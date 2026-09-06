@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml)
 
-MilterGuard is an AI-powered mail filter for identifying and rejecting unwanted email. It has been tested with Postfix but is designed to work with any MTA that supports the Sendmail Milter protocol.
+MilterGuard is an AI-powered mail filter for identifying and rejecting unwanted spam and scam email. It has been tested with Postfix but is designed to work with any MTA that supports the Sendmail Milter protocol.
 
 [Quick start](QUICKSTART.md) · [Operating guide](OPERATING_GUIDE.md)
 
