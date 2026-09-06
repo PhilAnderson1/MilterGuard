@@ -40,4 +40,43 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl reset-failed milterguard.service >/dev/null 2>&1 || true
 fi
 
+echo ""
+printf "Remove the milterguard system user and group? [y/N] "
+IFS= read -r remove_account
+
+case "$remove_account" in
+    y|Y|yes|YES|Yes)
+        if id milterguard >/dev/null 2>&1; then
+            if command -v userdel >/dev/null 2>&1; then
+                if ! userdel milterguard; then
+                    echo "WARNING: Could not remove the milterguard user." >&2
+                fi
+            elif command -v deluser >/dev/null 2>&1; then
+                if ! deluser milterguard; then
+                    echo "WARNING: Could not remove the milterguard user." >&2
+                fi
+            else
+                echo "WARNING: userdel/deluser not found; the milterguard user remains." >&2
+            fi
+        fi
+
+        if getent group milterguard >/dev/null 2>&1; then
+            if command -v groupdel >/dev/null 2>&1; then
+                if ! groupdel milterguard; then
+                    echo "WARNING: Could not remove the milterguard group." >&2
+                fi
+            elif command -v delgroup >/dev/null 2>&1; then
+                if ! delgroup milterguard; then
+                    echo "WARNING: Could not remove the milterguard group." >&2
+                fi
+            else
+                echo "WARNING: groupdel/delgroup not found; the milterguard group remains." >&2
+            fi
+        fi
+        ;;
+    *)
+        echo "Preserving the milterguard system user and group."
+        ;;
+esac
+
 echo "MilterGuard has been uninstalled."

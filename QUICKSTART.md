@@ -1,7 +1,7 @@
 # MilterGuard Quick Start
 
 **Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
-the repository URL—https://github.com/PhilAnderson1/MilterGuard—and ask it to
+the repository URL, https://github.com/PhilAnderson1/MilterGuard, and ask it to
 consult the current source code and documentation. Check any suggested
 configuration changes before applying them to a live mail server.
 
