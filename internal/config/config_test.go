@@ -26,6 +26,7 @@ ai:
   max_concurrent: 3
 filtering:
   reject_score: 0.8
+  add_unwanted_headers: true
 attachments:
   block_executables: false
 correspondents:
@@ -41,7 +42,7 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.FlushInterval.Value() != 2*time.Minute {
+	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || !cfg.Filtering.AddUnwantedHeaders || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.FlushInterval.Value() != 2*time.Minute {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
@@ -203,7 +204,7 @@ func TestLoadSenderDomainAllowlistFile(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsInvalidOrMissingSenderDomainAllowlistFile(t *testing.T) {
+func TestLoadHandlesUnavailableEmptyOrInvalidSenderDomainAllowlistFile(t *testing.T) {
 	directory := t.TempDir()
 	configPath := filepath.Join(directory, "milterguard.yaml")
 	writeConfig := func(path string) {
@@ -213,8 +214,23 @@ func TestLoadRejectsInvalidOrMissingSenderDomainAllowlistFile(t *testing.T) {
 		}
 	}
 	writeConfig(filepath.Join(directory, "missing.txt"))
-	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "sender_domain_allowlist") {
-		t.Fatalf("missing file error = %v", err)
+	cfg, err := Load(configPath)
+	if err != nil || len(cfg.Warnings) != 1 || len(cfg.Filtering.SenderDomainAllowlist) != 0 {
+		t.Fatalf("missing file result: config=%#v error=%v", cfg, err)
+	}
+	emptyPath := filepath.Join(directory, "empty.txt")
+	if err := os.WriteFile(emptyPath, []byte("# no domains configured\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(emptyPath)
+	cfg, err = Load(configPath)
+	if err != nil || len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], "contains no domains") {
+		t.Fatalf("empty file result: warnings=%q error=%v", cfg.Warnings, err)
+	}
+	writeConfig(directory)
+	cfg, err = Load(configPath)
+	if err != nil || len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], "cannot read") {
+		t.Fatalf("unreadable file result: warnings=%q error=%v", cfg.Warnings, err)
 	}
 	invalidPath := filepath.Join(directory, "invalid.txt")
 	if err := os.WriteFile(invalidPath, []byte("*.example.com\n"), 0o600); err != nil {

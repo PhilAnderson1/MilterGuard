@@ -53,7 +53,13 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 	case actionTempfail:
 		response = []byte{responseTempfail}
 	}
-	err := writeFrame(ss.conn, response)
+	var err error
+	if selected == actionAccept {
+		err = ss.writeAcceptedResultHeaders(nil)
+	}
+	if err == nil {
+		err = writeFrame(ss.conn, response)
+	}
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
 		"mode", ss.server.cfg.Mode,

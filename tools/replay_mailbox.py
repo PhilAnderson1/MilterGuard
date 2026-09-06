@@ -66,7 +66,9 @@ def no_response_command(sock, code, payload=b""):
 
 
 def negotiate(sock):
-    response = command(sock, b"O", struct.pack("!III", 6, 0, 0))
+    # Offer ADDHEADER and CHGHEADER so result-header behavior is covered by
+    # corpus replay when filtering.add_unwanted_headers is enabled.
+    response = command(sock, b"O", struct.pack("!III", 6, 0x11, 0))
     if not response.startswith(b"O"):
         raise RuntimeError(f"unexpected negotiation response: {response!r}")
 
@@ -75,6 +77,16 @@ def begin_smtp_session(sock, connection):
     hostname = connection["hostname"] or "unknown"
     helo = connection["helo"] or "unknown"
     remote_ip = connection["remote_ip"]
+    mta_hostname = connection["mta_hostname"]
+    if mta_hostname:
+        # The Milter j macro identifies the receiving MTA. MilterGuard uses it
+        # to decide which saved Authentication-Results headers are local and
+        # therefore trustworthy during a replay.
+        no_response_command(
+            sock,
+            b"D",
+            b"Cj\x00" + mta_hostname.encode("utf-8", "replace") + b"\x00",
+        )
     if remote_ip:
         family = b"6" if ipaddress.ip_address(remote_ip).version == 6 else b"4"
         connect_payload = (
@@ -126,9 +138,15 @@ def clean_identity(value):
 
 
 def connection_from_received(parsed):
+    mta_hostname = None
     for header in parsed.get_all("Received", []):
         value = " ".join(str(header).split())
-        from_clause = re.split(r"\s+by\s+", value, maxsplit=1, flags=re.I)[0]
+        clauses = re.split(r"\s+by\s+", value, maxsplit=1, flags=re.I)
+        from_clause = clauses[0]
+        if mta_hostname is None and len(clauses) == 2:
+            by_fields = clauses[1].split(None, 1)
+            if by_fields:
+                mta_hostname = clean_identity(by_fields[0])
         addresses = re.findall(r"\[(?:IPv6:)?([0-9A-Fa-f:.]+)\]", from_clause, re.I)
         remote_ip = None
         for candidate in addresses:
@@ -155,9 +173,16 @@ def connection_from_received(parsed):
             "remote_ip": remote_ip,
             "hostname": hostname,
             "helo": helo,
+            "mta_hostname": mta_hostname,
             "source": "received",
         }
-    return {"remote_ip": None, "hostname": None, "helo": None, "source": "unavailable"}
+    return {
+        "remote_ip": None,
+        "hostname": None,
+        "helo": None,
+        "mta_hostname": mta_hostname,
+        "source": "unavailable",
+    }
 
 
 def replay_connection(parsed, args):
@@ -168,6 +193,7 @@ def replay_connection(parsed, args):
             "remote_ip": "127.0.0.1",
             "hostname": "replay.local",
             "helo": "replay.local",
+            "mta_hostname": "replay.local",
             "source": "synthetic",
         }
     if args.remote_ip is not None:
@@ -181,6 +207,9 @@ def replay_connection(parsed, args):
         connection["source"] = "override"
     if args.helo is not None:
         connection["helo"] = clean_identity(args.helo)
+        connection["source"] = "override"
+    if args.mta_hostname is not None:
+        connection["mta_hostname"] = clean_identity(args.mta_hostname)
         connection["source"] = "override"
     return connection
 
@@ -212,7 +241,7 @@ def replay(sock, parsed, body, mail_from, rcpt_to):
     response = command(sock, b"M", f"<{mail_from}>\x00".encode("ascii"))
     if response != b"c":
         elapsed_ms = round((time.monotonic() - started) * 1000)
-        return interpret(response), elapsed_ms
+        return interpret(response), elapsed_ms, {}
     continue_command(sock, b"R", f"<{rcpt_to}>\x00".encode("ascii"))
 
     for name, value in parsed.raw_items():
@@ -230,9 +259,23 @@ def replay(sock, parsed, body, mail_from, rcpt_to):
             raise RuntimeError(f"body rejected unexpectedly: {response!r}")
 
     started = time.monotonic()
-    response = command(sock, b"E")
-    elapsed_ms = round((time.monotonic() - started) * 1000)
-    return interpret(response), elapsed_ms
+    send_frame(sock, b"E")
+    added_headers = {}
+    while True:
+        response = receive_frame(sock)
+        if response.startswith(b"h"):
+            fields = response[1:].split(b"\x00")
+            if len(fields) != 3 or fields[-1] != b"":
+                raise RuntimeError(f"malformed SMFIR_ADDHEADER: {response!r}")
+            name = fields[0].decode("utf-8", "replace")
+            value = fields[1].decode("utf-8", "replace")
+            added_headers[name] = value
+            continue
+        if response.startswith(b"m"):
+            # CHGHEADER removes any sender-forged MilterGuard result headers.
+            continue
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        return interpret(response), elapsed_ms, added_headers
 
 
 def interpret(response):
@@ -277,6 +320,10 @@ def main():
     parser.add_argument("--remote-ip", help="override the reconstructed SMTP peer IP")
     parser.add_argument("--client-hostname", help="override the reconstructed MTA-reported hostname")
     parser.add_argument("--helo", help="override the reconstructed SMTP HELO/EHLO identity")
+    parser.add_argument(
+        "--mta-hostname",
+        help="override the receiving MTA hostname used to trust saved authentication results",
+    )
     parser.add_argument("--mail-from", help="override Return-Path/From envelope-sender reconstruction")
     parser.add_argument("--rcpt-to", help="override X-Original-To/Delivered-To/To recipient reconstruction")
     parser.add_argument("--expected", choices=("accept", "reject"))
@@ -301,7 +348,7 @@ def main():
                 sock.settimeout(args.timeout)
                 negotiate(sock)
                 begin_smtp_session(sock, connection)
-                (result, detail), latency = replay(
+                (result, detail), latency, added_headers = replay(
                     sock, parsed, body, mail_from, rcpt_to
                 )
                 send_frame(sock, b"Q")
@@ -317,6 +364,7 @@ def main():
                             "matched": matched,
                             "latency_ms": latency,
                             "detail": detail,
+                            "added_headers": added_headers,
                             "connection": connection,
                             "mail_from": mail_from,
                             "rcpt_to": rcpt_to,

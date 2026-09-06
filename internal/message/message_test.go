@@ -150,6 +150,79 @@ func TestHeaderPaddingCannotConsumeBodyBudget(t *testing.T) {
 	}
 }
 
+func TestPromptIncludesOnlyTrustedAuthenticationResults(t *testing.T) {
+	m := New(1000)
+	m.TrustedAuthservIDs = []string{"nl.invades.net"}
+	m.AddHeader("Authentication-Results", "nl.invades.net; dmarc=pass header.from=example.com")
+	m.AddHeader("Authentication-Results", "mx.google.com; dkim=pass header.d=example.com")
+	m.AddHeader("From", "Sender <sender@example.com>")
+	m.AddHeader("Subject", "test")
+	prompt := m.Prompt(100)
+	if !strings.Contains(prompt, "DMARC: pass for visible From domain example.com (matches supplied visible From domain: yes)") {
+		t.Fatalf("trusted authentication result missing: %s", prompt)
+	}
+	if strings.Contains(prompt, "mx.google.com") {
+		t.Fatalf("untrusted authentication result leaked into prompt: %s", prompt)
+	}
+}
+
+func TestPromptIncludesOnlyReceivedSPFFromTrustedReceiver(t *testing.T) {
+	m := New(1000)
+	m.TrustedAuthservIDs = []string{"nl.invades.net"}
+	m.AddHeader("Received-SPF", "pass receiver=nl.invades.net; client-ip=192.0.2.1")
+	m.AddHeader("Received-SPF", "pass receiver=mx.google.com; client-ip=192.0.2.2")
+	m.AddHeader("Received-SPF", "pass client-ip=192.0.2.3")
+	prompt := m.Prompt(100)
+	if !strings.Contains(prompt, "SPF: pass for envelope-sender domain unavailable") {
+		t.Fatalf("trusted Received-SPF result missing: %s", prompt)
+	}
+	if strings.Contains(prompt, "192.0.2.2") || strings.Contains(prompt, "192.0.2.3") {
+		t.Fatalf("untrusted Received-SPF result leaked into prompt: %s", prompt)
+	}
+}
+
+func TestPromptOmitsAuthenticationEvidenceWhenNoTrustedResultsExist(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("Authentication-Results", "mx.google.com; dkim=pass header.d=example.com")
+	m.AddHeader("Received-SPF", "pass receiver=mx.google.com; client-ip=192.0.2.2")
+	m.AddHeader("From", "sender@example.com")
+	prompt := m.Prompt(100)
+	if strings.Contains(prompt, "mx.google.com") || strings.Contains(prompt, "192.0.2.2") {
+		t.Fatalf("untrusted authentication evidence leaked into prompt: %s", prompt)
+	}
+	for _, want := range []string{"DKIM: no trusted local result", "SPF: no trusted local result", "DMARC: no trusted local result"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("missing explicit unavailable result %q: %s", want, prompt)
+		}
+	}
+	if !strings.Contains(prompt, "From: sender@example.com") {
+		t.Fatalf("ordinary selected header missing: %s", prompt)
+	}
+}
+
+func TestPromptNormalizesConflictingBrandAuthenticationEvidence(t *testing.T) {
+	m := New(1000)
+	m.TrustedAuthservIDs = []string{"nl.invades.net"}
+	m.AddHeader("From", "Aliexpress <Aliexpress@gernandz.click>")
+	m.AddHeader("Authentication-Results", "nl.invades.net; dmarc=pass header.from=gernandz.click")
+	m.AddHeader("Authentication-Results", "nl.invades.net; \tdkim=pass header.d=gernandz.click; \tdkim=fail reason=\"signature verification failed\" header.d=mail.aliexpress.com")
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"Visible From domain: gernandz.click",
+		"DKIM: pass for signing domain gernandz.click (aligned with visible From domain: yes)",
+		"DKIM: fail for signing domain mail.aliexpress.com (aligned with visible From domain: no)",
+		"SPF: no trusted local result",
+		"DMARC: pass for visible From domain gernandz.click (matches supplied visible From domain: yes)",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("normalized authentication summary missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "Authentication-Results:") {
+		t.Fatalf("raw authentication header leaked into prompt: %s", prompt)
+	}
+}
+
 func TestLongBodySamplesBeginningMiddleAndEnd(t *testing.T) {
 	m := New(10000)
 	body := "BEGIN-EVIDENCE " + strings.Repeat("a", 400) + " MIDDLE-EVIDENCE " + strings.Repeat("b", 400) + " END-EVIDENCE"
@@ -219,6 +292,23 @@ func TestHTMLExcludesScriptAndStyle(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Visible") {
 		t.Fatalf("visible text missing: %s", prompt)
+	}
+}
+
+func TestHTMLExcludesMalformedStyleElementFromMixedEncodingSpam(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/html")
+	m.AddHeader("Content-Transfer-Encoding", "8bit")
+	m.AddBody([]byte(`<h2>End of Summer Offers</h2><img src="tracker" style="display:none;><object><title><style=
+ type=3D"text/css"> @media screen and (min-width: 480px) { .product { font-size: 18px !important; } } </style><p>Visible offer</p>`))
+	prompt := m.Prompt(1000)
+	for _, unwanted := range []string{"<style", "@media", ".product", "font-size", "!important"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("malformed style content leaked into prompt: %s", prompt)
+		}
+	}
+	if !strings.Contains(prompt, "End of Summer Offers") {
+		t.Fatalf("visible HTML text before malformed markup is missing: %s", prompt)
 	}
 }
 

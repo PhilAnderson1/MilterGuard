@@ -9,7 +9,7 @@ import (
 
 func (s *correspondentStore) load() error {
 	var data correspondentFile
-	if err := jsonfile.Read(s.cfg.File, maxCorrespondentFileSize, &data); err != nil {
+	if err := jsonfile.Read(s.cfg.File, persistentStoreReadLimit(s.cfg.MaxEntries, estimatedCorrespondentEntryBytes), &data); err != nil {
 		return err
 	}
 	if data.Version != legacyCorrespondentFileVersion && data.Version != correspondentFileVersion {

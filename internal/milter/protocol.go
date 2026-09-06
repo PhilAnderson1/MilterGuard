@@ -27,11 +27,13 @@ const (
 	commandUnknown           = byte('U')
 	commandQuitConnection    = byte('K')
 
-	responseAccept   = byte('a')
-	responseContinue = byte('c')
-	responseDiscard  = byte('d')
-	responseTempfail = byte('t')
-	responseReply    = byte('y')
+	responseAccept       = byte('a')
+	responseContinue     = byte('c')
+	responseDiscard      = byte('d')
+	responseTempfail     = byte('t')
+	responseReply        = byte('y')
+	responseAddHeader    = byte('h')
+	responseChangeHeader = byte('m')
 
 	minimumProtocolVersion   = uint32(2)
 	supportedProtocolVersion = uint32(6)
@@ -40,6 +42,10 @@ const (
 	maxSMTPReplyBytes        = 510 // Excludes the terminating CRLF.
 	maxMacroPairs            = 128
 	maxAuthenticationBytes   = 1024
+
+	actionAddHeaders    = uint32(0x00000001)
+	actionChangeHeaders = uint32(0x00000010)
+	resultHeaderActions = actionAddHeaders | actionChangeHeaders
 )
 
 type action uint8
@@ -68,13 +74,30 @@ func (a action) String() string {
 	}
 }
 
-func optionResponse(version uint32) []byte {
+func optionResponse(version, actions uint32) []byte {
 	response := make([]byte, 13)
 	response[0] = commandOptionNegotiation
 	binary.BigEndian.PutUint32(response[1:5], version)
-	// MilterGuard neither modifies messages nor suppresses protocol stages.
-	binary.BigEndian.PutUint32(response[5:9], 0)
+	binary.BigEndian.PutUint32(response[5:9], actions)
 	binary.BigEndian.PutUint32(response[9:13], 0)
+	return response
+}
+
+func addHeaderResponse(name, value string) []byte {
+	response := []byte{responseAddHeader}
+	response = append(response, name...)
+	response = append(response, 0)
+	response = append(response, value...)
+	return append(response, 0)
+}
+
+func deleteHeaderResponse(name string) []byte {
+	response := make([]byte, 5)
+	response[0] = responseChangeHeader
+	// Repeatedly removing occurrence one safely deletes every existing value.
+	binary.BigEndian.PutUint32(response[1:5], 1)
+	response = append(response, name...)
+	response = append(response, 0, 0)
 	return response
 }
 

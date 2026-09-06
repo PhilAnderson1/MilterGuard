@@ -104,16 +104,28 @@ func expectFrame(t *testing.T, conn net.Conn, want string) {
 }
 
 func negotiate(t *testing.T, conn net.Conn) {
+	negotiateWithActions(t, conn, 0)
+}
+
+func negotiateWithActions(t *testing.T, conn net.Conn, actions uint32) {
 	t.Helper()
 	payload := make([]byte, 13)
 	payload[0] = commandOptionNegotiation
 	binary.BigEndian.PutUint32(payload[1:5], 6)
+	binary.BigEndian.PutUint32(payload[5:9], actions)
 	if err := writeFrame(conn, payload); err != nil {
 		t.Fatal(err)
 	}
 	reply, err := readFrame(conn)
 	if err != nil || len(reply) != 13 || reply[0] != commandOptionNegotiation {
 		t.Fatalf("option negotiation failed: reply=%q err=%v", reply, err)
+	}
+	wantActions := uint32(0)
+	if actions&resultHeaderActions == resultHeaderActions {
+		wantActions = resultHeaderActions
+	}
+	if got := binary.BigEndian.Uint32(reply[5:9]); got != wantActions {
+		t.Fatalf("negotiated actions = %#x, want %#x", got, wantActions)
 	}
 }
 
@@ -157,6 +169,56 @@ func headerFrame(name, value string) []byte {
 	payload = append(payload, 0)
 	payload = append(payload, []byte(value)...)
 	return append(payload, 0)
+}
+
+func TestBelowThresholdUnwantedAddsTrustedResultHeaders(t *testing.T) {
+	analyzer := fixedAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 0.85, Reasons: []string{"test"}}}
+	server, conn, done := testServer(t, analyzer)
+	server.cfg.Filtering.AddUnwantedHeaders = true
+	defer func() {
+		_ = conn.Close()
+		<-done
+	}()
+
+	negotiateWithActions(t, conn, resultHeaderActions)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "sender@example.com"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+		headerFrame(classificationHeader, "legitimate"),
+		headerFrame("From", "Sender <sender@example.com>"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string(deleteHeaderResponse(classificationHeader)))
+	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
+	expectFrame(t, conn, string(addHeaderResponse(scoreHeader, "0.85")))
+	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-below-threshold")))
+	expectFrame(t, conn, string([]byte{responseAccept}))
+}
+
+func TestResultHeadersDoNotAffectDeliveryWithoutMTASupport(t *testing.T) {
+	analyzer := fixedAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 0.85, Reasons: []string{"test"}}}
+	server, conn, done := testServer(t, analyzer)
+	server.cfg.Filtering.AddUnwantedHeaders = true
+	defer func() {
+		_ = conn.Close()
+		<-done
+	}()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "sender@example.com"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
 }
 
 func TestConnectionIdentityAndDNSAreSuppliedOncePerConnection(t *testing.T) {
@@ -631,7 +693,7 @@ func TestKnownCorrespondentIsSuppliedAsAIEvidence(t *testing.T) {
 	input := <-analyzer.inputs
 	for _, want := range []string{
 		"CORRESPONDENT INFORMATION:",
-		"Known correspondent: yes",
+		"Sender found in known correspondent database: yes",
 		"Basis: The visible From address was previously emailed from a relevant local address.",
 		"Sender authentication: no trusted aligned DKIM or DMARC result is available.",
 	} {

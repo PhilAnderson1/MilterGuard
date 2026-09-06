@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"golang.org/x/net/publicsuffix"
 )
 
 var (
@@ -49,32 +48,18 @@ func trustedSenderAuthentication(msg *message.Message, trustedAuthservIDs []stri
 		}
 		for _, result := range strings.Split(results, ";") {
 			if dkimPassPattern.MatchString(result) {
-				if match := dkimDomainPattern.FindStringSubmatch(result); len(match) == 2 && authenticationDomainAligned(match[1], fromDomain) {
+				if match := dkimDomainPattern.FindStringSubmatch(result); len(match) == 2 && message.AuthenticationDomainAligned(match[1], fromDomain) {
 					evidence.DKIMAligned = true
 				}
 			}
 			if dmarcPassPattern.MatchString(result) {
-				if match := dmarcDomainPattern.FindStringSubmatch(result); len(match) == 2 && authenticationDomainAligned(match[1], fromDomain) {
+				if match := dmarcDomainPattern.FindStringSubmatch(result); len(match) == 2 && message.AuthenticationDomainAligned(match[1], fromDomain) {
 					evidence.DMARCAligned = true
 				}
 			}
 		}
 	}
 	return evidence
-}
-
-func authenticationDomainAligned(authenticatedDomain, fromDomain string) bool {
-	authenticatedDomain = normalizeDomain(authenticatedDomain)
-	fromDomain = normalizeDomain(fromDomain)
-	if authenticatedDomain == "" || fromDomain == "" {
-		return false
-	}
-	authenticatedOrg, authenticatedErr := publicsuffix.EffectiveTLDPlusOne(authenticatedDomain)
-	fromOrg, fromErr := publicsuffix.EffectiveTLDPlusOne(fromDomain)
-	if authenticatedErr == nil && fromErr == nil {
-		return strings.EqualFold(authenticatedOrg, fromOrg)
-	}
-	return authenticatedDomain == fromDomain
 }
 
 func allowedSenderDomain(fromAddress string, allowedDomains []string) string {

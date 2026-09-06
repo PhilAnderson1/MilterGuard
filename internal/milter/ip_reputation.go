@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	rejectedIPFileVersion            = 1
-	maxRejectedIPFileSize            = 8 << 20
-	rejectedIPRefreshPersistInterval = 5 * time.Minute
-	rejectedIPBlockShort             = "short"
-	rejectedIPBlockRepeat            = "repeat"
+	rejectedIPFileVersion                  = 1
+	estimatedIPReputationEntryBytes  int64 = 1 << 10
+	rejectedIPRefreshPersistInterval       = 5 * time.Minute
+	rejectedIPBlockShort                   = "short"
+	rejectedIPBlockRepeat                  = "repeat"
 )
 
 type ipBlock struct {

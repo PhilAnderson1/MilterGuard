@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -41,6 +42,7 @@ type Config struct {
 	Correspondents   CorrespondentsConfig   `yaml:"correspondents"`
 	IPReputation     IPReputationConfig     `yaml:"ip_reputation"`
 	Logging          LoggingConfig          `yaml:"logging"`
+	Warnings         []string               `yaml:"-"`
 }
 
 type PersistenceConfig struct {
@@ -105,6 +107,7 @@ type AIConfig struct {
 }
 type FilteringConfig struct {
 	RejectScore                      float64  `yaml:"reject_score"`
+	AddUnwantedHeaders               bool     `yaml:"add_unwanted_headers"`
 	AIErrorAction                    string   `yaml:"ai_error_action"`
 	RejectMessage                    string   `yaml:"reject_message"`
 	ScanAuthenticated                bool     `yaml:"scan_authenticated"`
@@ -165,9 +168,14 @@ func Load(path string) (Config, error) {
 	if c.Filtering.SenderDomainAllowlistFile != "" {
 		domains, err := loadSenderDomainAllowlist(c.Filtering.SenderDomainAllowlistFile)
 		if err != nil {
-			return Config{}, err
+			var unavailable *senderDomainAllowlistUnavailableError
+			if !errors.As(err, &unavailable) && !errors.Is(err, errSenderDomainAllowlistEmpty) {
+				return Config{}, err
+			}
+			c.Warnings = append(c.Warnings, err.Error()+"; trusted sender domain bypass disabled")
+		} else {
+			c.Filtering.SenderDomainAllowlist = domains
 		}
-		c.Filtering.SenderDomainAllowlist = domains
 	}
 	if err := c.Validate(); err != nil {
 		return Config{}, err
@@ -415,10 +423,23 @@ func (c Config) Validate() error {
 	return nil
 }
 
+var errSenderDomainAllowlistEmpty = errors.New("filtering.sender_domain_allowlist contains no domains")
+
+type senderDomainAllowlistUnavailableError struct {
+	path string
+	err  error
+}
+
+func (e *senderDomainAllowlistUnavailableError) Error() string {
+	return fmt.Sprintf("cannot read filtering.sender_domain_allowlist %s: %v", e.path, e.err)
+}
+
+func (e *senderDomainAllowlistUnavailableError) Unwrap() error { return e.err }
+
 func loadSenderDomainAllowlist(path string) ([]string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read filtering.sender_domain_allowlist: %w", err)
+		return nil, &senderDomainAllowlistUnavailableError{path: path, err: err}
 	}
 	if len(b) > 1<<20 {
 		return nil, fmt.Errorf("filtering.sender_domain_allowlist exceeds 1 MiB")
@@ -440,7 +461,7 @@ func loadSenderDomainAllowlist(path string) ([]string, error) {
 		}
 	}
 	if len(domains) == 0 {
-		return nil, fmt.Errorf("filtering.sender_domain_allowlist contains no domains")
+		return nil, errSenderDomainAllowlistEmpty
 	}
 	return domains, nil
 }

@@ -5,15 +5,16 @@ import (
 )
 
 type Message struct {
-	Headers       map[string][]string
-	Body          strings.Builder
-	Connection    ConnectionInfo
-	Correspondent CorrespondentInfo
-	Truncated     bool
-	BodyTruncated bool
-	MaxBytes      int64
-	bodySize      int64
-	headerSize    int64
+	Headers            map[string][]string
+	Body               strings.Builder
+	Connection         ConnectionInfo
+	Correspondent      CorrespondentInfo
+	TrustedAuthservIDs []string
+	Truncated          bool
+	BodyTruncated      bool
+	MaxBytes           int64
+	bodySize           int64
+	headerSize         int64
 }
 
 type ConnectionInfo struct {
@@ -71,19 +72,22 @@ const (
 )
 
 var retainedHeaders = map[string]bool{
-	"authentication-results":    true,
-	"content-disposition":       true,
-	"content-transfer-encoding": true,
-	"content-type":              true,
-	"date":                      true,
-	"from":                      true,
-	"message-id":                true,
-	"x-milterguard-internal":    true,
-	"received-spf":              true,
-	"reply-to":                  true,
-	"return-path":               true,
-	"subject":                   true,
-	"to":                        true,
+	"authentication-results":       true,
+	"content-disposition":          true,
+	"content-transfer-encoding":    true,
+	"content-type":                 true,
+	"date":                         true,
+	"from":                         true,
+	"message-id":                   true,
+	"x-milterguard-action":         true,
+	"x-milterguard-classification": true,
+	"x-milterguard-score":          true,
+	"x-milterguard-internal":       true,
+	"received-spf":                 true,
+	"reply-to":                     true,
+	"return-path":                  true,
+	"subject":                      true,
+	"to":                           true,
 }
 
 func New(maxBytes int64) *Message {

@@ -11,7 +11,7 @@ import (
 
 func (s *ipReputationStore) load() error {
 	var stored rejectedIPFile
-	if err := jsonfile.Read(s.stateFile, maxRejectedIPFileSize, &stored); err != nil {
+	if err := jsonfile.Read(s.stateFile, persistentStoreReadLimit(s.maxSize, estimatedIPReputationEntryBytes), &stored); err != nil {
 		return err
 	}
 	if stored.Version != rejectedIPFileVersion {

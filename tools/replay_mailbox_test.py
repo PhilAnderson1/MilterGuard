@@ -22,6 +22,7 @@ class ReceivedConnectionTests(unittest.TestCase):
                 "remote_ip": "8.8.8.8",
                 "hostname": "ptr.example",
                 "helo": "helo.example",
+                "mta_hostname": "mx.example",
                 "source": "received",
             },
         )
@@ -43,6 +44,16 @@ class ReceivedConnectionTests(unittest.TestCase):
         connection = replay_mailbox.connection_from_received(parsed)
         self.assertEqual(connection["remote_ip"], "1.1.1.1")
         self.assertEqual(connection["hostname"], "original.example")
+        self.assertEqual(connection["mta_hostname"], "mx.example")
+
+    def test_retains_mta_hostname_without_a_public_peer(self):
+        parsed = headers(
+            "Received: from internal.example (internal.example [192.168.1.2]) "
+            "by mx.example with ESMTP"
+        )
+        connection = replay_mailbox.connection_from_received(parsed)
+        self.assertEqual(connection["source"], "unavailable")
+        self.assertEqual(connection["mta_hostname"], "mx.example")
 
 
 class EnvelopeTests(unittest.TestCase):

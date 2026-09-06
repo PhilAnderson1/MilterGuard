@@ -49,6 +49,7 @@ type session struct {
 	connectionDNS               connectionDNSResult
 	connectionDNSPending        <-chan connectionDNSResult
 	message                     *message.Message
+	negotiatedActions           uint32
 }
 
 func newSession(server *Server, conn net.Conn) *session {
@@ -225,13 +226,22 @@ func (ss *session) negotiate(payload []byte) bool {
 		return ss.protocolError("invalid milter option negotiation", "payload_bytes", len(payload), "repeated", ss.phase != phaseNegotiation)
 	}
 	version := binary.BigEndian.Uint32(payload[:4])
+	offeredActions := binary.BigEndian.Uint32(payload[4:8])
 	if version < minimumProtocolVersion {
 		return ss.protocolError("unsupported milter protocol version", "version", version)
 	}
 	if version > supportedProtocolVersion {
 		version = supportedProtocolVersion
 	}
-	if !ss.send(commandOptionNegotiation, optionResponse(version)) {
+	requestedActions := uint32(0)
+	if ss.server.cfg.Filtering.AddUnwantedHeaders && offeredActions&resultHeaderActions == resultHeaderActions {
+		requestedActions = resultHeaderActions
+	} else if ss.server.cfg.Filtering.AddUnwantedHeaders {
+		ss.server.log.Warn("result headers disabled for Milter connection because MTA did not offer add/change-header support",
+			"offered_actions", offeredActions)
+	}
+	ss.negotiatedActions = requestedActions
+	if !ss.send(commandOptionNegotiation, optionResponse(version, requestedActions)) {
 		return false
 	}
 	ss.phase = phaseConnection
@@ -276,10 +286,17 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.trustedDKIM,
 			ss.knownCorrespondentLogAttrs()...)
 	}
+	ss.message.TrustedAuthservIDs = ss.trustedAuthservIDs()
 	ss.message.Connection = ss.connectionInformation(ctx)
 	_ = ss.conn.SetDeadline(time.Now().Add(ss.server.analysisTimeout()))
 	result := ss.server.evaluate(ctx, ss.message)
-	err := writeFrame(ss.conn, ss.server.encodeAction(result.selected))
+	var err error
+	if result.selected == actionAccept {
+		err = ss.writeAcceptedResultHeaders(&result)
+	}
+	if err == nil {
+		err = writeFrame(ss.conn, ss.server.encodeAction(result.selected))
+	}
 	ss.server.logOutcome(ctx, ss.message, result, err == nil, err)
 	if err != nil {
 		return false
@@ -442,7 +459,10 @@ func validMTAHostname(value string) string {
 }
 
 func (ss *session) finishBypassedMessage(ctx context.Context, source string, learn, touchInbound bool, extraAttrs ...any) bool {
-	err := writeFrame(ss.conn, ss.server.encodeAction(actionAccept))
+	err := ss.writeAcceptedResultHeaders(nil)
+	if err == nil {
+		err = writeFrame(ss.conn, ss.server.encodeAction(actionAccept))
+	}
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
 		"mode", ss.server.cfg.Mode,

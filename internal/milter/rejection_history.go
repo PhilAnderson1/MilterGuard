@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	rejectionHistoryVersion     = 1
-	maxRejectionHistoryFileSize = 16 << 20
-	maxRejectionReasonRunes     = 1000
+	rejectionHistoryVersion                   = 1
+	estimatedRejectionHistoryEntryBytes int64 = 2 << 10
+	maxRejectionReasonRunes                   = 1000
 )
 
 type rejectionHistoryEntry struct {
@@ -163,7 +163,7 @@ func (s *rejectionHistoryStore) pruneLocked(now time.Time) bool {
 
 func (s *rejectionHistoryStore) load() error {
 	var stored rejectionHistoryFile
-	if err := jsonfile.Read(s.cfg.File, maxRejectionHistoryFileSize, &stored); err != nil {
+	if err := jsonfile.Read(s.cfg.File, persistentStoreReadLimit(s.cfg.MaxEntries, estimatedRejectionHistoryEntryBytes), &stored); err != nil {
 		return err
 	}
 	if stored.Version != rejectionHistoryVersion {

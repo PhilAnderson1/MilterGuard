@@ -1,5 +1,10 @@
 # MilterGuard Operating Guide
 
+**Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
+the repository URL—https://github.com/PhilAnderson1/MilterGuard—and ask it to
+consult the current source code and documentation. Check any suggested
+configuration changes before applying them to a live mail server.
+
 Using the supplied default configuration, MilterGuard will use AI to identify
 unwanted spam and scam email, including threats concealed in images, and provide
 basic virus protection by blocking executable attachments. By default, it will
@@ -15,15 +20,16 @@ For initial installation and activation, follow the
 ## Contents
 
 1. [Configure the AI service](#configure-the-ai-service)
-2. [Connect MilterGuard to Postfix](#connect-milterguard-to-postfix)
-3. [Start in monitor mode](#start-in-monitor-mode)
-4. [Enable enforcement](#enable-enforcement)
-5. [Basic virus protection](#basic-virus-protection)
-6. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
-7. [Email commands](#email-commands)
-8. [Running AI locally](#running-ai-locally)
-9. [Routine operation](#routine-operation)
-10. [Replay saved email](#replay-saved-email)
+2. [Install and configure OpenDKIM and OpenDMARC (optional)](#install-and-configure-opendkim-and-opendmarc-optional)
+3. [Connect MilterGuard to Postfix](#connect-milterguard-to-postfix)
+4. [Start in monitor mode](#start-in-monitor-mode)
+5. [Enable enforcement](#enable-enforcement)
+6. [Basic virus protection](#basic-virus-protection)
+7. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
+8. [Email commands](#email-commands)
+9. [Running AI locally](#running-ai-locally)
+10. [Routine operation](#routine-operation)
+11. [Replay saved email](#replay-saved-email)
 
 ## Configure the AI service
 
@@ -50,6 +56,12 @@ model thinking; choose `openrouter`, `llamacpp`, or `openai` to match the server
 model must support image input if you want MilterGuard to examine email whose
 message is contained in an image.
 
+Image analysis detects scams that conceal their message inside an image to
+evade text-based filtering. Set `vision_mode` to `off` to disable it,
+`fallback` to examine qualifying inline images when insufficient text is
+available, or `always` to examine them in every message. MilterGuard never
+downloads remote images.
+
 Before starting MilterGuard, review
 `/etc/milterguard/detection-prompt.txt` and confirm that its unwanted-email
 rules match what you want to reject. The supplied prompt and settings have been
@@ -58,27 +70,74 @@ confidence scale differently. Keep prompt changes concise, and test any changed
 prompt or model in monitor mode against representative legitimate and unwanted
 email before enabling rejection.
 
+## Install and configure OpenDKIM and OpenDMARC (optional)
+
+MilterGuard works without OpenDKIM or OpenDMARC, but trusted DKIM, SPF, and
+DMARC results give the AI stronger evidence about sender identity and improve
+classification quality. Without trusted DKIM results, trusted-domain bypass,
+authenticated correspondent bypass, and automatic sender learning are less
+effective or unavailable.
+
+Your server may already use OpenDKIM to sign outbound email. If so, configure
+it to verify inbound signatures and add its results to `Authentication-Results`.
+OpenDMARC can then evaluate DMARC and SPF and add those results for MilterGuard
+to use. Install the packages supplied by your operating system and configure
+each service to expose a Milter socket or local TCP listener to Postfix.
+Loopback TCP listeners are generally simpler to configure consistently across
+multiple Milter services. Unix sockets also work, but their directory ownership,
+permissions, and any Postfix chroot must be configured correctly.
+
+These filters must run in this order:
+
+```text
+OpenDKIM → OpenDMARC → MilterGuard
+```
+
+The authentication service identifier written to `Authentication-Results`
+must be included in MilterGuard's `correspondents.trusted_authserv_ids` setting.
+The supplied `$mta_hostname` value normally handles results identified with the
+Postfix hostname.
+
 ## Connect MilterGuard to Postfix
 
-Add MilterGuard to the end of the Milter list in `/etc/postfix/main.cf`.
-Postfix calls Milters in the configured order, so putting authentication filters
-first allows MilterGuard to use their DKIM, SPF, and DMARC results. For
-example, with an existing DKIM Milter on port 8891 and MilterGuard on port
-8895:
+Add MilterGuard to the end of each applicable Milter list in
+`/etc/postfix/main.cf`. Postfix calls Milters in the configured order, allowing
+MilterGuard to use authentication results added by earlier filters.
+
+With no authentication filters:
 
 ```text
 milter_default_action = accept
 milter_protocol = 6
-smtpd_milters = inet:localhost:8891, inet:127.0.0.1:8895
-non_smtpd_milters = inet:localhost:8891, inet:127.0.0.1:8895
+smtpd_milters = inet:127.0.0.1:8895
+non_smtpd_milters = inet:127.0.0.1:8895
 ```
 
-MilterGuard does not verify DKIM signatures itself. A DKIM verifier such as
-OpenDKIM must run earlier in the mail-processing path and supply its result in
-an `Authentication-Results` header that MilterGuard is configured to trust.
-Without trusted DKIM results, AI classification still works, but trusted-domain
-bypass, authenticated correspondent bypass, and automatic sender learning may
-be unavailable or less reliable, and classification accuracy may be reduced.
+With OpenDKIM listening on port 8891:
+
+```text
+milter_default_action = accept
+milter_protocol = 6
+smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8895
+non_smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8895
+```
+
+With OpenDKIM on port 8891 and OpenDMARC on port 8892:
+
+```text
+milter_default_action = accept
+milter_protocol = 6
+smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
+non_smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
+```
+
+Use the actual sockets or ports configured for your services. MilterGuard must
+remain last in the chain.
+
+MilterGuard also supplies the connecting IP, reported hostname, HELO/EHLO
+identity, reverse DNS, and forward-confirmation result to the AI as supporting
+evidence. DNS failures do not reject or defer mail, and lookup time is bounded
+by `milter.connection_dns_timeout`.
 
 `smtpd_milters` processes mail received over SMTP. `non_smtpd_milters` processes
 locally submitted mail, including messages submitted through Postfix's
@@ -408,6 +467,13 @@ decisions, and changes in classification quality. After changing the prompt,
 model, confidence threshold, or filtering policy, repeat the saved-message tests
 before restarting production.
 
+When `filtering.add_unwanted_headers` is enabled, an unwanted message accepted
+because its score is below `reject_score` receives
+`X-MilterGuard-Classification`, `X-MilterGuard-Score`, and
+`X-MilterGuard-Action` headers. These can be used by a server-side or mail-client
+rule to place borderline messages in a Junk folder. MilterGuard removes incoming
+headers with these names before adding its own values.
+
 Review `/etc/milterguard/trusted-sender-domains.txt` periodically and remove
 domains that no longer represent low-risk, organization-controlled senders. Add
 new domains conservatively because matching, authenticated mail bypasses AI
@@ -417,6 +483,9 @@ such as `amazon.co.uk` and `amazon.de` must be listed separately. With
 `sender_domain_allowlist_require_dkim` enabled, a matching domain bypasses AI
 only when MilterGuard receives a trusted, aligned DKIM pass. Restart
 MilterGuard after changing the file.
+
+If the trusted-domain file is missing, empty, or unreadable, MilterGuard logs a
+warning and continues with trusted-domain bypass disabled.
 
 Keep `logging.include_ai_input` disabled during normal operation. Enabling it
 writes the complete textual AI input - including message content, links, and
@@ -451,8 +520,10 @@ message reaches the AI, set `ip_reputation.block_duration` to `0s`,
 response, so a test instance in `monitor` mode will report every message as
 accepted even when MilterGuard recommends rejection.
 
-By default, the replay tool reconstructs the SMTP peer IP, client hostname and
-HELO identity from the newest suitable external `Received` header. It also
+By default, the replay tool reconstructs the SMTP peer IP, client hostname,
+HELO identity, and receiving MTA hostname from the saved `Received` headers.
+The MTA hostname allows locally generated DKIM, SPF, and DMARC results already
+present in the message to be supplied to the AI as trusted evidence. It also
 derives the envelope sender and recipient from `Return-Path`, `X-Original-To`,
 `Delivered-To`, or the visible address headers. Each message uses a separate
 Milter connection. Because saved headers do not preserve every original SMTP

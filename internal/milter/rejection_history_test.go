@@ -100,3 +100,11 @@ func TestRejectionReasonIsSingleLineAndBounded(t *testing.T) {
 		t.Fatalf("bounded reason length = %d", got)
 	}
 }
+
+func TestRejectionHistoryReadLimitScalesWithConfiguredEntries(t *testing.T) {
+	const maxEntries = 10000
+	want := int64(maxEntries) * estimatedRejectionHistoryEntryBytes * persistentStoreReadMargin
+	if got := persistentStoreReadLimit(maxEntries, estimatedRejectionHistoryEntryBytes); got != want {
+		t.Fatalf("read limit = %d, want %d", got, want)
+	}
+}

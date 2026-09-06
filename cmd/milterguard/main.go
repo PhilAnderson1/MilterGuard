@@ -31,6 +31,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "configuration error:", err)
 		os.Exit(2)
 	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel()}))
+	for _, warning := range cfg.Warnings {
+		logger.Warn("configuration warning", "warning", warning)
+	}
 	if *check {
 		if *whitelistAdd != "" || *whitelistDelete != "" || len(flag.Args()) != 0 {
 			fmt.Fprintln(os.Stderr, "--check-config cannot be combined with whitelist operations")
@@ -79,7 +83,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel()}))
 	prompt, err := os.ReadFile(cfg.AI.PromptFile)
 	if err != nil {
 		logger.Error("cannot read detection prompt", "error", err)

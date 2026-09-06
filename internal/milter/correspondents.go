@@ -14,13 +14,13 @@ import (
 )
 
 const (
-	correspondentFileVersion       = 2
-	legacyCorrespondentFileVersion = 1
-	maxCorrespondentFileSize       = 8 << 20
-	maxLearnedRecipients           = 100
-	whitelistAuthenticatedOutbound = "authenticated_outbound"
-	whitelistRepeatedLegitimate    = "repeated_legitimate_inbound"
-	whitelistManual                = "manual"
+	correspondentFileVersion               = 2
+	legacyCorrespondentFileVersion         = 1
+	estimatedCorrespondentEntryBytes int64 = 1 << 10
+	maxLearnedRecipients                   = 100
+	whitelistAuthenticatedOutbound         = "authenticated_outbound"
+	whitelistRepeatedLegitimate            = "repeated_legitimate_inbound"
+	whitelistManual                        = "manual"
 )
 
 type correspondentEntry struct {

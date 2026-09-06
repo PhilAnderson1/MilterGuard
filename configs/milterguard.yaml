@@ -25,7 +25,7 @@ milter:
   # Maximum time for DNS lookups (DNS evidence is used by the AI to classify emails).
   connection_dns_timeout: 5s
 
-  # Maximum message body bytes retained for analysis; positive integer.
+  # Maximum email size retained for analysis, in bytes; positive integer.
   # Larger messages are truncated and the decision log records truncated=true.
   max_message_size: 10485760
 
@@ -87,6 +87,10 @@ ai:
 filtering:
   # Reject unwanted classifications at or above this confidence score (0-1).
   reject_score: 0.9
+
+  # Add classification, score, and action headers when an unwanted message is
+  # accepted because its confidence score is below reject_score.
+  add_unwanted_headers: true
 
   # Scan email sent by authenticated users. Set to true to enable attachment
   # and AI scanning of outbound mail.
@@ -161,7 +165,15 @@ email_commands:
   enabled: false
   recipient: milterguard@example.com
 
-  # Permit authenticated users to manage entries for their own verified
+  # SASL login identities with permission to manage any local address and use
+  # wildcard deletion. Values are matched case-insensitively. [] means no
+  # administrators. To add administrators, replace it with:
+  # administrators:
+  #   - admin_login
+  #   - another_admin
+  administrators: []
+
+  # Permit normal authenticated users to manage entries for their own verified
   # envelope-sender address.
   allow_authenticated_users: false
 
@@ -174,14 +186,6 @@ email_commands:
   # with smtpd_sender_login_maps. Without either check, an authenticated user
   # could modify another local user's allowlist.
 
-  # SASL login identities with permission to manage any local address and use
-  # wildcard deletion. Values are matched case-insensitively. [] means no
-  # administrators. To add administrators, replace it with:
-  # administrators:
-  #   - admin_login
-  #   - another_admin
-  administrators: []
-
   # Send a reply confirmation email when a command email is received.
   send_replies: true
   # SMTP server used to send command results. Include the port.
@@ -190,11 +194,6 @@ email_commands:
   # Maximum decoded command-message size. Plain-text and HTML commands are
   # accepted; attachments are not.
   max_message_bytes: 8192
-
-persistence:
-  # How often changed runtime databases are written to disk. Uses Go duration
-  # syntax. 0s writes every change immediately.
-  flush_interval: 1m
 
 rejection_history:
   # Retain AI-rejected sender, recipient, time, and reason records for this duration.
@@ -262,7 +261,7 @@ correspondents:
 
   # Number of legitimate emails required to allowlist an inbound sender, and the
   # minimum confidence score each email must meet.
-  legitimate_sender_min_messages: 5
+  legitimate_sender_min_messages: 3
   legitimate_sender_min_score: 0.95
 
   # Boolean: require trusted aligned DKIM before an inbound legitimate result
@@ -308,6 +307,11 @@ correspondents:
   # headers claiming this hostname.
   trusted_authserv_ids:
     - "$mta_hostname"
+
+persistence:
+  # How often changed runtime databases are written to disk. Uses Go duration
+  # syntax. 0s writes every change immediately.
+  flush_interval: 1m
 
 logging:
   # Minimum log level: debug, info, warn, or error.
