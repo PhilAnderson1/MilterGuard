@@ -1,52 +1,39 @@
 package milter
 
 import (
-	"fmt"
 	"net/netip"
-	"sort"
 	"time"
-
-	"github.com/PhilAnderson1/MilterGuard/internal/jsonfile"
 )
 
 func (s *ipReputationStore) load() error {
-	var stored rejectedIPFile
-	if err := jsonfile.Read(s.stateFile, persistentStoreReadLimit(s.maxSize, estimatedIPReputationEntryBytes), &stored); err != nil {
-		return err
-	}
-	if stored.Version != rejectedIPFileVersion {
-		return fmt.Errorf("unsupported rejected IP state version %d", stored.Version)
-	}
-	if len(stored.Entries) > s.maxSize {
-		return fmt.Errorf("rejected IP state contains %d entries; maximum is %d", len(stored.Entries), s.maxSize)
-	}
 	now := s.now().UTC()
-	for _, record := range stored.Entries {
+	_, err := s.db.load(func(version int) bool { return version == rejectedIPFileVersion }, func(record rejectedIPRecord) (rejectedIPRecord, bool, bool) {
 		addr, err := netip.ParseAddr(record.IP)
 		if err != nil {
-			continue
+			return record, false, true
 		}
 		addr = addr.Unmap()
+		changed := record.IP != addr.String()
 		record.IP, record.Strikes = addr.String(), s.pruneStrikes(record.Strikes, now)
 		if len(record.Strikes) > s.repeatThreshold {
 			record.Strikes = record.Strikes[len(record.Strikes)-s.repeatThreshold:]
 		}
 		if record.BlockLevel == rejectedIPBlockRepeat && !record.BlockedUntil.After(now) {
-			continue
+			return record, false, true
 		}
 		if record.BlockLevel == rejectedIPBlockShort && !record.BlockedUntil.After(now) {
 			record.BlockLevel, record.BlockedUntil = "", time.Time{}
 		}
 		if record.BlockLevel != "" && record.BlockLevel != rejectedIPBlockShort && record.BlockLevel != rejectedIPBlockRepeat {
-			continue
+			return record, false, true
 		}
 		if record.BlockLevel == "" && len(record.Strikes) == 0 {
-			continue
+			return record, false, true
 		}
 		record.PersistedRefreshAt = now
-		s.entries[addr] = record
-	}
-	return nil
+		return record, true, changed
+	})
+	return err
 }
 
 func (s *ipReputationStore) saveOrLogLocked() {
@@ -56,46 +43,20 @@ func (s *ipReputationStore) saveOrLogLocked() {
 }
 
 func (s *ipReputationStore) saveLocked() error {
-	if s.deferWrites {
-		s.dirty = true
-		return nil
-	}
-	return s.writeLocked()
-}
-
-func (s *ipReputationStore) writeLocked() error {
-	if s.stateFile == "" {
-		return nil
-	}
-	entries := make([]rejectedIPRecord, 0, len(s.entries))
-	for _, record := range s.entries {
-		entries = append(entries, record)
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].IP < entries[j].IP })
-	return jsonfile.Write(s.stateFile, rejectedIPFile{Version: rejectedIPFileVersion, Entries: entries}, 0750, 0640)
+	return s.db.changedLocked(1)
 }
 
 func (s *ipReputationStore) enableDeferredPersistence() {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	s.deferWrites = true
-	s.mu.Unlock()
+	s.db.setDeferred(true)
 }
 
 func (s *ipReputationStore) flush() error {
 	if s == nil {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.dirty {
-		return nil
-	}
-	if err := s.writeLocked(); err != nil {
-		return err
-	}
-	s.dirty = false
-	return nil
+	_, err := s.db.flush()
+	return err
 }

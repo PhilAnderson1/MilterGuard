@@ -66,6 +66,73 @@ func TestRejectionHistoryDeferredPersistence(t *testing.T) {
 	}
 }
 
+func TestPersistenceFlushRemovesExpiredRecords(t *testing.T) {
+	base := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+
+	t.Run("IP reputation", func(t *testing.T) {
+		store := newIPReputationStore(config.IPReputationConfig{
+			BlockDuration: config.Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: config.Duration(time.Hour),
+			RepeatBlockDuration: config.Duration(24 * time.Hour), MaxEntries: 10, StateFile: filepath.Join(t.TempDir(), "ip.json"),
+		}, nil)
+		store.now = func() time.Time { return base }
+		store.enableDeferredPersistence()
+		store.entries[netip.MustParseAddr("192.0.2.1")] = rejectedIPRecord{IP: "192.0.2.1", LastActivityAt: base.Add(-2 * time.Hour)}
+		if err := store.flush(); err != nil {
+			t.Fatal(err)
+		}
+		if len(store.entries) != 0 {
+			t.Fatal("expired IP record was not removed during flush")
+		}
+	})
+
+	t.Run("correspondents", func(t *testing.T) {
+		store := newCorrespondentStore(config.CorrespondentsConfig{
+			UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all", StaleAfter: config.Duration(time.Hour),
+			File: filepath.Join(t.TempDir(), "correspondents.json"), MaxEntries: 10,
+		}, nil)
+		store.now = func() time.Time { return base }
+		store.enableDeferredPersistence()
+		entry := correspondentEntry{LocalAddress: "local@example.com", Correspondent: "old@example.net", LearnedAt: base.Add(-2 * time.Hour), LastActivityAt: base.Add(-2 * time.Hour), WhitelistType: whitelistManual}
+		store.entries[store.key(entry.LocalAddress, entry.Correspondent)] = entry
+		if match := store.match(entry.Correspondent, []string{entry.LocalAddress}); match.Known {
+			t.Fatal("stale correspondent was used before scheduled cleanup")
+		}
+		if len(store.entries) != 1 {
+			t.Fatal("full correspondent cleanup ran before the interval elapsed")
+		}
+		if err := store.flush(); err != nil {
+			t.Fatal(err)
+		}
+		if len(store.entries) != 0 {
+			t.Fatal("stale correspondent was not removed at flush interval")
+		}
+	})
+
+	t.Run("rejection history", func(t *testing.T) {
+		store := newRejectionHistoryStore(config.RejectionHistoryConfig{File: filepath.Join(t.TempDir(), "rejections.json"), Expiry: config.Duration(time.Hour), MaxEntries: 10}, nil)
+		store.now = func() time.Time { return base }
+		store.enableDeferredPersistence()
+		if err := store.db.update(func(records map[string]rejectionHistoryEntry) (uint64, uint64, bool) {
+			records["old"] = rejectionHistoryEntry{ID: "old", Sender: "old@example.net", Recipient: "local@example.com", RejectedAt: base.Add(-2 * time.Hour)}
+			return 0, 1, true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if entries := store.list("local@example.com"); len(entries) != 0 {
+			t.Fatal("expired rejection was returned before scheduled cleanup")
+		}
+		if store.db.size() != 0 {
+			t.Fatal("full rejection cleanup ran before the interval elapsed")
+		}
+		if err := store.flush(); err != nil {
+			t.Fatal(err)
+		}
+		if store.db.size() != 0 {
+			t.Fatal("expired rejection was not removed at flush interval")
+		}
+	})
+}
+
 func assertNotPersisted(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {

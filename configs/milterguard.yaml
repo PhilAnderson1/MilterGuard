@@ -4,8 +4,7 @@
 # and tested with Qwen3.6-35B-A3B. Other LLMs may require adjustments to the
 # prompt, rejection threshold, timeout, or reasoning settings.
 #
-# To use with OpenRouter, create an account and API key at:
-# https://openrouter.ai/
+# Important: preserve the supplied two-space YAML indentation and do not use tabs.
 
 # Operation mode: monitor or enforce.
 # monitor logs proposed decisions but always accepts mail.
@@ -30,8 +29,9 @@ milter:
   max_message_size: 10485760
 
 ai:
-  # Full OpenRouter- or llama.cpp-compatible chat-completions URL.
+  # Full OpenRouter, OpenAI or llama.cpp-compatible chat-completions URL.
   # The endpoint must implement the v1/chat/completions request and response format.
+  # To use OpenRouter, create an account and API key at https://openrouter.ai/.
   endpoint: https://openrouter.ai/api/v1/chat/completions
 
   # Endpoint request type: openrouter, llamacpp, or openai. This selects the
@@ -88,8 +88,8 @@ filtering:
   # Reject unwanted classifications at or above this confidence score (0-1).
   reject_score: 0.9
 
-  # Add classification, score, and action headers when an unwanted message is
-  # accepted because its confidence score is below reject_score.
+  # Add classification, score, and action headers to the email when it is
+  # classified as unwanted but accepted because its score is below reject_score.
   add_unwanted_headers: true
 
   # Scan email sent by authenticated users. Set to true to enable attachment

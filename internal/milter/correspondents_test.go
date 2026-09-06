@@ -163,6 +163,9 @@ func TestCorrespondentStoreRemovesStaleRelationships(t *testing.T) {
 	if store.match("alice@example.net", nil).Known {
 		t.Fatal("stale relationship still matched")
 	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
 	if entries := readCorrespondentFile(t, path).Entries; len(entries) != 0 {
 		t.Fatalf("persisted stale relationships = %d, want 0", len(entries))
 	}

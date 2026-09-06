@@ -3,7 +3,6 @@ package milter
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
@@ -42,7 +41,7 @@ func (store *correspondentStore) addManual(sender, recipient string) (bool, erro
 	entry.LegitimateEmailCount = 0
 	store.entries[key] = entry
 	if err := store.saveLocked(); err != nil {
-		store.entries = before
+		store.db.replaceLocked(before)
 		return false, err
 	}
 	return !existed, nil
@@ -83,7 +82,7 @@ func (store *correspondentStore) deleteManual(sender, recipient string) (int, er
 	}
 	if removed > 0 || staleRemoved > 0 {
 		if err := store.saveLocked(); err != nil {
-			store.entries = before
+			store.db.replaceLocked(before)
 			return 0, err
 		}
 	}
@@ -99,7 +98,7 @@ func cloneCorrespondentEntries(entries map[string]correspondentEntry) map[string
 }
 
 func openCorrespondentStoreForManagement(cfg config.CorrespondentsConfig) (*correspondentStore, error) {
-	store := &correspondentStore{cfg: cfg, entries: make(map[string]correspondentEntry), now: time.Now}
+	store := newEmptyCorrespondentStore(cfg, nil)
 	if err := store.load(); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}

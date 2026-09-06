@@ -1,10 +1,5 @@
 # MilterGuard Quick Start
 
-**Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
-the repository URL, https://github.com/PhilAnderson1/MilterGuard, and ask it to
-consult the current source code and documentation. Check any suggested
-configuration changes before applying them to a live mail server.
-
 1. Install MilterGuard as root from the extracted release directory:
 
    ```sh
@@ -64,3 +59,8 @@ sudo systemctl restart milterguard
 
 See the [Operating Guide](OPERATING_GUIDE.md) for detailed configuration,
 testing, security, and maintenance information.
+
+**Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
+the repository URL, https://github.com/PhilAnderson1/MilterGuard, and ask it to
+consult the current source code and documentation. Check any suggested
+configuration changes before applying them to a live mail server.

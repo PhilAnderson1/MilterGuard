@@ -1,10 +1,5 @@
 # MilterGuard Operating Guide
 
-**Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
-the repository URL, https://github.com/PhilAnderson1/MilterGuard, and ask it to
-consult the current source code and documentation. Check any suggested
-configuration changes before applying them to a live mail server.
-
 Using the supplied default configuration, MilterGuard will use AI to identify
 unwanted spam and scam email, including threats concealed in images, and provide
 basic virus protection by blocking executable attachments. By default, it will
@@ -13,6 +8,11 @@ without rejecting it, allowing you to confirm that its decisions are reliable
 before enabling enforcement. Over time, it will learn and whitelist trusted email
 senders, and identify and blacklist problematic sending IP addresses to reduce
 false positives, false negatives, AI usage, and operating costs.
+
+**Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
+the repository URL, https://github.com/PhilAnderson1/MilterGuard, and ask it to
+consult the current source code and documentation. Check any suggested
+configuration changes before applying them to a live mail server.
 
 For initial installation and activation, follow the
 [MilterGuard Quick Start](QUICKSTART.md).

@@ -46,23 +46,51 @@ type correspondentMatch struct {
 }
 
 type correspondentStore struct {
-	mu          sync.RWMutex
-	cfg         config.CorrespondentsConfig
-	entries     map[string]correspondentEntry
-	now         func() time.Time
-	log         *slog.Logger
-	deferWrites bool
-	dirty       bool
+	mu      *sync.RWMutex
+	cfg     config.CorrespondentsConfig
+	entries map[string]correspondentEntry
+	db      *jsonDatabase[string, correspondentEntry]
+	now     func() time.Time
+	log     *slog.Logger
 }
 
 func newCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logger) *correspondentStore {
-	store := &correspondentStore{cfg: cfg, entries: make(map[string]correspondentEntry), now: time.Now, log: log}
+	store := newEmptyCorrespondentStore(cfg, log)
 	if !cfg.LearnAuthenticatedRecipients && !cfg.LearnLegitimateSenders && !cfg.UseAllowlist {
 		return store
 	}
 	if err := store.load(); err != nil && !os.IsNotExist(err) && log != nil {
 		log.Error("cannot load correspondent allowlist; continuing with an empty list", "file", cfg.File, "error", err)
 	}
+	return store
+}
+
+func newEmptyCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logger) *correspondentStore {
+	store := &correspondentStore{cfg: cfg, now: time.Now, log: log}
+	store.db = newJSONDatabase("Contacts", cfg.File, correspondentFileVersion, cfg.MaxEntries,
+		persistentStoreReadLimit(cfg.MaxEntries, estimatedCorrespondentEntryBytes),
+		func(entry correspondentEntry) string { return store.key(entry.LocalAddress, entry.Correspondent) },
+		func(entry correspondentEntry, now time.Time) bool {
+			staleAfter := cfg.StaleAfter.Value()
+			return staleAfter > 0 && correspondentActivityTime(entry).Before(now.Add(-staleAfter))
+		}, func(a, b correspondentEntry) bool {
+			aq, bq := store.qualified(a), store.qualified(b)
+			return (!aq && bq) || (aq == bq && correspondentActivityTime(a).Before(correspondentActivityTime(b)))
+		}, func(a, b correspondentEntry) bool {
+			return a.LocalAddress < b.LocalAddress || (a.LocalAddress == b.LocalAddress && a.Correspondent < b.Correspondent)
+		}, log)
+	store.db.now = func() time.Time { return store.now() }
+	store.db.prepareForWrite = func(entry correspondentEntry) correspondentEntry {
+		entry.PersistedActivityAt = entry.LastActivityAt
+		return entry
+	}
+	store.db.afterWrite = func(records map[string]correspondentEntry) {
+		for key, entry := range records {
+			entry.PersistedActivityAt = entry.LastActivityAt
+			records[key] = entry
+		}
+	}
+	store.mu, store.entries = &store.db.mu, store.db.records
 	return store
 }
 
@@ -94,26 +122,37 @@ func (s *correspondentStore) learn(localAddress string, recipients []string) err
 	now := s.now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	structuralChange := s.removeStaleLocked(now) > 0
+	structuralChange := false
 	persistActivity := false
 	added := 0
 	for recipient := range unique {
 		key := s.key(localAddress, recipient)
 		if entry, exists := s.entries[key]; exists {
-			promoted := entry.WhitelistType != whitelistAuthenticatedOutbound && entry.WhitelistType != whitelistManual
-			entry.LastActivityAt = now
-			if entry.WhitelistType != whitelistManual {
-				entry.WhitelistType = whitelistAuthenticatedOutbound
-				entry.LegitimateEmailCount = 0
+			s.db.markReadsLocked(1)
+			if s.entryStale(entry, now) {
+				delete(s.entries, key)
+				structuralChange = true
+			} else {
+				promoted := entry.WhitelistType != whitelistAuthenticatedOutbound && entry.WhitelistType != whitelistManual
+				entry.LastActivityAt = now
+				if entry.WhitelistType != whitelistManual {
+					entry.WhitelistType = whitelistAuthenticatedOutbound
+					entry.LegitimateEmailCount = 0
+				}
+				if promoted {
+					structuralChange = true
+				}
+				if s.activityPersistenceDue(entry, now) {
+					persistActivity = true
+				}
+				s.entries[key] = entry
+				continue
 			}
-			if promoted {
+		}
+		if len(s.entries) >= s.cfg.MaxEntries {
+			if s.removeStaleLocked(now) > 0 {
 				structuralChange = true
 			}
-			if s.activityPersistenceDue(entry, now) {
-				persistActivity = true
-			}
-			s.entries[key] = entry
-			continue
 		}
 		for len(s.entries) >= s.cfg.MaxEntries {
 			s.evictOldestLocked()
@@ -154,9 +193,12 @@ func (s *correspondentStore) touchInbound(correspondent string, recipients []str
 	now := s.now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	structuralChange := s.removeStaleLocked(now) > 0
+	structuralChange := false
 	persistActivity := false
 	for key, entry := range s.entries {
+		if s.entryStale(entry, now) {
+			continue
+		}
 		if entry.Correspondent != correspondent {
 			continue
 		}
@@ -166,6 +208,7 @@ func (s *correspondentStore) touchInbound(correspondent string, recipients []str
 		if !s.qualified(entry) {
 			continue
 		}
+		s.db.markReadsLocked(1)
 		entry.LastActivityAt = now
 		if s.activityPersistenceDue(entry, now) {
 			persistActivity = true
@@ -198,7 +241,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 	now := s.now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	saveNeeded := s.removeStaleLocked(now) > 0
+	saveNeeded := false
 
 	if classification == "unwanted" {
 		if score < unwantedMinScore {
@@ -240,9 +283,22 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 	for recipient := range recipientSet {
 		key := s.key(recipient, correspondent)
 		entry, exists := s.entries[key]
+		if exists {
+			s.db.markReadsLocked(1)
+		}
+		if exists && s.entryStale(entry, now) {
+			delete(s.entries, key)
+			exists = false
+			saveNeeded = true
+		}
 		if !exists {
 			if !qualifying {
 				continue
+			}
+			if len(s.entries) >= s.cfg.MaxEntries {
+				if s.removeStaleLocked(now) > 0 {
+					saveNeeded = true
+				}
 			}
 			for len(s.entries) >= s.cfg.MaxEntries {
 				s.evictOldestLocked()
@@ -320,16 +376,17 @@ func (s *correspondentStore) match(correspondent string, recipients []string) co
 	if correspondent == "" {
 		return result
 	}
-	s.removeStale()
+	now := s.now().UTC()
 	if s.cfg.Scope == "global" {
-		s.mu.RLock()
+		s.mu.Lock()
 		for _, entry := range s.entries {
-			if entry.Correspondent == correspondent && s.qualified(entry) {
+			if entry.Correspondent == correspondent && !s.entryStale(entry, now) && s.qualified(entry) {
+				s.db.markReadsLocked(1)
 				result.Known = true
 				break
 			}
 		}
-		s.mu.RUnlock()
+		s.mu.Unlock()
 		result.AllRecipientsMatched = result.Known
 		result.TotalRecipients = 1
 		if result.Known {
@@ -347,13 +404,14 @@ func (s *correspondentStore) match(correspondent string, recipients []string) co
 	if result.TotalRecipients == 0 {
 		return result
 	}
-	s.mu.RLock()
+	s.mu.Lock()
 	for recipient := range unique {
-		if entry, found := s.entries[s.key(recipient, correspondent)]; found && s.qualified(entry) {
+		if entry, found := s.entries[s.key(recipient, correspondent)]; found && !s.entryStale(entry, now) && s.qualified(entry) {
+			s.db.markReadsLocked(1)
 			result.MatchedRecipients++
 		}
 	}
-	s.mu.RUnlock()
+	s.mu.Unlock()
 	result.Known = result.MatchedRecipients > 0
 	result.AllRecipientsMatched = result.MatchedRecipients == result.TotalRecipients
 	return result
@@ -370,15 +428,16 @@ func (s *correspondentStore) listAllowlist(recipient string) []correspondentEntr
 			return nil
 		}
 	}
-	s.removeStale()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	now := s.now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	result := make([]correspondentEntry, 0)
 	for _, entry := range s.entries {
-		if s.qualified(entry) && (allRecipients || entry.LocalAddress == recipient) {
+		if !s.entryStale(entry, now) && s.qualified(entry) && (allRecipients || entry.LocalAddress == recipient) {
 			result = append(result, entry)
 		}
 	}
+	s.db.markReadsLocked(uint64(len(result)))
 	sort.Slice(result, func(i, j int) bool {
 		iActivity := correspondentActivityTime(result[i])
 		jActivity := correspondentActivityTime(result[j])
@@ -401,58 +460,20 @@ func correspondentActivityTime(entry correspondentEntry) time.Time {
 }
 
 func (s *correspondentStore) evictOldestLocked() {
-	var oldestKey string
-	var oldestTime time.Time
-	oldestQualified := true
-	for key, entry := range s.entries {
-		activity := entry.LastActivityAt
-		if activity.IsZero() {
-			activity = entry.LearnedAt
-		}
-		qualified := s.qualified(entry)
-		if oldestKey == "" || (oldestQualified && !qualified) || (qualified == oldestQualified && activity.Before(oldestTime)) {
-			oldestKey, oldestTime, oldestQualified = key, activity, qualified
-		}
-	}
-	delete(s.entries, oldestKey)
-}
-
-func (s *correspondentStore) removeStale() {
-	if s == nil || s.cfg.StaleAfter.Value() <= 0 {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	removed := s.removeStaleLocked(s.now().UTC())
-	if removed == 0 {
-		return
-	}
-	if err := s.saveLocked(); err != nil && s.log != nil {
-		s.log.Error("cannot persist stale correspondent eviction", "error", err)
-	}
+	s.db.evictOneLocked()
 }
 
 func (s *correspondentStore) removeStaleLocked(now time.Time) int {
-	staleAfter := s.cfg.StaleAfter.Value()
-	if staleAfter <= 0 {
-		return 0
-	}
-	cutoff := now.Add(-staleAfter)
-	removed := 0
-	for key, entry := range s.entries {
-		activity := entry.LastActivityAt
-		if activity.IsZero() {
-			activity = entry.LearnedAt
-		}
-		if activity.Before(cutoff) {
-			delete(s.entries, key)
-			removed++
-		}
-	}
+	removed := int(s.db.removeExpiredLocked(now))
 	if removed > 0 && s.log != nil {
 		s.log.Debug("stale correspondent relationships removed", "removed_entries", removed, "entry_count", len(s.entries))
 	}
 	return removed
+}
+
+func (s *correspondentStore) entryStale(entry correspondentEntry, now time.Time) bool {
+	staleAfter := s.cfg.StaleAfter.Value()
+	return staleAfter > 0 && correspondentActivityTime(entry).Before(now.Add(-staleAfter))
 }
 
 func normalizeEmailAddress(value string) string {

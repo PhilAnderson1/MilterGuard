@@ -44,6 +44,7 @@ type Server struct {
 	attachments      *attachment.Scanner
 	internalToken    string
 	replySlots       chan struct{}
+	persistence      *jsonDatabaseManager
 	wg               sync.WaitGroup
 }
 
@@ -51,6 +52,8 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	var tokenBytes [32]byte
 	_, _ = rand.Read(tokenBytes[:])
 	server := &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent), ipReputation: newIPReputationStore(cfg.IPReputation, log), correspondents: newCorrespondentStore(cfg.Correspondents, log), rejectionHistory: newRejectionHistoryStore(cfg.RejectionHistory, log), resolver: net.DefaultResolver, internalToken: hex.EncodeToString(tokenBytes[:]), replySlots: make(chan struct{}, 4)}
+	server.persistence = &jsonDatabaseManager{log: log}
+	server.persistence.add(server.ipReputation.db, server.correspondents.db, server.rejectionHistory.db)
 	if cfg.Attachments.BlockExecutables {
 		server.attachments = attachment.New(attachment.Options{
 			BlockedExtensions: cfg.Attachments.BlockedExtensions, InspectSignatures: cfg.Attachments.InspectSignatures,
@@ -63,8 +66,10 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 }
 
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	s.persistence.flush("startup")
+	defer s.persistence.flush("shutdown")
 	if flushInterval := s.cfg.Persistence.FlushInterval.Value(); flushInterval > 0 {
-		s.enableDeferredPersistence()
+		s.persistence.setDeferred(true)
 		flushCtx, stopFlush := context.WithCancel(ctx)
 		flushDone := make(chan struct{})
 		go func() {
@@ -74,7 +79,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			for {
 				select {
 				case <-ticker.C:
-					s.flushPersistentState()
+					s.persistence.flush("timer")
 				case <-flushCtx.Done():
 					return
 				}
@@ -83,7 +88,6 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		defer func() {
 			stopFlush()
 			<-flushDone
-			s.flushPersistentState()
 		}()
 	}
 	go func() { <-ctx.Done(); _ = ln.Close() }()
@@ -102,24 +106,6 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			defer conn.Close()
 			newSession(s, conn).run(ctx)
 		}()
-	}
-}
-
-func (s *Server) enableDeferredPersistence() {
-	s.ipReputation.enableDeferredPersistence()
-	s.correspondents.enableDeferredPersistence()
-	s.rejectionHistory.enableDeferredPersistence()
-}
-
-func (s *Server) flushPersistentState() {
-	if err := s.ipReputation.flush(); err != nil {
-		s.log.Error("cannot flush rejected IP state", "error", err)
-	}
-	if err := s.correspondents.flush(); err != nil {
-		s.log.Error("cannot flush correspondent allowlist", "error", err)
-	}
-	if err := s.rejectionHistory.flush(); err != nil {
-		s.log.Error("cannot flush rejection history", "error", err)
 	}
 }
 
