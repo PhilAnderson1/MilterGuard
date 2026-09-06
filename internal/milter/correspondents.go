@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
 )
 
 const (
@@ -49,7 +50,7 @@ type correspondentStore struct {
 	mu      *sync.RWMutex
 	cfg     config.CorrespondentsConfig
 	entries map[string]correspondentEntry
-	db      *jsonDatabase[string, correspondentEntry]
+	db      *jsonstore.Database[string, correspondentEntry]
 	now     func() time.Time
 	log     *slog.Logger
 }
@@ -67,7 +68,7 @@ func newCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logger) *c
 
 func newEmptyCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logger) *correspondentStore {
 	store := &correspondentStore{cfg: cfg, now: time.Now, log: log}
-	store.db = newJSONDatabase("Contacts", cfg.File, correspondentFileVersion, cfg.MaxEntries,
+	store.db = jsonstore.New("Contacts", cfg.File, correspondentFileVersion, cfg.MaxEntries,
 		persistentStoreReadLimit(cfg.MaxEntries, estimatedCorrespondentEntryBytes),
 		func(entry correspondentEntry) string { return store.key(entry.LocalAddress, entry.Correspondent) },
 		func(entry correspondentEntry, now time.Time) bool {
@@ -79,18 +80,18 @@ func newEmptyCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logge
 		}, func(a, b correspondentEntry) bool {
 			return a.LocalAddress < b.LocalAddress || (a.LocalAddress == b.LocalAddress && a.Correspondent < b.Correspondent)
 		}, log)
-	store.db.now = func() time.Time { return store.now() }
-	store.db.prepareForWrite = func(entry correspondentEntry) correspondentEntry {
+	store.db.Now = func() time.Time { return store.now() }
+	store.db.PrepareForWrite = func(entry correspondentEntry) correspondentEntry {
 		entry.PersistedActivityAt = entry.LastActivityAt
 		return entry
 	}
-	store.db.afterWrite = func(records map[string]correspondentEntry) {
+	store.db.AfterWrite = func(records map[string]correspondentEntry) {
 		for key, entry := range records {
 			entry.PersistedActivityAt = entry.LastActivityAt
 			records[key] = entry
 		}
 	}
-	store.mu, store.entries = &store.db.mu, store.db.records
+	store.mu, store.entries = &store.db.Mu, store.db.Records
 	return store
 }
 
@@ -128,7 +129,7 @@ func (s *correspondentStore) learn(localAddress string, recipients []string) err
 	for recipient := range unique {
 		key := s.key(localAddress, recipient)
 		if entry, exists := s.entries[key]; exists {
-			s.db.markReadsLocked(1)
+			s.db.MarkReadsLocked(1)
 			if s.entryStale(entry, now) {
 				delete(s.entries, key)
 				structuralChange = true
@@ -208,7 +209,7 @@ func (s *correspondentStore) touchInbound(correspondent string, recipients []str
 		if !s.qualified(entry) {
 			continue
 		}
-		s.db.markReadsLocked(1)
+		s.db.MarkReadsLocked(1)
 		entry.LastActivityAt = now
 		if s.activityPersistenceDue(entry, now) {
 			persistActivity = true
@@ -284,7 +285,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 		key := s.key(recipient, correspondent)
 		entry, exists := s.entries[key]
 		if exists {
-			s.db.markReadsLocked(1)
+			s.db.MarkReadsLocked(1)
 		}
 		if exists && s.entryStale(entry, now) {
 			delete(s.entries, key)
@@ -381,7 +382,7 @@ func (s *correspondentStore) match(correspondent string, recipients []string) co
 		s.mu.Lock()
 		for _, entry := range s.entries {
 			if entry.Correspondent == correspondent && !s.entryStale(entry, now) && s.qualified(entry) {
-				s.db.markReadsLocked(1)
+				s.db.MarkReadsLocked(1)
 				result.Known = true
 				break
 			}
@@ -407,7 +408,7 @@ func (s *correspondentStore) match(correspondent string, recipients []string) co
 	s.mu.Lock()
 	for recipient := range unique {
 		if entry, found := s.entries[s.key(recipient, correspondent)]; found && !s.entryStale(entry, now) && s.qualified(entry) {
-			s.db.markReadsLocked(1)
+			s.db.MarkReadsLocked(1)
 			result.MatchedRecipients++
 		}
 	}
@@ -437,7 +438,7 @@ func (s *correspondentStore) listAllowlist(recipient string) []correspondentEntr
 			result = append(result, entry)
 		}
 	}
-	s.db.markReadsLocked(uint64(len(result)))
+	s.db.MarkReadsLocked(uint64(len(result)))
 	sort.Slice(result, func(i, j int) bool {
 		iActivity := correspondentActivityTime(result[i])
 		jActivity := correspondentActivityTime(result[j])
@@ -460,11 +461,11 @@ func correspondentActivityTime(entry correspondentEntry) time.Time {
 }
 
 func (s *correspondentStore) evictOldestLocked() {
-	s.db.evictOneLocked()
+	s.db.EvictOneLocked()
 }
 
 func (s *correspondentStore) removeStaleLocked(now time.Time) int {
-	removed := int(s.db.removeExpiredLocked(now))
+	removed := int(s.db.RemoveExpiredLocked(now))
 	if removed > 0 && s.log != nil {
 		s.log.Debug("stale correspondent relationships removed", "removed_entries", removed, "entry_count", len(s.entries))
 	}

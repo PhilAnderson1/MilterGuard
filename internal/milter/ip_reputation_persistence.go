@@ -7,7 +7,7 @@ import (
 
 func (s *ipReputationStore) load() error {
 	now := s.now().UTC()
-	_, err := s.db.load(func(version int) bool { return version == rejectedIPFileVersion }, func(record rejectedIPRecord) (rejectedIPRecord, bool, bool) {
+	_, err := s.db.Load(func(version int) bool { return version == rejectedIPFileVersion }, func(record rejectedIPRecord) (rejectedIPRecord, bool, bool) {
 		addr, err := netip.ParseAddr(record.IP)
 		if err != nil {
 			return record, false, true
@@ -43,20 +43,20 @@ func (s *ipReputationStore) saveOrLogLocked() {
 }
 
 func (s *ipReputationStore) saveLocked() error {
-	return s.db.changedLocked(1)
+	return s.db.ChangedLocked(1)
 }
 
 func (s *ipReputationStore) enableDeferredPersistence() {
 	if s == nil {
 		return
 	}
-	s.db.setDeferred(true)
+	s.db.SetDeferred(true)
 }
 
 func (s *ipReputationStore) flush() error {
 	if s == nil {
 		return nil
 	}
-	_, err := s.db.flush()
+	_, err := s.db.Flush()
 	return err
 }

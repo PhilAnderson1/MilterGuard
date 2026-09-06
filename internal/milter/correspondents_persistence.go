@@ -1,7 +1,7 @@
 package milter
 
 func (s *correspondentStore) load() error {
-	changed, err := s.db.load(func(version int) bool {
+	changed, err := s.db.Load(func(version int) bool {
 		return version == legacyCorrespondentFileVersion || version == correspondentFileVersion
 	}, func(entry correspondentEntry) (correspondentEntry, bool, bool) {
 		modified := false
@@ -38,20 +38,20 @@ func (s *correspondentStore) load() error {
 }
 
 func (s *correspondentStore) saveLocked() error {
-	return s.db.changedLocked(1)
+	return s.db.ChangedLocked(1)
 }
 
 func (s *correspondentStore) enableDeferredPersistence() {
 	if s == nil {
 		return
 	}
-	s.db.setDeferred(true)
+	s.db.SetDeferred(true)
 }
 
 func (s *correspondentStore) flush() error {
 	if s == nil {
 		return nil
 	}
-	_, err := s.db.flush()
+	_, err := s.db.Flush()
 	return err
 }

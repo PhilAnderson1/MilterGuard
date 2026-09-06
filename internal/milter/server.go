@@ -12,6 +12,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
@@ -44,7 +45,7 @@ type Server struct {
 	attachments      *attachment.Scanner
 	internalToken    string
 	replySlots       chan struct{}
-	persistence      *jsonDatabaseManager
+	persistence      *jsonstore.Manager
 	wg               sync.WaitGroup
 }
 
@@ -52,8 +53,8 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	var tokenBytes [32]byte
 	_, _ = rand.Read(tokenBytes[:])
 	server := &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent), ipReputation: newIPReputationStore(cfg.IPReputation, log), correspondents: newCorrespondentStore(cfg.Correspondents, log), rejectionHistory: newRejectionHistoryStore(cfg.RejectionHistory, log), resolver: net.DefaultResolver, internalToken: hex.EncodeToString(tokenBytes[:]), replySlots: make(chan struct{}, 4)}
-	server.persistence = &jsonDatabaseManager{log: log}
-	server.persistence.add(server.ipReputation.db, server.correspondents.db, server.rejectionHistory.db)
+	server.persistence = jsonstore.NewManager(log)
+	server.persistence.Add(server.ipReputation.db, server.correspondents.db, server.rejectionHistory.db)
 	if cfg.Attachments.BlockExecutables {
 		server.attachments = attachment.New(attachment.Options{
 			BlockedExtensions: cfg.Attachments.BlockedExtensions, InspectSignatures: cfg.Attachments.InspectSignatures,
@@ -66,10 +67,10 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 }
 
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
-	s.persistence.flush("startup")
-	defer s.persistence.flush("shutdown")
+	s.persistence.Flush("startup")
+	defer s.persistence.Flush("shutdown")
 	if flushInterval := s.cfg.Persistence.FlushInterval.Value(); flushInterval > 0 {
-		s.persistence.setDeferred(true)
+		s.persistence.SetDeferred(true)
 		flushCtx, stopFlush := context.WithCancel(ctx)
 		flushDone := make(chan struct{})
 		go func() {
@@ -79,7 +80,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			for {
 				select {
 				case <-ticker.C:
-					s.persistence.flush("timer")
+					s.persistence.Flush("timer")
 				case <-flushCtx.Done():
 					return
 				}

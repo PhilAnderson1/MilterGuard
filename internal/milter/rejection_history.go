@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
 )
 
 const (
@@ -32,16 +33,16 @@ type rejectionHistoryStore struct {
 	cfg      config.RejectionHistoryConfig
 	now      func() time.Time
 	log      *slog.Logger
-	db       *jsonDatabase[string, rejectionHistoryEntry]
+	db       *jsonstore.Database[string, rejectionHistoryEntry]
 	sequence atomic.Uint64
 }
 
 func newRejectionHistoryStore(cfg config.RejectionHistoryConfig, log *slog.Logger) *rejectionHistoryStore {
 	store := &rejectionHistoryStore{cfg: cfg, now: time.Now, log: log}
-	store.db = newJSONDatabase("Rejections", cfg.File, rejectionHistoryVersion, cfg.MaxEntries, persistentStoreReadLimit(cfg.MaxEntries, estimatedRejectionHistoryEntryBytes), func(v rejectionHistoryEntry) string { return v.ID }, func(v rejectionHistoryEntry, now time.Time) bool {
+	store.db = jsonstore.New("Rejections", cfg.File, rejectionHistoryVersion, cfg.MaxEntries, persistentStoreReadLimit(cfg.MaxEntries, estimatedRejectionHistoryEntryBytes), func(v rejectionHistoryEntry) string { return v.ID }, func(v rejectionHistoryEntry, now time.Time) bool {
 		return cfg.Expiry.Value() > 0 && v.RejectedAt.Before(now.Add(-cfg.Expiry.Value()))
 	}, func(a, b rejectionHistoryEntry) bool { return a.RejectedAt.Before(b.RejectedAt) }, func(a, b rejectionHistoryEntry) bool { return a.RejectedAt.Before(b.RejectedAt) }, log)
-	store.db.now = func() time.Time { return store.now() }
+	store.db.Now = func() time.Time { return store.now() }
 	if cfg.Expiry.Value() <= 0 {
 		return store
 	}
@@ -73,7 +74,7 @@ func (s *rejectionHistoryStore) add(visibleSender, envelopeSender string, recipi
 	}
 	now := s.now().UTC()
 	reason := rejectionReason(reasons)
-	err := s.db.update(func(records map[string]rejectionHistoryEntry) (uint64, uint64, bool) {
+	err := s.db.Update(func(records map[string]rejectionHistoryEntry) (uint64, uint64, bool) {
 		for recipient := range unique {
 			id := fmt.Sprintf("%d-%d-%s", now.UnixNano(), s.sequence.Add(1), recipient)
 			records[id] = rejectionHistoryEntry{ID: id, Sender: sender, Recipient: recipient, RejectedAt: now, Reason: reason}
@@ -84,7 +85,7 @@ func (s *rejectionHistoryStore) add(visibleSender, envelopeSender string, recipi
 		return err
 	}
 	if s.log != nil {
-		s.log.Debug("rejection history updated", "new_entries", len(unique), "entry_count", s.db.size())
+		s.log.Debug("rejection history updated", "new_entries", len(unique), "entry_count", s.db.Size())
 	}
 	return nil
 }
@@ -121,7 +122,7 @@ func (s *rejectionHistoryStore) list(recipient string) []rejectionHistoryEntry {
 			return nil
 		}
 	}
-	result := s.db.view(func(entry rejectionHistoryEntry) bool { return allRecipients || entry.Recipient == recipient })
+	result := s.db.View(func(entry rejectionHistoryEntry) bool { return allRecipients || entry.Recipient == recipient })
 	sort.SliceStable(result, func(i, j int) bool {
 		return result[i].RejectedAt.After(result[j].RejectedAt)
 	})
@@ -130,7 +131,7 @@ func (s *rejectionHistoryStore) list(recipient string) []rejectionHistoryEntry {
 
 func (s *rejectionHistoryStore) load() error {
 	sequence := 0
-	changed, err := s.db.load(func(version int) bool { return version == rejectionHistoryVersion }, func(entry rejectionHistoryEntry) (rejectionHistoryEntry, bool, bool) {
+	changed, err := s.db.Load(func(version int) bool { return version == rejectionHistoryVersion }, func(entry rejectionHistoryEntry) (rejectionHistoryEntry, bool, bool) {
 		entry.Sender = normalizeEmailAddress(entry.Sender)
 		entry.Recipient = normalizeEmailAddress(entry.Recipient)
 		modified := entry.ID == ""
@@ -141,20 +142,20 @@ func (s *rejectionHistoryStore) load() error {
 		return entry, entry.Sender != "" && entry.Recipient != "" && !entry.RejectedAt.IsZero(), modified
 	})
 	if err == nil && changed {
-		_, err = s.db.flush()
+		_, err = s.db.Flush()
 	}
 	return err
 }
 
 func (s *rejectionHistoryStore) enableDeferredPersistence() {
 	if s != nil {
-		s.db.setDeferred(true)
+		s.db.SetDeferred(true)
 	}
 }
 func (s *rejectionHistoryStore) flush() error {
 	if s == nil {
 		return nil
 	}
-	_, err := s.db.flush()
+	_, err := s.db.Flush()
 	return err
 }

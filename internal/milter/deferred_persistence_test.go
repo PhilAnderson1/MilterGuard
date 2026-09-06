@@ -112,7 +112,7 @@ func TestPersistenceFlushRemovesExpiredRecords(t *testing.T) {
 		store := newRejectionHistoryStore(config.RejectionHistoryConfig{File: filepath.Join(t.TempDir(), "rejections.json"), Expiry: config.Duration(time.Hour), MaxEntries: 10}, nil)
 		store.now = func() time.Time { return base }
 		store.enableDeferredPersistence()
-		if err := store.db.update(func(records map[string]rejectionHistoryEntry) (uint64, uint64, bool) {
+		if err := store.db.Update(func(records map[string]rejectionHistoryEntry) (uint64, uint64, bool) {
 			records["old"] = rejectionHistoryEntry{ID: "old", Sender: "old@example.net", Recipient: "local@example.com", RejectedAt: base.Add(-2 * time.Hour)}
 			return 0, 1, true
 		}); err != nil {
@@ -121,13 +121,13 @@ func TestPersistenceFlushRemovesExpiredRecords(t *testing.T) {
 		if entries := store.list("local@example.com"); len(entries) != 0 {
 			t.Fatal("expired rejection was returned before scheduled cleanup")
 		}
-		if store.db.size() != 0 {
+		if store.db.Size() != 0 {
 			t.Fatal("full rejection cleanup ran before the interval elapsed")
 		}
 		if err := store.flush(); err != nil {
 			t.Fatal(err)
 		}
-		if store.db.size() != 0 {
+		if store.db.Size() != 0 {
 			t.Fatal("expired rejection was not removed at flush interval")
 		}
 	})

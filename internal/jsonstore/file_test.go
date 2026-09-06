@@ -1,4 +1,4 @@
-package jsonfile
+package jsonstore
 
 import (
 	"os"
@@ -12,11 +12,11 @@ type testDocument struct {
 
 func TestWriteAndStrictRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	if err := Write(path, testDocument{Value: "saved"}, 0750, 0640); err != nil {
+	if err := writeFile(path, testDocument{Value: "saved"}, 0750, 0640); err != nil {
 		t.Fatal(err)
 	}
 	var document testDocument
-	if err := Read(path, 1024, &document); err != nil {
+	if err := readFile(path, 1024, &document); err != nil {
 		t.Fatal(err)
 	}
 	if document.Value != "saved" {
@@ -48,7 +48,7 @@ func TestReadRejectsUnknownTrailingAndOversizedData(t *testing.T) {
 				t.Fatal(err)
 			}
 			var document testDocument
-			if err := Read(path, test.max, &document); err == nil {
+			if err := readFile(path, test.max, &document); err == nil {
 				t.Fatal("invalid JSON file was accepted")
 			}
 		})
@@ -57,14 +57,14 @@ func TestReadRejectsUnknownTrailingAndOversizedData(t *testing.T) {
 
 func TestFailedWritePreservesExistingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	if err := Write(path, testDocument{Value: "original"}, 0750, 0640); err != nil {
+	if err := writeFile(path, testDocument{Value: "original"}, 0750, 0640); err != nil {
 		t.Fatal(err)
 	}
-	if err := Write(path, make(chan int), 0750, 0640); err == nil {
+	if err := writeFile(path, make(chan int), 0750, 0640); err == nil {
 		t.Fatal("unsupported JSON value was written")
 	}
 	var document testDocument
-	if err := Read(path, 1024, &document); err != nil {
+	if err := readFile(path, 1024, &document); err != nil {
 		t.Fatal(err)
 	}
 	if document.Value != "original" {

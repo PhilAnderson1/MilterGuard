@@ -41,7 +41,7 @@ func (store *correspondentStore) addManual(sender, recipient string) (bool, erro
 	entry.LegitimateEmailCount = 0
 	store.entries[key] = entry
 	if err := store.saveLocked(); err != nil {
-		store.db.replaceLocked(before)
+		store.db.ReplaceLocked(before)
 		return false, err
 	}
 	return !existed, nil
@@ -82,7 +82,7 @@ func (store *correspondentStore) deleteManual(sender, recipient string) (int, er
 	}
 	if removed > 0 || staleRemoved > 0 {
 		if err := store.saveLocked(); err != nil {
-			store.db.replaceLocked(before)
+			store.db.ReplaceLocked(before)
 			return 0, err
 		}
 	}

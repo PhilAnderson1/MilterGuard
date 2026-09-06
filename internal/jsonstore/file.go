@@ -1,6 +1,4 @@
-// Package jsonfile provides strict, size-bounded JSON reads and durable atomic
-// complete-file replacement for MilterGuard's small persistent stores.
-package jsonfile
+package jsonstore
 
 import (
 	"encoding/json"
@@ -11,9 +9,9 @@ import (
 	"syscall"
 )
 
-// Read decodes exactly one JSON value from path. Unknown object fields and
+// readFile decodes exactly one JSON value from path. Unknown object fields and
 // trailing JSON values are rejected, and the file is never read beyond maxSize.
-func Read(path string, maxSize int64, destination any) error {
+func readFile(path string, maxSize int64, destination any) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -41,10 +39,10 @@ func Read(path string, maxSize int64, destination any) error {
 	return nil
 }
 
-// Write atomically replaces path with an indented JSON representation. When
+// writeFile atomically replaces path with an indented JSON representation. When
 // running as root, ownership is inherited from the existing file or directory
 // so command-line maintenance cannot make a daemon-owned store unwritable.
-func Write(path string, value any, directoryMode, fileMode os.FileMode) error {
+func writeFile(path string, value any, directoryMode, fileMode os.FileMode) error {
 	if path == "" {
 		return fmt.Errorf("JSON file path is empty")
 	}
