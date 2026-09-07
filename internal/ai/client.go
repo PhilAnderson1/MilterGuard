@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -33,10 +34,15 @@ type Client struct {
 	cfg    config.AIConfig
 	prompt string
 	http   *http.Client
+	log    *slog.Logger
 }
 
-func NewClient(cfg config.AIConfig, prompt string) *Client {
-	return &Client{cfg: cfg, prompt: prompt, http: &http.Client{Timeout: cfg.Timeout.Value()}}
+func NewClient(cfg config.AIConfig, prompt string, logger ...*slog.Logger) *Client {
+	log := slog.Default()
+	if len(logger) > 0 && logger[0] != nil {
+		log = logger[0]
+	}
+	return &Client{cfg: cfg, prompt: prompt, http: &http.Client{Timeout: cfg.Timeout.Value()}, log: log}
 }
 
 func (c *Client) Analyze(ctx context.Context, input Input) (Decision, error) {
@@ -77,9 +83,27 @@ func (c *Client) Analyze(ctx context.Context, input Input) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.Endpoint, bytes.NewReader(b))
+	var lastErr error
+	for attempt := 0; attempt <= c.cfg.Retries; attempt++ {
+		decision, retry, err := c.analyzeOnce(ctx, b)
+		if err == nil {
+			return decision, nil
+		}
+		lastErr = err
+		if !retry || attempt == c.cfg.Retries || ctx.Err() != nil {
+			return Decision{}, err
+		}
+		c.log.WarnContext(ctx, "retrying AI endpoint request",
+			"attempt", attempt+1, "next_attempt", attempt+2,
+			"max_attempts", c.cfg.Retries+1, "error", err)
+	}
+	return Decision{}, lastErr
+}
+
+func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.Endpoint, bytes.NewReader(body))
 	if err != nil {
-		return Decision{}, err
+		return Decision{}, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -91,15 +115,15 @@ func (c *Client) Analyze(ctx context.Context, input Input) (Decision, error) {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return Decision{}, err
+		return Decision{}, true, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return Decision{}, err
+		return Decision{}, true, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Decision{}, fmt.Errorf("AI endpoint returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return Decision{}, false, fmt.Errorf("AI endpoint returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	var envelope struct {
 		Choices []struct {
@@ -109,25 +133,25 @@ func (c *Client) Analyze(ctx context.Context, input Input) (Decision, error) {
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return Decision{}, fmt.Errorf("decode endpoint response: %w", err)
+		return Decision{}, true, fmt.Errorf("decode endpoint response: %w", err)
 	}
 	if len(envelope.Choices) == 0 {
-		return Decision{}, fmt.Errorf("endpoint returned no choices: response_body=%q", responseExcerpt(raw))
+		return Decision{}, true, fmt.Errorf("endpoint returned no choices: response_body=%q", responseExcerpt(raw))
 	}
 	var d Decision
 	dec := json.NewDecoder(strings.NewReader(envelope.Choices[0].Message.Content))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&d); err != nil {
-		return Decision{}, fmt.Errorf("invalid decision JSON: %w", err)
+		return Decision{}, true, fmt.Errorf("invalid decision JSON: %w", err)
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
-		return Decision{}, fmt.Errorf("invalid decision JSON: trailing content")
+		return Decision{}, true, fmt.Errorf("invalid decision JSON: trailing content")
 	}
 	if err := validate(d); err != nil {
-		return Decision{}, err
+		return Decision{}, true, err
 	}
-	return d, nil
+	return d, false, nil
 }
 
 const maxResponseExcerptBytes = 2048

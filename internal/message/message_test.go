@@ -124,7 +124,7 @@ func TestMultipartAlternativePrefersHTML(t *testing.T) {
 	if strings.Contains(prompt, "plain-only wording") {
 		t.Fatalf("plain alternative must be ignored when HTML is available: %s", prompt)
 	}
-	if !strings.Contains(prompt, "HTML sign in [link: https://example.invalid/login]") {
+	if !strings.Contains(prompt, "HTML [sign in](https://example.invalid/login)") {
 		t.Fatalf("HTML alternative or link destination missing: %s", prompt)
 	}
 }
@@ -277,7 +277,7 @@ func TestLinkInventoryDoesNotDuplicateLinkRetainedInBody(t *testing.T) {
 	link := "https://example.org/action"
 	m.AddBody([]byte(`<p>Take action <a href="` + link + `">today</a>.</p>`))
 	prompt := m.Prompt(1000)
-	if !strings.Contains(prompt, "[link: "+link+"]") {
+	if !strings.Contains(prompt, "[today]("+link+")") {
 		t.Fatalf("body omitted link destination: %s", prompt)
 	}
 	if strings.Contains(prompt, "EXTRACTED LINKS") {
@@ -290,7 +290,7 @@ func TestHTMLPreservesLinkTextAndDestination(t *testing.T) {
 	m.AddHeader("Content-Type", "text/html")
 	m.AddBody([]byte(`<p>Sign in to <a href="https://evil.example/login"><strong>Microsoft</strong></a>.</p>`))
 	prompt := m.Prompt(1000)
-	if !strings.Contains(prompt, "Sign in to Microsoft [link: https://evil.example/login] .") {
+	if !strings.Contains(prompt, "Sign in to [Microsoft](https://evil.example/login).") {
 		t.Fatalf("link evidence missing: %s", prompt)
 	}
 }
@@ -300,7 +300,7 @@ func TestHTMLMarksQuotedContentAndPreservesItsLinks(t *testing.T) {
 	m.AddHeader("Content-Type", "text/html")
 	m.AddBody([]byte(`<p>Current reply</p><blockquote>Earlier message <a href="https://example.invalid/profile">profile</a></blockquote>`))
 	prompt := m.Prompt(1000)
-	want := "Current reply [quoted content begins] Earlier message profile [link: https://example.invalid/profile] [quoted content ends]"
+	want := "Current reply [quoted content begins] Earlier message [profile](https://example.invalid/profile) [quoted content ends]"
 	if !strings.Contains(prompt, want) {
 		t.Fatalf("HTML quote structure or link was not preserved: %s", prompt)
 	}
@@ -359,8 +359,47 @@ func TestMalformedHTMLStillPreservesLink(t *testing.T) {
 	m.AddHeader("Content-Type", "text/html")
 	m.AddBody([]byte(`<a href="https://example.invalid">Click <b>here`))
 	prompt := m.Prompt(1000)
-	if !strings.Contains(prompt, "Click here [link: https://example.invalid]") {
+	if !strings.Contains(prompt, "[Click here](https://example.invalid)") {
 		t.Fatalf("malformed HTML link missing: %s", prompt)
+	}
+}
+
+func TestHTMLPreservesRemoteImageReferenceAsMarkdown(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/html")
+	m.AddBody([]byte(`<p>Branding <img src="https://images.example/logo.png" alt="Example [logo]"></p>`))
+	prompt := m.Prompt(1000)
+	if !strings.Contains(prompt, `![Example \[logo\]](https://images.example/logo.png)`) {
+		t.Fatalf("remote image evidence missing: %s", prompt)
+	}
+	if strings.Contains(prompt, "EXTRACTED LINKS") {
+		t.Fatalf("remote image URL retained in body was duplicated: %s", prompt)
+	}
+}
+
+func TestMarkdownLinkEscapesDestinationParenthesesWithoutDuplicateInventory(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/html")
+	m.AddBody([]byte(`<a href="https://example.test/a_(b)">open account</a>`))
+	prompt := m.Prompt(1000)
+	if !strings.Contains(prompt, `[open account](https://example.test/a_%28b%29)`) {
+		t.Fatalf("Markdown destination was not escaped safely: %s", prompt)
+	}
+	if strings.Contains(prompt, "EXTRACTED LINKS") {
+		t.Fatalf("escaped link retained in body was duplicated: %s", prompt)
+	}
+}
+
+func TestHTMLRendersCIDImageReferenceButOmitsDataImage(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/html")
+	m.AddBody([]byte(`<img src="cid:logo" alt="Company logo"><img src="data:image/png;base64,AAAA">Visible`))
+	prompt := m.Prompt(1000)
+	if !strings.Contains(prompt, "![Company logo](cid:logo)") {
+		t.Fatalf("CID image reference missing from text: %s", prompt)
+	}
+	if strings.Contains(prompt, "data:image") {
+		t.Fatalf("data image reference leaked into text: %s", prompt)
 	}
 }
 

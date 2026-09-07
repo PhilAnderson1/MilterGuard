@@ -201,7 +201,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 }
 
 func (s *Server) analysisTimeout() time.Duration {
-	timeout := s.cfg.AI.Timeout.Value() + analysisResponseMargin
+	timeout := s.cfg.AI.Timeout.Value()*time.Duration(s.cfg.AI.Retries+1) + analysisResponseMargin
 	if milterTimeout := s.cfg.Milter.Timeout.Value(); milterTimeout > timeout {
 		return milterTimeout
 	}
@@ -210,7 +210,7 @@ func (s *Server) analysisTimeout() time.Duration {
 
 func (s *Server) evaluate(parent context.Context, msg *message.Message) evaluationResult {
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(parent, s.cfg.AI.Timeout.Value())
+	ctx, cancel := context.WithTimeout(parent, s.cfg.AI.Timeout.Value()*time.Duration(s.cfg.AI.Retries+1))
 	defer cancel()
 
 	select {

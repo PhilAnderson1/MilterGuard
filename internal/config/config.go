@@ -104,6 +104,7 @@ type AIConfig struct {
 	DisableThinking    bool     `yaml:"disable_thinking"`
 	PromptFile         string   `yaml:"prompt_file"`
 	Timeout            Duration `yaml:"timeout"`
+	Retries            int      `yaml:"retries"`
 	MaxConcurrent      int      `yaml:"max_concurrent"`
 	MaxBodyChars       int      `yaml:"max_body_chars"`
 	VisionMode         string   `yaml:"vision_mode"`
@@ -202,8 +203,8 @@ func defaults() Config {
 		},
 		AI: AIConfig{
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter", Timeout: Duration(15 * time.Second),
-			MaxConcurrent: 8,
-			MaxBodyChars:  50000, VisionMode: "off", VisionMinTextChars: 200,
+			Retries: 1, MaxConcurrent: 8,
+			MaxBodyChars: 50000, VisionMode: "off", VisionMinTextChars: 200,
 			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000, AppName: "MilterGuard",
 		},
 		Attachments: AttachmentsConfig{
@@ -270,6 +271,9 @@ func (c Config) Validate() error {
 	}
 	if c.AI.Timeout.Value() <= 0 || c.AI.MaxConcurrent < 1 || c.AI.MaxBodyChars < 1 {
 		return fmt.Errorf("invalid ai timeout, max_concurrent, or max_body_chars")
+	}
+	if c.AI.Retries < 0 || c.AI.Retries > 10 {
+		return fmt.Errorf("ai.retries must be between 0 and 10")
 	}
 	if c.AI.VisionMode != "off" && c.AI.VisionMode != "fallback" && c.AI.VisionMode != "always" {
 		return fmt.Errorf("ai.vision_mode must be off, fallback, or always")

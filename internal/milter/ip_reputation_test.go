@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net/netip"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -291,6 +292,13 @@ func TestRejectedIPCachePersistsReputation(t *testing.T) {
 	cache.add(addr, "unwanted", 1, connectionDNSResult{})
 	now = now.Add(2 * time.Minute)
 	cache.add(addr, "unwanted", 1, connectionDNSResult{})
+	state, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(state), `"classification"`) {
+		t.Fatalf("persisted IP reputation contains redundant classification: %s", state)
+	}
 
 	reloaded := newIPReputationStore(policy, nil)
 	if record := reloaded.entries[addr]; record.ID == 0 {

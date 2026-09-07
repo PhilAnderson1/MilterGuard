@@ -468,10 +468,7 @@ func (s *correspondentStore) listAllowlist(recipient string) []correspondentEntr
 }
 
 func correspondentActivityTime(entry correspondentEntry) time.Time {
-	if !entry.LastActivityAt.IsZero() {
-		return entry.LastActivityAt
-	}
-	return entry.LearnedAt
+	return entry.LastActivityAt
 }
 
 func (s *correspondentStore) evictOldestLocked() {

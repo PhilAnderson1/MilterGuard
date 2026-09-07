@@ -61,6 +61,9 @@ ai:
   # Maximum duration of one AI request, using Go duration syntax. Must be > 0.
   timeout: 45s
 
+  # Retry connection failures or malformed AI responses this many times.
+  retries: 1
+
   # Maximum number of simultaneous AI analyses; positive integer.
   max_concurrent: 8
 

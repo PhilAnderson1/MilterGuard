@@ -89,7 +89,6 @@ type rejectedIPRecord struct {
 	Strikes            []time.Time `json:"strikes,omitempty"`
 	BlockLevel         string      `json:"block_level,omitempty"`
 	BlockedUntil       time.Time   `json:"blocked_until,omitempty"`
-	Classification     string      `json:"classification,omitempty"`
 	Score              float64     `json:"score,omitempty"`
 	LegitimateCount    int         `json:"legitimate_count,omitempty"`
 	LastActivityAt     time.Time   `json:"last_activity_at"`
@@ -239,7 +238,7 @@ func (c *ipReputationStore) add(addr netip.Addr, classification string, score fl
 			record.Strikes = record.Strikes[len(record.Strikes)-c.repeatThreshold:]
 		}
 	}
-	record.Classification, record.Score, record.LastActivityAt = classification, score, now
+	record.Score, record.LastActivityAt = score, now
 	record.LegitimateCount = 0
 	if c.repeatThreshold > 0 && len(record.Strikes) >= c.repeatThreshold {
 		record.BlockLevel, record.BlockedUntil = rejectedIPBlockRepeat, now.Add(c.repeatDuration)
@@ -362,7 +361,7 @@ func (c *ipReputationStore) lookup(addr netip.Addr) (ipBlock, bool) {
 	} else {
 		c.entries[addr] = record
 	}
-	return ipBlock{expires: record.BlockedUntil, classification: record.Classification, score: record.Score, level: record.BlockLevel, strikeCount: len(record.Strikes)}, true
+	return ipBlock{expires: record.BlockedUntil, classification: "unwanted", score: record.Score, level: record.BlockLevel, strikeCount: len(record.Strikes)}, true
 }
 
 func (c *ipReputationStore) pruneStrikes(strikes []time.Time, now time.Time) []time.Time {
@@ -452,7 +451,7 @@ func (c *ipReputationStore) manualAdd(addr netip.Addr) (activeIPBlock, error) {
 	record := c.entries[addr]
 	record.IP, record.BlockLevel = addr.String(), level
 	record.BlockedUntil, record.LastActivityAt = now.Add(duration), now
-	record.Classification, record.Score, record.LegitimateCount = "manual", 1, 0
+	record.Score, record.LegitimateCount = 1, 0
 	record.PersistedRefreshAt = now
 	c.entries[addr] = record
 	if err := c.saveLocked(1, 0); err != nil {

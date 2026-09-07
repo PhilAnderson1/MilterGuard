@@ -3,9 +3,12 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,6 +178,77 @@ func TestResponseExcerptIsBounded(t *testing.T) {
 	if got != want {
 		t.Fatalf("unexpected excerpt length or contents: got %d bytes, want %d", len(got), len(want))
 	}
+}
+
+func TestAnalyzeRetriesConnectionFailure(t *testing.T) {
+	var attempts atomic.Int32
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if attempts.Add(1) == 1 {
+			return nil, errors.New("connection reset")
+		}
+		return decisionResponse(`{"classification":"legitimate","score":0.9,"reasons":[]}`), nil
+	})
+	client := retryTestClient(transport, 1)
+	decision, err := client.Analyze(context.Background(), Input{Text: "test"})
+	if err != nil || decision.Classification != "legitimate" {
+		t.Fatalf("retry did not recover: decision=%+v err=%v", decision, err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts.Load())
+	}
+}
+
+func TestAnalyzeRetriesMalformedDecision(t *testing.T) {
+	var attempts atomic.Int32
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if attempts.Add(1) == 1 {
+			return decisionResponse(`{"classification":"unwanted","score":0.9,"reasons":[1]}`), nil
+		}
+		return decisionResponse(`{"classification":"unwanted","score":0.95,"reasons":["evidence"]}`), nil
+	})
+	client := retryTestClient(transport, 1)
+	decision, err := client.Analyze(context.Background(), Input{Text: "test"})
+	if err != nil || decision.Classification != "unwanted" {
+		t.Fatalf("retry did not recover: decision=%+v err=%v", decision, err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts.Load())
+	}
+}
+
+func TestAnalyzeDoesNotRetryHTTPError(t *testing.T) {
+	var attempts atomic.Int32
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("invalid key")),
+		}, nil
+	})
+	client := retryTestClient(transport, 3)
+	if _, err := client.Analyze(context.Background(), Input{Text: "test"}); err == nil {
+		t.Fatal("expected HTTP error")
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts.Load())
+	}
+}
+
+func retryTestClient(transport http.RoundTripper, retries int) *Client {
+	client := NewClient(config.AIConfig{
+		Endpoint: "https://endpoint.invalid/v1/chat/completions", APIKey: "key",
+		Model: "model", Timeout: config.Duration(time.Second), Retries: retries,
+	}, "classify", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	client.http.Transport = transport
+	return client
+}
+
+func decisionResponse(content string) *http.Response {
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]string{"content": content}}},
+	})
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body)))}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

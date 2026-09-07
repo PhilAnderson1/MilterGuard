@@ -1175,6 +1175,16 @@ func TestAnalysisTimeoutUsesAITimeoutWithResponseMargin(t *testing.T) {
 	}
 }
 
+func TestAnalysisTimeoutIncludesRetryAttempts(t *testing.T) {
+	s := &Server{cfg: config.Config{
+		Milter: config.MilterConfig{Timeout: config.Duration(30 * time.Second)},
+		AI:     config.AIConfig{Timeout: config.Duration(60 * time.Second), Retries: 2},
+	}}
+	if got, want := s.analysisTimeout(), 185*time.Second; got != want {
+		t.Fatalf("analysis timeout = %v, want %v", got, want)
+	}
+}
+
 func TestAnalysisTimeoutPreservesLongerMilterTimeout(t *testing.T) {
 	s := &Server{cfg: config.Config{
 		Milter: config.MilterConfig{Timeout: config.Duration(90 * time.Second)},

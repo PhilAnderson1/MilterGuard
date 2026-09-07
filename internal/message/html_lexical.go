@@ -2,6 +2,7 @@ package message
 
 import (
 	stdhtml "html"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -15,7 +16,14 @@ var (
 	lexicalSoftLineBreak = regexp.MustCompile(`=\r?\n`)
 	lexicalHrefPattern   = regexp.MustCompile(`(?is)\bhref\s*(?:=3d|=)\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
 	lexicalSrcPattern    = regexp.MustCompile(`(?is)\bsrc\s*(?:=3d|=)\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
+	lexicalAltPattern    = regexp.MustCompile(`(?is)\balt\s*(?:=3d|=)\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
 )
+
+type lexicalAnchor struct {
+	href         string
+	contentStart int
+	markdown     bool
+}
 
 func htmlToText(source string) extractedContent {
 	return (lexicalHTMLExtractor{}).extract(source)
@@ -28,7 +36,8 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 	lower := strings.ToLower(source)
 
 	var text strings.Builder
-	var links, imageRefs, anchorStack []string
+	var links, imageRefs []string
+	var anchorStack []lexicalAnchor
 	for offset := 0; offset < len(source); {
 		opening := strings.IndexByte(source[offset:], '<')
 		if opening < 0 {
@@ -79,17 +88,46 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 		case name == "blockquote" && isClosing:
 			text.WriteString("\n[quoted content ends]\n")
 		case name == "a" && !isClosing:
-			anchorStack = append(anchorStack, lexicalAttribute(rawTag, lexicalHrefPattern))
+			href, valid := lexicalHTTPURL(lexicalAttribute(rawTag, lexicalHrefPattern))
+			anchor := lexicalAnchor{href: href, markdown: valid}
+			if valid {
+				text.WriteByte('[')
+				anchor.contentStart = text.Len()
+			}
+			anchorStack = append(anchorStack, anchor)
 		case name == "a" && isClosing:
 			if len(anchorStack) > 0 {
-				href := anchorStack[len(anchorStack)-1]
+				anchor := anchorStack[len(anchorStack)-1]
 				anchorStack = anchorStack[:len(anchorStack)-1]
-				writeLexicalLink(&text, &links, href)
+				closeLexicalAnchor(&text, &links, anchor)
 			}
 		case name == "img" && !isClosing:
 			src := lexicalAttribute(rawTag, lexicalSrcPattern)
 			if len(src) > 4 && strings.EqualFold(src[:4], "cid:") {
-				imageRefs = append(imageRefs, normalizeContentID(src[4:]))
+				contentID := normalizeContentID(src[4:])
+				if contentID != "" {
+					alt := markdownLabel(lexicalAttribute(rawTag, lexicalAltPattern))
+					if alt == "" {
+						alt = "embedded image"
+					}
+					text.WriteString(" ![")
+					text.WriteString(alt)
+					text.WriteString("](cid:")
+					text.WriteString(markdownURL(contentID))
+					text.WriteString(") ")
+					imageRefs = append(imageRefs, contentID)
+				}
+			} else if src, valid := lexicalHTTPURL(src); valid {
+				alt := markdownLabel(lexicalAttribute(rawTag, lexicalAltPattern))
+				if alt == "" {
+					alt = "image"
+				}
+				text.WriteString(" ![")
+				text.WriteString(alt)
+				text.WriteString("](")
+				text.WriteString(markdownURL(src))
+				text.WriteString(") ")
+				links = append(links, src)
 			}
 		case lexicalBlockElement(name):
 			text.WriteByte('\n')
@@ -97,9 +135,9 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 		offset = closing + 1
 	}
 	for len(anchorStack) > 0 {
-		href := anchorStack[len(anchorStack)-1]
+		anchor := anchorStack[len(anchorStack)-1]
 		anchorStack = anchorStack[:len(anchorStack)-1]
-		writeLexicalLink(&text, &links, href)
+		closeLexicalAnchor(&text, &links, anchor)
 	}
 
 	decoded := stdhtml.UnescapeString(text.String())
@@ -139,14 +177,35 @@ func lexicalAttribute(raw string, pattern *regexp.Regexp) string {
 	return ""
 }
 
-func writeLexicalLink(text *strings.Builder, links *[]string, href string) {
-	if href == "" {
+func closeLexicalAnchor(text *strings.Builder, links *[]string, anchor lexicalAnchor) {
+	if !anchor.markdown {
 		return
 	}
-	text.WriteString(" [link: ")
-	text.WriteString(sanitize(href))
-	text.WriteString("] ")
-	*links = append(*links, href)
+	if text.Len() == anchor.contentStart {
+		text.WriteString("link")
+	}
+	text.WriteString("](")
+	text.WriteString(markdownURL(anchor.href))
+	text.WriteString(")")
+	*links = append(*links, anchor.href)
+}
+
+func lexicalHTTPURL(value string) (string, bool) {
+	value = strings.TrimSpace(sanitize(value))
+	parsed, err := url.Parse(value)
+	return value, err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != ""
+}
+
+func markdownLabel(value string) string {
+	value = strings.Join(strings.Fields(sanitize(stdhtml.UnescapeString(value))), " ")
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, "[", `\[`)
+	return strings.ReplaceAll(value, "]", `\]`)
+}
+
+func markdownURL(value string) string {
+	replacer := strings.NewReplacer(" ", "%20", "(", "%28", ")", "%29", "<", "%3C", ">", "%3E")
+	return replacer.Replace(value)
 }
 
 func lexicalVisibleText(value string) string {

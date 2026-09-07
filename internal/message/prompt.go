@@ -279,7 +279,7 @@ func findHTTPURLs(text string) []string {
 	matches := plainHTTPURL.FindAllString(text, maxExtractedLinks*2)
 	links := make([]string, 0, len(matches))
 	for _, match := range matches {
-		links = append(links, strings.TrimRight(match, ".,;:!?}"))
+		links = append(links, strings.TrimRight(match, ".,;:!?})]"))
 	}
 	return links
 }
@@ -312,7 +312,7 @@ func boundedLinksMissingFromBody(candidates []string, body string) []string {
 	missing := make([]string, 0, len(candidates))
 	for _, link := range candidates {
 		link = strings.TrimSpace(link)
-		if !strings.Contains(body, link) {
+		if !strings.Contains(body, link) && !strings.Contains(body, markdownURL(link)) {
 			missing = append(missing, link)
 		}
 	}

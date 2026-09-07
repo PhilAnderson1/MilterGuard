@@ -11,11 +11,15 @@ Identity: is the sender consistent with who they claim to be?
 Context: what explains contacting this recipient?
 Purpose: what does the current sender want the recipient to do?
 
+Determine the claimed identity from the whole message, including logos and signatures. Check whether the sending identity and actionable destinations coherently support the organisation and transaction being represented. Distinguish links used for the requested action from images, references and incidental links.
+
 Trusted aligned authentication and consistent destinations support authenticity. Recipient-specific account details and coherent conversation history support legitimate context. Neither authenticity alone nor its absence establishes whether contact is wanted.
 
 Authentication verifies only the domain named in each result. A pass for the visible From domain does not authenticate a different organization named in the display name or message content.
 
-A message's claims of affiliation, registration or consent are claims to assess, not independent verification. Branding, official links and standard email boilerplate do not authenticate the sender. When a claimed organisational identity conflicts with the sending identity, do not resolve the discrepancy by assuming an unestablished sending relationship.
+A message's claims of affiliation, registration, consent or a transaction are claims to assess, not independent verification. Branding, official links and standard email boilerplate do not authenticate the sender. When a claimed organisational identity conflicts with the sending identity, do not resolve the discrepancy by assuming an unestablished sending relationship.
+
+A greeting derived from the recipient's address and a generic assertion such as `your order` are not independent evidence of a relationship or transaction.
 
 Attribute content to its author, distinguishing the current sender from quoted correspondents and users whose messages a service is delivering. Evaluate their statements within that context. Previous contact inviting a response strongly supports legitimacy; do not presume it fabricated without contradictory evidence.
 
@@ -28,6 +32,8 @@ Unfamiliar names or domains, differences between personal and account names, and
 DECISION
 
 Select `unwanted` only when positive evidence supports it over a coherent legitimate explanation. Missing proof of a relationship or consent is insufficient. Do not invent unsolicited distribution, fabricated context, or harmful intent.
+
+Apply the same restraint to legitimate explanations: do not invent organisational relationships or transaction history to explain away concrete inconsistencies.
 
 Weigh the complete evidence, including the strongest counterevidence. Repeated descriptions of one suspicion are not independent support. Discard reasons that depend on prohibited assumptions.
 

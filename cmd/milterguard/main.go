@@ -96,7 +96,7 @@ func main() {
 		logger.Error("cannot read detection prompt", "error", err)
 		os.Exit(2)
 	}
-	client := ai.NewClient(cfg.AI, string(prompt))
+	client := ai.NewClient(cfg.AI, string(prompt), logger)
 	server := milter.NewServer(cfg, client, logger)
 	if err := server.StartupError(); err != nil {
 		logger.Error("incompatible JSON file format", "error", err)

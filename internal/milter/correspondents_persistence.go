@@ -10,14 +10,6 @@ func (s *correspondentStore) load() error {
 		if entry.Correspondent == "" || entry.LocalAddress == "" {
 			return entry, false, true
 		}
-		if entry.LastActivityAt.IsZero() {
-			entry.LastActivityAt = entry.LearnedAt
-			modified = true
-		}
-		if entry.WhitelistType == "" {
-			entry.WhitelistType = whitelistAuthenticatedOutbound
-			modified = true
-		}
 		if entry.WhitelistType != whitelistAuthenticatedOutbound && entry.WhitelistType != whitelistRepeatedLegitimate && entry.WhitelistType != whitelistManual {
 			return entry, false, true
 		}
