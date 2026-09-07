@@ -387,6 +387,38 @@ func TestListAllowlistIsMostRecentlyActiveFirst(t *testing.T) {
 	}
 }
 
+func TestCorrespondentStatisticsCountAffectedRecords(t *testing.T) {
+	cfg := config.CorrespondentsConfig{
+		LearnAuthenticatedRecipients: true,
+		UseAllowlist:                 true,
+		Scope:                        "per_sender",
+		File:                         filepath.Join(t.TempDir(), "correspondents.json"),
+		MaxEntries:                   10,
+	}
+	store := newCorrespondentStore(cfg, nil)
+	store.enableDeferredPersistence()
+	if err := store.learn("local@example.com", []string{"one@example.net", "two@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := store.db.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Writes != 2 || stats.Deletes != 0 {
+		t.Fatalf("learning stats = %#v", stats)
+	}
+	if removed, err := store.deleteManual("one@example.net", "*"); err != nil || removed != 1 {
+		t.Fatalf("delete = %d, %v", removed, err)
+	}
+	stats, err = store.db.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Writes != 0 || stats.Deletes != 1 {
+		t.Fatalf("deletion stats = %#v", stats)
+	}
+}
+
 func fileMode(t *testing.T, path string) os.FileMode {
 	t.Helper()
 	info, err := os.Stat(path)

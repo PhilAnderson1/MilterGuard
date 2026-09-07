@@ -1,6 +1,7 @@
 package message
 
 import (
+	"bytes"
 	"strings"
 )
 
@@ -15,6 +16,9 @@ type Message struct {
 	MaxBytes           int64
 	bodySize           int64
 	headerSize         int64
+	archiveHeaders     bytes.Buffer
+	archiveHeaderBytes int64
+	archiveTruncated   bool
 }
 
 type ConnectionInfo struct {
@@ -94,6 +98,7 @@ func New(maxBytes int64) *Message {
 	return &Message{Headers: make(map[string][]string), MaxBytes: maxBytes}
 }
 func (m *Message) AddHeader(name, value string) {
+	m.addArchiveHeader(name, value)
 	name = strings.ToLower(strings.TrimSpace(name))
 	if !retainedHeaders[name] {
 		return
@@ -110,6 +115,31 @@ func (m *Message) AddHeader(name, value string) {
 	}
 	m.headerSize += entrySize
 	m.Headers[name] = append(m.Headers[name], value)
+}
+
+func (m *Message) addArchiveHeader(name, value string) {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, ":\r\n\x00") {
+		m.archiveTruncated = true
+		return
+	}
+	for _, char := range name {
+		if char < 33 || char > 126 {
+			m.archiveTruncated = true
+			return
+		}
+	}
+	value = strings.ReplaceAll(value, "\x00", "")
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	value = strings.ReplaceAll(value, "\n", "\r\n ")
+	line := name + ": " + value + "\r\n"
+	if m.archiveHeaderBytes+int64(len(line)) > m.MaxBytes {
+		m.archiveTruncated = true
+		return
+	}
+	m.archiveHeaderBytes += int64(len(line))
+	_, _ = m.archiveHeaders.WriteString(line)
 }
 func (m *Message) AddBody(p []byte) {
 	remaining := m.MaxBytes - m.bodySize
@@ -132,6 +162,31 @@ func (m *Message) Header(name string) string {
 
 // RetainedBytes reports the bounded header and body bytes kept by the Milter.
 func (m *Message) RetainedBytes() int64 { return m.headerSize + m.bodySize }
+
+// ArchiveBytes returns a bounded RFC 5322/MIME message reconstructed from the
+// headers and body supplied through the Milter protocol.
+func (m *Message) ArchiveBytes() []byte {
+	limit := m.MaxBytes
+	if limit < 0 {
+		limit = 0
+	}
+	var output bytes.Buffer
+	_, _ = output.Write(m.archiveHeaders.Bytes())
+	if m.archiveTruncated || m.BodyTruncated {
+		_, _ = output.WriteString("X-MilterGuard-Archive-Truncated: yes\r\n")
+	}
+	_, _ = output.WriteString("\r\n")
+	remaining := limit - int64(output.Len())
+	if remaining <= 0 {
+		return append([]byte(nil), output.Bytes()[:min(int64(output.Len()), limit)]...)
+	}
+	body := []byte(m.Body.String())
+	if int64(len(body)) > remaining {
+		body = body[:remaining]
+	}
+	_, _ = output.Write(body)
+	return append([]byte(nil), output.Bytes()...)
+}
 
 // CommandText returns decoded visible MIME text for the authenticated command
 // mailbox. Callers separately constrain the accepted top-level MIME types.

@@ -74,12 +74,12 @@ func (s *rejectionHistoryStore) add(visibleSender, envelopeSender string, recipi
 	}
 	now := s.now().UTC()
 	reason := rejectionReason(reasons)
-	err := s.db.Update(func(records map[string]rejectionHistoryEntry) (uint64, uint64, bool) {
+	err := s.db.Update(func(records map[string]rejectionHistoryEntry) (uint64, uint64, uint64, bool) {
 		for recipient := range unique {
 			id := fmt.Sprintf("%d-%d-%s", now.UnixNano(), s.sequence.Add(1), recipient)
 			records[id] = rejectionHistoryEntry{ID: id, Sender: sender, Recipient: recipient, RejectedAt: now, Reason: reason}
 		}
-		return 0, uint64(len(unique)), true
+		return 0, uint64(len(unique)), 0, true
 	})
 	if err != nil {
 		return err

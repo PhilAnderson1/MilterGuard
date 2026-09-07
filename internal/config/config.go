@@ -39,6 +39,7 @@ type Config struct {
 	EmailCommands    EmailCommandsConfig    `yaml:"email_commands"`
 	Persistence      PersistenceConfig      `yaml:"persistence"`
 	RejectionHistory RejectionHistoryConfig `yaml:"rejection_history"`
+	RejectedMail     RejectedMailConfig     `yaml:"rejected_mail"`
 	Correspondents   CorrespondentsConfig   `yaml:"correspondents"`
 	IPReputation     IPReputationConfig     `yaml:"ip_reputation"`
 	Logging          LoggingConfig          `yaml:"logging"`
@@ -53,6 +54,14 @@ type RejectionHistoryConfig struct {
 	File       string   `yaml:"file"`
 	Expiry     Duration `yaml:"expiry"`
 	MaxEntries int      `yaml:"max_entries"`
+}
+
+type RejectedMailConfig struct {
+	Enabled       bool     `yaml:"enabled"`
+	Directory     string   `yaml:"directory"`
+	Retention     Duration `yaml:"retention"`
+	MaxMessages   int      `yaml:"max_messages"`
+	MaxTotalBytes int64    `yaml:"max_total_bytes"`
 }
 
 type EmailCommandsConfig struct {
@@ -211,6 +220,10 @@ func defaults() Config {
 		RejectionHistory: RejectionHistoryConfig{
 			File: "/var/lib/milterguard/rejection-history.json", Expiry: Duration(30 * 24 * time.Hour), MaxEntries: 10000,
 		},
+		RejectedMail: RejectedMailConfig{
+			Directory: "/var/lib/milterguard/rejected-mail", Retention: Duration(30 * 24 * time.Hour),
+			MaxMessages: 10000, MaxTotalBytes: 5 << 30,
+		},
 		Filtering: FilteringConfig{
 			RejectScore: .95, AIErrorAction: "accept", RejectMessage: "Message rejected as suspected spam or fraud",
 			ScanAuthenticated: true, SenderDomainAllowlistRequireDKIM: true,
@@ -232,8 +245,8 @@ func defaults() Config {
 }
 
 func (c Config) Validate() error {
-	if c.Mode != "monitor" && c.Mode != "enforce" {
-		return fmt.Errorf("mode must be monitor or enforce")
+	if c.Mode != "monitor" && c.Mode != "tag" && c.Mode != "enforce" {
+		return fmt.Errorf("mode must be monitor, tag, or enforce")
 	}
 	if c.Milter.Socket == "" || c.Milter.MaxMessageSize < 1 {
 		return fmt.Errorf("invalid milter settings")
@@ -327,6 +340,20 @@ func (c Config) Validate() error {
 		}
 		if c.RejectionHistory.MaxEntries < 1 {
 			return fmt.Errorf("rejection_history.max_entries must be positive")
+		}
+	}
+	if c.RejectedMail.Enabled {
+		if !filepath.IsAbs(c.RejectedMail.Directory) {
+			return fmt.Errorf("rejected_mail.directory must be an absolute path")
+		}
+		if c.RejectedMail.Retention.Value() <= 0 {
+			return fmt.Errorf("rejected_mail.retention must be positive")
+		}
+		if c.RejectedMail.MaxMessages < 1 {
+			return fmt.Errorf("rejected_mail.max_messages must be positive")
+		}
+		if c.RejectedMail.MaxTotalBytes < c.Milter.MaxMessageSize {
+			return fmt.Errorf("rejected_mail.max_total_bytes must be at least milter.max_message_size")
 		}
 	}
 	if c.Filtering.RejectScore < 0 || c.Filtering.RejectScore > 1 {

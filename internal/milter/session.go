@@ -234,9 +234,10 @@ func (ss *session) negotiate(payload []byte) bool {
 		version = supportedProtocolVersion
 	}
 	requestedActions := uint32(0)
-	if ss.server.cfg.Filtering.AddUnwantedHeaders && offeredActions&resultHeaderActions == resultHeaderActions {
+	wantsResultHeaders := ss.server.cfg.Filtering.AddUnwantedHeaders || ss.server.cfg.Mode == "tag"
+	if wantsResultHeaders && offeredActions&resultHeaderActions == resultHeaderActions {
 		requestedActions = resultHeaderActions
-	} else if ss.server.cfg.Filtering.AddUnwantedHeaders {
+	} else if wantsResultHeaders {
 		ss.server.log.Warn("result headers disabled for Milter connection because MTA did not offer add/change-header support",
 			"offered_actions", offeredActions)
 	}
@@ -375,6 +376,7 @@ func (ss *session) recipientSetComplete() bool {
 
 func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluationResult, inbound inboundEvidence) {
 	if result.selected == actionReject && ss.server.cfg.Mode == "enforce" {
+		ss.server.saveRejectedMail(ctx, ss.message, "ai")
 		ss.server.ipReputation.add(ss.peerIP, result.classification, result.score, ss.connectionDNS)
 		if err := ss.server.rejectionHistory.add(ss.message.Header("From"), ss.envelopeSender, ss.envelopeRecipients, result.reasons); err != nil {
 			ss.server.log.ErrorContext(ctx, "cannot save rejection history", "message_id", ss.message.Header("Message-ID"), "error", err)
@@ -459,7 +461,7 @@ func validMTAHostname(value string) string {
 }
 
 func (ss *session) finishBypassedMessage(ctx context.Context, source string, learn, touchInbound bool, extraAttrs ...any) bool {
-	err := ss.writeAcceptedResultHeaders(nil)
+	err := ss.writeAcceptedBypassHeaders()
 	if err == nil {
 		err = writeFrame(ss.conn, ss.server.encodeAction(actionAccept))
 	}

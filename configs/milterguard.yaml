@@ -6,8 +6,9 @@
 #
 # Important: preserve the supplied two-space YAML indentation and do not use tabs.
 
-# Operation mode: monitor or enforce.
+# Operation mode: monitor, tag, or enforce.
 # monitor logs proposed decisions but always accepts mail.
+# tag accepts all mail and adds MilterGuard result headers.
 # enforce can reject unwanted decisions according to policy below.
 mode: monitor
 
@@ -205,6 +206,22 @@ rejection_history:
 
   # Maximum retained rejection records. The oldest records are removed first.
   max_entries: 10000
+
+rejected_mail:
+  # Save copies of messages rejected after complete-message inspection.
+  # IP reputation rejections occur before the message is received and cannot
+  # be saved. Stored email may contain private data and malicious attachments.
+  enabled: false
+
+  # Messages are stored as YYYY/MM/DD/*.eml beneath this directory.
+  directory: /var/lib/milterguard/rejected-mail
+
+  # Remove expired messages at startup and every 24 hours.
+  retention: 720h
+
+  # Storage limits. The oldest retained messages are removed first when needed.
+  max_messages: 10000
+  max_total_bytes: 5368709120
 
 ip_reputation:
   # Temporarily blacklist the sending IP after rejecting an email, avoiding further

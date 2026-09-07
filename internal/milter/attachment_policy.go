@@ -43,7 +43,7 @@ func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 
 func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action, path, detection string, scanErr error) bool {
 	selected := proposed
-	if ss.server.cfg.Mode == "monitor" {
+	if ss.server.cfg.Mode != "enforce" {
 		selected = actionAccept
 	}
 	response := []byte{responseAccept}
@@ -55,7 +55,15 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 	}
 	var err error
 	if selected == actionAccept {
-		err = ss.writeAcceptedResultHeaders(nil)
+		if ss.server.cfg.Mode == "tag" {
+			classification := "unwanted"
+			if scanErr != nil {
+				classification = "unavailable"
+			}
+			err = ss.writeTagHeaders(classification, nil, "accepted-tag-mode")
+		} else {
+			err = ss.writeAcceptedResultHeaders(nil)
+		}
 	}
 	if err == nil {
 		err = writeFrame(ss.conn, response)
@@ -81,6 +89,9 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 		return false
 	}
 	ss.server.log.InfoContext(ctx, "attachment policy decision", attrs...)
+	if selected == actionReject {
+		ss.server.saveRejectedMail(ctx, ss.message, "attachment_policy")
+	}
 	ss.resetMessage(phaseConnection)
 	return true
 }

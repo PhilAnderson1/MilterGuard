@@ -25,11 +25,12 @@ For initial installation and activation, follow the
 4. [Start in monitor mode](#start-in-monitor-mode)
 5. [Enable enforcement](#enable-enforcement)
 6. [Basic virus protection](#basic-virus-protection)
-7. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
-8. [Email commands](#email-commands)
-9. [Running AI locally](#running-ai-locally)
-10. [Routine operation](#routine-operation)
-11. [Replay saved email](#replay-saved-email)
+7. [Rejected message archive](#rejected-message-archive)
+8. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
+9. [Email commands](#email-commands)
+10. [Running AI locally](#running-ai-locally)
+11. [Routine operation](#routine-operation)
+12. [Replay saved email](#replay-saved-email)
 
 ## Configure the AI service
 
@@ -238,6 +239,10 @@ When monitor-mode results are satisfactory, change the mode to `enforce` and
 restart MilterGuard. It will then reject unwanted messages that meet the
 configured confidence threshold and block prohibited executable attachments.
 
+Alternatively, setting `mode: tag` accepts all mail while adding result
+headers. Successfully analysed mail includes its classification and score.
+Attachment policy and IP reputation do not reject mail in tag mode.
+
 Continue reviewing decisions after enabling enforcement. AI classification is
 not perfectly deterministic, and changes made by an AI provider can alter a
 model's behaviour even when the configured model name remains unchanged.
@@ -267,6 +272,20 @@ accepted, rejected, or temporarily deferred with `tempfail`. In the supplied
 configuration, encrypted archives are rejected while other unscannable content
 is accepted and continues to AI analysis. Monitor mode records the proposed
 attachment action but still accepts the message.
+
+## Rejected message archive
+
+The optional `rejected_mail` configuration saves `.eml` copies of messages
+rejected by AI or attachment inspection. Copies are organized beneath the
+configured directory as `YYYY/MM/DD`, making them easy to inspect or reuse for
+testing. Cached IP rejections happen before the email is received and therefore
+cannot be saved.
+
+The archive may contain private correspondence and dangerous attachments, so
+restrict access to it. Retention cleanup runs at startup and every 24 hours;
+expired date directories are removed hierarchically. Message-count and total-size
+limits remove the oldest retained copies when necessary. Archive errors are
+logged but never alter the SMTP filtering decision.
 
 ## Trusted mail and adaptive filtering
 

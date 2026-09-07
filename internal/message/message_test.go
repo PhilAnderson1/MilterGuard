@@ -26,6 +26,30 @@ func TestPromptDecodesMultipart(t *testing.T) {
 	}
 }
 
+func TestPromptDecodesHeaderWordsAndRetainsMailbox(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "=?UTF-8?B?TXVzY2xlIEdyb3d0aA==?= <noreply@musclegrowth.net>")
+	m.AddHeader("Subject", "=?UTF-8?B?bmlrb2xhaSBoYXMgc2VudCB5b3UgYSBtZXNzYWdl?=")
+
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"From: Muscle Growth <noreply@musclegrowth.net>",
+		"Subject: nikolai has sent you a message",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestPromptPreservesMalformedEncodedHeader(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "=?UTF-8?Q?broken <sender@example.com>")
+	if prompt := m.Prompt(100); !strings.Contains(prompt, "From: =?UTF-8?Q?broken <sender@example.com>") {
+		t.Fatalf("malformed header evidence was not preserved:\n%s", prompt)
+	}
+}
+
 func TestConnectionInformationPrecedesHeadersAndReportsDNSPrecisely(t *testing.T) {
 	m := New(1000)
 	m.Connection = ConnectionInfo{
@@ -431,4 +455,17 @@ func multipartRelatedMessage(plain, html, contentID string) *Message {
 		"--outer--\r\n"
 	m.AddBody([]byte(body))
 	return m
+}
+
+func TestArchiveBytesRetainsAllHeadersAndBody(t *testing.T) {
+	m := New(1024)
+	m.AddHeader("X-Unselected", "preserved")
+	m.AddHeader("Subject", "test")
+	m.AddBody([]byte("message body"))
+	got := string(m.ArchiveBytes())
+	for _, want := range []string{"X-Unselected: preserved\r\n", "Subject: test\r\n", "\r\nmessage body"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("archive missing %q: %q", want, got)
+		}
+	}
 }

@@ -112,9 +112,9 @@ func TestPersistenceFlushRemovesExpiredRecords(t *testing.T) {
 		store := newRejectionHistoryStore(config.RejectionHistoryConfig{File: filepath.Join(t.TempDir(), "rejections.json"), Expiry: config.Duration(time.Hour), MaxEntries: 10}, nil)
 		store.now = func() time.Time { return base }
 		store.enableDeferredPersistence()
-		if err := store.db.Update(func(records map[string]rejectionHistoryEntry) (uint64, uint64, bool) {
+		if err := store.db.Update(func(records map[string]rejectionHistoryEntry) (uint64, uint64, uint64, bool) {
 			records["old"] = rejectionHistoryEntry{ID: "old", Sender: "old@example.net", Recipient: "local@example.com", RejectedAt: base.Add(-2 * time.Hour)}
-			return 0, 1, true
+			return 0, 1, 0, true
 		}); err != nil {
 			t.Fatal(err)
 		}

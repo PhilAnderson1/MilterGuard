@@ -19,12 +19,20 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/milter"
 )
 
+// version is replaced at build time with -ldflags "-X main.version=<version>".
+var version = "development"
+
 func main() {
 	configPath := flag.String("config", "/etc/milterguard/milterguard.yaml", "configuration file")
 	check := flag.Bool("check-config", false, "validate configuration and exit")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	whitelistAdd := flag.String("whitelist-add", "", "manually whitelist sender for one recipient (service must be stopped)")
 	whitelistDelete := flag.String("whitelist-del", "", "delete sender whitelist entry; recipient may be * (service must be stopped)")
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("MilterGuard %s\n", version)
+		return
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {

@@ -37,6 +37,13 @@ func TestApplyPolicy(t *testing.T) {
 			selected: actionAccept,
 		},
 		{
+			name:     "tag records rejection but accepts",
+			mode:     "tag",
+			decision: ai.Decision{Classification: "unwanted", Score: 1},
+			proposed: actionReject,
+			selected: actionAccept,
+		},
+		{
 			name:     "high legitimate score is accepted",
 			mode:     "enforce",
 			decision: ai.Decision{Classification: "legitimate", Score: 1},

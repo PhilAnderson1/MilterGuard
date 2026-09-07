@@ -35,7 +35,7 @@ type Database[K comparable, V any] struct {
 	Dirty           bool
 	reads           uint64
 	writes          uint64
-	expiredRemoved  uint64
+	deletes         uint64
 }
 
 type jsonDatabaseFile[V any] struct {
@@ -44,11 +44,11 @@ type jsonDatabaseFile[V any] struct {
 }
 
 type Stats struct {
-	Name           string
-	Reads          uint64
-	Writes         uint64
-	ExpiredRemoved uint64
-	Flushed        bool
+	Name    string
+	Reads   uint64
+	Writes  uint64
+	Deletes uint64
+	Flushed bool
 }
 
 func New[K comparable, V any](name, path string, version, maxEntries int, readLimit int64, key func(V) K, expired func(V, time.Time) bool, evictLess, sortLess func(V, V) bool, log *slog.Logger) *Database[K, V] {
@@ -72,8 +72,11 @@ func (d *Database[K, V]) Load(acceptedVersion func(int) bool, normalize func(V) 
 		changed = changed || modified
 		if !keep || d.isExpired(value, now) {
 			changed = true
-			d.expiredRemoved++
+			d.deletes++
 			continue
+		}
+		if modified {
+			d.writes++
 		}
 		d.Records[d.key(value)] = value
 	}
@@ -98,7 +101,7 @@ func (d *Database[K, V]) Get(key K) (V, bool) {
 	if d.isExpired(value, d.Now().UTC()) {
 		delete(d.Records, key)
 		d.Dirty = true
-		d.expiredRemoved++
+		d.deletes++
 		var zero V
 		return zero, false
 	}
@@ -108,21 +111,21 @@ func (d *Database[K, V]) Get(key K) (V, bool) {
 
 func (d *Database[K, V]) Put(value V) error {
 	key := d.key(value)
-	return d.Update(func(records map[K]V) (uint64, uint64, bool) {
+	return d.Update(func(records map[K]V) (uint64, uint64, uint64, bool) {
 		records[key] = value
-		return 0, 1, true
+		return 0, 1, 0, true
 	})
 }
 
 func (d *Database[K, V]) Delete(key K) (bool, error) {
 	deleted := false
-	err := d.Update(func(records map[K]V) (uint64, uint64, bool) {
+	err := d.Update(func(records map[K]V) (uint64, uint64, uint64, bool) {
 		if _, found := records[key]; !found {
-			return 0, 0, false
+			return 0, 0, 0, false
 		}
 		delete(records, key)
 		deleted = true
-		return 0, 1, true
+		return 0, 0, 1, true
 	})
 	return deleted, err
 }
@@ -136,7 +139,7 @@ func (d *Database[K, V]) View(fn func(V) bool) []V {
 		if d.isExpired(value, now) {
 			delete(d.Records, key)
 			d.Dirty = true
-			d.expiredRemoved++
+			d.deletes++
 			continue
 		}
 		if fn(value) {
@@ -149,7 +152,7 @@ func (d *Database[K, V]) View(fn func(V) bool) []V {
 
 // update provides one atomic transaction for feature operations that need to
 // read and modify several related records.
-func (d *Database[K, V]) Update(fn func(map[K]V) (reads, writes uint64, changed bool)) error {
+func (d *Database[K, V]) Update(fn func(map[K]V) (reads, writes, deletes uint64, changed bool)) error {
 	d.Mu.Lock()
 	defer d.Mu.Unlock()
 	backup := make(map[K]V, len(d.Records))
@@ -159,12 +162,13 @@ func (d *Database[K, V]) Update(fn func(map[K]V) (reads, writes uint64, changed 
 		}
 		backup[key] = value
 	}
-	reads, writes, changed := fn(d.Records)
+	reads, writes, deletes, changed := fn(d.Records)
 	d.reads += reads
 	if !changed {
 		return nil
 	}
 	d.writes += writes
+	d.deletes += deletes
 	d.Dirty = true
 	if len(d.Records) >= d.maxEntries {
 		d.RemoveExpiredLocked(d.Now().UTC())
@@ -191,6 +195,7 @@ func (d *Database[K, V]) ReplaceLocked(values map[K]V) {
 func (d *Database[K, V]) RemoveExpiredLocked(now time.Time) uint64 {
 	var removed uint64
 	for key, value := range d.Records {
+		maintained := false
 		if d.Maintain != nil {
 			updated, keep, changed := d.Maintain(value, now)
 			if !keep {
@@ -200,29 +205,33 @@ func (d *Database[K, V]) RemoveExpiredLocked(now time.Time) uint64 {
 			}
 			d.Records[key] = updated
 			value = updated
-			if changed {
-				d.Dirty = true
-			}
+			maintained = changed
 		}
 		if d.isExpired(value, now) {
 			delete(d.Records, key)
 			removed++
+			continue
+		}
+		if maintained {
+			d.Dirty = true
+			d.writes++
 		}
 	}
 	if removed > 0 {
 		d.Dirty = true
-		d.expiredRemoved += removed
+		d.deletes += removed
 	}
 	return removed
 }
 
-func (d *Database[K, V]) MarkWritesLocked(count uint64) {
-	d.writes += count
+func (d *Database[K, V]) MarkChangesLocked(writes, deletes uint64) {
+	d.writes += writes
+	d.deletes += deletes
 	d.Dirty = true
 }
 
-func (d *Database[K, V]) ChangedLocked(writes uint64) error {
-	d.MarkWritesLocked(writes)
+func (d *Database[K, V]) ChangedLocked(writes, deletes uint64) error {
+	d.MarkChangesLocked(writes, deletes)
 	if d.DeferWrites {
 		return nil
 	}
@@ -247,7 +256,7 @@ func (d *Database[K, V]) EvictOneLocked() {
 	}
 	if found {
 		delete(d.Records, victim)
-		d.writes++
+		d.deletes++
 		if d.OnEvict != nil {
 			d.OnEvict(victim, selected)
 		}
@@ -262,7 +271,7 @@ func (d *Database[K, V]) Flush() (Stats, error) {
 
 func (d *Database[K, V]) FlushLocked(trigger string) (Stats, error) {
 	d.RemoveExpiredLocked(d.Now().UTC())
-	stats := Stats{Name: d.name, Reads: d.reads, Writes: d.writes, ExpiredRemoved: d.expiredRemoved}
+	stats := Stats{Name: d.name, Reads: d.reads, Writes: d.writes, Deletes: d.deletes}
 	if d.Dirty {
 		if err := d.writeLocked(); err != nil {
 			return stats, err
@@ -273,13 +282,13 @@ func (d *Database[K, V]) FlushLocked(trigger string) (Stats, error) {
 		d.Dirty = false
 		stats.Flushed = true
 	}
-	d.reads, d.writes, d.expiredRemoved = 0, 0, 0
+	d.reads, d.writes, d.deletes = 0, 0, 0
 	if trigger != "" && d.log != nil {
 		flushed := "no"
 		if stats.Flushed {
 			flushed = "yes"
 		}
-		d.log.Debug("JSON stores flushed", "trigger", trigger, "summary", fmt.Sprintf("%s: r %d, w %d, e %d, f %s", stats.Name, stats.Reads, stats.Writes, stats.ExpiredRemoved, flushed))
+		d.log.Debug("JSON stores flushed", "trigger", trigger, "summary", fmt.Sprintf("%s: r %d, w %d, d %d, f %s", stats.Name, stats.Reads, stats.Writes, stats.Deletes, flushed))
 	}
 	return stats, nil
 }
@@ -337,7 +346,7 @@ func (m *Manager) Flush(trigger string) {
 		if stats.Flushed {
 			flushed = "yes"
 		}
-		parts = append(parts, fmt.Sprintf("%s: r %d, w %d, e %d, f %s", stats.Name, stats.Reads, stats.Writes, stats.ExpiredRemoved, flushed))
+		parts = append(parts, fmt.Sprintf("%s: r %d, w %d, d %d, f %s", stats.Name, stats.Reads, stats.Writes, stats.Deletes, flushed))
 		if err != nil && m.log != nil {
 			m.log.Error("cannot flush JSON store", "store", stats.Name, "trigger", trigger, "error", err)
 		}

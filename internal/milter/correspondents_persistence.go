@@ -32,13 +32,14 @@ func (s *correspondentStore) load() error {
 		return err
 	}
 	if changed {
-		return s.saveLocked()
+		_, err = s.db.Flush()
+		return err
 	}
 	return nil
 }
 
-func (s *correspondentStore) saveLocked() error {
-	return s.db.ChangedLocked(1)
+func (s *correspondentStore) saveLocked(writes, deletes int) error {
+	return s.db.ChangedLocked(uint64(writes), uint64(deletes))
 }
 
 func (s *correspondentStore) enableDeferredPersistence() {

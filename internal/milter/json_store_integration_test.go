@@ -36,7 +36,7 @@ func TestFeatureStoresReportFlushStatistics(t *testing.T) {
 	rejections.list("local@example.com")
 	manager.Flush("timer")
 	logged := output.String()
-	for _, want := range []string{"IP: r 1, w 1, e 0, f yes", "Contacts: r 1, w 1, e 0, f yes", "Rejections: r 1, w 1, e 0, f yes"} {
+	for _, want := range []string{"IP: r 1, w 1, d 0, f yes", "Contacts: r 1, w 1, d 0, f yes", "Rejections: r 1, w 1, d 0, f yes"} {
 		if !strings.Contains(logged, want) {
 			t.Fatalf("flush log missing %q: %s", want, logged)
 		}

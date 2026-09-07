@@ -36,14 +36,14 @@ func (s *ipReputationStore) load() error {
 	return err
 }
 
-func (s *ipReputationStore) saveOrLogLocked() {
-	if err := s.saveLocked(); err != nil && s.log != nil {
+func (s *ipReputationStore) saveOrLogLocked(writes, deletes int) {
+	if err := s.saveLocked(writes, deletes); err != nil && s.log != nil {
 		s.log.Error("cannot save rejected IP state", "file", s.stateFile, "error", err)
 	}
 }
 
-func (s *ipReputationStore) saveLocked() error {
-	return s.db.ChangedLocked(1)
+func (s *ipReputationStore) saveLocked(writes, deletes int) error {
+	return s.db.ChangedLocked(uint64(writes), uint64(deletes))
 }
 
 func (s *ipReputationStore) enableDeferredPersistence() {

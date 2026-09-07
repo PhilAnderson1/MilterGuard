@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -18,6 +20,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 )
 
 type fixedAnalyzer struct {
@@ -32,6 +35,8 @@ type countingAnalyzer struct {
 type recordingAnalyzer struct {
 	inputs chan ai.Input
 }
+
+type failingAnalyzer struct{}
 
 type shortWriter struct {
 	max int
@@ -59,6 +64,10 @@ func (a *recordingAnalyzer) Analyze(_ context.Context, input ai.Input) (ai.Decis
 	return ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}, nil
 }
 
+func (failingAnalyzer) Analyze(context.Context, ai.Input) (ai.Decision, error) {
+	return ai.Decision{}, errors.New("endpoint unavailable")
+}
+
 func testServer(t *testing.T, analyzer Analyzer) (*Server, net.Conn, <-chan struct{}) {
 	t.Helper()
 	serverConn, clientConn := net.Pipe()
@@ -76,6 +85,63 @@ func testServer(t *testing.T, analyzer Analyzer) (*Server, net.Conn, <-chan stru
 		s.handle(context.Background(), serverConn)
 	}()
 	return s, clientConn, done
+}
+
+func enableTestRejectedMail(t *testing.T, server *Server) string {
+	t.Helper()
+	root := t.TempDir()
+	server.rejectedMail = rejectedmail.New(rejectedmail.Options{
+		Directory: root, Retention: 24 * time.Hour, MaxMessages: 10, MaxTotalBytes: 1 << 20,
+	}, server.log)
+	return root
+}
+
+func archivedMessages(t *testing.T, root string) []string {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		matches, err := filepath.Glob(filepath.Join(root, "*", "*", "*", "*.eml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) > 0 || time.Now().After(deadline) {
+			return matches
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestAIRejectedMessageIsArchived(t *testing.T) {
+	analyzer := fixedAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test rejection"}}}
+	server, conn, done := testServer(t, analyzer)
+	root := enableTestRejectedMail(t, server)
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		[]byte{commandMail},
+		headerFrame("From", "sender@example.net"),
+		headerFrame("X-Unselected", "archive me"),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("rejected body")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
+	files := archivedMessages(t, root)
+	if len(files) != 1 {
+		t.Fatalf("archived files = %v", files)
+	}
+	content, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"From: sender@example.net", "X-Unselected: archive me", "rejected body"} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("archive missing %q: %q", want, content)
+		}
+	}
 }
 
 func expectNoFrame(t *testing.T, conn net.Conn) {
@@ -196,6 +262,68 @@ func TestBelowThresholdUnwantedAddsTrustedResultHeaders(t *testing.T) {
 	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
 	expectFrame(t, conn, string(addHeaderResponse(scoreHeader, "0.85")))
 	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-below-threshold")))
+	expectFrame(t, conn, string([]byte{responseAccept}))
+}
+
+func TestTagModeAddsHeadersForEveryAIClassification(t *testing.T) {
+	for _, test := range []struct {
+		decision  ai.Decision
+		wantScore string
+	}{
+		{ai.Decision{Classification: "legitimate", Score: 0.8, Reasons: []string{"test"}}, "0.8"},
+		{ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}, "1"},
+	} {
+		t.Run(test.decision.Classification, func(t *testing.T) {
+			server, conn, done := testServer(t, fixedAnalyzer{decision: test.decision})
+			server.cfg.Mode = "tag"
+			defer func() { _ = conn.Close(); <-done }()
+
+			negotiateWithActions(t, conn, resultHeaderActions)
+			sendContinueFrames(t, conn,
+				connectFrame('4', "127.0.0.1"),
+				envelopeFrame(commandMail, "sender@example.com"),
+				envelopeFrame(commandRecipient, "recipient@example.net"),
+				headerFrame("From", "Sender <sender@example.com>"),
+				[]byte{commandEndHeaders},
+			)
+			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+				t.Fatal(err)
+			}
+			expectFrame(t, conn, string(addHeaderResponse(classificationHeader, test.decision.Classification)))
+			expectFrame(t, conn, string(addHeaderResponse(scoreHeader, test.wantScore)))
+			expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-tag-mode")))
+			expectFrame(t, conn, string([]byte{responseAccept}))
+		})
+	}
+}
+
+func TestAcceptedAIErrorAddsDiagnosticHeadersWithoutScore(t *testing.T) {
+	server, conn, done := testServer(t, failingAnalyzer{})
+	server.cfg.Filtering.AddUnwantedHeaders = true
+	defer func() {
+		_ = conn.Close()
+		<-done
+	}()
+
+	negotiateWithActions(t, conn, resultHeaderActions)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "sender@example.com"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+		headerFrame(classificationHeader, "forged"),
+		headerFrame(scoreHeader, "1"),
+		headerFrame(actionHeader, "reject"),
+		headerFrame("From", "Sender <sender@example.com>"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range resultHeaderNames {
+		expectFrame(t, conn, string(deleteHeaderResponse(name)))
+	}
+	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unavailable")))
+	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-ai-error")))
 	expectFrame(t, conn, string([]byte{responseAccept}))
 }
 

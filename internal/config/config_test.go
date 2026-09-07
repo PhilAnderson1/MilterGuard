@@ -81,6 +81,21 @@ func TestAuthenticatedMailScanningDefaultsEnabled(t *testing.T) {
 	}
 }
 
+func TestValidateOperationModes(t *testing.T) {
+	for _, mode := range []string{"monitor", "tag", "enforce"} {
+		cfg := validConfig()
+		cfg.Mode = mode
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("mode %q rejected: %v", mode, err)
+		}
+	}
+	cfg := validConfig()
+	cfg.Mode = "invalid"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mode must") {
+		t.Fatalf("invalid mode error = %v", err)
+	}
+}
+
 func TestValidateAIEndpointType(t *testing.T) {
 	for _, endpointType := range []string{"openrouter", "llamacpp", "openai"} {
 		cfg := validConfig()
@@ -130,6 +145,32 @@ func TestValidateRejectionHistory(t *testing.T) {
 	cfg.RejectionHistory.File = ""
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "rejection_history.file") {
 		t.Fatalf("missing history file error = %v", err)
+	}
+}
+
+func TestValidateRejectedMail(t *testing.T) {
+	cfg := validConfig()
+	cfg.RejectedMail.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default rejected mail settings rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		change func(*Config)
+	}{
+		{name: "relative directory", change: func(c *Config) { c.RejectedMail.Directory = "rejected-mail" }},
+		{name: "zero retention", change: func(c *Config) { c.RejectedMail.Retention = 0 }},
+		{name: "zero messages", change: func(c *Config) { c.RejectedMail.MaxMessages = 0 }},
+		{name: "byte limit below message limit", change: func(c *Config) { c.RejectedMail.MaxTotalBytes = c.Milter.MaxMessageSize - 1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := cfg
+			test.change(&invalid)
+			if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "rejected_mail") {
+				t.Fatalf("validation error = %v", err)
+			}
+		})
 	}
 }
 

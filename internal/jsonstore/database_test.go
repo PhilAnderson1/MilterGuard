@@ -32,7 +32,7 @@ func TestJSONDatabaseManagerLogsCombinedFlushStatistics(t *testing.T) {
 	}
 	manager.Flush("shutdown")
 	logged := output.String()
-	for _, want := range []string{`"trigger":"shutdown"`, `IP: r 1, w 1, e 0, f yes`, `Contacts: r 0, w 0, e 0, f no`} {
+	for _, want := range []string{`"trigger":"shutdown"`, `IP: r 1, w 1, d 0, f yes`, `Contacts: r 0, w 0, d 0, f no`} {
 		if !strings.Contains(logged, want) {
 			t.Fatalf("flush log missing %q: %s", want, logged)
 		}
@@ -47,10 +47,10 @@ func TestJSONDatabaseReadWriteDeleteExpiryAndStats(t *testing.T) {
 		func(a, b testJSONRecord) bool { return a.Expires.Before(b.Expires) }, nil, nil)
 	db.Now = func() time.Time { return now }
 	db.SetDeferred(true)
-	if err := db.Update(func(records map[string]testJSONRecord) (uint64, uint64, bool) {
+	if err := db.Update(func(records map[string]testJSONRecord) (uint64, uint64, uint64, bool) {
 		records["live"] = testJSONRecord{ID: "live", Expires: now.Add(time.Hour), Value: "kept"}
 		records["old"] = testJSONRecord{ID: "old", Expires: now.Add(-time.Hour), Value: "expired"}
-		return 0, 2, true
+		return 0, 2, 0, true
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -70,10 +70,58 @@ func TestJSONDatabaseReadWriteDeleteExpiryAndStats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Reads != 1 || stats.Writes != 3 || stats.ExpiredRemoved != 1 || !stats.Flushed {
+	if stats.Reads != 1 || stats.Writes != 2 || stats.Deletes != 2 || !stats.Flushed {
 		t.Fatalf("stats = %#v", stats)
 	}
 	if _, err := db.Load(func(version int) bool { return version == 1 }, func(v testJSONRecord) (testJSONRecord, bool, bool) { return v, true, false }); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestJSONDatabaseCountsMaintenanceAndEvictionByRecord(t *testing.T) {
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	db := New("Test", filepath.Join(t.TempDir(), "test.json"), 1, 2, 1<<20,
+		func(v testJSONRecord) string { return v.ID }, nil,
+		func(a, b testJSONRecord) bool { return a.ID < b.ID }, nil, nil)
+	db.Now = func() time.Time { return now }
+	db.Maintain = func(record testJSONRecord, _ time.Time) (testJSONRecord, bool, bool) {
+		switch record.Value {
+		case "update":
+			record.Value = "updated"
+			return record, true, true
+		case "delete":
+			return record, false, true
+		default:
+			return record, true, false
+		}
+	}
+	db.SetDeferred(true)
+	if err := db.Update(func(records map[string]testJSONRecord) (uint64, uint64, uint64, bool) {
+		records["a"] = testJSONRecord{ID: "a", Value: "update"}
+		records["b"] = testJSONRecord{ID: "b", Value: "delete"}
+		return 0, 2, 0, true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := db.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Writes != 3 || stats.Deletes != 1 {
+		t.Fatalf("maintenance stats = %#v", stats)
+	}
+
+	if err := db.Put(testJSONRecord{ID: "b", Value: "keep"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Put(testJSONRecord{ID: "c", Value: "keep"}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = db.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Writes != 2 || stats.Deletes != 1 {
+		t.Fatalf("eviction stats = %#v", stats)
 	}
 }

@@ -51,6 +51,7 @@ fi
 install -m 0755 "$binary" /usr/local/sbin/milterguard
 install -d -o root -g milterguard -m 0750 /etc/milterguard
 install -d -o milterguard -g milterguard -m 0750 /var/lib/milterguard
+install -d -o milterguard -g milterguard -m 0750 /var/lib/milterguard/rejected-mail
 install -d -o root -g root -m 0755 /usr/local/share/milterguard/tools
 install -o root -g root -m 0755 "$replay_tool_source" /usr/local/share/milterguard/tools/replay_mailbox.py
 install -o root -g root -m 0644 "$quickstart_source" /usr/local/share/milterguard/QUICKSTART.md

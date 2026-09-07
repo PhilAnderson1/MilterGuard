@@ -14,9 +14,11 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 )
 
 const analysisResponseMargin = 5 * time.Second
+const rejectedMailCleanupInterval = 24 * time.Hour
 
 type Analyzer interface {
 	Analyze(context.Context, ai.Input) (ai.Decision, error)
@@ -41,6 +43,7 @@ type Server struct {
 	ipReputation     *ipReputationStore
 	correspondents   *correspondentStore
 	rejectionHistory *rejectionHistoryStore
+	rejectedMail     *rejectedmail.Archive
 	resolver         dnsResolver
 	attachments      *attachment.Scanner
 	internalToken    string
@@ -55,6 +58,12 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	server := &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent), ipReputation: newIPReputationStore(cfg.IPReputation, log), correspondents: newCorrespondentStore(cfg.Correspondents, log), rejectionHistory: newRejectionHistoryStore(cfg.RejectionHistory, log), resolver: net.DefaultResolver, internalToken: hex.EncodeToString(tokenBytes[:]), replySlots: make(chan struct{}, 4)}
 	server.persistence = jsonstore.NewManager(log)
 	server.persistence.Add(server.ipReputation.db, server.correspondents.db, server.rejectionHistory.db)
+	if cfg.RejectedMail.Enabled {
+		server.rejectedMail = rejectedmail.New(rejectedmail.Options{
+			Directory: cfg.RejectedMail.Directory, Retention: cfg.RejectedMail.Retention.Value(),
+			MaxMessages: cfg.RejectedMail.MaxMessages, MaxTotalBytes: cfg.RejectedMail.MaxTotalBytes,
+		}, log)
+	}
 	if cfg.Attachments.BlockExecutables {
 		server.attachments = attachment.New(attachment.Options{
 			BlockedExtensions: cfg.Attachments.BlockedExtensions, InspectSignatures: cfg.Attachments.InspectSignatures,
@@ -69,6 +78,7 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.persistence.Flush("startup")
 	defer s.persistence.Flush("shutdown")
+	s.startRejectedMailCleanup(ctx)
 	if flushInterval := s.cfg.Persistence.FlushInterval.Value(); flushInterval > 0 {
 		s.persistence.SetDeferred(true)
 		flushCtx, stopFlush := context.WithCancel(ctx)
@@ -108,6 +118,41 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			newSession(s, conn).run(ctx)
 		}()
 	}
+}
+
+func (s *Server) startRejectedMailCleanup(ctx context.Context) {
+	if s.rejectedMail == nil {
+		return
+	}
+	if err := s.rejectedMail.Cleanup(); err != nil {
+		s.log.Warn("cannot clean rejected mail archive", "error", err)
+	}
+	go func() {
+		ticker := time.NewTicker(rejectedMailCleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := s.rejectedMail.Cleanup(); err != nil {
+					s.log.Warn("cannot clean rejected mail archive", "error", err)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+func (s *Server) saveRejectedMail(ctx context.Context, msg *message.Message, source string) {
+	if s.rejectedMail == nil || msg == nil {
+		return
+	}
+	path, err := s.rejectedMail.Save(msg.ArchiveBytes())
+	if err != nil {
+		s.log.WarnContext(ctx, "cannot save rejected message copy", "message_id", msg.Header("Message-ID"), "source", source, "error", err)
+		return
+	}
+	s.log.DebugContext(ctx, "rejected message copy saved", "message_id", msg.Header("Message-ID"), "source", source, "file", path)
 }
 
 // handle is retained as the single-connection entry point used by tests.
@@ -190,7 +235,7 @@ func (s *Server) applyPolicy(decision ai.Decision) (action, action) {
 		proposed = actionReject
 	}
 	selected := proposed
-	if s.cfg.Mode == "monitor" {
+	if s.cfg.Mode != "enforce" {
 		selected = actionAccept
 	}
 	return proposed, selected

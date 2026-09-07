@@ -40,7 +40,7 @@ func (store *correspondentStore) addManual(sender, recipient string) (bool, erro
 	entry.WhitelistType = whitelistManual
 	entry.LegitimateEmailCount = 0
 	store.entries[key] = entry
-	if err := store.saveLocked(); err != nil {
+	if err := store.saveLocked(1, 0); err != nil {
 		store.db.ReplaceLocked(before)
 		return false, err
 	}
@@ -81,7 +81,7 @@ func (store *correspondentStore) deleteManual(sender, recipient string) (int, er
 		}
 	}
 	if removed > 0 || staleRemoved > 0 {
-		if err := store.saveLocked(); err != nil {
+		if err := store.saveLocked(0, removed); err != nil {
 			store.db.ReplaceLocked(before)
 			return 0, err
 		}

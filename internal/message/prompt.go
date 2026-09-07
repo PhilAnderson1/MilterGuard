@@ -2,6 +2,7 @@ package message
 
 import (
 	"fmt"
+	"mime"
 	"net/url"
 	"regexp"
 	"sort"
@@ -46,7 +47,7 @@ func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
 	b.WriteString("\nSELECTED HEADERS:\n")
 	for _, key := range keys {
 		for _, value := range m.Headers[key] {
-			fmt.Fprintf(&b, "%s: %s\n", canonicalHeaderName(key), sanitize(value))
+			fmt.Fprintf(&b, "%s: %s\n", canonicalHeaderName(key), promptHeaderValue(value))
 		}
 	}
 	content := extractMIME(m.Header("Content-Type"), m.Header("Content-Transfer-Encoding"), "", []byte(m.Body.String()), 0)
@@ -245,6 +246,16 @@ func canonicalHeaderName(name string) string {
 
 func sanitize(value string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " ")
+}
+
+// promptHeaderValue presents RFC 2047 encoded words as UTF-8 while retaining
+// the rest of the original header, including any mailbox address. Malformed
+// encoded words are left intact rather than causing evidence to be discarded.
+func promptHeaderValue(value string) string {
+	if decoded, err := new(mime.WordDecoder).DecodeHeader(value); err == nil {
+		value = decoded
+	}
+	return sanitize(strings.ToValidUTF8(value, "�"))
 }
 
 func sampleBody(body string, maxChars int) string {

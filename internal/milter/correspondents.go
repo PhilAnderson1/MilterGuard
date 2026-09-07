@@ -125,6 +125,7 @@ func (s *correspondentStore) learn(localAddress string, recipients []string) err
 	defer s.mu.Unlock()
 	structuralChange := false
 	persistActivity := false
+	writes, deletes := 0, 0
 	added := 0
 	for recipient := range unique {
 		key := s.key(localAddress, recipient)
@@ -133,6 +134,7 @@ func (s *correspondentStore) learn(localAddress string, recipients []string) err
 			if s.entryStale(entry, now) {
 				delete(s.entries, key)
 				structuralChange = true
+				deletes++
 			} else {
 				promoted := entry.WhitelistType != whitelistAuthenticatedOutbound && entry.WhitelistType != whitelistManual
 				entry.LastActivityAt = now
@@ -145,6 +147,9 @@ func (s *correspondentStore) learn(localAddress string, recipients []string) err
 				}
 				if s.activityPersistenceDue(entry, now) {
 					persistActivity = true
+				}
+				if promoted || s.activityPersistenceDue(entry, now) {
+					writes++
 				}
 				s.entries[key] = entry
 				continue
@@ -161,12 +166,13 @@ func (s *correspondentStore) learn(localAddress string, recipients []string) err
 		}
 		s.entries[key] = correspondentEntry{LocalAddress: localAddress, Correspondent: recipient, LearnedAt: now, LastActivityAt: now, WhitelistType: whitelistAuthenticatedOutbound}
 		structuralChange = true
+		writes++
 		added++
 	}
 	if !structuralChange && !persistActivity {
 		return nil
 	}
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveLocked(writes, deletes); err != nil {
 		return err
 	}
 	if s.log != nil {
@@ -194,8 +200,8 @@ func (s *correspondentStore) touchInbound(correspondent string, recipients []str
 	now := s.now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	structuralChange := false
 	persistActivity := false
+	writes := 0
 	for key, entry := range s.entries {
 		if s.entryStale(entry, now) {
 			continue
@@ -213,13 +219,14 @@ func (s *correspondentStore) touchInbound(correspondent string, recipients []str
 		entry.LastActivityAt = now
 		if s.activityPersistenceDue(entry, now) {
 			persistActivity = true
+			writes++
 		}
 		s.entries[key] = entry
 	}
-	if !structuralChange && !persistActivity {
+	if !persistActivity {
 		return nil
 	}
-	return s.saveLocked()
+	return s.saveLocked(writes, 0)
 }
 
 func (s *correspondentStore) recordInboundClassification(correspondent string, recipients []string, recipientsComplete bool, classification string, score, unwantedMinScore float64, dkimAligned bool) error {
@@ -243,11 +250,12 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	saveNeeded := false
+	writes, deletes := 0, 0
 
 	if classification == "unwanted" {
 		if score < unwantedMinScore {
 			if saveNeeded {
-				return s.saveLocked()
+				return s.saveLocked(writes, deletes)
 			}
 			return nil
 		}
@@ -261,6 +269,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 			}
 			delete(s.entries, key)
 			removed++
+			deletes++
 		}
 		if removed > 0 {
 			saveNeeded = true
@@ -269,13 +278,13 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 			}
 		}
 		if saveNeeded {
-			return s.saveLocked()
+			return s.saveLocked(writes, deletes)
 		}
 		return nil
 	}
 	if classification != "legitimate" {
 		if saveNeeded {
-			return s.saveLocked()
+			return s.saveLocked(writes, deletes)
 		}
 		return nil
 	}
@@ -291,6 +300,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 			delete(s.entries, key)
 			exists = false
 			saveNeeded = true
+			deletes++
 		}
 		if !exists {
 			if !qualifying {
@@ -310,6 +320,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 			}
 			s.entries[key] = entry
 			saveNeeded = true
+			writes++
 			if s.log != nil {
 				if s.qualified(entry) {
 					s.log.Debug("inbound sender promoted to known correspondent", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", 1)
@@ -323,6 +334,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 			entry.LastActivityAt = now
 			if s.activityPersistenceDue(entry, now) {
 				saveNeeded = true
+				writes++
 			}
 			s.entries[key] = entry
 			continue
@@ -334,6 +346,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 			entry.LastActivityAt = now
 			if s.activityPersistenceDue(entry, now) {
 				saveNeeded = true
+				writes++
 			}
 			s.entries[key] = entry
 			continue
@@ -343,6 +356,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 			entry.LastActivityAt = now
 			s.entries[key] = entry
 			saveNeeded = true
+			writes++
 			if s.log != nil {
 				if s.qualified(entry) {
 					s.log.Debug("inbound sender promoted to known correspondent", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", entry.LegitimateEmailCount)
@@ -353,7 +367,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 		}
 	}
 	if saveNeeded {
-		return s.saveLocked()
+		return s.saveLocked(writes, deletes)
 	}
 	return nil
 }

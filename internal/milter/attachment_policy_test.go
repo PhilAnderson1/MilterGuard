@@ -48,6 +48,29 @@ func TestExecutableAttachmentRejectedBeforeAI(t *testing.T) {
 	}
 }
 
+func TestExecutableAttachmentRejectionIsArchived(t *testing.T) {
+	server, conn, done := testServer(t, &countingAnalyzer{})
+	enableTestAttachments(server)
+	root := enableTestRejectedMail(t, server)
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		[]byte{commandMail},
+		headerFrame("Content-Type", "application/octet-stream"),
+		headerFrame("Content-Disposition", `attachment; filename="invoice.exe"`),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("executable payload")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, "y550 5.7.1 executable attachment blocked\x00")
+	if files := archivedMessages(t, root); len(files) != 1 {
+		t.Fatalf("archived files = %v", files)
+	}
+}
+
 func TestAttachmentsMonitorModeAcceptsWithoutAI(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
@@ -66,6 +89,32 @@ func TestAttachmentsMonitorModeAcceptsWithoutAI(t *testing.T) {
 	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
 		t.Fatal(err)
 	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if got := analyzer.calls.Load(); got != 0 {
+		t.Fatalf("AI analysis calls = %d, want 0", got)
+	}
+}
+
+func TestAttachmentsTagModeAcceptsAndAddsHeaders(t *testing.T) {
+	analyzer := &countingAnalyzer{}
+	server, conn, done := testServer(t, analyzer)
+	enableTestAttachments(server)
+	server.cfg.Mode = "tag"
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiateWithActions(t, conn, resultHeaderActions)
+	sendContinueFrames(t, conn,
+		[]byte{commandMail},
+		headerFrame("Content-Type", "application/octet-stream"),
+		headerFrame("Content-Disposition", `attachment; filename="invoice.exe"`),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("payload")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
+	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-tag-mode")))
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)
