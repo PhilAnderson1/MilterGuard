@@ -71,6 +71,18 @@ func (a *Archive) Cleanup() error {
 }
 
 func (a *Archive) Save(message []byte) (string, error) {
+	return a.save(message, 0)
+}
+
+// SaveWithRecordID saves a message using its rejection-history record ID.
+func (a *Archive) SaveWithRecordID(message []byte, recordID uint64) (string, error) {
+	if recordID == 0 {
+		return "", fmt.Errorf("rejection record ID must be greater than zero")
+	}
+	return a.save(message, recordID)
+}
+
+func (a *Archive) save(message []byte, recordID uint64) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if int64(len(message)) > a.opts.MaxTotalBytes {
@@ -92,12 +104,22 @@ func (a *Archive) Save(message []byte) (string, error) {
 	if err := os.MkdirAll(directory, 0750); err != nil {
 		return "", err
 	}
-	var random [8]byte
-	if _, err := rand.Read(random[:]); err != nil {
+	var name string
+	if recordID != 0 {
+		name = strconv.FormatUint(recordID, 10) + ".eml"
+	} else {
+		var random [8]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return "", err
+		}
+		name = now.Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(random[:]) + ".eml"
+	}
+	path := filepath.Join(directory, name)
+	if _, err := os.Lstat(path); err == nil {
+		return "", fmt.Errorf("rejected message archive file already exists: %s", path)
+	} else if !os.IsNotExist(err) {
 		return "", err
 	}
-	name := now.Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(random[:]) + ".eml"
-	path := filepath.Join(directory, name)
 	temporary, err := os.CreateTemp(directory, ".milterguard-rejected-*")
 	if err != nil {
 		return "", err

@@ -97,6 +97,11 @@ func main() {
 		os.Exit(2)
 	}
 	client := ai.NewClient(cfg.AI, string(prompt))
+	server := milter.NewServer(cfg, client, logger)
+	if err := server.StartupError(); err != nil {
+		logger.Error("incompatible JSON file format", "error", err)
+		os.Exit(2)
+	}
 
 	ln, cleanup, err := listen(cfg.Milter.Socket)
 	if err != nil {
@@ -107,7 +112,6 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	server := milter.NewServer(cfg, client, logger)
 	logger.Info("MilterGuard started", "socket", cfg.Milter.Socket, "mode", cfg.Mode)
 	if err := server.Serve(ctx, ln); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("milter server stopped", "error", err)

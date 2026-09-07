@@ -55,12 +55,16 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 	}
 	var err error
 	if selected == actionAccept {
-		if ss.server.cfg.Mode == "tag" {
+		if proposed != actionAccept {
 			classification := "unwanted"
 			if scanErr != nil {
 				classification = "unavailable"
 			}
-			err = ss.writeTagHeaders(classification, nil, "accepted-tag-mode")
+			action := "accepted-monitor-mode"
+			if ss.server.cfg.Mode == "tag" {
+				action = "accepted-tag-mode"
+			}
+			err = ss.writeTagHeaders(classification, nil, action)
 		} else {
 			err = ss.writeAcceptedResultHeaders(nil)
 		}
@@ -90,7 +94,11 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 	}
 	ss.server.log.InfoContext(ctx, "attachment policy decision", attrs...)
 	if selected == actionReject {
-		ss.server.saveRejectedMail(ctx, ss.message, "attachment_policy")
+		reason := detection
+		if path != "" {
+			reason += ": " + path
+		}
+		ss.server.recordRejection(ctx, ss.message, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, "attachment_policy")
 	}
 	ss.resetMessage(phaseConnection)
 	return true

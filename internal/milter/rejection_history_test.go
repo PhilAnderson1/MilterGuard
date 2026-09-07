@@ -9,7 +9,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
 
-func TestRejectionHistoryPersistsPerRecipientAndExpires(t *testing.T) {
+func TestRejectionHistoryPersistsOneEventWithMultipleRecipientsAndExpires(t *testing.T) {
 	now := time.Now().UTC()
 	cfg := config.RejectionHistoryConfig{File: filepath.Join(t.TempDir(), "history.json"), Expiry: config.Duration(24 * time.Hour), MaxEntries: 10}
 	store := newRejectionHistoryStore(cfg, nil)
@@ -20,11 +20,18 @@ func TestRejectionHistoryPersistsPerRecipientAndExpires(t *testing.T) {
 	if got := store.list("alice@example.com"); len(got) != 1 || got[0].Sender != "news@example.net" || !got[0].RejectedAt.Equal(now) {
 		t.Fatalf("Alice history = %#v", got)
 	}
+	all := store.list("*")
+	if len(all) != 1 || all[0].ID == 0 || len(all[0].Recipients) != 2 {
+		t.Fatalf("rejection record IDs = %#v", all)
+	}
+	if got := store.list("alice@example.com"); len(got) != 1 || len(got[0].Recipients) != 1 || got[0].Recipients[0] != "alice@example.com" {
+		t.Fatalf("recipient-specific history disclosed other recipients: %#v", got)
+	}
 	if got := store.list("carol@example.com"); len(got) != 0 {
 		t.Fatalf("cross-recipient history exposed: %#v", got)
 	}
 	reloaded := newRejectionHistoryStore(cfg, nil)
-	if got := reloaded.list("bob@example.com"); len(got) != 1 {
+	if got := reloaded.list("bob@example.com"); len(got) != 1 || got[0].ID == 0 {
 		t.Fatalf("reloaded history = %#v", got)
 	}
 	reloaded.now = func() time.Time { return now.Add(25 * time.Hour) }
@@ -77,17 +84,13 @@ func TestRejectionHistoryWildcardAndFormatting(t *testing.T) {
 		t.Fatal(err)
 	}
 	entries := store.list("*")
-	if len(entries) != 2 {
+	if len(entries) != 1 {
 		t.Fatalf("wildcard history count = %d", len(entries))
 	}
 	formatted := formatRejectionHistory(entries)
-	for _, want := range []string{
-		"From: news@example.net\nTo: alice@example.com\nDate: 2026-09-03 12:34:56 UTC\nReason: Phishing link; Impersonated sender\n\n",
-		"From: news@example.net\nTo: bob@example.com\nDate: 2026-09-03 12:34:56 UTC\nReason: Phishing link; Impersonated sender\n\n",
-	} {
-		if !strings.Contains(formatted, want) {
-			t.Errorf("formatted history missing %q: %s", want, formatted)
-		}
+	want := "From: news@example.net\nTo: alice@example.com, bob@example.com\nDate: 2026-09-03 12:34:56 UTC\nRejection ID: 1\nReason: Phishing link; Impersonated sender\n\n"
+	if !strings.Contains(formatted, want) {
+		t.Errorf("formatted history missing %q: %s", want, formatted)
 	}
 }
 

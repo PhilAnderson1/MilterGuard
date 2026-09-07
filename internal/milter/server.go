@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -50,12 +52,18 @@ type Server struct {
 	replySlots       chan struct{}
 	persistence      *jsonstore.Manager
 	wg               sync.WaitGroup
+	startupErr       error
 }
 
 func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	var tokenBytes [32]byte
 	_, _ = rand.Read(tokenBytes[:])
 	server := &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent), ipReputation: newIPReputationStore(cfg.IPReputation, log), correspondents: newCorrespondentStore(cfg.Correspondents, log), rejectionHistory: newRejectionHistoryStore(cfg.RejectionHistory, log), resolver: net.DefaultResolver, internalToken: hex.EncodeToString(tokenBytes[:]), replySlots: make(chan struct{}, 4)}
+	server.startupErr = errors.Join(
+		persistenceLoadError("IP reputation", cfg.IPReputation.StateFile, server.ipReputation.loadErr),
+		persistenceLoadError("correspondent", cfg.Correspondents.File, server.correspondents.loadErr),
+		persistenceLoadError("rejection history", cfg.RejectionHistory.File, server.rejectionHistory.loadErr),
+	)
 	server.persistence = jsonstore.NewManager(log)
 	server.persistence.Add(server.ipReputation.db, server.correspondents.db, server.rejectionHistory.db)
 	if cfg.RejectedMail.Enabled {
@@ -75,7 +83,20 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	return server
 }
 
+func persistenceLoadError(name, path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s file %s: %w", name, path, err)
+}
+
+// StartupError reports persistent state that could not be loaded safely.
+func (s *Server) StartupError() error { return s.startupErr }
+
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	if s.startupErr != nil {
+		return s.startupErr
+	}
 	s.persistence.Flush("startup")
 	defer s.persistence.Flush("shutdown")
 	s.startRejectedMailCleanup(ctx)
@@ -143,16 +164,35 @@ func (s *Server) startRejectedMailCleanup(ctx context.Context) {
 	}()
 }
 
-func (s *Server) saveRejectedMail(ctx context.Context, msg *message.Message, source string) {
-	if s.rejectedMail == nil || msg == nil {
+func (s *Server) recordRejection(ctx context.Context, msg *message.Message, envelopeSender string, recipients, reasons []string, source string) {
+	if msg == nil {
 		return
 	}
-	path, err := s.rejectedMail.Save(msg.ArchiveBytes())
+	recordID, err := s.rejectionHistory.addWithID(msg.Header("From"), envelopeSender, recipients, reasons)
 	if err != nil {
-		s.log.WarnContext(ctx, "cannot save rejected message copy", "message_id", msg.Header("Message-ID"), "source", source, "error", err)
+		s.log.ErrorContext(ctx, "cannot save rejection history", "message_id", msg.Header("Message-ID"), "error", err)
+		recordID = 0
+	}
+	if s.rejectedMail == nil {
 		return
 	}
-	s.log.DebugContext(ctx, "rejected message copy saved", "message_id", msg.Header("Message-ID"), "source", source, "file", path)
+	contents := msg.ArchiveBytes()
+	s.saveRejectedMailCopy(ctx, msg, contents, source, recordID)
+}
+
+func (s *Server) saveRejectedMailCopy(ctx context.Context, msg *message.Message, contents []byte, source string, recordID uint64) {
+	var path string
+	var err error
+	if recordID == 0 {
+		path, err = s.rejectedMail.Save(contents)
+	} else {
+		path, err = s.rejectedMail.SaveWithRecordID(contents, recordID)
+	}
+	if err != nil {
+		s.log.WarnContext(ctx, "cannot save rejected message copy", "message_id", msg.Header("Message-ID"), "source", source, "rejection_id", recordID, "error", err)
+		return
+	}
+	s.log.DebugContext(ctx, "rejected message copy saved", "message_id", msg.Header("Message-ID"), "source", source, "rejection_id", recordID, "file", path)
 }
 
 // handle is retained as the single-connection entry point used by tests.

@@ -2,7 +2,7 @@ package milter
 
 func (s *correspondentStore) load() error {
 	changed, err := s.db.Load(func(version int) bool {
-		return version == legacyCorrespondentFileVersion || version == correspondentFileVersion
+		return version == correspondentFileVersion
 	}, func(entry correspondentEntry) (correspondentEntry, bool, bool) {
 		modified := false
 		entry.Correspondent = normalizeEmailAddress(entry.Correspondent)

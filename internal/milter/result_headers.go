@@ -8,41 +8,44 @@ import (
 const (
 	classificationHeader = "X-MilterGuard-Classification"
 	scoreHeader          = "X-MilterGuard-Score"
+	confidenceHeader     = "X-MilterGuard-Confidence"
 	actionHeader         = "X-MilterGuard-Action"
 )
 
-var resultHeaderNames = []string{classificationHeader, scoreHeader, actionHeader}
+var resultHeaderNames = []string{classificationHeader, scoreHeader, confidenceHeader, actionHeader}
 
 // writeAcceptedResultHeaders removes sender-supplied result headers from every
 // accepted message. Genuine values are then added for tag mode, an AI
-// classification of unwanted below the rejection threshold, or an AI failure.
+// classification, an AI failure, or a bypass.
 func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
-	if !ss.server.cfg.Filtering.AddUnwantedHeaders && ss.server.cfg.Mode != "tag" {
+	if !ss.server.cfg.Filtering.AddEmailHeaders && ss.server.cfg.Mode != "tag" {
 		return nil
 	}
 	if result == nil {
-		return ss.replaceResultHeaders(nil)
+		return ss.writeTagHeaders("not-scanned", nil, "accepted-bypass")
 	}
 	var headers [][2]string
 	if result.err != nil && result.selected == actionAccept {
 		headers = [][2]string{
 			{classificationHeader, "unavailable"},
+			{confidenceHeader, "unavailable"},
 			{actionHeader, "accepted-ai-error"},
 		}
-	} else if ss.server.cfg.Mode == "tag" {
+	} else {
+		action := "accepted"
+		if ss.server.cfg.Mode == "tag" {
+			action = "accepted-tag-mode"
+		} else if result.proposed == actionReject {
+			action = "accepted-monitor-mode"
+		} else if result.classification == "unwanted" {
+			action = "accepted-below-threshold"
+		}
 		headers = [][2]string{
 			{classificationHeader, result.classification},
 			{scoreHeader, strconv.FormatFloat(result.score, 'f', -1, 64)},
-			{actionHeader, "accepted-tag-mode"},
+			{confidenceHeader, ss.confidenceLabel(result.classification, result.score)},
+			{actionHeader, action},
 		}
-	} else if result.classification == "unwanted" && result.score < ss.server.cfg.Filtering.RejectScore {
-		headers = [][2]string{
-			{classificationHeader, "unwanted"},
-			{scoreHeader, strconv.FormatFloat(result.score, 'f', -1, 64)},
-			{actionHeader, "accepted-below-threshold"},
-		}
-	} else {
-		return ss.replaceResultHeaders(nil)
 	}
 	return ss.replaceResultHeaders(headers)
 }
@@ -58,9 +61,23 @@ func (ss *session) writeTagHeaders(classification string, score *float64, action
 	headers := [][2]string{{classificationHeader, classification}}
 	if score != nil {
 		headers = append(headers, [2]string{scoreHeader, strconv.FormatFloat(*score, 'f', -1, 64)})
+		headers = append(headers, [2]string{confidenceHeader, ss.confidenceLabel(classification, *score)})
+	} else {
+		headers = append(headers, [2]string{confidenceHeader, "unavailable"})
 	}
 	headers = append(headers, [2]string{actionHeader, action})
 	return ss.replaceResultHeaders(headers)
+}
+
+func (ss *session) confidenceLabel(classification string, score float64) string {
+	threshold := ss.server.cfg.Filtering.RejectScore
+	if classification == "legitimate" {
+		threshold = ss.server.cfg.Filtering.LegitimateLowConfidenceScore
+	}
+	if score < threshold {
+		return "low"
+	}
+	return "high"
 }
 
 func (ss *session) replaceResultHeaders(headers [][2]string) error {

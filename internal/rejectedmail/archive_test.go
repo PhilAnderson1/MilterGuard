@@ -86,3 +86,28 @@ func TestSaveEnforcesTotalByteLimit(t *testing.T) {
 		t.Fatalf("byte capacity state = %d files, %d bytes", len(archive.files), archive.bytes)
 	}
 }
+
+func TestSaveWithRecordIDUsesRecordIDAndDoesNotOverwrite(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	archive := New(Options{Directory: root, Retention: 24 * time.Hour, MaxMessages: 10, MaxTotalBytes: 100}, nil)
+	archive.now = func() time.Time { return now }
+
+	path, err := archive.SaveWithRecordID([]byte("first"), 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, "2026", "09", "07", "123.eml"); path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+	if _, err := archive.SaveWithRecordID([]byte("replacement"), 123); err == nil {
+		t.Fatal("expected duplicate record ID to be refused")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "first" {
+		t.Fatalf("saved contents = %q", contents)
+	}
+}

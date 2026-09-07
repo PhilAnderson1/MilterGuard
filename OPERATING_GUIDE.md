@@ -486,12 +486,16 @@ decisions, and changes in classification quality. After changing the prompt,
 model, confidence threshold, or filtering policy, repeat the saved-message tests
 before restarting production.
 
-When `filtering.add_unwanted_headers` is enabled, an unwanted message accepted
-because its score is below `reject_score` receives
-`X-MilterGuard-Classification`, `X-MilterGuard-Score`, and
-`X-MilterGuard-Action` headers. These can be used by a server-side or mail-client
-rule to place borderline messages in a Junk folder. MilterGuard removes incoming
-headers with these names before adding its own values.
+When `filtering.add_email_headers` is enabled, every accepted message receives
+`X-MilterGuard-Classification`, `X-MilterGuard-Score`,
+`X-MilterGuard-Confidence`, and `X-MilterGuard-Action` headers where applicable.
+`X-MilterGuard-Confidence: low` identifies unwanted classifications below
+`reject_score`, or legitimate classifications below
+`legitimate_low_confidence_score`. It can be used by a server-side or mail-client
+rule to place borderline messages in a Junk folder. Bypassed messages and
+analysis failures are marked as unavailable rather than being given an invented
+score. MilterGuard removes incoming headers with these names before adding its
+own values.
 
 Review `/etc/milterguard/trusted-sender-domains.txt` periodically and remove
 domains that no longer represent low-risk, organization-controlled senders. Add

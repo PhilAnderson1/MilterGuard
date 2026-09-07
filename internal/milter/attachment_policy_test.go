@@ -114,6 +114,7 @@ func TestAttachmentsTagModeAcceptsAndAddsHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
+	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "unavailable")))
 	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-tag-mode")))
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	if got := analyzer.calls.Load(); got != 0 {

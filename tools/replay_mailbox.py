@@ -67,7 +67,7 @@ def no_response_command(sock, code, payload=b""):
 
 def negotiate(sock):
     # Offer ADDHEADER and CHGHEADER so result-header behavior is covered by
-    # corpus replay when filtering.add_unwanted_headers is enabled.
+    # corpus replay when filtering.add_email_headers is enabled.
     response = command(sock, b"O", struct.pack("!III", 6, 0x11, 0))
     if not response.startswith(b"O"):
         raise RuntimeError(f"unexpected negotiation response: {response!r}")

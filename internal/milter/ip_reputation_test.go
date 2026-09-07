@@ -262,6 +262,9 @@ func TestRejectedIPCacheRefreshesOnlyRepeatBlockWithoutAddingStrike(t *testing.T
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.42")
 	cache.add(addr, "unwanted", 1, connectionDNSResult{})
+	if record := cache.entries[addr]; record.ID == 0 {
+		t.Fatal("IP reputation record was not assigned an ID")
+	}
 	now = now.Add(2 * time.Minute)
 	cache.add(addr, "unwanted", 1, connectionDNSResult{})
 	now = now.Add(time.Hour)
@@ -290,6 +293,9 @@ func TestRejectedIPCachePersistsReputation(t *testing.T) {
 	cache.add(addr, "unwanted", 1, connectionDNSResult{})
 
 	reloaded := newIPReputationStore(policy, nil)
+	if record := reloaded.entries[addr]; record.ID == 0 {
+		t.Fatal("reloaded IP reputation record has no ID")
+	}
 	entry, ok := reloaded.lookup(addr)
 	if !ok || entry.level != rejectedIPBlockRepeat || entry.strikeCount != 2 {
 		t.Fatalf("persisted repeat reputation was not restored: %+v, found=%v", entry, ok)

@@ -1,12 +1,11 @@
 package milter
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -22,46 +21,54 @@ const (
 )
 
 type rejectionHistoryEntry struct {
-	ID         string    `json:"id,omitempty"`
+	ID         uint64    `json:"id"`
 	Sender     string    `json:"sender"`
-	Recipient  string    `json:"recipient"`
+	Recipients []string  `json:"recipients"`
 	RejectedAt time.Time `json:"rejected_at"`
 	Reason     string    `json:"reason,omitempty"`
 }
 
 type rejectionHistoryStore struct {
-	cfg      config.RejectionHistoryConfig
-	now      func() time.Time
-	log      *slog.Logger
-	db       *jsonstore.Database[string, rejectionHistoryEntry]
-	sequence atomic.Uint64
+	cfg     config.RejectionHistoryConfig
+	now     func() time.Time
+	log     *slog.Logger
+	db      *jsonstore.Database[uint64, rejectionHistoryEntry]
+	loadErr error
 }
 
 func newRejectionHistoryStore(cfg config.RejectionHistoryConfig, log *slog.Logger) *rejectionHistoryStore {
 	store := &rejectionHistoryStore{cfg: cfg, now: time.Now, log: log}
-	store.db = jsonstore.New("Rejections", cfg.File, rejectionHistoryVersion, cfg.MaxEntries, persistentStoreReadLimit(cfg.MaxEntries, estimatedRejectionHistoryEntryBytes), func(v rejectionHistoryEntry) string { return v.ID }, func(v rejectionHistoryEntry, now time.Time) bool {
+	store.db = jsonstore.New("Rejections", cfg.File, rejectionHistoryVersion, cfg.MaxEntries, persistentStoreReadLimit(cfg.MaxEntries, estimatedRejectionHistoryEntryBytes), func(v rejectionHistoryEntry) uint64 { return v.ID }, jsonstore.Identity[rejectionHistoryEntry]{
+		Get: func(v rejectionHistoryEntry) uint64 { return v.ID },
+		Set: func(v rejectionHistoryEntry, id uint64) rejectionHistoryEntry { v.ID = id; return v },
+	}, func(v rejectionHistoryEntry, now time.Time) bool {
 		return cfg.Expiry.Value() > 0 && v.RejectedAt.Before(now.Add(-cfg.Expiry.Value()))
 	}, func(a, b rejectionHistoryEntry) bool { return a.RejectedAt.Before(b.RejectedAt) }, func(a, b rejectionHistoryEntry) bool { return a.RejectedAt.Before(b.RejectedAt) }, log)
 	store.db.Now = func() time.Time { return store.now() }
 	if cfg.Expiry.Value() <= 0 {
 		return store
 	}
-	if err := store.load(); err != nil && !os.IsNotExist(err) && log != nil {
-		log.Error("cannot load rejection history; continuing with an empty history", "file", cfg.File, "error", err)
+	if err := store.load(); err != nil && !os.IsNotExist(err) {
+		store.loadErr = err
 	}
 	return store
 }
 
 func (s *rejectionHistoryStore) add(visibleSender, envelopeSender string, recipients, reasons []string) error {
+	_, err := s.addWithID(visibleSender, envelopeSender, recipients, reasons)
+	return err
+}
+
+func (s *rejectionHistoryStore) addWithID(visibleSender, envelopeSender string, recipients, reasons []string) (uint64, error) {
 	if s == nil || s.cfg.Expiry.Value() <= 0 {
-		return nil
+		return 0, nil
 	}
 	sender := normalizeEmailAddress(visibleSender)
 	if sender == "" {
 		sender = normalizeEmailAddress(envelopeSender)
 	}
 	if sender == "" {
-		return nil
+		return 0, nil
 	}
 	unique := make(map[string]bool)
 	for _, recipient := range recipients {
@@ -70,24 +77,26 @@ func (s *rejectionHistoryStore) add(visibleSender, envelopeSender string, recipi
 		}
 	}
 	if len(unique) == 0 {
-		return nil
+		return 0, nil
 	}
 	now := s.now().UTC()
 	reason := rejectionReason(reasons)
-	err := s.db.Update(func(records map[string]rejectionHistoryEntry) (uint64, uint64, uint64, bool) {
-		for recipient := range unique {
-			id := fmt.Sprintf("%d-%d-%s", now.UnixNano(), s.sequence.Add(1), recipient)
-			records[id] = rejectionHistoryEntry{ID: id, Sender: sender, Recipient: recipient, RejectedAt: now, Reason: reason}
-		}
-		return 0, uint64(len(unique)), 0, true
-	})
+	normalizedRecipients := make([]string, 0, len(unique))
+	for recipient := range unique {
+		normalizedRecipients = append(normalizedRecipients, recipient)
+	}
+	sort.Strings(normalizedRecipients)
+	added, err := s.db.Add(rejectionHistoryEntry{Sender: sender, Recipients: normalizedRecipients, RejectedAt: now, Reason: reason})
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if s.log != nil {
-		s.log.Debug("rejection history updated", "new_entries", len(unique), "entry_count", s.db.Size())
+		s.log.Debug("rejection history updated", "new_entries", 1, "recipient_count", len(normalizedRecipients), "entry_count", s.db.Size())
 	}
-	return nil
+	if len(added) != 1 {
+		return 0, nil
+	}
+	return added[0].ID, nil
 }
 
 func rejectionReason(reasons []string) string {
@@ -122,7 +131,16 @@ func (s *rejectionHistoryStore) list(recipient string) []rejectionHistoryEntry {
 			return nil
 		}
 	}
-	result := s.db.View(func(entry rejectionHistoryEntry) bool { return allRecipients || entry.Recipient == recipient })
+	result := s.db.View(func(entry rejectionHistoryEntry) bool {
+		return allRecipients || slices.Contains(entry.Recipients, recipient)
+	})
+	if !allRecipients {
+		for i := range result {
+			// Do not disclose other recipients of the same rejected message to a
+			// normal user querying only their own rejection history.
+			result[i].Recipients = []string{recipient}
+		}
+	}
 	sort.SliceStable(result, func(i, j int) bool {
 		return result[i].RejectedAt.After(result[j].RejectedAt)
 	})
@@ -130,16 +148,20 @@ func (s *rejectionHistoryStore) list(recipient string) []rejectionHistoryEntry {
 }
 
 func (s *rejectionHistoryStore) load() error {
-	sequence := 0
 	changed, err := s.db.Load(func(version int) bool { return version == rejectionHistoryVersion }, func(entry rejectionHistoryEntry) (rejectionHistoryEntry, bool, bool) {
 		entry.Sender = normalizeEmailAddress(entry.Sender)
-		entry.Recipient = normalizeEmailAddress(entry.Recipient)
-		modified := entry.ID == ""
-		if modified {
-			sequence++
-			entry.ID = fmt.Sprintf("legacy-%d-%d", entry.RejectedAt.UnixNano(), sequence)
+		unique := make(map[string]bool)
+		for _, recipient := range entry.Recipients {
+			if normalized := normalizeEmailAddress(recipient); normalized != "" {
+				unique[normalized] = true
+			}
 		}
-		return entry, entry.Sender != "" && entry.Recipient != "" && !entry.RejectedAt.IsZero(), modified
+		entry.Recipients = entry.Recipients[:0]
+		for recipient := range unique {
+			entry.Recipients = append(entry.Recipients, recipient)
+		}
+		sort.Strings(entry.Recipients)
+		return entry, entry.Sender != "" && len(entry.Recipients) > 0 && !entry.RejectedAt.IsZero(), false
 	})
 	if err == nil && changed {
 		_, err = s.db.Flush()

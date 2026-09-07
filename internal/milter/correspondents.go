@@ -15,8 +15,7 @@ import (
 )
 
 const (
-	correspondentFileVersion               = 2
-	legacyCorrespondentFileVersion         = 1
+	correspondentFileVersion               = 1
 	estimatedCorrespondentEntryBytes int64 = 1 << 10
 	maxLearnedRecipients                   = 100
 	whitelistAuthenticatedOutbound         = "authenticated_outbound"
@@ -25,6 +24,7 @@ const (
 )
 
 type correspondentEntry struct {
+	ID                   uint64    `json:"id"`
 	LocalAddress         string    `json:"local_address"`
 	Correspondent        string    `json:"correspondent"`
 	LearnedAt            time.Time `json:"learned_at"`
@@ -32,11 +32,6 @@ type correspondentEntry struct {
 	PersistedActivityAt  time.Time `json:"-"`
 	WhitelistType        string    `json:"whitelist_type"`
 	LegitimateEmailCount int       `json:"legitimate_email_count,omitempty"`
-}
-
-type correspondentFile struct {
-	Version int                  `json:"version"`
-	Entries []correspondentEntry `json:"entries"`
 }
 
 type correspondentMatch struct {
@@ -53,6 +48,7 @@ type correspondentStore struct {
 	db      *jsonstore.Database[string, correspondentEntry]
 	now     func() time.Time
 	log     *slog.Logger
+	loadErr error
 }
 
 func newCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logger) *correspondentStore {
@@ -60,8 +56,8 @@ func newCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logger) *c
 	if !cfg.LearnAuthenticatedRecipients && !cfg.LearnLegitimateSenders && !cfg.UseAllowlist {
 		return store
 	}
-	if err := store.load(); err != nil && !os.IsNotExist(err) && log != nil {
-		log.Error("cannot load correspondent allowlist; continuing with an empty list", "file", cfg.File, "error", err)
+	if err := store.load(); err != nil && !os.IsNotExist(err) {
+		store.loadErr = err
 	}
 	return store
 }
@@ -71,6 +67,10 @@ func newEmptyCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logge
 	store.db = jsonstore.New("Contacts", cfg.File, correspondentFileVersion, cfg.MaxEntries,
 		persistentStoreReadLimit(cfg.MaxEntries, estimatedCorrespondentEntryBytes),
 		func(entry correspondentEntry) string { return store.key(entry.LocalAddress, entry.Correspondent) },
+		jsonstore.Identity[correspondentEntry]{
+			Get: func(entry correspondentEntry) uint64 { return entry.ID },
+			Set: func(entry correspondentEntry, id uint64) correspondentEntry { entry.ID = id; return entry },
+		},
 		func(entry correspondentEntry, now time.Time) bool {
 			staleAfter := cfg.StaleAfter.Value()
 			return staleAfter > 0 && correspondentActivityTime(entry).Before(now.Add(-staleAfter))

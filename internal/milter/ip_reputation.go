@@ -84,6 +84,7 @@ func (s *Server) resolveActiveIPHostnames(parent context.Context, entries []acti
 }
 
 type rejectedIPRecord struct {
+	ID                 uint64      `json:"id"`
 	IP                 string      `json:"ip"`
 	Strikes            []time.Time `json:"strikes,omitempty"`
 	BlockLevel         string      `json:"block_level,omitempty"`
@@ -111,6 +112,7 @@ type ipReputationStore struct {
 	domainAllowlist        []string
 	now                    func() time.Time
 	log                    *slog.Logger
+	loadErr                error
 }
 
 func newIPReputationStore(reputation config.IPReputationConfig, log *slog.Logger) *ipReputationStore {
@@ -123,7 +125,11 @@ func newIPReputationStore(reputation config.IPReputationConfig, log *slog.Logger
 	}
 	cache.db = jsonstore.New("IP", reputation.StateFile, rejectedIPFileVersion, reputation.MaxEntries,
 		persistentStoreReadLimit(reputation.MaxEntries, estimatedIPReputationEntryBytes),
-		func(record rejectedIPRecord) netip.Addr { addr, _ := netip.ParseAddr(record.IP); return addr.Unmap() }, nil,
+		func(record rejectedIPRecord) netip.Addr { addr, _ := netip.ParseAddr(record.IP); return addr.Unmap() },
+		jsonstore.Identity[rejectedIPRecord]{
+			Get: func(record rejectedIPRecord) uint64 { return record.ID },
+			Set: func(record rejectedIPRecord, id uint64) rejectedIPRecord { record.ID = id; return record },
+		}, nil,
 		func(a, b rejectedIPRecord) bool {
 			rank := func(v rejectedIPRecord) int {
 				if v.BlockLevel == rejectedIPBlockRepeat {
@@ -175,8 +181,8 @@ func newIPReputationStore(reputation config.IPReputationConfig, log *slog.Logger
 		cache.domainAllowlist = append(cache.domainAllowlist, normalizeDomain(domain))
 	}
 	if cache.enabled() && cache.stateFile != "" {
-		if err := cache.load(); err != nil && !os.IsNotExist(err) && log != nil {
-			log.Error("cannot load rejected IP state; continuing with empty state", "file", cache.stateFile, "error", err)
+		if err := cache.load(); err != nil && !os.IsNotExist(err) {
+			cache.loadErr = err
 		}
 	}
 	return cache

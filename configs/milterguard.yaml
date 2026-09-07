@@ -89,9 +89,12 @@ filtering:
   # Reject unwanted classifications at or above this confidence score (0-1).
   reject_score: 0.9
 
-  # Add classification, score, and action headers to the email when it is
-  # classified as unwanted but accepted because its score is below reject_score.
-  add_unwanted_headers: true
+  # Mark legitimate classifications below this score as low confidence (0-1).
+  legitimate_low_confidence_score: 0.8
+
+  # Add classification, confidence, score, and action headers to accepted email.
+  # Unwanted and legitimate classifications use their respective thresholds.
+  add_email_headers: true
 
   # Scan email sent by authenticated users. Set to true to enable attachment
   # and AI scanning of outbound mail.

@@ -116,7 +116,8 @@ type AIConfig struct {
 }
 type FilteringConfig struct {
 	RejectScore                      float64  `yaml:"reject_score"`
-	AddUnwantedHeaders               bool     `yaml:"add_unwanted_headers"`
+	LegitimateLowConfidenceScore     float64  `yaml:"legitimate_low_confidence_score"`
+	AddEmailHeaders                  bool     `yaml:"add_email_headers"`
 	AIErrorAction                    string   `yaml:"ai_error_action"`
 	RejectMessage                    string   `yaml:"reject_message"`
 	ScanAuthenticated                bool     `yaml:"scan_authenticated"`
@@ -225,7 +226,8 @@ func defaults() Config {
 			MaxMessages: 10000, MaxTotalBytes: 5 << 30,
 		},
 		Filtering: FilteringConfig{
-			RejectScore: .95, AIErrorAction: "accept", RejectMessage: "Message rejected as suspected spam or fraud",
+			RejectScore: .95, LegitimateLowConfidenceScore: .8,
+			AIErrorAction: "accept", RejectMessage: "Message rejected as suspected spam or fraud",
 			ScanAuthenticated: true, SenderDomainAllowlistRequireDKIM: true,
 		},
 		IPReputation: IPReputationConfig{
@@ -358,6 +360,9 @@ func (c Config) Validate() error {
 	}
 	if c.Filtering.RejectScore < 0 || c.Filtering.RejectScore > 1 {
 		return fmt.Errorf("filtering.reject_score must be between 0 and 1")
+	}
+	if c.Filtering.LegitimateLowConfidenceScore < 0 || c.Filtering.LegitimateLowConfidenceScore > 1 {
+		return fmt.Errorf("filtering.legitimate_low_confidence_score must be between 0 and 1")
 	}
 	if c.Filtering.AIErrorAction != "accept" && c.Filtering.AIErrorAction != "tempfail" {
 		return fmt.Errorf("filtering.ai_error_action must be accept or tempfail")

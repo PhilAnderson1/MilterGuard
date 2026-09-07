@@ -85,6 +85,7 @@ var retainedHeaders = map[string]bool{
 	"message-id":                   true,
 	"x-milterguard-action":         true,
 	"x-milterguard-classification": true,
+	"x-milterguard-confidence":     true,
 	"x-milterguard-score":          true,
 	"x-milterguard-internal":       true,
 	"received-spf":                 true,

@@ -26,7 +26,8 @@ ai:
   max_concurrent: 3
 filtering:
   reject_score: 0.8
-  add_unwanted_headers: true
+  legitimate_low_confidence_score: 0.7
+  add_email_headers: true
 attachments:
   block_executables: false
 correspondents:
@@ -42,7 +43,7 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || !cfg.Filtering.AddUnwantedHeaders || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.FlushInterval.Value() != 2*time.Minute {
+	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.FlushInterval.Value() != 2*time.Minute {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
@@ -64,6 +65,19 @@ func TestValidatePersistenceFlushInterval(t *testing.T) {
 	cfg.Persistence.FlushInterval = 0
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("immediate persistence rejected: %v", err)
+	}
+}
+
+func TestValidateLegitimateLowConfidenceScore(t *testing.T) {
+	if got := defaults().Filtering.LegitimateLowConfidenceScore; got != 0.8 {
+		t.Fatalf("default legitimate low-confidence score = %v", got)
+	}
+	cfg := validConfig()
+	for _, score := range []float64{-0.01, 1.01} {
+		cfg.Filtering.LegitimateLowConfidenceScore = score
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "filtering.legitimate_low_confidence_score") {
+			t.Fatalf("invalid score %v error = %v", score, err)
+		}
 	}
 }
 

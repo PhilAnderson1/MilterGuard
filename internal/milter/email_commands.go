@@ -392,7 +392,7 @@ func formatRejectionHistory(entries []rejectionHistoryEntry) string {
 		if reason == "" {
 			reason = "Unavailable (record predates reason logging)"
 		}
-		fmt.Fprintf(&body, "From: %s\nTo: %s\nDate: %s\nReason: %s\n\n", entry.Sender, entry.Recipient, entry.RejectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), reason)
+		fmt.Fprintf(&body, "From: %s\nTo: %s\nDate: %s\nRejection ID: %d\nReason: %s\n\n", entry.Sender, strings.Join(entry.Recipients, ", "), entry.RejectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), entry.ID, reason)
 	}
 	return body.String()
 }

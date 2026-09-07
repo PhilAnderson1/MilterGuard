@@ -36,38 +36,22 @@ func TestCorrespondentStorePersistsPerSenderRelationships(t *testing.T) {
 	}
 }
 
-func TestCorrespondentStoreMigratesLegacyEntries(t *testing.T) {
+func TestCorrespondentStorePersistsRecordIDAndLastID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "allowlist.json")
-	file, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	learnedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
-	legacy := correspondentFile{Version: legacyCorrespondentFileVersion, Entries: []correspondentEntry{{
-		LocalAddress: "owner@example.com", Correspondent: "alice@example.net", LearnedAt: learnedAt,
-	}}}
-	if err := json.NewEncoder(file).Encode(legacy); err != nil {
-		_ = file.Close()
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
 	cfg := config.CorrespondentsConfig{
-		UseAllowlist: true, Scope: "per_sender", LegitimateSenderMinMessages: 5,
+		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", LegitimateSenderMinMessages: 5,
 		File: path, MaxEntries: 10,
 	}
 	store := newCorrespondentStore(cfg, slog.Default())
-	if !store.match("alice@example.net", []string{"owner@example.com"}).Known {
-		t.Fatal("legacy relationship was not retained as authenticated outbound")
+	if err := store.learn("owner@example.com", []string{"alice@example.net"}); err != nil {
+		t.Fatal(err)
 	}
-	migrated := readCorrespondentFile(t, path)
-	if migrated.Version != correspondentFileVersion || len(migrated.Entries) != 1 {
-		t.Fatalf("migrated file = %#v", migrated)
+	persisted := readCorrespondentFile(t, path)
+	if persisted.Version != correspondentFileVersion || persisted.LastID != 1 || len(persisted.Entries) != 1 {
+		t.Fatalf("persisted file = %#v", persisted)
 	}
-	entry := migrated.Entries[0]
-	if entry.WhitelistType != whitelistAuthenticatedOutbound || !entry.LastActivityAt.Equal(learnedAt) {
-		t.Fatalf("migrated entry = %#v", entry)
+	if persisted.Entries[0].ID != 1 {
+		t.Fatalf("persisted entry ID = %d", persisted.Entries[0].ID)
 	}
 }
 
@@ -336,14 +320,20 @@ func TestManualCorrespondentOverridesInboundCandidate(t *testing.T) {
 	}
 }
 
-func readCorrespondentFile(t *testing.T, path string) correspondentFile {
+type correspondentTestFile struct {
+	Version int                  `json:"version"`
+	LastID  uint64               `json:"last_id"`
+	Entries []correspondentEntry `json:"entries"`
+}
+
+func readCorrespondentFile(t *testing.T, path string) correspondentTestFile {
 	t.Helper()
 	file, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	var data correspondentFile
+	var data correspondentTestFile
 	if err := json.NewDecoder(file).Decode(&data); err != nil {
 		t.Fatal(err)
 	}
