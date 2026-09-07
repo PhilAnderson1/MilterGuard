@@ -38,8 +38,8 @@ Download the archive for your system from the [latest MilterGuard release](https
 Extract the downloaded archive and run its installer. For example, for an AMD64 system:
 
 ```sh
-tar -xzf milterguard-v0.2.2-linux-amd64.tar.gz
-cd milterguard-v0.2.2-linux-amd64
+tar -xzf milterguard-v0.2.3-linux-amd64.tar.gz
+cd milterguard-v0.2.3-linux-amd64
 sudo ./install.sh
 ```
 
