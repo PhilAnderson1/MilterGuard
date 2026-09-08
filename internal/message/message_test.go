@@ -27,6 +27,27 @@ func TestPromptDecodesMultipart(t *testing.T) {
 	}
 }
 
+func TestMIMEExtractionRetainsContentBeyondTwoMiB(t *testing.T) {
+	tail := "evidence-after-two-mib"
+	largeText := strings.Repeat("a", (2<<20)+1024) + tail
+
+	t.Run("transfer decoded body", func(t *testing.T) {
+		encoded := base64.StdEncoding.EncodeToString([]byte(largeText))
+		content := extractMIME("text/plain", "base64", "", []byte(encoded), 0)
+		if !strings.HasSuffix(content.Text, tail) {
+			t.Fatal("transfer-decoded MIME content was truncated before its tail")
+		}
+	})
+
+	t.Run("multipart body", func(t *testing.T) {
+		body := "--x\r\nContent-Type: text/plain\r\n\r\n" + largeText + "\r\n--x--\r\n"
+		content := extractMIME(`multipart/mixed; boundary="x"`, "", "", []byte(body), 0)
+		if !strings.Contains(content.Text, tail) {
+			t.Fatal("multipart MIME content was truncated before its tail")
+		}
+	})
+}
+
 func TestPromptDecodesHeaderWordsAndRetainsMailbox(t *testing.T) {
 	m := New(1000)
 	m.AddHeader("From", "=?UTF-8?B?TXVzY2xlIEdyb3d0aA==?= <noreply@musclegrowth.net>")
@@ -36,6 +57,22 @@ func TestPromptDecodesHeaderWordsAndRetainsMailbox(t *testing.T) {
 	for _, want := range []string{
 		"From: Muscle Growth <noreply@musclegrowth.net>",
 		"Subject: nikolai has sent you a message",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestPromptDecodesISO2022JPHeaderWordsAndRetainsMailbox(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "=?iso-2022-jp?b?GyRCJSslOSU/JV4hPCU1JV0hPCVIGyhC?= <Support@mkabbr.angelgarcia-abogados.com>")
+	m.AddHeader("Subject", "=?iso-2022-jp?b?GyRCO1lKJyQkPGpCMyQtJE4kNDNORyckJCQ/JEAkLyRyJCo0aiQkJDckXiQ5GyhC?=")
+
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"From: カスタマーサポート <Support@mkabbr.angelgarcia-abogados.com>",
+		"Subject: 支払い手続きのご確認いただくをお願いします",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q:\n%s", want, prompt)
@@ -362,6 +399,36 @@ func TestHTMLExcludesScriptAndStyle(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Visible") {
 		t.Fatalf("visible text missing: %s", prompt)
+	}
+}
+
+func TestHTMLAttributesRequireExactNames(t *testing.T) {
+	m := New(4096)
+	m.AddHeader("Content-Type", "text/html; charset=UTF-8")
+	m.AddBody([]byte(`<a data-href="https://bad.example/" href="https://good.example/">Good</a><img data-src="https://bad.example/a.png" src="https://good.example/a.png" data-alt="Bad" alt="Good image">`))
+	prompt := m.Prompt(4096)
+	if !strings.Contains(prompt, "[Good](https://good.example/)") || !strings.Contains(prompt, "![Good image](https://good.example/a.png)") {
+		t.Fatalf("exact href/src/alt attributes were not used: %s", prompt)
+	}
+	if strings.Contains(prompt, "bad.example") {
+		t.Fatalf("prefixed attribute was mistaken for a real URL attribute: %s", prompt)
+	}
+}
+
+func TestHTMLRecoversAfterUnclosedHiddenElement(t *testing.T) {
+	for _, hidden := range []string{"style", "script", "noscript"} {
+		t.Run(hidden, func(t *testing.T) {
+			m := New(4096)
+			m.AddHeader("Content-Type", "text/html; charset=UTF-8")
+			m.AddBody([]byte("Before<" + hidden + ">discard me<p>Visible after malformed hidden element</p>"))
+			prompt := m.Prompt(4096)
+			if !strings.Contains(prompt, "Before Visible after malformed hidden element") {
+				t.Fatalf("visible tail was discarded: %s", prompt)
+			}
+			if strings.Contains(prompt, "discard me") {
+				t.Fatalf("hidden content leaked into prompt: %s", prompt)
+			}
+		})
 	}
 }
 

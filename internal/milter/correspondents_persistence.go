@@ -29,22 +29,3 @@ func (s *correspondentStore) load() error {
 	}
 	return nil
 }
-
-func (s *correspondentStore) saveLocked(writes, deletes int) error {
-	return s.db.ChangedLocked(uint64(writes), uint64(deletes))
-}
-
-func (s *correspondentStore) enableDeferredPersistence() {
-	if s == nil {
-		return
-	}
-	s.db.SetDeferred(true)
-}
-
-func (s *correspondentStore) flush() error {
-	if s == nil {
-		return nil
-	}
-	_, err := s.db.Flush()
-	return err
-}

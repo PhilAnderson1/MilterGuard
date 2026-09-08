@@ -3,9 +3,12 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadAcceptsNewSectionsAndRejectsLegacySections(t *testing.T) {
@@ -92,6 +95,16 @@ func TestValidatePersistenceFlushInterval(t *testing.T) {
 	}
 }
 
+func TestValidateMilterTimeout(t *testing.T) {
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		cfg := validConfig()
+		cfg.Milter.Timeout = Duration(timeout)
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "milter.timeout") {
+			t.Fatalf("timeout %s error = %v", timeout, err)
+		}
+	}
+}
+
 func TestValidateLegitimateLowConfidenceScore(t *testing.T) {
 	if got := defaults().Filtering.LegitimateLowConfidenceScore; got != 0.8 {
 		t.Fatalf("default legitimate low-confidence score = %v", got)
@@ -113,9 +126,9 @@ func validConfig() Config {
 	return cfg
 }
 
-func TestAuthenticatedMailScanningDefaultsEnabled(t *testing.T) {
-	if !defaults().Filtering.ScanAuthenticated {
-		t.Fatal("authenticated mail scanning must default to enabled")
+func TestAuthenticatedMailScanningDefaultsDisabled(t *testing.T) {
+	if defaults().Filtering.ScanAuthenticated {
+		t.Fatal("authenticated mail scanning must match the disabled sample configuration")
 	}
 }
 
@@ -321,9 +334,27 @@ func TestLoadHandlesUnavailableEmptyOrInvalidSenderDomainAllowlistFile(t *testin
 	}
 }
 
-func TestAttachmentBlockingDefaultsDisabled(t *testing.T) {
-	if defaults().Attachments.BlockExecutables {
-		t.Fatal("attachment blocking must default to disabled for existing configurations")
+func TestAttachmentBlockingDefaultsEnabled(t *testing.T) {
+	if !defaults().Attachments.BlockExecutables {
+		t.Fatal("attachment blocking must match the enabled sample configuration")
+	}
+}
+
+func TestDefaultsMatchDistributedConfiguration(t *testing.T) {
+	content, err := os.ReadFile("../../configs/milterguard.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sample Config
+	if err := yaml.Unmarshal(content, &sample); err != nil {
+		t.Fatal(err)
+	}
+	want := defaults()
+	// Credentials must be explicitly supplied even though the sample shows the
+	// placeholder and all operational defaults are safe to omit.
+	want.AI.APIKey = sample.AI.APIKey
+	if !reflect.DeepEqual(want, sample) {
+		t.Fatalf("internal defaults differ from distributed configuration:\ninternal: %#v\nsample:   %#v", want, sample)
 	}
 }
 
@@ -500,6 +531,7 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 		{
 			name: "correspondent bypass without use",
 			configure: func(cfg *Config) {
+				cfg.Correspondents.UseAllowlist = false
 				cfg.Correspondents.BypassAI = true
 				cfg.Correspondents.TrustedAuthservIDs = []string{"mx.example.com"}
 			},
@@ -514,6 +546,25 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 				cfg.Correspondents.TrustedAuthservIDs = nil
 			},
 			wantError: "requires trusted_authserv_ids",
+		},
+		{
+			name: "DKIM-required legitimate sender learning without trusted authentication service",
+			configure: func(cfg *Config) {
+				cfg.Correspondents.BypassAI = false
+				cfg.Correspondents.LearnLegitimateSenders = true
+				cfg.Correspondents.LegitimateSenderRequireDKIM = true
+				cfg.Correspondents.TrustedAuthservIDs = nil
+			},
+			wantError: "legitimate_sender_require_dkim requires trusted_authserv_ids",
+		},
+		{
+			name: "disabled legitimate sender learning does not require trusted authentication service",
+			configure: func(cfg *Config) {
+				cfg.Correspondents.BypassAI = false
+				cfg.Correspondents.LearnLegitimateSenders = false
+				cfg.Correspondents.LegitimateSenderRequireDKIM = true
+				cfg.Correspondents.TrustedAuthservIDs = nil
+			},
 		},
 		{
 			name: "invalid vision limit",

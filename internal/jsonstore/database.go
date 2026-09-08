@@ -14,28 +14,28 @@ import (
 // complete-file JSON stores. Domain-specific code supplies record identity,
 // expiry, eviction and ordering policies.
 type Database[K comparable, V any] struct {
-	Mu              sync.RWMutex
+	mu              sync.RWMutex
 	name            string
 	path            string
 	version         int
 	maxEntries      int
 	readLimit       int64
-	Records         map[K]V
+	records         map[K]V
 	key             func(V) K
 	identity        Identity[V]
 	lastID          uint64
 	expired         func(V, time.Time) bool
-	Maintain        func(V, time.Time) (V, bool, bool)
+	maintain        func(V, time.Time) (V, bool, bool)
 	evictLess       func(V, V) bool
 	sortLess        func(V, V) bool
-	PrepareForWrite func(V) V
-	AfterWrite      func(map[K]V)
-	OnEvict         func(K, V)
-	CloneValue      func(V) V
-	Now             func() time.Time
+	prepareForWrite func(V) V
+	afterWrite      func(V) V
+	onEvict         func(K, V, int)
+	cloneValue      func(V) V
+	now             func() time.Time
 	log             *slog.Logger
-	DeferWrites     bool
-	Dirty           bool
+	deferWrites     bool
+	dirty           bool
 	reads           uint64
 	writes          uint64
 	deletes         uint64
@@ -63,25 +63,33 @@ type Stats struct {
 }
 
 func New[K comparable, V any](name, path string, version, maxEntries int, readLimit int64, key func(V) K, identity Identity[V], expired func(V, time.Time) bool, evictLess, sortLess func(V, V) bool, log *slog.Logger) *Database[K, V] {
-	return &Database[K, V]{name: name, path: path, version: version, maxEntries: maxEntries, readLimit: readLimit, Records: make(map[K]V), key: key, identity: identity, Now: time.Now, expired: expired, evictLess: evictLess, sortLess: sortLess, log: log}
+	return &Database[K, V]{name: name, path: path, version: version, maxEntries: maxEntries, readLimit: readLimit, records: make(map[K]V), key: key, identity: identity, now: time.Now, expired: expired, evictLess: evictLess, sortLess: sortLess, log: log}
 }
 
+func (d *Database[K, V]) SetClock(now func() time.Time)                        { d.now = now }
+func (d *Database[K, V]) SetMaintenance(fn func(V, time.Time) (V, bool, bool)) { d.maintain = fn }
+func (d *Database[K, V]) SetWriteHooks(prepare func(V) V, after func(V) V) {
+	d.prepareForWrite, d.afterWrite = prepare, after
+}
+func (d *Database[K, V]) SetEvictionHook(fn func(K, V, int)) { d.onEvict = fn }
+func (d *Database[K, V]) SetClone(fn func(V) V)              { d.cloneValue = fn }
+
 func (d *Database[K, V]) Load(acceptedVersion func(int) bool, normalize func(V) (V, bool, bool)) (bool, error) {
-	d.Mu.Lock()
-	defer d.Mu.Unlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	var file jsonDatabaseFile[V]
 	if err := readFile(d.path, d.readLimit, &file); err != nil {
 		return false, err
 	}
 	if !acceptedVersion(file.Version) {
-		return false, fmt.Errorf("unsupported %s version %d", d.name, file.Version)
+		return false, fmt.Errorf("%w: unsupported %s version %d", ErrIncompatibleFormat, d.name, file.Version)
 	}
 	changed := file.Version != d.version
 	lastID := file.LastID
 	seenIDs := make(map[uint64]bool, len(file.Entries))
 	loaded := make(map[K]V, len(file.Entries))
 	var loadWrites, loadDeletes uint64
-	now := d.Now().UTC()
+	now := d.now().UTC()
 	for _, value := range file.Entries {
 		value, keep, modified := normalize(value)
 		changed = changed || modified
@@ -95,46 +103,50 @@ func (d *Database[K, V]) Load(acceptedVersion func(int) bool, normalize func(V) 
 		}
 		id := d.identity.Get(value)
 		if id == 0 {
-			return false, fmt.Errorf("%s contains a record without an ID", d.name)
+			return false, fmt.Errorf("%w: %s contains a record without an ID", ErrIncompatibleFormat, d.name)
 		}
 		if seenIDs[id] {
-			return false, fmt.Errorf("%s contains duplicate record ID %d", d.name, id)
+			return false, fmt.Errorf("%w: %s contains duplicate record ID %d", ErrIncompatibleFormat, d.name, id)
 		}
 		seenIDs[id] = true
 		if id > lastID {
 			lastID = id
 			changed = true
 		}
-		loaded[d.key(value)] = value
+		key := d.key(value)
+		if _, exists := loaded[key]; exists {
+			return false, fmt.Errorf("%w: %s contains duplicate logical record key", ErrIncompatibleFormat, d.name)
+		}
+		loaded[key] = value
 	}
-	clear(d.Records)
+	clear(d.records)
 	for key, value := range loaded {
-		d.Records[key] = value
+		d.records[key] = value
 	}
 	d.lastID = lastID
 	d.writes += loadWrites
 	d.deletes += loadDeletes
-	for len(d.Records) > d.maxEntries {
-		d.EvictOneLocked()
+	for len(d.records) > d.maxEntries {
+		d.evictOneLocked()
 		changed = true
 	}
 	if changed {
-		d.Dirty = true
+		d.dirty = true
 	}
 	return changed, nil
 }
 
 func (d *Database[K, V]) Get(key K) (V, bool) {
-	d.Mu.Lock()
-	defer d.Mu.Unlock()
-	value, ok := d.Records[key]
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	value, ok := d.records[key]
 	if !ok {
 		var zero V
 		return zero, false
 	}
-	if d.isExpired(value, d.Now().UTC()) {
-		delete(d.Records, key)
-		d.Dirty = true
+	if d.isExpired(value, d.now().UTC()) {
+		delete(d.records, key)
+		d.dirty = true
 		d.deletes++
 		var zero V
 		return zero, false
@@ -156,13 +168,13 @@ func (d *Database[K, V]) Put(value V) error {
 
 // Add appends records whose keys depend on their newly assigned IDs.
 func (d *Database[K, V]) Add(values ...V) ([]V, error) {
-	d.Mu.Lock()
-	defer d.Mu.Unlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	added := make([]V, 0, len(values))
-	backup := make(map[K]V, len(d.Records))
-	for key, value := range d.Records {
-		if d.CloneValue != nil {
-			value = d.CloneValue(value)
+	backup := make(map[K]V, len(d.records))
+	for key, value := range d.records {
+		if d.cloneValue != nil {
+			value = d.cloneValue(value)
 		}
 		backup[key] = value
 	}
@@ -171,24 +183,24 @@ func (d *Database[K, V]) Add(values ...V) ([]V, error) {
 		var err error
 		value, err = d.assignIDLocked(value)
 		if err != nil {
-			d.ReplaceLocked(backup)
+			d.replaceLocked(backup)
 			d.lastID = backupLastID
 			return nil, err
 		}
-		d.Records[d.key(value)] = value
+		d.records[d.key(value)] = value
 		added = append(added, value)
 	}
 	d.writes += uint64(len(values))
-	d.Dirty = true
-	if len(d.Records) >= d.maxEntries {
-		d.RemoveExpiredLocked(d.Now().UTC())
+	d.dirty = true
+	if len(d.records) >= d.maxEntries {
+		d.removeExpiredLocked(d.now().UTC())
 	}
-	for len(d.Records) > d.maxEntries {
-		d.EvictOneLocked()
+	for len(d.records) > d.maxEntries {
+		d.evictOneLocked()
 	}
-	if !d.DeferWrites {
-		if _, err := d.FlushLocked("write"); err != nil {
-			d.ReplaceLocked(backup)
+	if !d.deferWrites {
+		if _, err := d.flushLocked("write"); err != nil {
+			d.replaceLocked(backup)
 			d.lastID = backupLastID
 			return nil, err
 		}
@@ -210,15 +222,12 @@ func (d *Database[K, V]) Delete(key K) (bool, error) {
 }
 
 func (d *Database[K, V]) View(fn func(V) bool) []V {
-	d.Mu.Lock()
-	defer d.Mu.Unlock()
-	now := d.Now().UTC()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	now := d.now().UTC()
 	result := make([]V, 0)
-	for key, value := range d.Records {
+	for _, value := range d.records {
 		if d.isExpired(value, now) {
-			delete(d.Records, key)
-			d.Dirty = true
-			d.deletes++
 			continue
 		}
 		if fn(value) {
@@ -229,20 +238,20 @@ func (d *Database[K, V]) View(fn func(V) bool) []V {
 	return result
 }
 
-// update provides one atomic transaction for feature operations that need to
+// Update provides one atomic transaction for feature operations that need to
 // read and modify several related records.
 func (d *Database[K, V]) Update(fn func(map[K]V) (reads, writes, deletes uint64, changed bool)) error {
-	d.Mu.Lock()
-	defer d.Mu.Unlock()
-	backup := make(map[K]V, len(d.Records))
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	backup := make(map[K]V, len(d.records))
 	backupLastID := d.lastID
-	for key, value := range d.Records {
-		if d.CloneValue != nil {
-			value = d.CloneValue(value)
+	for key, value := range d.records {
+		if d.cloneValue != nil {
+			value = d.cloneValue(value)
 		}
 		backup[key] = value
 	}
-	reads, writes, deletes, changed := fn(d.Records)
+	reads, writes, deletes, changed := fn(d.records)
 	d.reads += reads
 	if !changed {
 		return nil
@@ -250,20 +259,20 @@ func (d *Database[K, V]) Update(fn func(map[K]V) (reads, writes, deletes uint64,
 	d.writes += writes
 	d.deletes += deletes
 	if err := d.assignMissingIDsLocked(); err != nil {
-		d.ReplaceLocked(backup)
+		d.replaceLocked(backup)
 		d.lastID = backupLastID
 		return err
 	}
-	d.Dirty = true
-	if len(d.Records) >= d.maxEntries {
-		d.RemoveExpiredLocked(d.Now().UTC())
+	d.dirty = true
+	if len(d.records) >= d.maxEntries {
+		d.removeExpiredLocked(d.now().UTC())
 	}
-	for len(d.Records) > d.maxEntries {
-		d.EvictOneLocked()
+	for len(d.records) > d.maxEntries {
+		d.evictOneLocked()
 	}
-	if !d.DeferWrites {
-		if _, err := d.FlushLocked("write"); err != nil {
-			d.ReplaceLocked(backup)
+	if !d.deferWrites {
+		if _, err := d.flushLocked("write"); err != nil {
+			d.replaceLocked(backup)
 			d.lastID = backupLastID
 			return err
 		}
@@ -271,66 +280,48 @@ func (d *Database[K, V]) Update(fn func(map[K]V) (reads, writes, deletes uint64,
 	return nil
 }
 
-func (d *Database[K, V]) ReplaceLocked(values map[K]V) {
-	clear(d.Records)
+func (d *Database[K, V]) replaceLocked(values map[K]V) {
+	clear(d.records)
 	for key, value := range values {
-		d.Records[key] = value
+		d.records[key] = value
 	}
 }
 
-func (d *Database[K, V]) RemoveExpiredLocked(now time.Time) uint64 {
+func (d *Database[K, V]) removeExpiredLocked(now time.Time) uint64 {
 	var removed uint64
-	for key, value := range d.Records {
+	for key, value := range d.records {
 		maintained := false
-		if d.Maintain != nil {
-			updated, keep, changed := d.Maintain(value, now)
+		if d.maintain != nil {
+			updated, keep, changed := d.maintain(value, now)
 			if !keep {
-				delete(d.Records, key)
+				delete(d.records, key)
 				removed++
 				continue
 			}
-			d.Records[key] = updated
+			d.records[key] = updated
 			value = updated
 			maintained = changed
 		}
 		if d.isExpired(value, now) {
-			delete(d.Records, key)
+			delete(d.records, key)
 			removed++
 			continue
 		}
 		if maintained {
-			d.Dirty = true
+			d.dirty = true
 			d.writes++
 		}
 	}
 	if removed > 0 {
-		d.Dirty = true
+		d.dirty = true
 		d.deletes += removed
 	}
 	return removed
 }
 
-func (d *Database[K, V]) MarkChangesLocked(writes, deletes uint64) {
-	d.writes += writes
-	d.deletes += deletes
-	d.Dirty = true
-}
-
-func (d *Database[K, V]) ChangedLocked(writes, deletes uint64) error {
-	if err := d.assignMissingIDsLocked(); err != nil {
-		return err
-	}
-	d.MarkChangesLocked(writes, deletes)
-	if d.DeferWrites {
-		return nil
-	}
-	_, err := d.FlushLocked("write")
-	return err
-}
-
 func (d *Database[K, V]) assignMissingIDsLocked() error {
-	seen := make(map[uint64]bool, len(d.Records))
-	for key, value := range d.Records {
+	seen := make(map[uint64]bool, len(d.records))
+	for key, value := range d.records {
 		id := d.identity.Get(value)
 		if id != 0 {
 			if seen[id] {
@@ -346,7 +337,7 @@ func (d *Database[K, V]) assignMissingIDsLocked() error {
 		if err != nil {
 			return err
 		}
-		d.Records[key] = updated
+		d.records[key] = updated
 		seen[d.identity.Get(updated)] = true
 	}
 	return nil
@@ -363,54 +354,54 @@ func (d *Database[K, V]) assignIDLocked(value V) (V, error) {
 	return d.identity.Set(value, d.lastID), nil
 }
 
-func (d *Database[K, V]) MarkReadsLocked(count uint64) { d.reads += count }
-
 func (d *Database[K, V]) isExpired(value V, now time.Time) bool {
 	return d.expired != nil && d.expired(value, now)
 }
 
-func (d *Database[K, V]) EvictOneLocked() {
+func (d *Database[K, V]) evictOneLocked() {
 	var victim K
 	var selected V
 	found := false
-	for key, value := range d.Records {
+	for key, value := range d.records {
 		if !found || (d.evictLess != nil && d.evictLess(value, selected)) {
 			victim, selected, found = key, value, true
 		}
 	}
 	if found {
-		delete(d.Records, victim)
+		delete(d.records, victim)
 		d.deletes++
-		if d.OnEvict != nil {
-			d.OnEvict(victim, selected)
+		if d.onEvict != nil {
+			d.onEvict(victim, selected, len(d.records))
 		}
 	}
 }
 
 func (d *Database[K, V]) Flush() (Stats, error) {
-	d.Mu.Lock()
-	defer d.Mu.Unlock()
-	return d.FlushLocked("")
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.flushLocked("")
 }
 
-func (d *Database[K, V]) FlushLocked(trigger string) (Stats, error) {
+func (d *Database[K, V]) flushLocked(trigger string) (Stats, error) {
 	previousLastID := d.lastID
 	if err := d.assignMissingIDsLocked(); err != nil {
 		return Stats{Name: d.name, Reads: d.reads, Writes: d.writes, Deletes: d.deletes}, err
 	}
 	if d.lastID != previousLastID {
-		d.Dirty = true
+		d.dirty = true
 	}
-	d.RemoveExpiredLocked(d.Now().UTC())
+	d.removeExpiredLocked(d.now().UTC())
 	stats := Stats{Name: d.name, Reads: d.reads, Writes: d.writes, Deletes: d.deletes}
-	if d.Dirty {
+	if d.dirty {
 		if err := d.writeLocked(); err != nil {
 			return stats, err
 		}
-		if d.AfterWrite != nil {
-			d.AfterWrite(d.Records)
+		if d.afterWrite != nil {
+			for key, value := range d.records {
+				d.records[key] = d.afterWrite(value)
+			}
 		}
-		d.Dirty = false
+		d.dirty = false
 		stats.Flushed = true
 	}
 	d.reads, d.writes, d.deletes = 0, 0, 0
@@ -428,10 +419,10 @@ func (d *Database[K, V]) writeLocked() error {
 	if d.path == "" {
 		return nil
 	}
-	values := make([]V, 0, len(d.Records))
-	for _, value := range d.Records {
-		if d.PrepareForWrite != nil {
-			value = d.PrepareForWrite(value)
+	values := make([]V, 0, len(d.records))
+	for _, value := range d.records {
+		if d.prepareForWrite != nil {
+			value = d.prepareForWrite(value)
 		}
 		values = append(values, value)
 	}
@@ -442,11 +433,26 @@ func (d *Database[K, V]) writeLocked() error {
 }
 
 func (d *Database[K, V]) SetDeferred(deferred bool) {
-	d.Mu.Lock()
-	d.DeferWrites = deferred
-	d.Mu.Unlock()
+	d.mu.Lock()
+	d.deferWrites = deferred
+	d.mu.Unlock()
 }
-func (d *Database[K, V]) Size() int { d.Mu.Lock(); defer d.Mu.Unlock(); return len(d.Records) }
+func (d *Database[K, V]) Size() int { d.mu.RLock(); defer d.mu.RUnlock(); return len(d.records) }
+
+// Snapshot returns an isolated copy of the current records for diagnostics and
+// tests. Callers cannot mutate database state through the returned map.
+func (d *Database[K, V]) Snapshot() map[K]V {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	result := make(map[K]V, len(d.records))
+	for key, value := range d.records {
+		if d.cloneValue != nil {
+			value = d.cloneValue(value)
+		}
+		result[key] = value
+	}
+	return result
+}
 
 type managedDatabase interface {
 	Flush() (Stats, error)

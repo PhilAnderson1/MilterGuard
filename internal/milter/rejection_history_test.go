@@ -1,7 +1,11 @@
 package milter
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -106,8 +110,89 @@ func TestRejectionReasonIsSingleLineAndBounded(t *testing.T) {
 
 func TestRejectionHistoryReadLimitScalesWithConfiguredEntries(t *testing.T) {
 	const maxEntries = 10000
-	want := int64(maxEntries) * estimatedRejectionHistoryEntryBytes * persistentStoreReadMargin
-	if got := persistentStoreReadLimit(maxEntries, estimatedRejectionHistoryEntryBytes); got != want {
+	want := int64(maxEntries) * maximumRejectionHistoryEntryBytes * persistentStoreReadMargin
+	if got := persistentStoreReadLimit(maxEntries, maximumRejectionHistoryEntryBytes); got != want {
 		t.Fatalf("read limit = %d, want %d", got, want)
+	}
+}
+
+func TestRejectionHistoryEntryBoundCoversMaximumRecord(t *testing.T) {
+	address := strings.Repeat("a", 242) + "@example.com"
+	recipients := make([]string, maxLearnedRecipients)
+	for i := range recipients {
+		recipients[i] = address
+	}
+	record := rejectionHistoryEntry{
+		ID:         ^uint64(0),
+		Sender:     address,
+		Recipients: recipients,
+		RejectedAt: time.Now().UTC(),
+		Reason:     strings.Repeat("<", maxRejectionReasonRunes) + "…",
+	}
+	encoded, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(encoded)) > maximumRejectionHistoryEntryBytes {
+		t.Fatalf("maximum encoded record is %d bytes, exceeds bound %d", len(encoded), maximumRejectionHistoryEntryBytes)
+	}
+}
+
+func TestRejectionHistoryCapsRecipientsPerRecord(t *testing.T) {
+	cfg := config.RejectionHistoryConfig{File: filepath.Join(t.TempDir(), "history.json"), Expiry: config.Duration(time.Hour), MaxEntries: 10}
+	store := newRejectionHistoryStore(cfg, nil)
+	recipients := make([]string, maxLearnedRecipients+10)
+	for i := range recipients {
+		recipients[i] = fmt.Sprintf("recipient-%03d@example.com", i)
+	}
+	if err := store.add("sender@example.com", "", recipients, []string{"test"}); err != nil {
+		t.Fatal(err)
+	}
+	entries := store.list("*")
+	if len(entries) != 1 || len(entries[0].Recipients) != maxLearnedRecipients {
+		t.Fatalf("stored recipient counts = %d entries, %d recipients", len(entries), len(entries[0].Recipients))
+	}
+}
+
+func TestRejectionHistoryLoadPersistsNormalizedAddresses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.json")
+	document := struct {
+		Version int                     `json:"version"`
+		LastID  uint64                  `json:"last_id"`
+		Entries []rejectionHistoryEntry `json:"entries"`
+	}{
+		Version: 1,
+		LastID:  1,
+		Entries: []rejectionHistoryEntry{{
+			ID: 1, Sender: "Alice@Example.COM",
+			Recipients: []string{"BOB@Example.COM", "bob@example.com"},
+			RejectedAt: time.Now().UTC(),
+		}},
+	}
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := newRejectionHistoryStore(config.RejectionHistoryConfig{
+		File: path, Expiry: config.Duration(time.Hour), MaxEntries: 10,
+	}, nil)
+	if store.loadErr != nil {
+		t.Fatal(store.loadErr)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var normalized struct {
+		Entries []rejectionHistoryEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(persisted, &normalized); err != nil {
+		t.Fatal(err)
+	}
+	if len(normalized.Entries) != 1 || normalized.Entries[0].Sender != "alice@example.com" || !slices.Equal(normalized.Entries[0].Recipients, []string{"bob@example.com"}) {
+		t.Fatalf("persisted normalized history = %#v", normalized.Entries)
 	}
 }

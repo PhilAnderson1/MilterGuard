@@ -49,7 +49,10 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 			if err != nil {
 				break
 			}
-			body, _ := io.ReadAll(io.LimitReader(part, 2<<20))
+			// The complete message body has already been bounded by Message.MaxBytes.
+			// Do not impose a smaller per-part limit here: doing so would silently
+			// discard evidence from otherwise retained messages.
+			body, _ := io.ReadAll(part)
 			partContentType := part.Header.Get("Content-Type")
 			content := extractMIME(partContentType, part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-ID"), body, depth+1)
 			if !hasExtractedContent(content) {
@@ -125,7 +128,10 @@ func decodeTransfer(encoding string, data []byte) []byte {
 	case "quoted-printable":
 		reader = quotedprintable.NewReader(reader)
 	}
-	decoded, err := io.ReadAll(io.LimitReader(reader, 2<<20))
+	// Transfer decoding cannot expand base64 or quoted-printable input beyond
+	// the already bounded source message, so a second fixed-size limit would
+	// only create an undocumented truncation point.
+	decoded, err := io.ReadAll(reader)
 	if err != nil {
 		return data
 	}

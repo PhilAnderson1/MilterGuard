@@ -55,7 +55,7 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 	}
 	var err error
 	if selected == actionAccept {
-		if proposed != actionAccept {
+		if proposed != actionAccept && (ss.server.cfg.Filtering.AddEmailHeaders || ss.server.cfg.Mode == "tag") {
 			classification := "unwanted"
 			if scanErr != nil {
 				classification = "unavailable"

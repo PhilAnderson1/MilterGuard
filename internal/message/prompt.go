@@ -2,6 +2,7 @@ package message
 
 import (
 	"fmt"
+	"io"
 	"mime"
 	"net/url"
 	"regexp"
@@ -10,6 +11,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/net/html/charset"
 )
 
 const (
@@ -28,6 +31,12 @@ var promptHeaders = map[string]bool{
 var plainHTTPURL = regexp.MustCompile(`(?i)https?://[^\s<>"'\]\)]+`)
 
 var receivedSPFReceiverPattern = regexp.MustCompile(`(?i)(?:^|[;\s])receiver\s*=\s*(?:"([^"]+)"|([^\s;]+))`)
+
+var headerWordDecoder = &mime.WordDecoder{
+	CharsetReader: func(label string, input io.Reader) (io.Reader, error) {
+		return charset.NewReaderLabel(label, input)
+	},
+}
 
 func (m *Message) Prompt(maxChars int) string {
 	return m.BuildAnalysis(maxChars, VisionOptions{Mode: "off"}).Prompt
@@ -295,7 +304,7 @@ func sanitize(value string) string {
 // the rest of the original header, including any mailbox address. Malformed
 // encoded words are left intact rather than causing evidence to be discarded.
 func promptHeaderValue(value string) string {
-	if decoded, err := new(mime.WordDecoder).DecodeHeader(value); err == nil {
+	if decoded, err := headerWordDecoder.DecodeHeader(value); err == nil {
 		value = decoded
 	}
 	return sanitize(strings.ToValidUTF8(value, "�"))

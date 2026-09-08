@@ -15,9 +15,15 @@ import (
 )
 
 const (
-	rejectionHistoryVersion                   = 1
-	estimatedRejectionHistoryEntryBytes int64 = 2 << 10
-	maxRejectionReasonRunes                   = 1000
+	rejectionHistoryVersion = 1
+	maxRejectionReasonRunes = 1000
+	// encoding/json can expand one input byte or rune to a six-byte escape
+	// sequence. Allow for the sender, every recipient, the truncation ellipsis,
+	// timestamps, numeric IDs, field names, separators and indentation.
+	maxJSONEncodedUnitBytes            int64 = 6
+	maxPersistedEmailAddressBytes      int64 = 254
+	maxRejectionHistoryStructuralBytes int64 = 512
+	maximumRejectionHistoryEntryBytes        = (int64(maxLearnedRecipients)+1)*maxPersistedEmailAddressBytes*maxJSONEncodedUnitBytes + (int64(maxRejectionReasonRunes)+1)*maxJSONEncodedUnitBytes + maxRejectionHistoryStructuralBytes
 )
 
 type rejectionHistoryEntry struct {
@@ -38,13 +44,13 @@ type rejectionHistoryStore struct {
 
 func newRejectionHistoryStore(cfg config.RejectionHistoryConfig, log *slog.Logger) *rejectionHistoryStore {
 	store := &rejectionHistoryStore{cfg: cfg, now: time.Now, log: log}
-	store.db = jsonstore.New("Rejections", cfg.File, rejectionHistoryVersion, cfg.MaxEntries, persistentStoreReadLimit(cfg.MaxEntries, estimatedRejectionHistoryEntryBytes), func(v rejectionHistoryEntry) uint64 { return v.ID }, jsonstore.Identity[rejectionHistoryEntry]{
+	store.db = jsonstore.New("Rejections", cfg.File, rejectionHistoryVersion, cfg.MaxEntries, persistentStoreReadLimit(cfg.MaxEntries, maximumRejectionHistoryEntryBytes), func(v rejectionHistoryEntry) uint64 { return v.ID }, jsonstore.Identity[rejectionHistoryEntry]{
 		Get: func(v rejectionHistoryEntry) uint64 { return v.ID },
 		Set: func(v rejectionHistoryEntry, id uint64) rejectionHistoryEntry { v.ID = id; return v },
 	}, func(v rejectionHistoryEntry, now time.Time) bool {
 		return cfg.Expiry.Value() > 0 && v.RejectedAt.Before(now.Add(-cfg.Expiry.Value()))
 	}, func(a, b rejectionHistoryEntry) bool { return a.RejectedAt.Before(b.RejectedAt) }, func(a, b rejectionHistoryEntry) bool { return a.RejectedAt.Before(b.RejectedAt) }, log)
-	store.db.Now = func() time.Time { return store.now() }
+	store.db.SetClock(func() time.Time { return store.now() })
 	if cfg.Expiry.Value() <= 0 {
 		return store
 	}
@@ -74,6 +80,9 @@ func (s *rejectionHistoryStore) addWithID(visibleSender, envelopeSender string, 
 	for _, recipient := range recipients {
 		if normalized := normalizeEmailAddress(recipient); normalized != "" {
 			unique[normalized] = true
+			if len(unique) == maxLearnedRecipients {
+				break
+			}
 		}
 	}
 	if len(unique) == 0 {
@@ -149,6 +158,8 @@ func (s *rejectionHistoryStore) list(recipient string) []rejectionHistoryEntry {
 
 func (s *rejectionHistoryStore) load() error {
 	changed, err := s.db.Load(func(version int) bool { return version == rejectionHistoryVersion }, func(entry rejectionHistoryEntry) (rejectionHistoryEntry, bool, bool) {
+		originalSender := entry.Sender
+		originalRecipients := append([]string(nil), entry.Recipients...)
 		entry.Sender = normalizeEmailAddress(entry.Sender)
 		unique := make(map[string]bool)
 		for _, recipient := range entry.Recipients {
@@ -161,23 +172,14 @@ func (s *rejectionHistoryStore) load() error {
 			entry.Recipients = append(entry.Recipients, recipient)
 		}
 		sort.Strings(entry.Recipients)
-		return entry, entry.Sender != "" && len(entry.Recipients) > 0 && !entry.RejectedAt.IsZero(), false
+		if len(entry.Recipients) > maxLearnedRecipients {
+			entry.Recipients = entry.Recipients[:maxLearnedRecipients]
+		}
+		modified := entry.Sender != originalSender || !slices.Equal(entry.Recipients, originalRecipients)
+		return entry, entry.Sender != "" && len(entry.Recipients) > 0 && !entry.RejectedAt.IsZero(), modified
 	})
 	if err == nil && changed {
 		_, err = s.db.Flush()
 	}
-	return err
-}
-
-func (s *rejectionHistoryStore) enableDeferredPersistence() {
-	if s != nil {
-		s.db.SetDeferred(true)
-	}
-}
-func (s *rejectionHistoryStore) flush() error {
-	if s == nil {
-		return nil
-	}
-	_, err := s.db.Flush()
 	return err
 }

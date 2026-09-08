@@ -48,6 +48,34 @@ func TestExecutableAttachmentRejectedBeforeAI(t *testing.T) {
 	}
 }
 
+func TestAttachmentsMonitorModeAddsHeadersWhenEnabled(t *testing.T) {
+	analyzer := &countingAnalyzer{}
+	server, conn, done := testServer(t, analyzer)
+	enableTestAttachments(server)
+	server.cfg.Mode = "monitor"
+	server.cfg.Filtering.AddEmailHeaders = true
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiateWithActions(t, conn, resultHeaderActions)
+	sendContinueFrames(t, conn,
+		[]byte{commandMail},
+		headerFrame("Content-Type", "application/octet-stream"),
+		headerFrame("Content-Disposition", `attachment; filename="invoice.exe"`),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("payload")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
+	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "unavailable")))
+	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-monitor-mode")))
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if got := analyzer.calls.Load(); got != 0 {
+		t.Fatalf("AI analysis calls = %d, want 0", got)
+	}
+}
+
 func TestExecutableAttachmentRejectionIsArchived(t *testing.T) {
 	server, conn, done := testServer(t, &countingAnalyzer{})
 	enableTestAttachments(server)

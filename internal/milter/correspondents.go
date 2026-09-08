@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
@@ -42,9 +41,7 @@ type correspondentMatch struct {
 }
 
 type correspondentStore struct {
-	mu      *sync.RWMutex
 	cfg     config.CorrespondentsConfig
-	entries map[string]correspondentEntry
 	db      *jsonstore.Database[string, correspondentEntry]
 	now     func() time.Time
 	log     *slog.Logger
@@ -80,18 +77,14 @@ func newEmptyCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logge
 		}, func(a, b correspondentEntry) bool {
 			return a.LocalAddress < b.LocalAddress || (a.LocalAddress == b.LocalAddress && a.Correspondent < b.Correspondent)
 		}, log)
-	store.db.Now = func() time.Time { return store.now() }
-	store.db.PrepareForWrite = func(entry correspondentEntry) correspondentEntry {
+	store.db.SetClock(func() time.Time { return store.now() })
+	store.db.SetWriteHooks(func(entry correspondentEntry) correspondentEntry {
 		entry.PersistedActivityAt = entry.LastActivityAt
 		return entry
-	}
-	store.db.AfterWrite = func(records map[string]correspondentEntry) {
-		for key, entry := range records {
-			entry.PersistedActivityAt = entry.LastActivityAt
-			records[key] = entry
-		}
-	}
-	store.mu, store.entries = &store.db.Mu, store.db.Records
+	}, func(entry correspondentEntry) correspondentEntry {
+		entry.PersistedActivityAt = entry.LastActivityAt
+		return entry
+	})
 	return store
 }
 
@@ -121,62 +114,46 @@ func (s *correspondentStore) learn(localAddress string, recipients []string) err
 	}
 
 	now := s.now().UTC()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	structuralChange := false
-	persistActivity := false
-	writes, deletes := 0, 0
 	added := 0
-	for recipient := range unique {
-		key := s.key(localAddress, recipient)
-		if entry, exists := s.entries[key]; exists {
-			s.db.MarkReadsLocked(1)
-			if s.entryStale(entry, now) {
-				delete(s.entries, key)
-				structuralChange = true
-				deletes++
-			} else {
-				promoted := entry.WhitelistType != whitelistAuthenticatedOutbound && entry.WhitelistType != whitelistManual
-				entry.LastActivityAt = now
-				if entry.WhitelistType != whitelistManual {
-					entry.WhitelistType = whitelistAuthenticatedOutbound
-					entry.LegitimateEmailCount = 0
+	err := s.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
+		for recipient := range unique {
+			key := s.key(localAddress, recipient)
+			entry, exists := records[key]
+			if exists {
+				reads++
+				if s.entryStale(entry, now) {
+					delete(records, key)
+					deletes++
+					exists = false
+				} else {
+					promoted := entry.WhitelistType != whitelistAuthenticatedOutbound && entry.WhitelistType != whitelistManual
+					persist := s.activityPersistenceDue(entry, now)
+					entry.LastActivityAt = now
+					if entry.WhitelistType != whitelistManual {
+						entry.WhitelistType, entry.LegitimateEmailCount = whitelistAuthenticatedOutbound, 0
+					}
+					records[key] = entry
+					if promoted || persist {
+						writes++
+						changed = true
+					}
+					continue
 				}
-				if promoted {
-					structuralChange = true
-				}
-				if s.activityPersistenceDue(entry, now) {
-					persistActivity = true
-				}
-				if promoted || s.activityPersistenceDue(entry, now) {
-					writes++
-				}
-				s.entries[key] = entry
-				continue
+			}
+			if !exists {
+				records[key] = correspondentEntry{LocalAddress: localAddress, Correspondent: recipient, LearnedAt: now, LastActivityAt: now, WhitelistType: whitelistAuthenticatedOutbound}
+				writes++
+				added++
+				changed = true
 			}
 		}
-		if len(s.entries) >= s.cfg.MaxEntries {
-			if s.removeStaleLocked(now) > 0 {
-				structuralChange = true
-			}
-		}
-		for len(s.entries) >= s.cfg.MaxEntries {
-			s.evictOldestLocked()
-			structuralChange = true
-		}
-		s.entries[key] = correspondentEntry{LocalAddress: localAddress, Correspondent: recipient, LearnedAt: now, LastActivityAt: now, WhitelistType: whitelistAuthenticatedOutbound}
-		structuralChange = true
-		writes++
-		added++
-	}
-	if !structuralChange && !persistActivity {
-		return nil
-	}
-	if err := s.saveLocked(writes, deletes); err != nil {
+		return
+	})
+	if err != nil {
 		return err
 	}
 	if s.log != nil {
-		s.log.Debug("correspondent allowlist updated", "new_entries", added, "entry_count", len(s.entries))
+		s.log.Debug("correspondent allowlist updated", "new_entries", added, "entry_count", s.db.Size())
 	}
 	return nil
 }
@@ -198,35 +175,23 @@ func (s *correspondentStore) touchInbound(correspondent string, recipients []str
 		}
 	}
 	now := s.now().UTC()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	persistActivity := false
-	writes := 0
-	for key, entry := range s.entries {
-		if s.entryStale(entry, now) {
-			continue
+	return s.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
+		for key, entry := range records {
+			if s.entryStale(entry, now) || entry.Correspondent != correspondent ||
+				(s.cfg.Scope == "per_sender" && !recipientSet[entry.LocalAddress]) || !s.qualified(entry) {
+				continue
+			}
+			reads++
+			persist := s.activityPersistenceDue(entry, now)
+			entry.LastActivityAt = now
+			records[key] = entry
+			if persist {
+				writes++
+				changed = true
+			}
 		}
-		if entry.Correspondent != correspondent {
-			continue
-		}
-		if s.cfg.Scope == "per_sender" && !recipientSet[entry.LocalAddress] {
-			continue
-		}
-		if !s.qualified(entry) {
-			continue
-		}
-		s.db.MarkReadsLocked(1)
-		entry.LastActivityAt = now
-		if s.activityPersistenceDue(entry, now) {
-			persistActivity = true
-			writes++
-		}
-		s.entries[key] = entry
-	}
-	if !persistActivity {
-		return nil
-	}
-	return s.saveLocked(writes, 0)
+		return
+	})
 }
 
 func (s *correspondentStore) recordInboundClassification(correspondent string, recipients []string, recipientsComplete bool, classification string, score, unwantedMinScore float64, dkimAligned bool) error {
@@ -247,129 +212,106 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 		return nil
 	}
 	now := s.now().UTC()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	saveNeeded := false
-	writes, deletes := 0, 0
+	return s.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
+		if classification == "unwanted" {
+			if score < unwantedMinScore {
+				return
+			}
+			removed := 0
+			for key, entry := range records {
+				if entry.Correspondent != correspondent || entry.WhitelistType != whitelistRepeatedLegitimate {
+					continue
+				}
+				if s.cfg.Scope == "per_sender" && !recipientSet[entry.LocalAddress] {
+					continue
+				}
+				delete(records, key)
+				removed++
+				deletes++
+			}
+			if removed > 0 {
+				changed = true
+				if s.log != nil {
+					s.log.Debug("inbound-learned correspondent removed after unwanted classification", "correspondent", correspondent, "removed_entries", removed, "entry_count", len(records))
+				}
+			}
+			return
+		}
+		if classification != "legitimate" {
+			return
+		}
 
-	if classification == "unwanted" {
-		if score < unwantedMinScore {
-			if saveNeeded {
-				return s.saveLocked(writes, deletes)
+		qualifying := s.cfg.LearnLegitimateSenders && score >= s.cfg.LegitimateSenderMinScore && (!s.cfg.LegitimateSenderRequireDKIM || dkimAligned)
+		for recipient := range recipientSet {
+			key := s.key(recipient, correspondent)
+			entry, exists := records[key]
+			if exists {
+				reads++
 			}
-			return nil
-		}
-		removed := 0
-		for key, entry := range s.entries {
-			if entry.Correspondent != correspondent || entry.WhitelistType != whitelistRepeatedLegitimate {
-				continue
+			if exists && s.entryStale(entry, now) {
+				delete(records, key)
+				exists = false
+				changed = true
+				deletes++
 			}
-			if s.cfg.Scope == "per_sender" && !recipientSet[entry.LocalAddress] {
-				continue
-			}
-			delete(s.entries, key)
-			removed++
-			deletes++
-		}
-		if removed > 0 {
-			saveNeeded = true
-			if s.log != nil {
-				s.log.Debug("inbound-learned correspondent removed after unwanted classification", "correspondent", correspondent, "removed_entries", removed, "entry_count", len(s.entries))
-			}
-		}
-		if saveNeeded {
-			return s.saveLocked(writes, deletes)
-		}
-		return nil
-	}
-	if classification != "legitimate" {
-		if saveNeeded {
-			return s.saveLocked(writes, deletes)
-		}
-		return nil
-	}
-
-	qualifying := s.cfg.LearnLegitimateSenders && score >= s.cfg.LegitimateSenderMinScore && (!s.cfg.LegitimateSenderRequireDKIM || dkimAligned)
-	for recipient := range recipientSet {
-		key := s.key(recipient, correspondent)
-		entry, exists := s.entries[key]
-		if exists {
-			s.db.MarkReadsLocked(1)
-		}
-		if exists && s.entryStale(entry, now) {
-			delete(s.entries, key)
-			exists = false
-			saveNeeded = true
-			deletes++
-		}
-		if !exists {
-			if !qualifying {
-				continue
-			}
-			if len(s.entries) >= s.cfg.MaxEntries {
-				if s.removeStaleLocked(now) > 0 {
-					saveNeeded = true
+			if !exists {
+				if !qualifying {
+					continue
 				}
-			}
-			for len(s.entries) >= s.cfg.MaxEntries {
-				s.evictOldestLocked()
-			}
-			entry = correspondentEntry{
-				LocalAddress: recipient, Correspondent: correspondent, LearnedAt: now, LastActivityAt: now,
-				WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 1,
-			}
-			s.entries[key] = entry
-			saveNeeded = true
-			writes++
-			if s.log != nil {
-				if s.qualified(entry) {
-					s.log.Debug("inbound sender promoted to known correspondent", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", 1)
-				} else {
-					s.log.Debug("inbound sender legitimate candidate updated", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", 1, "required_count", s.cfg.LegitimateSenderMinMessages)
+				entry = correspondentEntry{
+					LocalAddress: recipient, Correspondent: correspondent, LearnedAt: now, LastActivityAt: now,
+					WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 1,
 				}
-			}
-			continue
-		}
-		if entry.WhitelistType == whitelistAuthenticatedOutbound || entry.WhitelistType == whitelistManual {
-			entry.LastActivityAt = now
-			if s.activityPersistenceDue(entry, now) {
-				saveNeeded = true
+				records[key] = entry
+				changed = true
 				writes++
+				if s.log != nil {
+					if s.qualified(entry) {
+						s.log.Debug("inbound sender promoted to known correspondent", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", 1)
+					} else {
+						s.log.Debug("inbound sender legitimate candidate updated", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", 1, "required_count", s.cfg.LegitimateSenderMinMessages)
+					}
+				}
+				continue
 			}
-			s.entries[key] = entry
-			continue
-		}
-		if entry.WhitelistType != whitelistRepeatedLegitimate {
-			continue
-		}
-		if s.qualified(entry) {
-			entry.LastActivityAt = now
-			if s.activityPersistenceDue(entry, now) {
-				saveNeeded = true
+			if entry.WhitelistType == whitelistAuthenticatedOutbound || entry.WhitelistType == whitelistManual {
+				entry.LastActivityAt = now
+				if s.activityPersistenceDue(entry, now) {
+					changed = true
+					writes++
+				}
+				records[key] = entry
+				continue
+			}
+			if entry.WhitelistType != whitelistRepeatedLegitimate {
+				continue
+			}
+			if s.qualified(entry) {
+				entry.LastActivityAt = now
+				if s.activityPersistenceDue(entry, now) {
+					changed = true
+					writes++
+				}
+				records[key] = entry
+				continue
+			}
+			if qualifying {
+				entry.LegitimateEmailCount++
+				entry.LastActivityAt = now
+				records[key] = entry
+				changed = true
 				writes++
-			}
-			s.entries[key] = entry
-			continue
-		}
-		if qualifying {
-			entry.LegitimateEmailCount++
-			entry.LastActivityAt = now
-			s.entries[key] = entry
-			saveNeeded = true
-			writes++
-			if s.log != nil {
-				if s.qualified(entry) {
-					s.log.Debug("inbound sender promoted to known correspondent", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", entry.LegitimateEmailCount)
-				} else {
-					s.log.Debug("inbound sender legitimate candidate updated", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", entry.LegitimateEmailCount, "required_count", s.cfg.LegitimateSenderMinMessages)
+				if s.log != nil {
+					if s.qualified(entry) {
+						s.log.Debug("inbound sender promoted to known correspondent", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", entry.LegitimateEmailCount)
+					} else {
+						s.log.Debug("inbound sender legitimate candidate updated", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", entry.LegitimateEmailCount, "required_count", s.cfg.LegitimateSenderMinMessages)
+					}
 				}
 			}
 		}
-	}
-	if saveNeeded {
-		return s.saveLocked(writes, deletes)
-	}
-	return nil
+		return
+	})
 }
 
 func (s *correspondentStore) qualified(entry correspondentEntry) bool {
@@ -393,15 +335,9 @@ func (s *correspondentStore) match(correspondent string, recipients []string) co
 	}
 	now := s.now().UTC()
 	if s.cfg.Scope == "global" {
-		s.mu.Lock()
-		for _, entry := range s.entries {
-			if entry.Correspondent == correspondent && !s.entryStale(entry, now) && s.qualified(entry) {
-				s.db.MarkReadsLocked(1)
-				result.Known = true
-				break
-			}
-		}
-		s.mu.Unlock()
+		result.Known = len(s.db.View(func(entry correspondentEntry) bool {
+			return entry.Correspondent == correspondent && !s.entryStale(entry, now) && s.qualified(entry)
+		})) > 0
 		result.AllRecipientsMatched = result.Known
 		result.TotalRecipients = 1
 		if result.Known {
@@ -419,14 +355,10 @@ func (s *correspondentStore) match(correspondent string, recipients []string) co
 	if result.TotalRecipients == 0 {
 		return result
 	}
-	s.mu.Lock()
-	for recipient := range unique {
-		if entry, found := s.entries[s.key(recipient, correspondent)]; found && !s.entryStale(entry, now) && s.qualified(entry) {
-			s.db.MarkReadsLocked(1)
-			result.MatchedRecipients++
-		}
-	}
-	s.mu.Unlock()
+	matches := s.db.View(func(entry correspondentEntry) bool {
+		return unique[entry.LocalAddress] && entry.Correspondent == correspondent && !s.entryStale(entry, now) && s.qualified(entry)
+	})
+	result.MatchedRecipients = len(matches)
 	result.Known = result.MatchedRecipients > 0
 	result.AllRecipientsMatched = result.MatchedRecipients == result.TotalRecipients
 	return result
@@ -444,15 +376,9 @@ func (s *correspondentStore) listAllowlist(recipient string) []correspondentEntr
 		}
 	}
 	now := s.now().UTC()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	result := make([]correspondentEntry, 0)
-	for _, entry := range s.entries {
-		if !s.entryStale(entry, now) && s.qualified(entry) && (allRecipients || entry.LocalAddress == recipient) {
-			result = append(result, entry)
-		}
-	}
-	s.db.MarkReadsLocked(uint64(len(result)))
+	result := s.db.View(func(entry correspondentEntry) bool {
+		return !s.entryStale(entry, now) && s.qualified(entry) && (allRecipients || entry.LocalAddress == recipient)
+	})
 	sort.Slice(result, func(i, j int) bool {
 		iActivity := correspondentActivityTime(result[i])
 		jActivity := correspondentActivityTime(result[j])
@@ -471,22 +397,12 @@ func correspondentActivityTime(entry correspondentEntry) time.Time {
 	return entry.LastActivityAt
 }
 
-func (s *correspondentStore) evictOldestLocked() {
-	s.db.EvictOneLocked()
-}
-
-func (s *correspondentStore) removeStaleLocked(now time.Time) int {
-	removed := int(s.db.RemoveExpiredLocked(now))
-	if removed > 0 && s.log != nil {
-		s.log.Debug("stale correspondent relationships removed", "removed_entries", removed, "entry_count", len(s.entries))
-	}
-	return removed
-}
-
 func (s *correspondentStore) entryStale(entry correspondentEntry, now time.Time) bool {
 	staleAfter := s.cfg.StaleAfter.Value()
 	return staleAfter > 0 && correspondentActivityTime(entry).Before(now.Add(-staleAfter))
 }
+
+func (s *correspondentStore) snapshot() map[string]correspondentEntry { return s.db.Snapshot() }
 
 func normalizeEmailAddress(value string) string {
 	value = strings.TrimSpace(value)

@@ -51,7 +51,7 @@ func TestJSONDatabaseReadWriteDeleteExpiryAndStats(t *testing.T) {
 		func(v testJSONRecord) string { return v.Key }, testIdentity,
 		func(v testJSONRecord, at time.Time) bool { return !v.Expires.After(at) },
 		func(a, b testJSONRecord) bool { return a.Expires.Before(b.Expires) }, nil, nil)
-	db.Now = func() time.Time { return now }
+	db.SetClock(func() time.Time { return now })
 	db.SetDeferred(true)
 	if err := db.Update(func(records map[string]testJSONRecord) (uint64, uint64, uint64, bool) {
 		records["live"] = testJSONRecord{Key: "live", Expires: now.Add(time.Hour), Value: "kept"}
@@ -89,8 +89,8 @@ func TestJSONDatabaseCountsMaintenanceAndEvictionByRecord(t *testing.T) {
 	db := New("Test", filepath.Join(t.TempDir(), "test.json"), 1, 2, 1<<20,
 		func(v testJSONRecord) string { return v.Key }, testIdentity, nil,
 		func(a, b testJSONRecord) bool { return a.Key < b.Key }, nil, nil)
-	db.Now = func() time.Time { return now }
-	db.Maintain = func(record testJSONRecord, _ time.Time) (testJSONRecord, bool, bool) {
+	db.SetClock(func() time.Time { return now })
+	db.SetMaintenance(func(record testJSONRecord, _ time.Time) (testJSONRecord, bool, bool) {
 		switch record.Value {
 		case "update":
 			record.Value = "updated"
@@ -100,7 +100,7 @@ func TestJSONDatabaseCountsMaintenanceAndEvictionByRecord(t *testing.T) {
 		default:
 			return record, true, false
 		}
-	}
+	})
 	db.SetDeferred(true)
 	if err := db.Update(func(records map[string]testJSONRecord) (uint64, uint64, uint64, bool) {
 		records["a"] = testJSONRecord{Key: "a", Value: "update"}
@@ -213,8 +213,31 @@ func TestJSONDatabaseRejectsMissingAndDuplicateIDsWithoutPartialLoad(t *testing.
 				t.Fatal("invalid IDs were accepted")
 			}
 			if db.Size() != 0 {
-				t.Fatalf("partial records remained after failed load: %#v", db.Records)
+				t.Fatalf("partial records remained after failed load: %#v", db.Snapshot())
 			}
 		})
+	}
+}
+
+func TestJSONDatabaseRejectsDuplicateLogicalKeysWithoutReplacingLiveState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.json")
+	entries := []testJSONRecord{
+		{Key: "duplicate", StoreID: 1, Value: "first"},
+		{Key: "duplicate", StoreID: 2, Value: "second"},
+	}
+	if err := writeFile(path, jsonDatabaseFile[testJSONRecord]{Version: 1, LastID: 2, Entries: entries}, 0750, 0640); err != nil {
+		t.Fatal(err)
+	}
+	db := New("Test", path, 1, 10, 1<<20, func(v testJSONRecord) string { return v.Key }, testIdentity, nil, nil, nil, nil)
+	db.SetDeferred(true)
+	if err := db.Put(testJSONRecord{Key: "existing", StoreID: 7, Value: "live"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.Load(func(version int) bool { return version == 1 }, func(v testJSONRecord) (testJSONRecord, bool, bool) { return v, true, false })
+	if err == nil || !strings.Contains(err.Error(), "duplicate logical record key") {
+		t.Fatalf("duplicate logical keys returned error %v", err)
+	}
+	if records := db.Snapshot(); len(records) != 1 || records["existing"].Value != "live" {
+		t.Fatalf("failed load replaced live state: %#v", records)
 	}
 }

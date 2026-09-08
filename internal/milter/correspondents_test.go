@@ -147,7 +147,7 @@ func TestCorrespondentStoreRemovesStaleRelationships(t *testing.T) {
 	if store.match("alice@example.net", nil).Known {
 		t.Fatal("stale relationship still matched")
 	}
-	if err := store.flush(); err != nil {
+	if _, err := store.db.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	if entries := readCorrespondentFile(t, path).Entries; len(entries) != 0 {
@@ -198,17 +198,17 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 		}
 	}
 	record("legitimate", 1, false)
-	if len(store.entries) != 0 {
+	if len(store.snapshot()) != 0 {
 		t.Fatal("message without required DKIM created a candidate")
 	}
 	record("legitimate", 1, true)
 	key := store.key("owner@example.com", "news@example.net")
-	if entry := store.entries[key]; entry.LegitimateEmailCount != 1 || store.qualified(entry) {
+	if entry := store.snapshot()[key]; entry.LegitimateEmailCount != 1 || store.qualified(entry) {
 		t.Fatalf("first candidate result = %#v", entry)
 	}
 	record("legitimate", .9, true)
 	record("unwanted", .89, true)
-	if count := store.entries[key].LegitimateEmailCount; count != 1 {
+	if count := store.snapshot()[key].LegitimateEmailCount; count != 1 {
 		t.Fatalf("neutral results changed count to %d", count)
 	}
 	record("legitimate", 1, true)
@@ -217,11 +217,11 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 		t.Fatal("threshold-qualified inbound sender is not known")
 	}
 	record("unwanted", .89, true)
-	if _, exists := store.entries[key]; !exists {
+	if _, exists := store.snapshot()[key]; !exists {
 		t.Fatal("below-threshold unwanted classification deleted inbound-learned entry")
 	}
 	record("unwanted", .9, true)
-	if _, exists := store.entries[key]; exists {
+	if _, exists := store.snapshot()[key]; exists {
 		t.Fatal("unwanted classification did not delete inbound-learned entry")
 	}
 
@@ -229,12 +229,12 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	if err := store.learn("owner@example.com", []string{"news@example.net"}); err != nil {
 		t.Fatal(err)
 	}
-	entry := store.entries[key]
+	entry := store.snapshot()[key]
 	if entry.WhitelistType != whitelistAuthenticatedOutbound || entry.LegitimateEmailCount != 0 || !store.qualified(entry) {
 		t.Fatalf("authenticated outbound promotion = %#v", entry)
 	}
 	record("unwanted", 1, true)
-	if _, exists := store.entries[key]; !exists {
+	if _, exists := store.snapshot()[key]; !exists {
 		t.Fatal("unwanted classification deleted authenticated-outbound entry")
 	}
 }
@@ -257,7 +257,7 @@ func TestCorrespondentCapacityEvictsCandidateBeforeQualifiedEntry(t *testing.T) 
 	if !store.match("trusted@example.net", []string{"owner@example.com"}).Known {
 		t.Fatal("candidate evicted a qualified authenticated-outbound relationship")
 	}
-	if _, exists := store.entries[store.key("owner@example.com", "candidate1@example.net")]; exists {
+	if _, exists := store.snapshot()[store.key("owner@example.com", "candidate1@example.net")]; exists {
 		t.Fatal("old candidate was not evicted first")
 	}
 }
@@ -349,9 +349,9 @@ func TestListAllowlistIsRecipientScopedAndQualifiedOnly(t *testing.T) {
 	if _, err := store.addManual("a@example.net", "alice@example.com"); err != nil {
 		t.Fatal(err)
 	}
-	store.mu.Lock()
-	store.entries[store.key("alice@example.com", "candidate@example.net")] = correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "candidate@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 1}
-	store.mu.Unlock()
+	if err := store.db.Put(correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "candidate@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 1}); err != nil {
+		t.Fatal(err)
+	}
 	alice := store.listAllowlist("alice@example.com")
 	if len(alice) != 1 || alice[0].Correspondent != "a@example.net" {
 		t.Fatalf("Alice allowlist = %#v", alice)
@@ -367,10 +367,12 @@ func TestListAllowlistIsMostRecentlyActiveFirst(t *testing.T) {
 	store := newCorrespondentStore(cfg, nil)
 	older := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	newer := older.Add(time.Hour)
-	store.mu.Lock()
-	store.entries[store.key("alice@example.com", "older@example.net")] = correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "older@example.net", WhitelistType: whitelistManual, LearnedAt: older, LastActivityAt: older}
-	store.entries[store.key("alice@example.com", "newer@example.net")] = correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "newer@example.net", WhitelistType: whitelistManual, LearnedAt: newer, LastActivityAt: newer}
-	store.mu.Unlock()
+	if err := store.db.Put(correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "older@example.net", WhitelistType: whitelistManual, LearnedAt: older, LastActivityAt: older}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Put(correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "newer@example.net", WhitelistType: whitelistManual, LearnedAt: newer, LastActivityAt: newer}); err != nil {
+		t.Fatal(err)
+	}
 	got := store.listAllowlist("alice@example.com")
 	if len(got) != 2 || got[0].Correspondent != "newer@example.net" || got[1].Correspondent != "older@example.net" {
 		t.Fatalf("allowlist order = %#v", got)
@@ -386,7 +388,7 @@ func TestCorrespondentStatisticsCountAffectedRecords(t *testing.T) {
 		MaxEntries:                   10,
 	}
 	store := newCorrespondentStore(cfg, nil)
-	store.enableDeferredPersistence()
+	store.db.SetDeferred(true)
 	if err := store.learn("local@example.com", []string{"one@example.net", "two@example.net"}); err != nil {
 		t.Fatal(err)
 	}

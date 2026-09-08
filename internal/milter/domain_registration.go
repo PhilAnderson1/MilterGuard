@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -74,7 +76,7 @@ func newDomainRegistrationStore(cfg config.DomainRegistrationConfig, log *slog.L
 		},
 		func(a, b domainRegistrationRecord) bool { return a.ExpiresAt.Before(b.ExpiresAt) },
 		func(a, b domainRegistrationRecord) bool { return a.Domain < b.Domain }, log)
-	store.db.Now = func() time.Time { return store.now() }
+	store.db.SetClock(func() time.Time { return store.now() })
 	if !cfg.Enabled {
 		return store
 	}
@@ -191,19 +193,45 @@ func domainRegistrationEvidence(record domainRegistrationRecord) message.DomainR
 
 type rdapClient struct {
 	http     *http.Client
+	resolve  func(context.Context, string) ([]net.IPAddr, error)
 	mu       sync.Mutex
 	services map[string][]string
 }
 
 func newRDAPClient(timeout time.Duration) *rdapClient {
-	client := &http.Client{Timeout: timeout}
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 3 || req.URL.Scheme != "https" {
-			return errors.New("unsafe RDAP redirect")
+	rdap := &rdapClient{resolve: net.DefaultResolver.LookupIPAddr}
+	rdap.http = &http.Client{Timeout: timeout}
+	rdap.http.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return errors.New("too many RDAP redirects")
 		}
-		return nil
+		return rdap.validateRedirect(req.Context(), req.URL)
 	}
-	return &rdapClient{http: client}
+	return rdap
+}
+
+func (c *rdapClient) validateRedirect(ctx context.Context, destination *url.URL) error {
+	if destination == nil || destination.Scheme != "https" || destination.User != nil {
+		return errors.New("unsafe RDAP redirect destination")
+	}
+	hostname := safeDNSHostname(destination.Hostname())
+	if hostname == "" || !strings.Contains(hostname, ".") || net.ParseIP(hostname) != nil {
+		return errors.New("unsafe RDAP redirect hostname")
+	}
+	addresses, err := c.resolve(ctx, hostname)
+	if err != nil {
+		return fmt.Errorf("cannot validate RDAP redirect hostname %q: %w", hostname, err)
+	}
+	if len(addresses) == 0 {
+		return fmt.Errorf("cannot validate RDAP redirect hostname %q: no addresses", hostname)
+	}
+	for _, resolved := range addresses {
+		address, ok := netip.AddrFromSlice(resolved.IP)
+		if !ok || !connectionAddressRoutable(address) {
+			return fmt.Errorf("unsafe RDAP redirect address for %q", hostname)
+		}
+	}
+	return nil
 }
 
 func (c *rdapClient) Lookup(ctx context.Context, domain string) (time.Time, time.Time, error) {

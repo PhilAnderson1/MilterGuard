@@ -206,16 +206,20 @@ func defaults() Config {
 	return Config{
 		Mode: "monitor",
 		Milter: MilterConfig{
-			Socket: "unix:/run/milterguard/milterguard.sock", Timeout: Duration(30 * time.Second),
-			ConnectionDNSTimeout: Duration(2 * time.Second), MaxMessageSize: 10 << 20,
+			Socket: "tcp:127.0.0.1:8895", Timeout: Duration(time.Minute),
+			ConnectionDNSTimeout: Duration(5 * time.Second), MaxMessageSize: 10 << 20,
 		},
 		AI: AIConfig{
-			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter", Timeout: Duration(15 * time.Second),
-			Retries: 1, MaxConcurrent: 8,
-			MaxBodyChars: 50000, VisionMode: "off", VisionMinTextChars: 200,
-			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000, AppName: "MilterGuard",
+			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
+			Model: "qwen/qwen3.6-35b-a3b", DisableThinking: true,
+			PromptFile: "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
+			Retries: 1, MaxConcurrent: 8, MaxBodyChars: 50000,
+			VisionMode: "fallback", VisionMinTextChars: 200,
+			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000,
+			SiteURL: "https://github.com/PhilAnderson1/MilterGuard", AppName: "MilterGuard",
 		},
 		Attachments: AttachmentsConfig{
+			BlockExecutables:  true,
 			BlockedExtensions: []string{"exe", "com", "scr", "pif", "bat", "cmd", "ps1", "vbs", "js", "jse", "msi", "dll", "jar", "lnk", "iso", "7z", "rar"},
 			InspectSignatures: true, InspectArchives: true, MaxAttachmentBytes: 10 << 20,
 			MaxArchiveDepth: 2, MaxArchiveFiles: 100, MaxArchiveUncompressedBytes: 50 << 20,
@@ -223,8 +227,8 @@ func defaults() Config {
 			RejectMessage: "Message rejected because it contains a prohibited executable attachment",
 		},
 		EmailCommands: EmailCommandsConfig{
-			Recipient: "milterguard@example.com", SendReplies: true,
-			SMTPHost: "127.0.0.1:25", MaxMessageBytes: 8192, AliasesFile: "/etc/aliases",
+			Recipient: "milterguard@example.com", VerifySenderViaAliases: true, SendReplies: true,
+			SMTPHost: "127.0.0.1:25", MaxMessageBytes: 8192, AliasesFile: "/etc/aliases", Administrators: []string{},
 		},
 		Persistence: PersistenceConfig{FlushInterval: Duration(time.Minute)},
 		RejectionHistory: RejectionHistoryConfig{
@@ -235,23 +239,32 @@ func defaults() Config {
 			MaxMessages: 10000, MaxTotalBytes: 5 << 30,
 		},
 		Filtering: FilteringConfig{
-			RejectScore: .95, LegitimateLowConfidenceScore: .8,
+			RejectScore: .9, LegitimateLowConfidenceScore: .8, AddEmailHeaders: true,
 			AIErrorAction: "accept", RejectMessage: "Message rejected as suspected spam or fraud",
-			ScanAuthenticated: true, SenderDomainAllowlistRequireDKIM: true,
+			SenderDomainAllowlistFile:        "/etc/milterguard/trusted-sender-domains.txt",
+			SenderDomainAllowlistRequireDKIM: true,
 		},
 		IPReputation: IPReputationConfig{
-			RepeatThreshold: 3, RepeatWindow: Duration(30 * 24 * time.Hour),
+			BlockDuration: Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: Duration(30 * 24 * time.Hour),
 			RepeatBlockDuration: Duration(30 * 24 * time.Hour), RepeatRefreshOnAttempt: true,
 			LegitimatePerStrike: 3, MaxEntries: 10000,
-			StateFile: "/var/lib/milterguard/rejected-ip-state.json",
+			StateFile:   "/var/lib/milterguard/rejected-ip-state.json",
+			IPAllowlist: []string{"127.0.0.0/8", "::1/128"},
+			DomainAllowlist: []string{
+				"google.com", "outlook.com", "yahoo.com", "yahoo.net", "me.com", "icloud.com",
+				"messagingengine.com", "protonmail.ch", "zoho.com", "zohomail.com", "gmx.net", "web.de",
+			},
 		},
 		DomainRegistration: DomainRegistrationConfig{
-			Timeout: Duration(3 * time.Second), MaxEntries: 10000,
+			Enabled: true, Timeout: Duration(3 * time.Second), MaxEntries: 10000,
 			StateFile: "/var/lib/milterguard/domain-registration.json",
 		},
 		Correspondents: CorrespondentsConfig{
-			LegitimateSenderMinMessages: 5, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
-			Scope: "per_sender", RecipientMatch: "all", File: "/var/lib/milterguard/correspondent-allowlist.json",
+			LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true,
+			LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .95, LegitimateSenderRequireDKIM: true,
+			UseAllowlist: true,
+			Scope:        "per_sender", RecipientMatch: "all", File: "/var/lib/milterguard/correspondent-allowlist.json",
+			BypassAI: true, RequireDKIMForBypass: true,
 			TrustedAuthservIDs: []string{MTAHostnameAuthservID}, MaxEntries: 10000,
 			StaleAfter: Duration(365 * 24 * time.Hour), ActivityUpdateInterval: Duration(24 * time.Hour),
 		},
@@ -265,6 +278,9 @@ func (c Config) Validate() error {
 	}
 	if c.Milter.Socket == "" || c.Milter.MaxMessageSize < 1 {
 		return fmt.Errorf("invalid milter settings")
+	}
+	if c.Milter.Timeout.Value() <= 0 {
+		return fmt.Errorf("milter.timeout must be positive")
 	}
 	if c.Milter.ConnectionDNSTimeout.Value() < 0 {
 		return fmt.Errorf("milter.connection_dns_timeout must not be negative")
@@ -465,6 +481,9 @@ func (c Config) Validate() error {
 	}
 	if allowlist.BypassAI && allowlist.RequireDKIMForBypass && len(allowlist.TrustedAuthservIDs) == 0 {
 		return fmt.Errorf("correspondents.require_dkim_for_bypass requires trusted_authserv_ids")
+	}
+	if allowlist.LearnLegitimateSenders && allowlist.LegitimateSenderRequireDKIM && len(allowlist.TrustedAuthservIDs) == 0 {
+		return fmt.Errorf("correspondents.legitimate_sender_require_dkim requires trusted_authserv_ids when legitimate sender learning is enabled")
 	}
 	for _, authservID := range allowlist.TrustedAuthservIDs {
 		if authservID != MTAHostnameAuthservID && !validDomainName(authservID) {

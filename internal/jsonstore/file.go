@@ -2,12 +2,17 @@ package jsonstore
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"syscall"
 )
+
+// ErrIncompatibleFormat identifies persistent JSON that was read successfully
+// but cannot be decoded or accepted as a valid store document.
+var ErrIncompatibleFormat = errors.New("incompatible JSON file format")
 
 // readFile decodes exactly one JSON value from path. Unknown object fields and
 // trailing JSON values are rejected, and the file is never read beyond maxSize.
@@ -27,14 +32,14 @@ func readFile(path string, maxSize int64, destination any) error {
 	decoder := json.NewDecoder(io.LimitReader(file, maxSize+1))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrIncompatibleFormat, err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		if err == nil {
-			return fmt.Errorf("JSON file contains trailing data")
+			return fmt.Errorf("%w: JSON file contains trailing data", ErrIncompatibleFormat)
 		}
-		return err
+		return fmt.Errorf("%w: %v", ErrIncompatibleFormat, err)
 	}
 	return nil
 }

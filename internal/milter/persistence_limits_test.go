@@ -13,7 +13,7 @@ func TestPersistentStoreReadLimitsScaleWithConfiguredEntries(t *testing.T) {
 	}{
 		{name: "correspondents", estimated: estimatedCorrespondentEntryBytes},
 		{name: "IP reputation", estimated: estimatedIPReputationEntryBytes},
-		{name: "rejection history", estimated: estimatedRejectionHistoryEntryBytes},
+		{name: "rejection history", estimated: maximumRejectionHistoryEntryBytes},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

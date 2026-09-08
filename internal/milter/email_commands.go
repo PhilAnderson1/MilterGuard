@@ -231,8 +231,9 @@ func parseEmailCommand(text, authenticatedSender string, admin bool) (emailComma
 		if err != nil {
 			return emailCommand{}, false, fmt.Errorf("IP command requires a valid IPv4 or IPv6 address")
 		}
+		addr = canonicalIP(addr)
 		verb := strings.ToUpper(fields[1])
-		return emailCommand{kind: "ip_" + strings.ToLower(verb), canonical: "IP " + verb + " " + addr.Unmap().String(), ip: addr.Unmap()}, false, nil
+		return emailCommand{kind: "ip_" + strings.ToLower(verb), canonical: "IP " + verb + " " + addr.String(), ip: addr}, false, nil
 	}
 	if len(fields) >= 1 && strings.EqualFold(fields[0], "REJECTIONS") {
 		if len(fields) > 2 {

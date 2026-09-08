@@ -111,3 +111,38 @@ func TestSaveWithRecordIDUsesRecordIDAndDoesNotOverwrite(t *testing.T) {
 		t.Fatalf("saved contents = %q", contents)
 	}
 }
+
+func TestCapacityEvictionUsesModificationTimeAfterReindex(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "2026", "09", "07")
+	if err := os.MkdirAll(directory, 0750); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(directory, "2.eml")
+	newPath := filepath.Join(directory, "10.eml")
+	for _, path := range []string{oldPath, newPath} {
+		if err := os.WriteFile(path, []byte(path), 0640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC)
+	newTime := oldTime.Add(time.Hour)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newPath, newTime, newTime); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := New(Options{Directory: root, Retention: 30 * 24 * time.Hour, MaxMessages: 2, MaxTotalBytes: 1 << 20}, nil)
+	archive.now = func() time.Time { return newTime.Add(time.Hour) }
+	if _, err := archive.SaveWithRecordID([]byte("newest"), 11); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("oldest file was not evicted: %v", err)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("newer file was incorrectly evicted: %v", err)
+	}
+}

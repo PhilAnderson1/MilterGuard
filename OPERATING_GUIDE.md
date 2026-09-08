@@ -220,7 +220,8 @@ sudo postfix reload
 
 The default `monitor` mode analyses email and logs the action MilterGuard
 would recommend, but allows the message through. Leave it in this mode while you
-send representative test messages and observe real mail traffic.
+send representative test messages and observe real mail traffic. Monitor mode
+does not update correspondent allowlists or IP reputation.
 
 Review the journal regularly:
 
@@ -241,7 +242,8 @@ configured confidence threshold and block prohibited executable attachments.
 
 Alternatively, setting `mode: tag` accepts all mail while adding result
 headers. Successfully analysed mail includes its classification and score.
-Attachment policy and IP reputation do not reject mail in tag mode.
+Attachment policy and IP reputation do not reject mail in tag mode, and adaptive
+correspondent and IP reputation data is not changed.
 
 Continue reviewing decisions after enabling enforcement. AI classification is
 not perfectly deterministic, and changes made by an AI provider can alter a
@@ -446,7 +448,10 @@ duration when repeat-offender blocking is disabled.
 
 Command-result emails are submitted to the SMTP server configured by
 `email_commands.smtp_host`, which defaults to `127.0.0.1:25`. Change it when
-MilterGuard and the receiving MTA run on different machines.
+MilterGuard and the receiving MTA run on different machines. This connection
+does not use TLS or SMTP authentication, so a remote SMTP host should be used
+only over a trusted private network or a separately secured connection. Command
+replies can contain allowlist and rejection-history data.
 
 ## Running AI locally
 

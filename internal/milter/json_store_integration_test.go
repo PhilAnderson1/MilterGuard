@@ -25,7 +25,7 @@ func TestFeatureStoresReportFlushStatistics(t *testing.T) {
 	manager.Add(ip.db, contacts.db, rejections.db, domains.db)
 	manager.SetDeferred(true)
 	address := netip.MustParseAddr("192.0.2.10")
-	ip.add(address, "unwanted", 1, connectionDNSResult{})
+	ip.add(address, 1, connectionDNSResult{})
 	ip.lookup(address)
 	if err := contacts.learn("local@example.com", []string{"friend@example.net"}); err != nil {
 		t.Fatal(err)

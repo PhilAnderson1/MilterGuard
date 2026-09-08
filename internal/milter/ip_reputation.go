@@ -17,19 +17,17 @@ import (
 )
 
 const (
-	rejectedIPFileVersion                  = 1
-	estimatedIPReputationEntryBytes  int64 = 1 << 10
-	rejectedIPRefreshPersistInterval       = 5 * time.Minute
-	rejectedIPBlockShort                   = "short"
-	rejectedIPBlockRepeat                  = "repeat"
+	rejectedIPFileVersion                 = 1
+	estimatedIPReputationEntryBytes int64 = 1 << 10
+	rejectedIPBlockShort                  = "short"
+	rejectedIPBlockRepeat                 = "repeat"
 )
 
 type ipBlock struct {
-	expires        time.Time
-	classification string
-	score          float64
-	level          string
-	strikeCount    int
+	expires     time.Time
+	score       float64
+	level       string
+	strikeCount int
 }
 
 type activeIPBlock struct {
@@ -37,6 +35,13 @@ type activeIPBlock struct {
 	Hostname  string
 	Level     string
 	ExpiresAt time.Time
+}
+
+func canonicalIP(addr netip.Addr) netip.Addr {
+	if addr.Is6() {
+		addr = addr.WithZone("")
+	}
+	return addr.Unmap()
 }
 
 func (s *Server) resolveActiveIPHostnames(parent context.Context, entries []activeIPBlock) []activeIPBlock {
@@ -84,20 +89,17 @@ func (s *Server) resolveActiveIPHostnames(parent context.Context, entries []acti
 }
 
 type rejectedIPRecord struct {
-	ID                 uint64      `json:"id"`
-	IP                 string      `json:"ip"`
-	Strikes            []time.Time `json:"strikes,omitempty"`
-	BlockLevel         string      `json:"block_level,omitempty"`
-	BlockedUntil       time.Time   `json:"blocked_until,omitempty"`
-	Score              float64     `json:"score,omitempty"`
-	LegitimateCount    int         `json:"legitimate_count,omitempty"`
-	LastActivityAt     time.Time   `json:"last_activity_at"`
-	PersistedRefreshAt time.Time   `json:"-"`
+	ID              uint64      `json:"id"`
+	IP              string      `json:"ip"`
+	Strikes         []time.Time `json:"strikes,omitempty"`
+	BlockLevel      string      `json:"block_level,omitempty"`
+	BlockedUntil    time.Time   `json:"blocked_until,omitempty"`
+	Score           float64     `json:"score,omitempty"`
+	LegitimateCount int         `json:"legitimate_count,omitempty"`
+	LastActivityAt  time.Time   `json:"last_activity_at"`
 }
 
 type ipReputationStore struct {
-	mu                     *sync.RWMutex
-	entries                map[netip.Addr]rejectedIPRecord
 	db                     *jsonstore.Database[netip.Addr, rejectedIPRecord]
 	shortDuration          time.Duration
 	repeatThreshold        int
@@ -124,7 +126,10 @@ func newIPReputationStore(reputation config.IPReputationConfig, log *slog.Logger
 	}
 	cache.db = jsonstore.New("IP", reputation.StateFile, rejectedIPFileVersion, reputation.MaxEntries,
 		persistentStoreReadLimit(reputation.MaxEntries, estimatedIPReputationEntryBytes),
-		func(record rejectedIPRecord) netip.Addr { addr, _ := netip.ParseAddr(record.IP); return addr.Unmap() },
+		func(record rejectedIPRecord) netip.Addr {
+			addr, _ := netip.ParseAddr(record.IP)
+			return canonicalIP(addr)
+		},
 		jsonstore.Identity[rejectedIPRecord]{
 			Get: func(record rejectedIPRecord) uint64 { return record.ID },
 			Set: func(record rejectedIPRecord, id uint64) rejectedIPRecord { record.ID = id; return record },
@@ -140,10 +145,11 @@ func newIPReputationStore(reputation config.IPReputationConfig, log *slog.Logger
 				return 0
 			}
 			ar, br := rank(a), rank(b)
-			return ar < br || (ar == br && a.LastActivityAt.Before(b.LastActivityAt))
+			return ar < br || (ar == br && (a.LastActivityAt.Before(b.LastActivityAt) ||
+				(a.LastActivityAt.Equal(b.LastActivityAt) && a.IP < b.IP)))
 		}, func(a, b rejectedIPRecord) bool { return a.IP < b.IP }, log)
-	cache.db.Now = func() time.Time { return cache.now() }
-	cache.db.Maintain = func(record rejectedIPRecord, now time.Time) (rejectedIPRecord, bool, bool) {
+	cache.db.SetClock(func() time.Time { return cache.now() })
+	cache.db.SetMaintenance(func(record rejectedIPRecord, now time.Time) (rejectedIPRecord, bool, bool) {
 		originalStrikeCount, originalLevel, originalUntil := len(record.Strikes), record.BlockLevel, record.BlockedUntil
 		record.Strikes = cache.pruneStrikes(record.Strikes, now)
 		if record.BlockLevel == rejectedIPBlockRepeat && !record.BlockedUntil.After(now) {
@@ -154,15 +160,14 @@ func newIPReputationStore(reputation config.IPReputationConfig, log *slog.Logger
 		}
 		changed := originalStrikeCount != len(record.Strikes) || originalLevel != record.BlockLevel || !originalUntil.Equal(record.BlockedUntil)
 		return record, record.BlockLevel != "" || len(record.Strikes) > 0, changed
-	}
-	cache.db.OnEvict = func(addr netip.Addr, _ rejectedIPRecord) {
-		cache.debug("sending IP removed from rejection reputation", "remote_ip", addr.String(), "reason", "capacity", "cache_size", len(cache.db.Records))
-	}
-	cache.db.CloneValue = func(record rejectedIPRecord) rejectedIPRecord {
+	})
+	cache.db.SetEvictionHook(func(addr netip.Addr, _ rejectedIPRecord, size int) {
+		cache.debug("sending IP removed from rejection reputation", "remote_ip", addr.String(), "reason", "capacity", "cache_size", size)
+	})
+	cache.db.SetClone(func(record rejectedIPRecord) rejectedIPRecord {
 		record.Strikes = append([]time.Time(nil), record.Strikes...)
 		return record
-	}
-	cache.mu, cache.entries = &cache.db.Mu, cache.db.Records
+	})
 	for _, entry := range reputation.IPAllowlist {
 		if prefix, err := netip.ParsePrefix(entry); err == nil {
 			cache.allowlist = append(cache.allowlist, prefix)
@@ -173,7 +178,7 @@ func newIPReputationStore(reputation config.IPReputationConfig, log *slog.Logger
 			if addr.Is4() || addr.Is4In6() {
 				bits = 32
 			}
-			cache.allowlist = append(cache.allowlist, netip.PrefixFrom(addr.Unmap(), bits))
+			cache.allowlist = append(cache.allowlist, netip.PrefixFrom(canonicalIP(addr), bits))
 		}
 	}
 	for _, domain := range reputation.DomainAllowlist {
@@ -195,7 +200,7 @@ func (c *ipReputationStore) allowed(addr netip.Addr) (netip.Prefix, bool) {
 	if !addr.IsValid() {
 		return netip.Prefix{}, true
 	}
-	addr = addr.Unmap()
+	addr = canonicalIP(addr)
 	for _, prefix := range c.allowlist {
 		if prefix.Contains(addr) {
 			return prefix, true
@@ -204,11 +209,11 @@ func (c *ipReputationStore) allowed(addr netip.Addr) (netip.Prefix, bool) {
 	return netip.Prefix{}, false
 }
 
-func (c *ipReputationStore) add(addr netip.Addr, classification string, score float64, dns connectionDNSResult) bool {
+func (c *ipReputationStore) add(addr netip.Addr, score float64, dns connectionDNSResult) bool {
 	if !c.enabled() || !addr.IsValid() {
 		return false
 	}
-	addr = addr.Unmap()
+	addr = canonicalIP(addr)
 	if prefix, ok := c.allowed(addr); ok {
 		c.debug("sending IP excluded from rejection reputation", "remote_ip", addr.String(), "matched_prefix", prefix.String(), "reason", "ip_allowlist", "cache_size", c.size())
 		return false
@@ -218,37 +223,36 @@ func (c *ipReputationStore) add(addr netip.Addr, classification string, score fl
 		return false
 	}
 	now := c.now().UTC()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	record, existed := c.entries[addr]
-	if existed {
-		c.db.MarkReadsLocked(1)
-	}
-	if !existed && len(c.entries) >= c.maxSize {
-		c.cleanupLocked(now)
-	}
-	if !existed && len(c.entries) >= c.maxSize {
-		c.evictOldestLocked()
-	}
-	record.IP = addr.String()
-	record.Strikes = c.pruneStrikes(record.Strikes, now)
-	if c.repeatThreshold > 0 {
-		record.Strikes = append(record.Strikes, now)
-		if len(record.Strikes) > c.repeatThreshold {
-			record.Strikes = record.Strikes[len(record.Strikes)-c.repeatThreshold:]
+	var record rejectedIPRecord
+	err := c.db.Update(func(records map[netip.Addr]rejectedIPRecord) (uint64, uint64, uint64, bool) {
+		var existed bool
+		record, existed = records[addr]
+		record.IP = addr.String()
+		record.Strikes = c.pruneStrikes(record.Strikes, now)
+		if c.repeatThreshold > 0 {
+			record.Strikes = append(record.Strikes, now)
+			if len(record.Strikes) > c.repeatThreshold {
+				record.Strikes = record.Strikes[len(record.Strikes)-c.repeatThreshold:]
+			}
 		}
+		record.Score, record.LastActivityAt = score, now
+		record.LegitimateCount = 0
+		if c.repeatThreshold > 0 && len(record.Strikes) >= c.repeatThreshold {
+			record.BlockLevel, record.BlockedUntil = rejectedIPBlockRepeat, now.Add(c.repeatDuration)
+		} else if c.shortDuration > 0 {
+			record.BlockLevel, record.BlockedUntil = rejectedIPBlockShort, now.Add(c.shortDuration)
+		}
+		records[addr] = record
+		if existed {
+			return 1, 1, 0, true
+		}
+		return 0, 1, 0, true
+	})
+	if err != nil {
+		c.logError("cannot save rejected IP state", err)
+		return false
 	}
-	record.Score, record.LastActivityAt = score, now
-	record.LegitimateCount = 0
-	if c.repeatThreshold > 0 && len(record.Strikes) >= c.repeatThreshold {
-		record.BlockLevel, record.BlockedUntil = rejectedIPBlockRepeat, now.Add(c.repeatDuration)
-	} else if c.shortDuration > 0 {
-		record.BlockLevel, record.BlockedUntil = rejectedIPBlockShort, now.Add(c.shortDuration)
-	}
-	record.PersistedRefreshAt = now
-	c.entries[addr] = record
-	c.saveOrLogLocked(1, 0)
-	c.debug("sending IP reputation updated", "remote_ip", addr.String(), "classification", classification, "score", score, "block_level", record.BlockLevel, "strike_count", len(record.Strikes), "block_expires_at", record.BlockedUntil, "cache_size", len(c.entries))
+	c.debug("sending IP reputation updated", "remote_ip", addr.String(), "score", score, "block_level", record.BlockLevel, "strike_count", len(record.Strikes), "block_expires_at", record.BlockedUntil, "cache_size", c.size())
 	return record.BlockLevel != ""
 }
 
@@ -258,46 +262,52 @@ func (c *ipReputationStore) recordLegitimate(addr netip.Addr) {
 	if !c.enabled() || c.legitimatePerStrike <= 0 || !addr.IsValid() {
 		return
 	}
-	addr = addr.Unmap()
+	addr = canonicalIP(addr)
 	now := c.now().UTC()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	record, ok := c.entries[addr]
-	if !ok {
-		return
-	}
-	c.db.MarkReadsLocked(1)
-	record.Strikes = c.pruneStrikes(record.Strikes, now)
-	if len(record.Strikes) == 0 {
-		record.LegitimateCount = 0
-		if record.BlockLevel == "" || !record.BlockedUntil.After(now) {
-			delete(c.entries, addr)
-			c.debug("sending IP removed from rejection reputation", "remote_ip", addr.String(), "reason", "no_strikes", "cache_size", len(c.entries))
-			c.saveOrLogLocked(0, 1)
-			return
-		}
-		c.entries[addr] = record
-		return
-	}
-	record.LegitimateCount++
-	record.LastActivityAt = now
+	removed := false
 	strikeRemoved := false
-	if record.LegitimateCount >= c.legitimatePerStrike {
-		record.Strikes = record.Strikes[1:]
-		record.LegitimateCount = 0
-		strikeRemoved = true
+	var record rejectedIPRecord
+	err := c.db.Update(func(records map[netip.Addr]rejectedIPRecord) (uint64, uint64, uint64, bool) {
+		var ok bool
+		record, ok = records[addr]
+		if !ok {
+			return 0, 0, 0, false
+		}
+		record.Strikes = c.pruneStrikes(record.Strikes, now)
+		if len(record.Strikes) == 0 {
+			record.LegitimateCount = 0
+			if record.BlockLevel == "" || !record.BlockedUntil.After(now) {
+				delete(records, addr)
+				removed = true
+				return 1, 0, 1, true
+			}
+			records[addr] = record
+			return 1, 1, 0, true
+		}
+		record.LegitimateCount++
+		record.LastActivityAt = now
+		if record.LegitimateCount >= c.legitimatePerStrike {
+			record.Strikes = record.Strikes[1:]
+			record.LegitimateCount = 0
+			strikeRemoved = true
+		}
+		if len(record.Strikes) == 0 && record.BlockLevel == "" {
+			delete(records, addr)
+			removed = true
+			return 1, 0, 1, true
+		}
+		records[addr] = record
+		return 1, 1, 0, true
+	})
+	if err != nil {
+		c.logError("cannot save rejected IP state", err)
+		return
 	}
-	if len(record.Strikes) == 0 && record.BlockLevel == "" {
-		delete(c.entries, addr)
-	} else {
-		c.entries[addr] = record
+	if removed {
+		c.debug("sending IP removed from rejection reputation", "remote_ip", addr.String(), "reason", "no_strikes", "cache_size", c.size())
+		return
 	}
-	if len(record.Strikes) == 0 && record.BlockLevel == "" {
-		c.saveOrLogLocked(0, 1)
-	} else {
-		c.saveOrLogLocked(1, 0)
-	}
-	c.debug("sending IP legitimate evidence recorded", "remote_ip", addr.String(), "legitimate_count", record.LegitimateCount, "strike_removed", strikeRemoved, "strike_count", len(record.Strikes), "block_level", record.BlockLevel, "cache_size", len(c.entries))
+	c.debug("sending IP legitimate evidence recorded", "remote_ip", addr.String(), "legitimate_count", record.LegitimateCount, "strike_removed", strikeRemoved, "strike_count", len(record.Strikes), "block_level", record.BlockLevel, "cache_size", c.size())
 }
 
 func (c *ipReputationStore) lookup(addr netip.Addr) (ipBlock, bool) {
@@ -307,61 +317,70 @@ func (c *ipReputationStore) lookup(addr netip.Addr) (ipBlock, bool) {
 	if _, allowed := c.allowed(addr); allowed {
 		return ipBlock{}, false
 	}
-	addr = addr.Unmap()
+	addr = canonicalIP(addr)
 	now := c.now().UTC()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	record, ok := c.entries[addr]
-	if !ok {
+	var block ipBlock
+	found := false
+	removedReason := ""
+	expiredStrikeCount := 0
+	err := c.db.Update(func(records map[netip.Addr]rejectedIPRecord) (uint64, uint64, uint64, bool) {
+		record, ok := records[addr]
+		if !ok {
+			return 0, 0, 0, false
+		}
+		record.Strikes = c.pruneStrikes(record.Strikes, now)
+		if record.BlockLevel != "" && !record.BlockedUntil.After(now) {
+			if record.BlockLevel == rejectedIPBlockRepeat {
+				delete(records, addr)
+				removedReason = "repeat_block_expired"
+				return 1, 0, 1, true
+			}
+			record.BlockLevel, record.BlockedUntil = "", time.Time{}
+			if len(record.Strikes) == 0 {
+				delete(records, addr)
+				removedReason = "short_block_expired"
+				return 1, 0, 1, true
+			}
+			expiredStrikeCount = len(record.Strikes)
+			records[addr] = record
+			return 1, 1, 0, true
+		}
+		if record.BlockLevel == "" {
+			if len(record.Strikes) == 0 {
+				delete(records, addr)
+				return 1, 0, 1, true
+			}
+			records[addr] = record
+			return 1, 0, 0, false
+		}
+		writes := uint64(0)
+		changed := false
+		if record.BlockLevel == rejectedIPBlockRepeat && c.repeatRefreshOnAttempt {
+			record.BlockedUntil, record.LastActivityAt = now.Add(c.repeatDuration), now
+			records[addr] = record
+			writes, changed = 1, true
+		} else {
+			records[addr] = record
+		}
+		block = ipBlock{expires: record.BlockedUntil, score: record.Score, level: record.BlockLevel, strikeCount: len(record.Strikes)}
+		found = true
+		return 1, writes, 0, changed
+	})
+	if err != nil {
+		c.logError("cannot save rejected IP state", err)
 		return ipBlock{}, false
 	}
-	c.db.MarkReadsLocked(1)
-	record.Strikes = c.pruneStrikes(record.Strikes, now)
-	if record.BlockLevel != "" && !record.BlockedUntil.After(now) {
-		if record.BlockLevel == rejectedIPBlockRepeat {
-			delete(c.entries, addr)
-			c.debug("sending IP removed from rejection reputation", "remote_ip", addr.String(), "reason", "repeat_block_expired", "cache_size", len(c.entries))
-			c.saveOrLogLocked(0, 1)
-			return ipBlock{}, false
-		}
-		record.BlockLevel, record.BlockedUntil = "", time.Time{}
-		if len(record.Strikes) == 0 {
-			delete(c.entries, addr)
+	if removedReason != "" {
+		if removedReason == "short_block_expired" {
+			c.debug("sending IP short block expired", "remote_ip", addr.String(), "strike_count", expiredStrikeCount, "cache_size", c.size())
 		} else {
-			c.entries[addr] = record
+			c.debug("sending IP removed from rejection reputation", "remote_ip", addr.String(), "reason", removedReason, "cache_size", c.size())
 		}
-		c.debug("sending IP short block expired", "remote_ip", addr.String(), "strike_count", len(record.Strikes), "cache_size", len(c.entries))
-		if len(record.Strikes) == 0 {
-			c.saveOrLogLocked(0, 1)
-		} else {
-			c.saveOrLogLocked(1, 0)
-		}
-		return ipBlock{}, false
 	}
-	if record.BlockLevel == "" {
-		if len(record.Strikes) == 0 {
-			delete(c.entries, addr)
-			c.saveOrLogLocked(0, 1)
-		} else {
-			c.entries[addr] = record
-		}
-		return ipBlock{}, false
+	if found && block.level == rejectedIPBlockRepeat && c.repeatRefreshOnAttempt {
+		c.debug("sending IP repeat block expiry refreshed", "remote_ip", addr.String(), "block_level", block.level, "strike_count", block.strikeCount, "block_expires_at", block.expires, "cache_size", c.size())
 	}
-	if record.BlockLevel == rejectedIPBlockRepeat && c.repeatRefreshOnAttempt {
-		record.BlockedUntil, record.LastActivityAt = now.Add(c.repeatDuration), now
-		persist := now.Sub(record.PersistedRefreshAt) >= rejectedIPRefreshPersistInterval
-		if persist {
-			record.PersistedRefreshAt = now
-		}
-		c.entries[addr] = record
-		c.debug("sending IP repeat block expiry refreshed", "remote_ip", addr.String(), "block_level", record.BlockLevel, "strike_count", len(record.Strikes), "block_expires_at", record.BlockedUntil, "cache_size", len(c.entries))
-		if persist {
-			c.saveOrLogLocked(1, 0)
-		}
-	} else {
-		c.entries[addr] = record
-	}
-	return ipBlock{expires: record.BlockedUntil, classification: "unwanted", score: record.Score, level: record.BlockLevel, strikeCount: len(record.Strikes)}, true
+	return block, found
 }
 
 func (c *ipReputationStore) pruneStrikes(strikes []time.Time, now time.Time) []time.Time {
@@ -376,14 +395,6 @@ func (c *ipReputationStore) pruneStrikes(strikes []time.Time, now time.Time) []t
 		}
 	}
 	return kept
-}
-
-func (c *ipReputationStore) cleanupLocked(now time.Time) bool {
-	return c.db.RemoveExpiredLocked(now) > 0
-}
-
-func (c *ipReputationStore) evictOldestLocked() {
-	c.db.EvictOneLocked()
 }
 
 func (c *ipReputationStore) domainAllowed(dns connectionDNSResult) (string, string, bool) {
@@ -418,16 +429,16 @@ func (c *ipReputationStore) debug(msg string, attrs ...any) {
 }
 
 func (c *ipReputationStore) size() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.entries)
+	return c.db.Size()
 }
+
+func (c *ipReputationStore) snapshot() map[netip.Addr]rejectedIPRecord { return c.db.Snapshot() }
 
 func (c *ipReputationStore) manualAdd(addr netip.Addr) (activeIPBlock, error) {
 	if !c.enabled() || !addr.IsValid() {
 		return activeIPBlock{}, fmt.Errorf("IP reputation blocking is disabled or the address is invalid")
 	}
-	addr = addr.Unmap()
+	addr = canonicalIP(addr)
 	if prefix, allowed := c.allowed(addr); allowed {
 		return activeIPBlock{}, fmt.Errorf("IP address is protected by allowlist %s", prefix)
 	}
@@ -439,26 +450,23 @@ func (c *ipReputationStore) manualAdd(addr netip.Addr) (activeIPBlock, error) {
 	if duration <= 0 {
 		return activeIPBlock{}, fmt.Errorf("no IP block duration is configured")
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	before := cloneRejectedIPEntries(c.entries)
-	if _, exists := c.entries[addr]; !exists && len(c.entries) >= c.maxSize {
-		c.cleanupLocked(now)
-	}
-	if _, exists := c.entries[addr]; !exists && len(c.entries) >= c.maxSize {
-		c.evictOldestLocked()
-	}
-	record := c.entries[addr]
-	record.IP, record.BlockLevel = addr.String(), level
-	record.BlockedUntil, record.LastActivityAt = now.Add(duration), now
-	record.Score, record.LegitimateCount = 1, 0
-	record.PersistedRefreshAt = now
-	c.entries[addr] = record
-	if err := c.saveLocked(1, 0); err != nil {
-		c.db.ReplaceLocked(before)
+	var record rejectedIPRecord
+	err := c.db.Update(func(records map[netip.Addr]rejectedIPRecord) (uint64, uint64, uint64, bool) {
+		_, existed := records[addr]
+		record = records[addr]
+		record.IP, record.BlockLevel = addr.String(), level
+		record.BlockedUntil, record.LastActivityAt = now.Add(duration), now
+		record.Score, record.LegitimateCount = 1, 0
+		records[addr] = record
+		if existed {
+			return 1, 1, 0, true
+		}
+		return 0, 1, 0, true
+	})
+	if err != nil {
 		return activeIPBlock{}, err
 	}
-	c.debug("sending IP manually blocked", "remote_ip", addr.String(), "block_level", level, "block_expires_at", record.BlockedUntil, "cache_size", len(c.entries))
+	c.debug("sending IP manually blocked", "remote_ip", addr.String(), "block_level", level, "block_expires_at", record.BlockedUntil, "cache_size", c.size())
 	return activeIPBlock{IP: addr.String(), Level: level, ExpiresAt: record.BlockedUntil}, nil
 }
 
@@ -466,20 +474,12 @@ func (c *ipReputationStore) manualDelete(addr netip.Addr) (bool, error) {
 	if c == nil || !addr.IsValid() {
 		return false, fmt.Errorf("invalid IP address")
 	}
-	addr = addr.Unmap()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	before := cloneRejectedIPEntries(c.entries)
-	if _, found := c.entries[addr]; !found {
-		return false, nil
+	addr = canonicalIP(addr)
+	deleted, err := c.db.Delete(addr)
+	if deleted && err == nil {
+		c.debug("sending IP manually removed from rejection reputation", "remote_ip", addr.String(), "cache_size", c.size())
 	}
-	delete(c.entries, addr)
-	if err := c.saveLocked(0, 1); err != nil {
-		c.db.ReplaceLocked(before)
-		return false, err
-	}
-	c.debug("sending IP manually removed from rejection reputation", "remote_ip", addr.String(), "cache_size", len(c.entries))
-	return true, nil
+	return deleted, err
 }
 
 func (c *ipReputationStore) listActive() []activeIPBlock {
@@ -487,30 +487,19 @@ func (c *ipReputationStore) listActive() []activeIPBlock {
 		return nil
 	}
 	now := c.now().UTC()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.cleanupLocked(now)
-	result := make([]activeIPBlock, 0)
-	for _, record := range c.entries {
-		if (record.BlockLevel == rejectedIPBlockShort || record.BlockLevel == rejectedIPBlockRepeat) && record.BlockedUntil.After(now) {
-			result = append(result, activeIPBlock{IP: record.IP, Level: record.BlockLevel, ExpiresAt: record.BlockedUntil})
-		}
+	records := c.db.View(func(record rejectedIPRecord) bool {
+		return (record.BlockLevel == rejectedIPBlockShort || record.BlockLevel == rejectedIPBlockRepeat) && record.BlockedUntil.After(now)
+	})
+	result := make([]activeIPBlock, 0, len(records))
+	for _, record := range records {
+		result = append(result, activeIPBlock{IP: record.IP, Level: record.BlockLevel, ExpiresAt: record.BlockedUntil})
 	}
-	c.db.MarkReadsLocked(uint64(len(result)))
 	sort.Slice(result, func(i, j int) bool { return result[i].IP < result[j].IP })
-	if c.db.Dirty && !c.db.DeferWrites {
-		if _, err := c.db.FlushLocked("write"); err != nil && c.log != nil {
-			c.log.Error("cannot save rejected IP state", "file", c.stateFile, "error", err)
-		}
-	}
 	return result
 }
 
-func cloneRejectedIPEntries(entries map[netip.Addr]rejectedIPRecord) map[netip.Addr]rejectedIPRecord {
-	clone := make(map[netip.Addr]rejectedIPRecord, len(entries))
-	for addr, record := range entries {
-		record.Strikes = append([]time.Time(nil), record.Strikes...)
-		clone[addr] = record
+func (c *ipReputationStore) logError(message string, err error) {
+	if c.log != nil {
+		c.log.Error(message, "file", c.stateFile, "error", err)
 	}
-	return clone
 }

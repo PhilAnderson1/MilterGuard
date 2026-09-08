@@ -24,24 +24,23 @@ func (store *correspondentStore) addManual(sender, recipient string) (bool, erro
 		return false, fmt.Errorf("sender and recipient must be valid email addresses")
 	}
 	now := store.now().UTC()
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	before := cloneCorrespondentEntries(store.entries)
-	store.removeStaleLocked(now)
 	key := store.key(recipient, sender)
-	entry, existed := store.entries[key]
-	if !existed {
-		for len(store.entries) >= store.cfg.MaxEntries {
-			store.evictOldestLocked()
+	existed := false
+	err := store.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
+		entry, found := records[key]
+		existed = found
+		if found {
+			reads++
+		} else {
+			entry = correspondentEntry{LocalAddress: recipient, Correspondent: sender, LearnedAt: now}
 		}
-		entry = correspondentEntry{LocalAddress: recipient, Correspondent: sender, LearnedAt: now}
-	}
-	entry.LastActivityAt = now
-	entry.WhitelistType = whitelistManual
-	entry.LegitimateEmailCount = 0
-	store.entries[key] = entry
-	if err := store.saveLocked(1, 0); err != nil {
-		store.db.ReplaceLocked(before)
+		entry.LastActivityAt = now
+		entry.WhitelistType = whitelistManual
+		entry.LegitimateEmailCount = 0
+		records[key] = entry
+		return reads, 1, 0, true
+	})
+	if err != nil {
 		return false, err
 	}
 	return !existed, nil
@@ -69,32 +68,20 @@ func (store *correspondentStore) deleteManual(sender, recipient string) (int, er
 			return 0, fmt.Errorf("recipient must be a valid email address or *")
 		}
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	before := cloneCorrespondentEntries(store.entries)
-	staleRemoved := store.removeStaleLocked(store.now().UTC())
 	removed := 0
-	for key, entry := range store.entries {
-		if entry.Correspondent == sender && (allRecipients || entry.LocalAddress == recipient) {
-			delete(store.entries, key)
-			removed++
+	err := store.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
+		for key, entry := range records {
+			if entry.Correspondent == sender && (allRecipients || entry.LocalAddress == recipient) {
+				delete(records, key)
+				removed++
+			}
 		}
-	}
-	if removed > 0 || staleRemoved > 0 {
-		if err := store.saveLocked(0, removed); err != nil {
-			store.db.ReplaceLocked(before)
-			return 0, err
-		}
+		return 0, 0, uint64(removed), removed > 0
+	})
+	if err != nil {
+		return 0, err
 	}
 	return removed, nil
-}
-
-func cloneCorrespondentEntries(entries map[string]correspondentEntry) map[string]correspondentEntry {
-	clone := make(map[string]correspondentEntry, len(entries))
-	for key, entry := range entries {
-		clone[key] = entry
-	}
-	return clone
 }
 
 func openCorrespondentStoreForManagement(cfg config.CorrespondentsConfig) (*correspondentStore, error) {

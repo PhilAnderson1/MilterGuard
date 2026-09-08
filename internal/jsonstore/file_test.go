@@ -1,6 +1,7 @@
 package jsonstore
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,6 +51,10 @@ func TestReadRejectsUnknownTrailingAndOversizedData(t *testing.T) {
 			var document testDocument
 			if err := readFile(path, test.max, &document); err == nil {
 				t.Fatal("invalid JSON file was accepted")
+			} else if test.name != "oversized" && !errors.Is(err, ErrIncompatibleFormat) {
+				t.Fatalf("invalid JSON error = %v, want incompatible format", err)
+			} else if test.name == "oversized" && errors.Is(err, ErrIncompatibleFormat) {
+				t.Fatalf("oversized-file error was misclassified as incompatible format: %v", err)
 			}
 		})
 	}

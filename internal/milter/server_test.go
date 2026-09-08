@@ -566,6 +566,49 @@ func TestRejectedIPDomainAllowlistReusesConnectionDNS(t *testing.T) {
 	}
 }
 
+func TestForwardConfirmedDomainAllowlistBypassesExistingIPBlock(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
+	server, conn, done := testServer(t, analyzer)
+	server.cfg.Milter.ConnectionDNSTimeout = config.Duration(time.Second)
+	server.cfg.IPReputation.BlockDuration = config.Duration(time.Hour)
+	server.cfg.IPReputation.MaxEntries = 100
+	server.cfg.IPReputation.DomainAllowlist = []string{"google.com"}
+	server.ipReputation = newIPReputationStore(server.cfg.IPReputation, server.log)
+	addr := netip.MustParseAddr("8.8.8.8")
+	if !server.ipReputation.add(addr, 1, connectionDNSResult{status: message.ReverseDNSLookupFailed}) {
+		t.Fatal("test IP was not initially blocked")
+	}
+	resolver := &connectionTestResolver{
+		ptr:        []string{"smtp.google.com."},
+		forward:    map[string][]net.IPAddr{"smtp.google.com": {{IP: net.ParseIP(addr.String())}}},
+		forwardErr: map[string]error{},
+	}
+	server.resolver = resolver
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', addr.String()),
+		[]byte{commandMail},
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("legitimate message")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if got := analyzer.calls.Load(); got != 1 {
+		t.Fatalf("AI analysis calls = %d, want 1 after cached block bypass", got)
+	}
+	if resolver.ptrCalls.Load() != 1 || resolver.forwardCalls.Load() != 1 {
+		t.Fatalf("DNS calls = PTR %d, forward %d; want one each", resolver.ptrCalls.Load(), resolver.forwardCalls.Load())
+	}
+	_, retained := server.ipReputation.snapshot()[addr]
+	if !retained {
+		t.Fatal("domain allowlist bypass unexpectedly deleted persisted IP reputation")
+	}
+}
+
 func TestCommandResponseRequirements(t *testing.T) {
 	for _, cmd := range []byte{commandConnect, commandHelo, commandMail, commandRecipient, commandData, commandEndHeaders, commandUnknown} {
 		t.Run(string(cmd), func(t *testing.T) {
@@ -623,6 +666,7 @@ func TestParseConnectIP(t *testing.T) {
 	}{
 		{family: '4', address: "192.0.2.25", want: "192.0.2.25"},
 		{family: '6', address: "2001:db8::25", want: "2001:db8::25"},
+		{family: '6', address: "2001:db8::25%untrusted", want: "2001:db8::25"},
 	}
 	for _, test := range tests {
 		frame := connectFrame(test.family, test.address)
@@ -1035,10 +1079,12 @@ func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
 		name           string
 		authentication string
 		requireDKIM    bool
+		allowedDomain  string
 		wantRefresh    bool
 	}{
 		{name: "unauthenticated bypass is not refreshed", requireDKIM: false},
 		{name: "trusted DKIM bypass is refreshed", authentication: "nl.invades.net; dkim=pass header.d=example.com", requireDKIM: true, wantRefresh: true},
+		{name: "trusted sender-domain bypass refreshes known correspondent", authentication: "nl.invades.net; dkim=pass header.d=example.com", requireDKIM: true, allowedDomain: "example.com", wantRefresh: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
@@ -1050,6 +1096,10 @@ func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
 			}
 			server.cfg.Correspondents = cfg
 			server.correspondents = newCorrespondentStore(cfg, server.log)
+			if test.allowedDomain != "" {
+				server.cfg.Filtering.SenderDomainAllowlist = []string{test.allowedDomain}
+				server.cfg.Filtering.SenderDomainAllowlistRequireDKIM = true
+			}
 			learnedAt := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 			server.correspondents.now = func() time.Time { return learnedAt }
 			if err := server.correspondents.learn("philip@invades.net", []string{"alice@example.com"}); err != nil {
@@ -1072,9 +1122,7 @@ func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
 			expectFrame(t, conn, string([]byte{responseAccept}))
 			_ = conn.Close()
 			<-done
-			server.correspondents.mu.RLock()
-			activity := server.correspondents.entries[server.correspondents.key("philip@invades.net", "alice@example.com")].LastActivityAt
-			server.correspondents.mu.RUnlock()
+			activity := server.correspondents.snapshot()[server.correspondents.key("philip@invades.net", "alice@example.com")].LastActivityAt
 			want := learnedAt
 			if test.wantRefresh {
 				want = activityAt
@@ -1120,6 +1168,89 @@ func TestAIResultLearnsInboundSender(t *testing.T) {
 	_ = conn.Close()
 	if match := server.correspondents.match("news@example.com", []string{"philip@invades.net"}); !match.Known {
 		t.Fatal("qualifying AI result did not create a known correspondent")
+	}
+}
+
+func TestNonEnforceModesDoNotLearnFromAIResultsOrDecayIPReputation(t *testing.T) {
+	for _, mode := range []string{"monitor", "tag"} {
+		t.Run(mode, func(t *testing.T) {
+			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
+			server, conn, done := testServer(t, analyzer)
+			server.cfg.Mode = mode
+			server.cfg.Correspondents = config.CorrespondentsConfig{
+				LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+				LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
+				File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
+			}
+			server.correspondents = newCorrespondentStore(server.cfg.Correspondents, server.log)
+			server.cfg.IPReputation = config.IPReputationConfig{
+				BlockDuration: config.Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: config.Duration(24 * time.Hour), LegitimatePerStrike: 1,
+				MaxEntries: 100, StateFile: filepath.Join(t.TempDir(), "ip.json"),
+			}
+			server.ipReputation = newIPReputationStore(server.cfg.IPReputation, server.log)
+			addr := netip.MustParseAddr("192.0.2.90")
+			server.ipReputation.add(addr, 1, connectionDNSResult{})
+
+			negotiate(t, conn)
+			sendContinueFrames(t, conn,
+				connectFrame('4', addr.String()),
+				envelopeFrame(commandMail, "news@example.com"),
+				envelopeFrame(commandRecipient, "philip@invades.net"),
+				headerFrame("From", "News <news@example.com>"),
+				headerFrame("Authentication-Results", "nl.invades.net; dkim=pass header.d=example.com"),
+				[]byte{commandEndHeaders},
+			)
+			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+				t.Fatal(err)
+			}
+			expectFrame(t, conn, string([]byte{responseAccept}))
+			_ = conn.Close()
+			<-done
+
+			if match := server.correspondents.match("news@example.com", []string{"philip@invades.net"}); match.Known {
+				t.Fatalf("%s mode learned an inbound correspondent", mode)
+			}
+			strikes := len(server.ipReputation.snapshot()[addr].Strikes)
+			if strikes != 1 {
+				t.Fatalf("%s mode changed IP strike count to %d", mode, strikes)
+			}
+		})
+	}
+}
+
+func TestNonEnforceModesDoNotLearnAuthenticatedRecipients(t *testing.T) {
+	for _, mode := range []string{"monitor", "tag"} {
+		t.Run(mode, func(t *testing.T) {
+			server, conn, done := testServer(t, &countingAnalyzer{})
+			server.cfg.Mode = mode
+			server.cfg.Filtering.ScanAuthenticated = false
+			server.cfg.Correspondents = config.CorrespondentsConfig{
+				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+				File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100,
+			}
+			server.correspondents = newCorrespondentStore(server.cfg.Correspondents, server.log)
+
+			negotiate(t, conn)
+			sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
+			if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip")); err != nil {
+				t.Fatal(err)
+			}
+			expectNoFrame(t, conn)
+			sendContinueFrames(t, conn,
+				envelopeFrame(commandMail, "philip@invades.net"),
+				envelopeFrame(commandRecipient, "alice@example.com"),
+				[]byte{commandEndHeaders},
+			)
+			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+				t.Fatal(err)
+			}
+			expectFrame(t, conn, string([]byte{responseAccept}))
+			_ = conn.Close()
+			<-done
+			if match := server.correspondents.match("alice@example.com", []string{"philip@invades.net"}); match.Known {
+				t.Fatalf("%s mode learned an authenticated recipient", mode)
+			}
+		})
 	}
 }
 

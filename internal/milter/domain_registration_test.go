@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -176,6 +178,61 @@ func TestRDAPClientReadsRegistrationAndExpirationEvents(t *testing.T) {
 	}
 	if registered.Format("2006-01-02") != "2026-09-01" || expires.Format("2006-01-02") != "2027-09-01" {
 		t.Fatalf("unexpected RDAP dates: registered=%v expires=%v", registered, expires)
+	}
+}
+
+func TestRDAPClientRejectsUnsafeRedirectDestinations(t *testing.T) {
+	client := newRDAPClient(time.Second)
+	client.resolve = func(_ context.Context, hostname string) ([]net.IPAddr, error) {
+		addresses := map[string]string{
+			"public.example":     "8.8.8.8",
+			"private.example":    "10.0.0.1",
+			"loopback.example":   "127.0.0.1",
+			"link-local.example": "169.254.1.1",
+		}
+		address, found := addresses[hostname]
+		if !found {
+			return nil, errors.New("not found")
+		}
+		return []net.IPAddr{{IP: net.ParseIP(address)}}, nil
+	}
+	tests := []struct {
+		name    string
+		target  string
+		allowed bool
+	}{
+		{name: "public HTTPS hostname", target: "https://public.example/domain/example.com", allowed: true},
+		{name: "plain HTTP", target: "http://public.example/domain/example.com"},
+		{name: "IP literal", target: "https://127.0.0.1/domain/example.com"},
+		{name: "private address", target: "https://private.example/domain/example.com"},
+		{name: "loopback address", target: "https://loopback.example/domain/example.com"},
+		{name: "link-local address", target: "https://link-local.example/domain/example.com"},
+		{name: "single-label hostname", target: "https://localhost/domain/example.com"},
+		{name: "userinfo", target: "https://user@public.example/domain/example.com"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target, err := url.Parse(test.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = client.validateRedirect(context.Background(), target)
+			if (err == nil) != test.allowed {
+				t.Fatalf("validateRedirect(%q) error = %v, allowed = %v", test.target, err, test.allowed)
+			}
+		})
+	}
+}
+
+func TestRDAPClientLimitsRedirectCount(t *testing.T) {
+	client := newRDAPClient(time.Second)
+	target, err := url.Parse("https://public.example/domain/example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &http.Request{URL: target}
+	if err := client.http.CheckRedirect(request, []*http.Request{{}, {}, {}}); err == nil {
+		t.Fatal("fourth RDAP redirect was accepted")
 	}
 }
 

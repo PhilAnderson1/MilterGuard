@@ -279,7 +279,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	}
 	inbound := ss.prepareInboundEvidence()
 	if inbound.allowedSenderDomain != "" {
-		return ss.finishBypassedMessage(ctx, "sender_domain_allowlist", false, false,
+		return ss.finishBypassedMessage(ctx, "sender_domain_allowlist", false, inbound.knownCorrespondent && inbound.trustedDKIM,
 			"sender_domain", inbound.allowedSenderDomain,
 			"trusted_aligned_dkim", inbound.trustedDKIM)
 	}
@@ -336,6 +336,7 @@ func (ss *session) knownCorrespondentLogAttrs() []any {
 type inboundEvidence struct {
 	recipientsComplete  bool
 	trustedDKIM         bool
+	knownCorrespondent  bool
 	bypassAI            bool
 	allowedSenderDomain string
 	authenticatedDomain string
@@ -366,6 +367,7 @@ func (ss *session) prepareInboundEvidence() inboundEvidence {
 	if ss.server.cfg.Correspondents.Scope == "per_sender" && ss.server.cfg.Correspondents.RecipientMatch == "all" {
 		known = evidence.recipientsComplete && match.AllRecipientsMatched
 	}
+	evidence.knownCorrespondent = known
 	ss.message.Correspondent = message.CorrespondentInfo{
 		Enabled:               true,
 		Known:                 known,
@@ -390,9 +392,12 @@ func (ss *session) recipientSetComplete() bool {
 }
 
 func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluationResult, inbound inboundEvidence) {
-	if result.selected == actionReject && ss.server.cfg.Mode == "enforce" {
+	if ss.server.cfg.Mode != "enforce" {
+		return
+	}
+	if result.selected == actionReject {
 		ss.server.recordRejection(ctx, ss.message, ss.envelopeSender, ss.envelopeRecipients, result.reasons, "ai")
-		ss.server.ipReputation.add(ss.peerIP, result.classification, result.score, ss.connectionDNS)
+		ss.server.ipReputation.add(ss.peerIP, result.score, ss.connectionDNS)
 	}
 	if result.err == nil && result.classification == "legitimate" {
 		ss.server.ipReputation.recordLegitimate(ss.peerIP)
@@ -490,11 +495,13 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 		ss.server.log.ErrorContext(ctx, "message bypass response failed", attrs...)
 		return false
 	}
-	if learn {
-		ss.learnAuthenticatedRecipients(ctx)
-	}
-	if touchInbound {
-		ss.touchInboundCorrespondent(ctx)
+	if ss.server.cfg.Mode == "enforce" {
+		if learn {
+			ss.learnAuthenticatedRecipients(ctx)
+		}
+		if touchInbound {
+			ss.touchInboundCorrespondent(ctx)
+		}
 	}
 	if source == "internal_command_reply" {
 		ss.server.log.DebugContext(ctx, "message bypassed AI analysis", attrs...)
@@ -532,14 +539,7 @@ func (ss *session) startConnectionDNS(ctx context.Context) {
 }
 
 func (ss *session) connectionInformation(ctx context.Context) message.ConnectionInfo {
-	if ss.connectionDNSPending != nil {
-		select {
-		case ss.connectionDNS = <-ss.connectionDNSPending:
-		case <-ctx.Done():
-			ss.connectionDNS = connectionDNSResult{status: message.ReverseDNSLookupFailed}
-		}
-		ss.connectionDNSPending = nil
-	}
+	ss.awaitConnectionDNS(ctx)
 	info := message.ConnectionInfo{
 		MTAReportedHostname: ss.peerHostname,
 		HELOIdentity:        ss.heloIdentity,
@@ -550,6 +550,18 @@ func (ss *session) connectionInformation(ctx context.Context) message.Connection
 		info.RemoteIP = ss.peerIP.String()
 	}
 	return info
+}
+
+func (ss *session) awaitConnectionDNS(ctx context.Context) connectionDNSResult {
+	if ss.connectionDNSPending != nil {
+		select {
+		case ss.connectionDNS = <-ss.connectionDNSPending:
+		case <-ctx.Done():
+			ss.connectionDNS = connectionDNSResult{status: message.ReverseDNSLookupFailed}
+		}
+		ss.connectionDNSPending = nil
+	}
+	return ss.connectionDNS
 }
 
 func cleanSMTPIdentity(value string) string {
@@ -574,6 +586,17 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 	if ss.server.cfg.Mode != "enforce" {
 		return false, true
 	}
+	if _, allowed := ss.server.ipReputation.allowed(ss.peerIP); allowed {
+		return false, true
+	}
+	if len(ss.server.ipReputation.domainAllowlist) > 0 {
+		dns := ss.awaitConnectionDNS(ctx)
+		if hostname, domain, allowed := ss.server.ipReputation.domainAllowed(dns); allowed {
+			ss.server.log.DebugContext(ctx, "sending IP block bypassed by reverse-DNS domain allowlist",
+				"remote_ip", ss.peerIP.String(), "reverse_dns", hostname, "matched_domain", domain)
+			return false, true
+		}
+	}
 	entry, ok := ss.server.ipReputation.lookup(ss.peerIP)
 	if !ok {
 		return false, true
@@ -582,7 +605,6 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 	attrs := []any{
 		"remote_ip", ss.peerIP.String(),
 		"mode", ss.server.cfg.Mode,
-		"classification", entry.classification,
 		"score", entry.score,
 		"proposed_action", actionReject.String(),
 		"actual_action", actionReject.String(),

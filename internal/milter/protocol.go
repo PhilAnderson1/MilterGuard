@@ -225,7 +225,7 @@ func parseConnectIP(payload []byte) (netip.Addr, bool) {
 	if err != nil || (family == '4' && !addr.Is4() && !addr.Is4In6()) || (family == '6' && !addr.Is6()) {
 		return netip.Addr{}, false
 	}
-	return addr.Unmap(), true
+	return canonicalIP(addr), true
 }
 
 func readFrame(reader io.Reader) ([]byte, error) {

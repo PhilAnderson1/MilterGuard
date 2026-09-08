@@ -2,10 +2,27 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
 )
+
+func TestPersistentStateStartupErrorMessage(t *testing.T) {
+	formatErr := fmt.Errorf("rejection history: %w", jsonstore.ErrIncompatibleFormat)
+	if got := persistentStateStartupErrorMessage(formatErr); got != "incompatible JSON file format" {
+		t.Fatalf("format error message = %q", got)
+	}
+	if got := persistentStateStartupErrorMessage(errors.New("permission denied")); got != "persistent JSON file cannot be read" {
+		t.Fatalf("read error message = %q", got)
+	}
+	mixed := errors.Join(formatErr, errors.New("permission denied"))
+	if got := persistentStateStartupErrorMessage(mixed); got != "persistent JSON file cannot be read" {
+		t.Fatalf("mixed startup error message = %q", got)
+	}
+}
 
 func TestMilterListenerActive(t *testing.T) {
 	server, client := net.Pipe()

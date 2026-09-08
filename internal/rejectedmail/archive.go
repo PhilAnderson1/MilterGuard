@@ -35,8 +35,9 @@ type Archive struct {
 }
 
 type storedFile struct {
-	path string
-	size int64
+	path       string
+	size       int64
+	modifiedAt time.Time
 }
 
 func New(opts Options, log *slog.Logger) *Archive {
@@ -149,7 +150,8 @@ func (a *Archive) save(message []byte, recordID uint64) (string, error) {
 		_ = os.Remove(temporaryPath)
 		return "", err
 	}
-	a.files = append(a.files, storedFile{path: path, size: int64(len(message))})
+	a.files = append(a.files, storedFile{path: path, size: int64(len(message)), modifiedAt: now})
+	sortStoredFiles(a.files)
 	a.bytes += int64(len(message))
 	return path, nil
 }
@@ -231,16 +233,25 @@ func (a *Archive) indexLocked() error {
 		if err != nil {
 			return err
 		}
-		a.files = append(a.files, storedFile{path: path, size: info.Size()})
+		a.files = append(a.files, storedFile{path: path, size: info.Size(), modifiedAt: info.ModTime()})
 		a.bytes += info.Size()
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	sort.Slice(a.files, func(i, j int) bool { return a.files[i].path < a.files[j].path })
+	sortStoredFiles(a.files)
 	a.indexed = true
 	return nil
+}
+
+func sortStoredFiles(files []storedFile) {
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].modifiedAt.Equal(files[j].modifiedAt) {
+			return files[i].path < files[j].path
+		}
+		return files[i].modifiedAt.Before(files[j].modifiedAt)
+	})
 }
 
 func (a *Archive) validMessagePath(path string) bool {

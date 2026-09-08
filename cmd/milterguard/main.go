@@ -16,6 +16,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/milter"
 )
 
@@ -99,7 +100,7 @@ func main() {
 	client := ai.NewClient(cfg.AI, string(prompt), logger)
 	server := milter.NewServer(cfg, client, logger)
 	if err := server.StartupError(); err != nil {
-		logger.Error("incompatible JSON file format", "error", err)
+		logger.Error(persistentStateStartupErrorMessage(err), "error", err)
 		os.Exit(2)
 	}
 
@@ -117,6 +118,29 @@ func main() {
 		logger.Error("milter server stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+func persistentStateStartupErrorMessage(err error) string {
+	if persistentStateErrorsAllFormat(err) {
+		return "incompatible JSON file format"
+	}
+	return "persistent JSON file cannot be read"
+}
+
+func persistentStateErrorsAllFormat(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !persistentStateErrorsAllFormat(child) {
+				return false
+			}
+		}
+		return true
+	}
+	return errors.Is(err, jsonstore.ErrIncompatibleFormat)
 }
 
 func milterListenerActive(address string) bool {
