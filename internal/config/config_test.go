@@ -36,6 +36,11 @@ ip_reputation:
   max_entries: 42
 persistence:
   flush_interval: 2m
+domain_registration:
+  enabled: true
+  timeout: 4s
+  max_entries: 123
+  state_file: /tmp/domains.json
 logging:
   level: warn
 `
@@ -43,13 +48,32 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.FlushInterval.Value() != 2*time.Minute {
+	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.FlushInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
 	legacy := valid + "\npolicy:\n  reject_score: 0.9\n"
 	if _, err := Load(writeConfig(t, legacy)); err == nil || !strings.Contains(err.Error(), "field policy not found") {
 		t.Fatalf("legacy policy section error = %v", err)
+	}
+}
+
+func TestValidateDomainRegistration(t *testing.T) {
+	cfg := validConfig()
+	cfg.DomainRegistration.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid domain registration settings rejected: %v", err)
+	}
+	for _, configure := range []func(*Config){
+		func(cfg *Config) { cfg.DomainRegistration.Timeout = 0 },
+		func(cfg *Config) { cfg.DomainRegistration.MaxEntries = 0 },
+		func(cfg *Config) { cfg.DomainRegistration.StateFile = "" },
+	} {
+		invalid := cfg
+		configure(&invalid)
+		if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "domain_registration") {
+			t.Fatalf("invalid domain registration settings error = %v", err)
+		}
 	}
 }
 

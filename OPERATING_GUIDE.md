@@ -303,6 +303,13 @@ The supplied file contains a curated low-risk sender list whose messages bypass
 scanning only when trusted, aligned DKIM authentication passes. Merely forging
 an address in one of these domains therefore does not bypass filtering.
 
+For authenticated sender domains that still require scanning, the optional
+`domain_registration` feature obtains the registrable domain's creation and
+expiry dates through RDAP and supplies its age to the AI as supporting evidence.
+Results are cached locally; expired entries are refreshed only if the domain is
+seen again, and entries more than two weeks past expiry are removed. Lookup
+failures never reject or defer mail.
+
 When MilterGuard rejects unwanted mail, it records the sending IP address.
 Repeated attempts can then be rejected without another AI request, and persistent
 offenders receive longer blocks. Legitimate traffic gradually reduces an IP's
@@ -325,12 +332,13 @@ record attachment-policy, cached-IP, or unrelated Postfix rejections. The
 number of entries; expired and excess oldest entries are removed automatically,
 and an expiry of `0s` disables the history.
 
-Learned correspondents, rejection history, and IP reputation are stored in
-`/var/lib/milterguard` and survive service restarts. Back up this directory
-if you want to preserve the learned state when moving the service to another
-machine. Changes take effect in memory immediately and are written according to
-`persistence.flush_interval`; a normal service shutdown also performs a final
-write. Set the interval to `0s` to write every change immediately.
+Learned correspondents, rejection history, IP reputation, and cached domain
+registration data are stored in `/var/lib/milterguard` and survive service
+restarts. Back up this directory if you want to preserve the learned state when
+moving the service to another machine. Changes take effect in memory immediately
+and are written according to `persistence.flush_interval`; a normal service
+shutdown also performs a final write. Set the interval to `0s` to write every
+change immediately.
 
 To add or remove correspondent whitelist entries directly from the command
 line, stop MilterGuard while editing its database:

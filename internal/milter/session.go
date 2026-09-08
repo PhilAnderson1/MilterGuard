@@ -287,6 +287,14 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.trustedDKIM,
 			ss.knownCorrespondentLogAttrs()...)
 	}
+	if inbound.authenticatedDomain != "" {
+		info, err := ss.server.domainRegistration.evidence(ctx, inbound.authenticatedDomain)
+		if err != nil {
+			ss.server.log.DebugContext(ctx, "domain registration lookup unavailable", "domain", registrableDomain(inbound.authenticatedDomain), "error", err)
+		} else {
+			ss.message.DomainRegistration = info
+		}
+	}
 	ss.message.TrustedAuthservIDs = ss.trustedAuthservIDs()
 	ss.message.Connection = ss.connectionInformation(ctx)
 	_ = ss.conn.SetDeadline(time.Now().Add(ss.server.analysisTimeout()))
@@ -330,6 +338,7 @@ type inboundEvidence struct {
 	trustedDKIM         bool
 	bypassAI            bool
 	allowedSenderDomain string
+	authenticatedDomain string
 }
 
 func (ss *session) prepareInboundEvidence() inboundEvidence {
@@ -339,6 +348,12 @@ func (ss *session) prepareInboundEvidence() inboundEvidence {
 	}
 	authentication := trustedSenderAuthentication(ss.message, ss.trustedAuthservIDs(), ss.message.Header("From"))
 	evidence.trustedDKIM = authentication.DKIMAligned
+	if authentication.anyAligned() {
+		address := normalizeEmailAddress(ss.message.Header("From"))
+		if separator := strings.LastIndexByte(address, '@'); separator >= 0 {
+			evidence.authenticatedDomain = address[separator+1:]
+		}
+	}
 	if domain := allowedSenderDomain(ss.message.Header("From"), ss.server.cfg.Filtering.SenderDomainAllowlist); domain != "" &&
 		(!ss.server.cfg.Filtering.SenderDomainAllowlistRequireDKIM || authentication.DKIMAligned) {
 		evidence.allowedSenderDomain = domain

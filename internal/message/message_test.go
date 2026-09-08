@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 )
 
 const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -256,6 +257,51 @@ func TestLongBodySamplesBeginningMiddleAndEnd(t *testing.T) {
 		if !strings.Contains(prompt, evidence) {
 			t.Errorf("sampled prompt omitted %s: %s", evidence, prompt)
 		}
+	}
+}
+
+func TestPromptIncludesDomainRegistrationEvidence(t *testing.T) {
+	m := New(1000)
+	m.DomainRegistration = DomainRegistrationInfo{
+		Available: true, Domain: "example.com", RegisteredAt: time.Now().UTC().Add(-72 * time.Hour),
+	}
+	prompt := m.Prompt(1000)
+	for _, wanted := range []string{
+		"AUTHENTICATION INFORMATION:",
+		"Authenticated visible From domain registration date:",
+		"(3 days old)",
+	} {
+		if !strings.Contains(prompt, wanted) {
+			t.Fatalf("domain registration evidence missing %q: %s", wanted, prompt)
+		}
+	}
+	if strings.Contains(prompt, "DOMAIN REGISTRATION INFORMATION:") {
+		t.Fatalf("domain registration evidence was written as a separate section: %s", prompt)
+	}
+}
+
+func TestFormatDomainAgeUsesLargestWholeUnit(t *testing.T) {
+	tests := []struct {
+		name string
+		age  time.Duration
+		want string
+	}{
+		{name: "years", age: 3*365*24*time.Hour + 364*24*time.Hour, want: "3 years"},
+		{name: "one year", age: 365 * 24 * time.Hour, want: "1 year"},
+		{name: "months", age: 8*30*24*time.Hour + 29*24*time.Hour, want: "8 months"},
+		{name: "one month", age: 30 * 24 * time.Hour, want: "1 month"},
+		{name: "weeks", age: 3*7*24*time.Hour + 6*24*time.Hour, want: "3 weeks"},
+		{name: "one week", age: 7 * 24 * time.Hour, want: "1 week"},
+		{name: "days", age: 6*24*time.Hour + 23*time.Hour, want: "6 days"},
+		{name: "one day", age: 24 * time.Hour, want: "1 day"},
+		{name: "sub-day", age: 23 * time.Hour, want: "less than 1 day"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatDomainAge(tt.age); got != tt.want {
+				t.Fatalf("formatDomainAge(%s) = %q, want %q", tt.age, got, tt.want)
+			}
+		})
 	}
 }
 

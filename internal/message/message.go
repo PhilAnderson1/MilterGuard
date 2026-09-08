@@ -3,6 +3,7 @@ package message
 import (
 	"bytes"
 	"strings"
+	"time"
 )
 
 type Message struct {
@@ -10,6 +11,7 @@ type Message struct {
 	Body               strings.Builder
 	Connection         ConnectionInfo
 	Correspondent      CorrespondentInfo
+	DomainRegistration DomainRegistrationInfo
 	TrustedAuthservIDs []string
 	Truncated          bool
 	BodyTruncated      bool
@@ -39,6 +41,12 @@ type CorrespondentInfo struct {
 	Known                 bool
 	Scope                 string
 	AuthenticationAligned bool
+}
+
+type DomainRegistrationInfo struct {
+	Available    bool
+	Domain       string
+	RegisteredAt time.Time
 }
 
 const (

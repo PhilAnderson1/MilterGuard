@@ -274,6 +274,20 @@ ip_reputation:
     - gmx.net
     - web.de
 
+domain_registration:
+  # Supply the AI with the age of authenticated sender domains. Registration
+  # lookups are cached and failures never reject or defer email.
+  enabled: true
+
+  # Maximum duration of an RDAP lookup.
+  timeout: 3s
+
+  # Maximum cached domain records.
+  max_entries: 10000
+
+  # Persistent domain registration cache.
+  state_file: /var/lib/milterguard/domain-registration.json
+
 correspondents:
   # Automatically whitelist external addresses that authenticated local users
   # send email to.

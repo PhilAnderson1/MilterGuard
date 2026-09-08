@@ -38,34 +38,36 @@ type evaluationResult struct {
 }
 
 type Server struct {
-	cfg              config.Config
-	analyzer         Analyzer
-	log              *slog.Logger
-	slots            chan struct{}
-	ipReputation     *ipReputationStore
-	correspondents   *correspondentStore
-	rejectionHistory *rejectionHistoryStore
-	rejectedMail     *rejectedmail.Archive
-	resolver         dnsResolver
-	attachments      *attachment.Scanner
-	internalToken    string
-	replySlots       chan struct{}
-	persistence      *jsonstore.Manager
-	wg               sync.WaitGroup
-	startupErr       error
+	cfg                config.Config
+	analyzer           Analyzer
+	log                *slog.Logger
+	slots              chan struct{}
+	ipReputation       *ipReputationStore
+	correspondents     *correspondentStore
+	rejectionHistory   *rejectionHistoryStore
+	domainRegistration *domainRegistrationStore
+	rejectedMail       *rejectedmail.Archive
+	resolver           dnsResolver
+	attachments        *attachment.Scanner
+	internalToken      string
+	replySlots         chan struct{}
+	persistence        *jsonstore.Manager
+	wg                 sync.WaitGroup
+	startupErr         error
 }
 
 func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	var tokenBytes [32]byte
 	_, _ = rand.Read(tokenBytes[:])
-	server := &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent), ipReputation: newIPReputationStore(cfg.IPReputation, log), correspondents: newCorrespondentStore(cfg.Correspondents, log), rejectionHistory: newRejectionHistoryStore(cfg.RejectionHistory, log), resolver: net.DefaultResolver, internalToken: hex.EncodeToString(tokenBytes[:]), replySlots: make(chan struct{}, 4)}
+	server := &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent), ipReputation: newIPReputationStore(cfg.IPReputation, log), correspondents: newCorrespondentStore(cfg.Correspondents, log), rejectionHistory: newRejectionHistoryStore(cfg.RejectionHistory, log), domainRegistration: newDomainRegistrationStore(cfg.DomainRegistration, log), resolver: net.DefaultResolver, internalToken: hex.EncodeToString(tokenBytes[:]), replySlots: make(chan struct{}, 4)}
 	server.startupErr = errors.Join(
 		persistenceLoadError("IP reputation", cfg.IPReputation.StateFile, server.ipReputation.loadErr),
 		persistenceLoadError("correspondent", cfg.Correspondents.File, server.correspondents.loadErr),
 		persistenceLoadError("rejection history", cfg.RejectionHistory.File, server.rejectionHistory.loadErr),
+		persistenceLoadError("domain registration", cfg.DomainRegistration.StateFile, server.domainRegistration.loadErr),
 	)
 	server.persistence = jsonstore.NewManager(log)
-	server.persistence.Add(server.ipReputation.db, server.correspondents.db, server.rejectionHistory.db)
+	server.persistence.Add(server.ipReputation.db, server.correspondents.db, server.rejectionHistory.db, server.domainRegistration.db)
 	if cfg.RejectedMail.Enabled {
 		server.rejectedMail = rejectedmail.New(rejectedmail.Options{
 			Directory: cfg.RejectedMail.Directory, Retention: cfg.RejectedMail.Retention.Value(),
@@ -202,6 +204,9 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 
 func (s *Server) analysisTimeout() time.Duration {
 	timeout := s.cfg.AI.Timeout.Value()*time.Duration(s.cfg.AI.Retries+1) + analysisResponseMargin
+	if s.cfg.DomainRegistration.Enabled {
+		timeout += s.cfg.DomainRegistration.Timeout.Value()
+	}
 	if milterTimeout := s.cfg.Milter.Timeout.Value(); milterTimeout > timeout {
 		return milterTimeout
 	}

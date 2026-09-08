@@ -31,23 +31,31 @@ func (d *Duration) UnmarshalText(text []byte) error {
 func (d Duration) Value() time.Duration { return time.Duration(d) }
 
 type Config struct {
-	Mode             string                 `yaml:"mode"`
-	Milter           MilterConfig           `yaml:"milter"`
-	AI               AIConfig               `yaml:"ai"`
-	Filtering        FilteringConfig        `yaml:"filtering"`
-	Attachments      AttachmentsConfig      `yaml:"attachments"`
-	EmailCommands    EmailCommandsConfig    `yaml:"email_commands"`
-	Persistence      PersistenceConfig      `yaml:"persistence"`
-	RejectionHistory RejectionHistoryConfig `yaml:"rejection_history"`
-	RejectedMail     RejectedMailConfig     `yaml:"rejected_mail"`
-	Correspondents   CorrespondentsConfig   `yaml:"correspondents"`
-	IPReputation     IPReputationConfig     `yaml:"ip_reputation"`
-	Logging          LoggingConfig          `yaml:"logging"`
-	Warnings         []string               `yaml:"-"`
+	Mode               string                   `yaml:"mode"`
+	Milter             MilterConfig             `yaml:"milter"`
+	AI                 AIConfig                 `yaml:"ai"`
+	Filtering          FilteringConfig          `yaml:"filtering"`
+	Attachments        AttachmentsConfig        `yaml:"attachments"`
+	EmailCommands      EmailCommandsConfig      `yaml:"email_commands"`
+	Persistence        PersistenceConfig        `yaml:"persistence"`
+	RejectionHistory   RejectionHistoryConfig   `yaml:"rejection_history"`
+	RejectedMail       RejectedMailConfig       `yaml:"rejected_mail"`
+	Correspondents     CorrespondentsConfig     `yaml:"correspondents"`
+	IPReputation       IPReputationConfig       `yaml:"ip_reputation"`
+	DomainRegistration DomainRegistrationConfig `yaml:"domain_registration"`
+	Logging            LoggingConfig            `yaml:"logging"`
+	Warnings           []string                 `yaml:"-"`
 }
 
 type PersistenceConfig struct {
 	FlushInterval Duration `yaml:"flush_interval"`
+}
+
+type DomainRegistrationConfig struct {
+	Enabled    bool     `yaml:"enabled"`
+	Timeout    Duration `yaml:"timeout"`
+	MaxEntries int      `yaml:"max_entries"`
+	StateFile  string   `yaml:"state_file"`
 }
 
 type RejectionHistoryConfig struct {
@@ -237,6 +245,10 @@ func defaults() Config {
 			LegitimatePerStrike: 3, MaxEntries: 10000,
 			StateFile: "/var/lib/milterguard/rejected-ip-state.json",
 		},
+		DomainRegistration: DomainRegistrationConfig{
+			Timeout: Duration(3 * time.Second), MaxEntries: 10000,
+			StateFile: "/var/lib/milterguard/domain-registration.json",
+		},
 		Correspondents: CorrespondentsConfig{
 			LegitimateSenderMinMessages: 5, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
 			Scope: "per_sender", RecipientMatch: "all", File: "/var/lib/milterguard/correspondent-allowlist.json",
@@ -259,6 +271,9 @@ func (c Config) Validate() error {
 	}
 	if c.Persistence.FlushInterval.Value() < 0 {
 		return fmt.Errorf("persistence.flush_interval must not be negative")
+	}
+	if c.DomainRegistration.Enabled && (c.DomainRegistration.Timeout.Value() <= 0 || c.DomainRegistration.MaxEntries < 1 || strings.TrimSpace(c.DomainRegistration.StateFile) == "") {
+		return fmt.Errorf("domain_registration requires a positive timeout, max_entries, and state_file")
 	}
 	if c.AI.Endpoint == "" || c.AI.Model == "" || c.AI.PromptFile == "" {
 		return fmt.Errorf("ai endpoint, model, and prompt_file are required")

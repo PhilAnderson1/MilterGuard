@@ -45,6 +45,7 @@ func writeAuthenticationInformation(b *strings.Builder, msg *Message) {
 			fmt.Fprintf(b, "%s: no trusted local result\n", strings.ToUpper(method))
 		}
 	}
+	writeDomainRegistrationEvidence(b, msg.DomainRegistration)
 }
 
 func normalizedAuthenticationResults(msg *Message) []authenticationResult {
