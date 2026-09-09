@@ -110,7 +110,7 @@ func (output *lexicalOutput) WriteString(value string) {
 	output.text.WriteString(value)
 }
 
-func (output *lexicalOutput) WriteByte(value byte) {
+func (output *lexicalOutput) appendByte(value byte) {
 	if output.anchor != nil {
 		output.anchor.label.WriteByte(value)
 		output.anchor.plainLabel.WriteByte(value)
@@ -173,7 +173,7 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 		opening += offset
 		lexicalWriteDecodedText(&text, source[offset:opening])
 		if !lexicalMarkupStart(source, opening) {
-			text.WriteByte('<')
+			text.appendByte('<')
 			offset = opening + 1
 			continue
 		}
@@ -213,7 +213,7 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 				continue
 			}
 			offset = blockEnd
-			text.WriteByte(' ')
+			text.appendByte(' ')
 			continue
 		}
 		if !isClosing && lexicalExactOpeningTag(rawTag, name) && name == "plaintext" {
@@ -299,7 +299,7 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 				links.Add(src)
 			}
 		case lexicalBlockElement(name):
-			text.WriteByte('\n')
+			text.appendByte('\n')
 		}
 		offset = closing + 1
 	}
