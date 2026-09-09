@@ -25,7 +25,6 @@ const (
 
 type ipBlock struct {
 	expires     time.Time
-	score       float64
 	level       string
 	strikeCount int
 }
@@ -119,7 +118,6 @@ type rejectedIPRecord struct {
 	Strikes         []time.Time `json:"strikes,omitempty"`
 	BlockLevel      string      `json:"block_level,omitempty"`
 	BlockedUntil    time.Time   `json:"blocked_until,omitempty"`
-	Score           float64     `json:"score,omitempty"`
 	LegitimateCount int         `json:"legitimate_count,omitempty"`
 	LastActivityAt  time.Time   `json:"last_activity_at"`
 }
@@ -262,7 +260,7 @@ func (c *ipReputationStore) add(addr netip.Addr, score float64, dns connectionDN
 				record.Strikes = record.Strikes[len(record.Strikes)-c.repeatThreshold:]
 			}
 		}
-		record.Score, record.LastActivityAt = score, now
+		record.LastActivityAt = now
 		record.LegitimateCount = 0
 		if c.repeatThreshold > 0 && len(record.Strikes) >= c.repeatThreshold {
 			record.BlockLevel, record.BlockedUntil = rejectedIPBlockRepeat, now.Add(c.repeatDuration)
@@ -389,7 +387,7 @@ func (c *ipReputationStore) lookup(addr netip.Addr) (ipBlock, bool) {
 		} else {
 			records[addr] = record
 		}
-		block = ipBlock{expires: record.BlockedUntil, score: record.Score, level: record.BlockLevel, strikeCount: len(record.Strikes)}
+		block = ipBlock{expires: record.BlockedUntil, level: record.BlockLevel, strikeCount: len(record.Strikes)}
 		found = true
 		return 1, writes, 0, changed
 	})
@@ -483,7 +481,7 @@ func (c *ipReputationStore) manualAdd(addr netip.Addr) (activeIPBlock, error) {
 		record = records[addr]
 		record.IP, record.BlockLevel = addr.String(), level
 		record.BlockedUntil, record.LastActivityAt = now.Add(duration), now
-		record.Score, record.LegitimateCount = 1, 0
+		record.LegitimateCount = 0
 		records[addr] = record
 		if existed {
 			return 1, 1, 0, true

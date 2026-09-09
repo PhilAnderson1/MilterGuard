@@ -667,7 +667,6 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 	attrs := []any{
 		"remote_ip", ss.peerIP.String(),
 		"mode", ss.server.cfg.Mode,
-		"score", entry.score,
 		"proposed_action", actionReject.String(),
 		"actual_action", actionReject.String(),
 		"source", "rejected_ip_reputation",
