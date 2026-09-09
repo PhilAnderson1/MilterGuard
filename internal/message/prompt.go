@@ -2,8 +2,6 @@ package message
 
 import (
 	"fmt"
-	"io"
-	"mime"
 	"net/url"
 	"regexp"
 	"sort"
@@ -11,8 +9,6 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
-
-	"golang.org/x/net/html/charset"
 )
 
 const (
@@ -28,15 +24,9 @@ var promptHeaders = map[string]bool{
 	"reply-to": true, "return-path": true, "subject": true, "to": true,
 }
 
-var plainHTTPURL = regexp.MustCompile(`(?i)https?://[^\s<>"'\]\)]+`)
+var plainHTTPURL = regexp.MustCompile(`(?i)https?://[^\s<>"']+`)
 
 var receivedSPFReceiverPattern = regexp.MustCompile(`(?i)(?:^|[;\s])receiver\s*=\s*(?:"([^"]+)"|([^\s;]+))`)
-
-var headerWordDecoder = &mime.WordDecoder{
-	CharsetReader: func(label string, input io.Reader) (io.Reader, error) {
-		return charset.NewReaderLabel(label, input)
-	},
-}
 
 func (m *Message) Prompt(maxChars int) string {
 	return m.BuildAnalysis(maxChars, VisionOptions{Mode: "off"}).Prompt
@@ -56,7 +46,7 @@ func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
 	writeAuthenticationInformation(&b, m)
 	b.WriteString("\nSELECTED HEADERS:\n")
 	for _, key := range keys {
-		for _, value := range m.Headers[key] {
+		for _, value := range m.decodedHeaderValues(key) {
 			fmt.Fprintf(&b, "%s: %s\n", canonicalHeaderName(key), promptHeaderValue(value))
 		}
 	}
@@ -300,13 +290,7 @@ func sanitize(value string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " ")
 }
 
-// promptHeaderValue presents RFC 2047 encoded words as UTF-8 while retaining
-// the rest of the original header, including any mailbox address. Malformed
-// encoded words are left intact rather than causing evidence to be discarded.
 func promptHeaderValue(value string) string {
-	if decoded, err := headerWordDecoder.DecodeHeader(value); err == nil {
-		value = decoded
-	}
 	return sanitize(strings.ToValidUTF8(value, "�"))
 }
 
@@ -331,9 +315,44 @@ func findHTTPURLs(text string) []string {
 	matches := plainHTTPURL.FindAllString(text, maxExtractedLinks*2)
 	links := make([]string, 0, len(matches))
 	for _, match := range matches {
-		links = append(links, strings.TrimRight(match, ".,;:!?})]"))
+		if match = trimPlainURLPunctuation(match); match != "" {
+			links = append(links, match)
+		}
 	}
 	return links
+}
+
+func trimPlainURLPunctuation(value string) string {
+	parentheses, brackets, braces := 0, 0, 0
+	for index, character := range value {
+		switch character {
+		case '(':
+			parentheses++
+		case ')':
+			if parentheses == 0 {
+				value = value[:index]
+				return strings.TrimRight(value, ".,;:!?")
+			}
+			parentheses--
+		case '[':
+			brackets++
+		case ']':
+			if brackets == 0 {
+				value = value[:index]
+				return strings.TrimRight(value, ".,;:!?")
+			}
+			brackets--
+		case '{':
+			braces++
+		case '}':
+			if braces == 0 {
+				value = value[:index]
+				return strings.TrimRight(value, ".,;:!?")
+			}
+			braces--
+		}
+	}
+	return strings.TrimRight(value, ".,;:!?")
 }
 
 func boundedLinks(candidates []string) []string {
@@ -341,7 +360,7 @@ func boundedLinks(candidates []string) []string {
 	links := make([]string, 0, min(len(candidates), maxExtractedLinks))
 	chars := 0
 	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
+		candidate = strings.TrimSpace(stripInvisibleFormatting(candidate))
 		parsed, err := url.Parse(candidate)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || seen[candidate] {
 			continue
@@ -363,7 +382,7 @@ func boundedLinks(candidates []string) []string {
 func boundedLinksMissingFromBody(candidates []string, body string) []string {
 	missing := make([]string, 0, len(candidates))
 	for _, link := range candidates {
-		link = strings.TrimSpace(link)
+		link = strings.TrimSpace(stripInvisibleFormatting(link))
 		if !strings.Contains(body, link) && !strings.Contains(body, markdownURL(link)) {
 			missing = append(missing, link)
 		}

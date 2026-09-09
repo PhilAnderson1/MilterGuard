@@ -13,6 +13,8 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
+const internalMessageHeader = "X-MilterGuard-Internal"
+
 type emailCommand struct {
 	kind      string
 	verb      string
@@ -46,7 +48,7 @@ func (ss *session) commandIdentityAuthorization() (bool, string) {
 }
 
 func (ss *session) isInternalMessage() bool {
-	marker := strings.TrimSpace(ss.message.Header("X-MilterGuard-Internal"))
+	marker := strings.TrimSpace(ss.message.Header(internalMessageHeader))
 	return marker != "" && marker == ss.server.internalToken &&
 		(!ss.peerIP.IsValid() || ss.peerIP.IsLoopback() || !connectionAddressRoutable(ss.peerIP))
 }
@@ -462,9 +464,14 @@ func (ss *session) queueCommandReplyFunc(recipient, subject string, body func() 
 	}
 	go func() {
 		defer func() { <-ss.server.replySlots }()
+		defer func() {
+			if panicValue := recover(); panicValue != nil {
+				ss.server.logRecoveredWorkerPanic(context.Background(), "email command reply", panicValue, "recipient", recipient)
+			}
+		}()
 		from := normalizeEmailAddress(cfg.Recipient)
 		date := time.Now().UTC().Format(time.RFC1123Z)
-		payload := fmt.Sprintf("From: MilterGuard <%s>\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nAuto-Submitted: auto-replied\r\nX-Auto-Response-Suppress: All\r\nX-MilterGuard-Internal: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s", from, recipient, subject, date, token, body())
+		payload := fmt.Sprintf("From: MilterGuard <%s>\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nAuto-Submitted: auto-replied\r\nX-Auto-Response-Suppress: All\r\n%s: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s", from, recipient, subject, date, internalMessageHeader, token, body())
 		err := submitSMTP(cfg.SMTPHost, recipient, []byte(payload))
 		if err != nil {
 			log.Error("cannot send email command confirmation", "recipient", recipient, "smtp_host", cfg.SMTPHost, "error", err)

@@ -3,6 +3,7 @@ package milter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -13,6 +14,39 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
+
+type deadlineFailingConn struct {
+	net.Conn
+	err error
+}
+
+func (conn deadlineFailingConn) SetDeadline(time.Time) error { return conn.err }
+
+func TestDeadlineFailureClosesSession(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	deadlineErr := errors.New("deadline unavailable")
+	var logOutput bytes.Buffer
+	server := &Server{
+		cfg: config.Config{Milter: config.MilterConfig{Timeout: config.Duration(time.Minute)}},
+		log: slog.New(slog.NewTextHandler(&logOutput, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.handle(context.Background(), deadlineFailingConn{Conn: serverConn, err: deadlineErr})
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("session continued after deadline failure")
+	}
+	for _, wanted := range []string{`msg="cannot set Milter connection deadline"`, `stage="protocol read"`, "deadline unavailable"} {
+		if !strings.Contains(logOutput.String(), wanted) {
+			t.Errorf("deadline failure log does not contain %q: %s", wanted, logOutput.String())
+		}
+	}
+}
 
 func TestMalformedOptionNegotiationClosesConnection(t *testing.T) {
 	_, conn, done := testServer(t, fixedAnalyzer{})
@@ -46,6 +80,7 @@ func TestProtocolRejectsInvalidSequences(t *testing.T) {
 			_, conn, done := testServer(t, fixedAnalyzer{})
 			defer conn.Close()
 			negotiate(t, conn)
+			sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
 			sendContinueFrames(t, conn, test.setup...)
 			if err := writeFrame(conn, test.invalid); err != nil {
 				t.Fatal(err)
@@ -62,10 +97,32 @@ func TestProtocolRejectsInvalidSequences(t *testing.T) {
 	}
 }
 
+func TestProtocolRejectsHeloAndMailWithoutConnect(t *testing.T) {
+	for _, command := range []byte{commandHelo, commandMail} {
+		t.Run(commandName(command), func(t *testing.T) {
+			_, conn, done := testServer(t, fixedAnalyzer{})
+			defer conn.Close()
+			negotiate(t, conn)
+			if err := writeFrame(conn, []byte{command}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readFrame(conn); err == nil {
+				t.Fatal("command without CONNECT did not close the connection")
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("handler did not exit after command without CONNECT")
+			}
+		})
+	}
+}
+
 func TestAbortDoesNotDesynchronizeNextTransaction(t *testing.T) {
 	_, conn, done := testServer(t, fixedAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}})
 	defer conn.Close()
 	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
 	if err := writeFrame(conn, []byte{commandMail}); err != nil {
 		t.Fatal(err)
 	}
@@ -110,15 +167,15 @@ func TestUnsupportedCommandClosesConnection(t *testing.T) {
 	}
 }
 
-func TestHandleKeepsConnectionAfterIdleTimeout(t *testing.T) {
+func TestHandleKeepsConnectionBeforeFiveMinuteIdleTimeout(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
-	var logOutput bytes.Buffer
-	server := &Server{cfg: config.Config{Milter: config.MilterConfig{Timeout: config.Duration(20 * time.Millisecond)}}, log: slog.New(slog.NewTextHandler(&logOutput, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	server := &Server{cfg: config.Config{Milter: config.MilterConfig{Timeout: config.Duration(20 * time.Millisecond)}}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	done := make(chan struct{})
 	go func() { defer close(done); defer serverConn.Close(); server.handle(context.Background(), serverConn) }()
 	time.Sleep(75 * time.Millisecond)
 	negotiate(t, clientConn)
+	sendContinueFrames(t, clientConn, connectFrame('4', "127.0.0.1"))
 	if err := writeFrame(clientConn, []byte{commandHelo}); err != nil {
 		t.Fatalf("write command after idle period: %v", err)
 	}
@@ -137,16 +194,28 @@ func TestHandleKeepsConnectionAfterIdleTimeout(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("handler did not exit after quit")
 	}
-	logs := logOutput.String()
-	for _, wanted := range []string{`msg="milter connection remains idle"`, `idle_interval=20ms`, `local_addr=pipe`, `remote_addr=pipe`} {
-		if !strings.Contains(logs, wanted) {
-			t.Errorf("idle log does not contain %q: %s", wanted, logs)
-		}
+}
+
+func TestIdleConnectionClosesAfterFiveMinutes(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	var logOutput bytes.Buffer
+	server := &Server{cfg: config.Config{Milter: config.MilterConfig{Timeout: config.Duration(time.Minute)}}, log: slog.New(slog.NewTextHandler(&logOutput, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	ss := newSession(server, serverConn)
+	ss.idleSince = time.Now().Add(-milterIdleTimeout)
+	if ss.handleReadError(context.Background(), 0, timeoutError{}) {
+		t.Fatal("expired idle connection was retained")
 	}
-	if strings.Contains(logs, "error=") {
-		t.Errorf("normal idle log contains an error field: %s", logs)
+	if !strings.Contains(logOutput.String(), `msg="closing idle Milter connection"`) {
+		t.Fatalf("idle close was not logged: %s", logOutput.String())
 	}
 }
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
 
 func TestContextCancellationClosesIdleConnectionImmediately(t *testing.T) {
 	serverConn, clientConn := net.Pipe()

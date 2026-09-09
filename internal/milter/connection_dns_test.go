@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +25,16 @@ type connectionTestResolver struct {
 }
 
 type blockingDNSResolver struct{}
+
+type panickingDNSResolver struct{}
+
+func (panickingDNSResolver) LookupAddr(context.Context, string) ([]string, error) {
+	panic("test DNS panic")
+}
+
+func (panickingDNSResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	panic("test DNS panic")
+}
 
 func (blockingDNSResolver) LookupAddr(ctx context.Context, _ string) ([]string, error) {
 	<-ctx.Done()
@@ -124,6 +136,19 @@ func TestResolveConnectionDNSTimeoutIsLookupFailure(t *testing.T) {
 	}
 	if time.Since(started) > time.Second {
 		t.Fatal("DNS timeout was not bounded")
+	}
+}
+
+func TestConnectionDNSPanicIsRecoveredAsLookupFailure(t *testing.T) {
+	var logOutput strings.Builder
+	server := &Server{log: slog.New(slog.NewJSONHandler(&logOutput, nil))}
+	got := server.resolveConnectionDNSSafely(context.Background(), panickingDNSResolver{}, netip.MustParseAddr("8.8.8.8"), time.Second)
+	if got.status != message.ReverseDNSLookupFailed {
+		t.Fatalf("panic status = %q, want lookup failure", got.status)
+	}
+	logs := logOutput.String()
+	if !strings.Contains(logs, `"worker":"connection DNS lookup"`) || !strings.Contains(logs, "test DNS panic") {
+		t.Fatalf("panic was not logged: %s", logs)
 	}
 }
 

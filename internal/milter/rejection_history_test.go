@@ -28,6 +28,10 @@ func TestRejectionHistoryPersistsOneEventWithMultipleRecipientsAndExpires(t *tes
 	if len(all) != 1 || all[0].ID == 0 || len(all[0].Recipients) != 2 {
 		t.Fatalf("rejection record IDs = %#v", all)
 	}
+	all[0].Recipients[0] = "mutated@example.invalid"
+	if stored := store.list("*"); len(stored) != 1 || slices.Contains(stored[0].Recipients, "mutated@example.invalid") {
+		t.Fatalf("returned recipients mutated rejection history: %#v", stored)
+	}
 	if got := store.list("alice@example.com"); len(got) != 1 || len(got[0].Recipients) != 1 || got[0].Recipients[0] != "alice@example.com" {
 		t.Fatalf("recipient-specific history disclosed other recipients: %#v", got)
 	}

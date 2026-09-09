@@ -1,10 +1,15 @@
 package milter
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
 func enableTestAttachments(server *Server) {
@@ -25,6 +30,26 @@ func enableTestAttachments(server *Server) {
 	})
 }
 
+func TestAttachmentScanWaitingForSlotStopsWithContext(t *testing.T) {
+	server := &Server{
+		cfg:   config.Config{Attachments: config.AttachmentsConfig{BlockExecutables: true}},
+		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		slots: make(chan struct{}, 1),
+		attachments: attachment.New(attachment.Options{
+			BlockedExtensions: []string{"exe"},
+		}),
+	}
+	server.slots <- struct{}{}
+	ss := &session{server: server, message: message.New(1024)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	handled, keepConnection := ss.applyAttachments(ctx)
+	if !handled || keepConnection {
+		t.Fatalf("cancelled attachment scan = handled %v, keep connection %v", handled, keepConnection)
+	}
+}
+
 func TestExecutableAttachmentRejectedBeforeAI(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 	server, conn, done := testServer(t, analyzer)
@@ -33,6 +58,7 @@ func TestExecutableAttachmentRejectedBeforeAI(t *testing.T) {
 
 	negotiate(t, conn)
 	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
 		[]byte{commandMail},
 		headerFrame("Content-Type", "application/octet-stream"),
 		headerFrame("Content-Disposition", `attachment; filename="invoice.exe"`),
@@ -58,6 +84,7 @@ func TestAttachmentsMonitorModeAddsHeadersWhenEnabled(t *testing.T) {
 
 	negotiateWithActions(t, conn, resultHeaderActions)
 	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
 		[]byte{commandMail},
 		headerFrame("Content-Type", "application/octet-stream"),
 		headerFrame("Content-Disposition", `attachment; filename="invoice.exe"`),
@@ -84,6 +111,7 @@ func TestExecutableAttachmentRejectionIsArchived(t *testing.T) {
 
 	negotiate(t, conn)
 	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
 		[]byte{commandMail},
 		headerFrame("Content-Type", "application/octet-stream"),
 		headerFrame("Content-Disposition", `attachment; filename="invoice.exe"`),
@@ -108,6 +136,7 @@ func TestAttachmentsMonitorModeAcceptsWithoutAI(t *testing.T) {
 
 	negotiate(t, conn)
 	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
 		[]byte{commandMail},
 		headerFrame("Content-Type", "application/octet-stream"),
 		headerFrame("Content-Disposition", `attachment; filename="invoice.exe"`),
@@ -132,6 +161,7 @@ func TestAttachmentsTagModeAcceptsAndAddsHeaders(t *testing.T) {
 
 	negotiateWithActions(t, conn, resultHeaderActions)
 	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
 		[]byte{commandMail},
 		headerFrame("Content-Type", "application/octet-stream"),
 		headerFrame("Content-Disposition", `attachment; filename="invoice.exe"`),
@@ -158,6 +188,7 @@ func TestSafeAttachmentContinuesToAI(t *testing.T) {
 
 	negotiate(t, conn)
 	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
 		[]byte{commandMail},
 		headerFrame("Content-Type", "application/pdf"),
 		headerFrame("Content-Disposition", `attachment; filename="report.pdf"`),
@@ -182,6 +213,7 @@ func TestUnscannableAttachmentCanTempfail(t *testing.T) {
 
 	negotiate(t, conn)
 	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
 		[]byte{commandMail},
 		headerFrame("Content-Type", "application/zip"),
 		headerFrame("Content-Disposition", `attachment; filename="broken.zip"`),

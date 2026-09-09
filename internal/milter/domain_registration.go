@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -142,7 +143,7 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 	var err error
 	select {
 	case s.slots <- struct{}{}:
-		registeredAt, expiresAt, err = s.lookup.Lookup(lookupCtx, domain)
+		registeredAt, expiresAt, err = s.lookupSafely(lookupCtx, domain)
 		<-s.slots
 	case <-lookupCtx.Done():
 		err = lookupCtx.Err()
@@ -171,6 +172,20 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 		s.log.DebugContext(ctx, "domain registration cached", "domain", domain, "registered_at", record.RegisteredAt, "expires_at", record.ExpiresAt)
 	}
 	return domainRegistrationEvidence(record), nil
+}
+
+func (s *domainRegistrationStore) lookupSafely(ctx context.Context, domain string) (registeredAt, expiresAt time.Time, err error) {
+	defer func() {
+		if panicValue := recover(); panicValue != nil {
+			if s.log != nil {
+				s.log.ErrorContext(ctx, "MilterGuard worker recovered from panic",
+					"worker", "domain registration lookup", "domain", domain,
+					"panic", fmt.Sprint(panicValue), "stack", string(debug.Stack()))
+			}
+			err = fmt.Errorf("domain registration lookup panicked: %v", panicValue)
+		}
+	}()
+	return s.lookup.Lookup(ctx, domain)
 }
 
 func (s *domainRegistrationStore) pruneFailuresLocked(now time.Time) {

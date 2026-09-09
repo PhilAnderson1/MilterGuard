@@ -105,6 +105,46 @@ func TestValidateMilterTimeout(t *testing.T) {
 	}
 }
 
+func TestValidateMilterMaxConnections(t *testing.T) {
+	if got := defaults().Milter.MaxConnections; got != 256 {
+		t.Fatalf("default maximum Milter connections = %d", got)
+	}
+	for _, maximum := range []int{0, -1} {
+		cfg := validConfig()
+		cfg.Milter.MaxConnections = maximum
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "milter.max_connections") {
+			t.Fatalf("maximum %d error = %v", maximum, err)
+		}
+	}
+}
+
+func TestValidateMilterAllowedPeerIPs(t *testing.T) {
+	defaults := defaults()
+	if !reflect.DeepEqual(defaults.Milter.AllowedPeerIPs, []string{"127.0.0.0/8", "::1/128"}) {
+		t.Fatalf("default allowed Milter peers = %#v", defaults.Milter.AllowedPeerIPs)
+	}
+	for _, entry := range []string{"192.0.2.10", "10.0.0.0/8", "2001:db8::/32"} {
+		cfg := validConfig()
+		cfg.Milter.AllowedPeerIPs = []string{entry}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid peer %q rejected: %v", entry, err)
+		}
+	}
+	for _, entries := range [][]string{nil, {}, {"not-an-ip"}} {
+		cfg := validConfig()
+		cfg.Milter.AllowedPeerIPs = entries
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "milter.allowed_peer_ips") {
+			t.Fatalf("invalid peers %#v error = %v", entries, err)
+		}
+	}
+	cfg := validConfig()
+	cfg.Milter.Socket = "unix:/run/milterguard/milterguard.sock"
+	cfg.Milter.AllowedPeerIPs = nil
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("empty TCP peer list rejected for Unix listener: %v", err)
+	}
+}
+
 func TestValidateLegitimateLowConfidenceScore(t *testing.T) {
 	if got := defaults().Filtering.LegitimateLowConfidenceScore; got != 0.8 {
 		t.Fatalf("default legitimate low-confidence score = %v", got)

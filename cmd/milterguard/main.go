@@ -100,7 +100,11 @@ func main() {
 	client := ai.NewClient(cfg.AI, string(prompt), logger)
 	server := milter.NewServer(cfg, client, logger)
 	if err := server.StartupError(); err != nil {
-		logger.Error(persistentStateStartupErrorMessage(err), "error", err)
+		message := persistentStateStartupErrorMessage(err)
+		if errors.Is(err, milter.ErrInternalTokenGeneration) {
+			message = "cannot initialize internal email-command replies"
+		}
+		logger.Error(message, "error", err)
 		os.Exit(2)
 	}
 
@@ -186,7 +190,9 @@ func listen(address string) (net.Listener, func(), error) {
 		if err != nil {
 			return nil, func() {}, err
 		}
-		_ = os.Chmod(path, 0660)
+		if err := setUnixSocketPermissions(ln, path, os.Chmod); err != nil {
+			return nil, func() {}, err
+		}
 		return ln, func() { _ = ln.Close(); _ = os.Remove(path) }, nil
 	}
 	if strings.HasPrefix(address, "tcp:") {
@@ -198,4 +204,13 @@ func listen(address string) (net.Listener, func(), error) {
 		}, err
 	}
 	return nil, func() {}, fmt.Errorf("socket must begin with unix: or tcp:")
+}
+
+func setUnixSocketPermissions(ln net.Listener, path string, chmod func(string, os.FileMode) error) error {
+	if err := chmod(path, 0660); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("set Unix Milter socket permissions: %w", err)
+	}
+	return nil
 }

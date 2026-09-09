@@ -62,7 +62,9 @@ milter_protocol = 6
 
 MilterGuard uses DKIM, SPF and DMARC results supplied by earlier mail filters as evidence. List authentication Milters before MilterGuard in your Postfix configuration to improve classification accuracy.
 
-Keep TCP listeners bound to a loopback address unless access is restricted separately.
+Keep TCP listeners bound to a loopback address unless Postfix runs on another
+machine. In that case, add only the Postfix server's network address to
+`milter.allowed_peer_ips` and restrict access with a firewall as well.
 
 Validate the configuration before enabling the service:
 

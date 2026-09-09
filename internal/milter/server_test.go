@@ -33,11 +33,199 @@ type countingAnalyzer struct {
 	calls    atomic.Int32
 }
 
+func TestSessionPanicIsRecoveredAndTempfailed(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	var logOutput bytes.Buffer
+	server := &Server{log: slog.New(slog.NewJSONHandler(&logOutput, nil))}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		func() {
+			defer server.recoverSessionPanic(context.Background(), serverConn)
+			panic("test parser panic")
+		}()
+	}()
+
+	expectFrame(t, clientConn, string([]byte{responseTempfail}))
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("panic recovery did not return")
+	}
+	logs := logOutput.String()
+	for _, wanted := range []string{"MilterGuard worker recovered from panic", `"worker":"milter session"`, "test parser panic", `"response_sent":true`, "goroutine"} {
+		if !strings.Contains(logs, wanted) {
+			t.Errorf("panic recovery log does not contain %q: %s", wanted, logs)
+		}
+	}
+}
+
+func TestMaintenancePanicIsRecovered(t *testing.T) {
+	var logOutput bytes.Buffer
+	server := &Server{log: slog.New(slog.NewJSONHandler(&logOutput, nil))}
+	completed := false
+	server.runMaintenance("test maintenance", func() { panic("test maintenance panic") })
+	completed = true
+	if !completed {
+		t.Fatal("maintenance recovery did not return")
+	}
+	logs := logOutput.String()
+	for _, wanted := range []string{"MilterGuard worker recovered from panic", `"worker":"test maintenance"`, "test maintenance panic", "goroutine"} {
+		if !strings.Contains(logs, wanted) {
+			t.Errorf("maintenance recovery log does not contain %q: %s", wanted, logs)
+		}
+	}
+}
+
 type recordingAnalyzer struct {
 	inputs chan ai.Input
 }
 
 type failingAnalyzer struct{}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("random source failed") }
+
+type temporaryAcceptError struct{}
+
+func (temporaryAcceptError) Error() string   { return "temporary accept failure" }
+func (temporaryAcceptError) Timeout() bool   { return false }
+func (temporaryAcceptError) Temporary() bool { return true }
+
+type scriptedListener struct {
+	errors  []error
+	conn    net.Conn
+	accepts int
+}
+
+func (listener *scriptedListener) Accept() (net.Conn, error) {
+	listener.accepts++
+	if len(listener.errors) > 0 {
+		err := listener.errors[0]
+		listener.errors = listener.errors[1:]
+		return nil, err
+	}
+	if listener.conn != nil {
+		conn := listener.conn
+		listener.conn = nil
+		return conn, nil
+	}
+	return nil, errors.New("permanent accept failure")
+}
+
+func (*scriptedListener) Close() error   { return nil }
+func (*scriptedListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+func TestAcceptConnectionRetriesTemporaryErrors(t *testing.T) {
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+	listener := &scriptedListener{errors: []error{temporaryAcceptError{}, temporaryAcceptError{}}, conn: serverSide}
+	server := &Server{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	conn, err := server.acceptConnection(context.Background(), listener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if listener.accepts != 3 {
+		t.Fatalf("accept attempts = %d, want 3", listener.accepts)
+	}
+}
+
+func TestAcceptConnectionReturnsPermanentError(t *testing.T) {
+	permanent := errors.New("listener closed unexpectedly")
+	listener := &scriptedListener{errors: []error{permanent}}
+	server := &Server{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	if _, err := server.acceptConnection(context.Background(), listener); !errors.Is(err, permanent) {
+		t.Fatalf("accept error = %v, want %v", err, permanent)
+	}
+	if listener.accepts != 1 {
+		t.Fatalf("accept attempts = %d, want 1", listener.accepts)
+	}
+}
+
+func TestGenerateInternalToken(t *testing.T) {
+	token, err := generateInternalToken(bytes.NewReader(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(token) != 64 {
+		t.Fatalf("token length = %d", len(token))
+	}
+	if _, err := generateInternalToken(failingReader{}); !errors.Is(err, ErrInternalTokenGeneration) {
+		t.Fatalf("random-source error = %v", err)
+	}
+}
+
+func TestInternalCommandReplyHeaderIsRemoved(t *testing.T) {
+	server, conn, done := testServer(t, fixedAnalyzer{})
+	server.cfg.EmailCommands.Enabled = true
+	server.cfg.EmailCommands.SendReplies = true
+	server.internalToken = "test-token"
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiateWithExpectedActions(t, conn, actionChangeHeaders, actionChangeHeaders)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "milterguard@example.com"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+		headerFrame(internalMessageHeader, "test-token"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string(deleteHeaderResponse(internalMessageHeader)))
+	expectFrame(t, conn, string([]byte{responseAccept}))
+}
+
+func TestInternalCommandReplyTempfailsWithoutHeaderRemoval(t *testing.T) {
+	server, conn, done := testServer(t, fixedAnalyzer{})
+	server.cfg.EmailCommands.Enabled = true
+	server.cfg.EmailCommands.SendReplies = true
+	server.internalToken = "test-token"
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "milterguard@example.com"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+		headerFrame(internalMessageHeader, "test-token"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseTempfail}))
+}
+
+func TestMilterPeerAuthorizationUsesSocketPeerAddress(t *testing.T) {
+	server := &Server{allowedPeerIPs: peerPrefixes([]string{"127.0.0.1", "192.0.2.0/24", "2001:db8::1"})}
+	tests := []struct {
+		name    string
+		address net.Addr
+		allowed bool
+	}{
+		{name: "loopback", address: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1234}, allowed: true},
+		{name: "allowed prefix", address: &net.TCPAddr{IP: net.ParseIP("192.0.2.45"), Port: 1234}, allowed: true},
+		{name: "allowed IPv6", address: &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 1234}, allowed: true},
+		{name: "unauthorized", address: &net.TCPAddr{IP: net.ParseIP("198.51.100.4"), Port: 1234}, allowed: false},
+		{name: "missing", address: nil, allowed: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := server.peerAllowed(test.address); got != test.allowed {
+				t.Fatalf("peerAllowed(%v) = %v, want %v", test.address, got, test.allowed)
+			}
+		})
+	}
+}
 
 type shortWriter struct {
 	max int
@@ -146,6 +334,7 @@ func TestAIRejectedMessageIsArchived(t *testing.T) {
 
 	negotiate(t, conn)
 	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
 		[]byte{commandMail},
 		headerFrame("From", "sender@example.net"),
 		headerFrame("X-Unselected", "archive me"),
@@ -233,20 +422,25 @@ func negotiate(t *testing.T, conn net.Conn) {
 
 func negotiateWithActions(t *testing.T, conn net.Conn, actions uint32) {
 	t.Helper()
+	wantActions := uint32(0)
+	if actions&resultHeaderActions == resultHeaderActions {
+		wantActions = resultHeaderActions
+	}
+	negotiateWithExpectedActions(t, conn, actions, wantActions)
+}
+
+func negotiateWithExpectedActions(t *testing.T, conn net.Conn, offeredActions, wantActions uint32) {
+	t.Helper()
 	payload := make([]byte, 13)
 	payload[0] = commandOptionNegotiation
 	binary.BigEndian.PutUint32(payload[1:5], 6)
-	binary.BigEndian.PutUint32(payload[5:9], actions)
+	binary.BigEndian.PutUint32(payload[5:9], offeredActions)
 	if err := writeFrame(conn, payload); err != nil {
 		t.Fatal(err)
 	}
 	reply, err := readFrame(conn)
 	if err != nil || len(reply) != 13 || reply[0] != commandOptionNegotiation {
 		t.Fatalf("option negotiation failed: reply=%q err=%v", reply, err)
-	}
-	wantActions := uint32(0)
-	if actions&resultHeaderActions == resultHeaderActions {
-		wantActions = resultHeaderActions
 	}
 	if got := binary.BigEndian.Uint32(reply[5:9]); got != wantActions {
 		t.Fatalf("negotiated actions = %#x, want %#x", got, wantActions)
@@ -615,6 +809,9 @@ func TestCommandResponseRequirements(t *testing.T) {
 			_, conn, _ := testServer(t, fixedAnalyzer{})
 			defer conn.Close()
 			negotiate(t, conn)
+			if cmd != commandConnect {
+				sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
+			}
 			if cmd == commandRecipient || cmd == commandData || cmd == commandEndHeaders {
 				if err := writeFrame(conn, []byte{commandMail}); err != nil {
 					t.Fatal(err)

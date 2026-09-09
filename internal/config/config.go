@@ -102,6 +102,8 @@ type MilterConfig struct {
 	Timeout              Duration `yaml:"timeout"`
 	ConnectionDNSTimeout Duration `yaml:"connection_dns_timeout"`
 	MaxMessageSize       int64    `yaml:"max_message_size"`
+	MaxConnections       int      `yaml:"max_connections"`
+	AllowedPeerIPs       []string `yaml:"allowed_peer_ips"`
 }
 type AIConfig struct {
 	Endpoint           string   `yaml:"endpoint"`
@@ -207,7 +209,8 @@ func defaults() Config {
 		Mode: "monitor",
 		Milter: MilterConfig{
 			Socket: "tcp:127.0.0.1:8895", Timeout: Duration(time.Minute),
-			ConnectionDNSTimeout: Duration(5 * time.Second), MaxMessageSize: 10 << 20,
+			ConnectionDNSTimeout: Duration(5 * time.Second), MaxMessageSize: 10 << 20, MaxConnections: 256,
+			AllowedPeerIPs: []string{"127.0.0.0/8", "::1/128"},
 		},
 		AI: AIConfig{
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
@@ -284,6 +287,21 @@ func (c Config) Validate() error {
 	}
 	if c.Milter.ConnectionDNSTimeout.Value() < 0 {
 		return fmt.Errorf("milter.connection_dns_timeout must not be negative")
+	}
+	if c.Milter.MaxConnections < 1 {
+		return fmt.Errorf("milter.max_connections must be positive")
+	}
+	if strings.HasPrefix(c.Milter.Socket, "tcp:") && len(c.Milter.AllowedPeerIPs) == 0 {
+		return fmt.Errorf("milter.allowed_peer_ips must contain at least one address for a TCP listener")
+	}
+	for _, entry := range c.Milter.AllowedPeerIPs {
+		entry = strings.TrimSpace(entry)
+		if _, err := netip.ParsePrefix(entry); err == nil {
+			continue
+		}
+		if _, err := netip.ParseAddr(entry); err != nil {
+			return fmt.Errorf("invalid milter.allowed_peer_ips entry %q", entry)
+		}
 	}
 	if c.Persistence.FlushInterval.Value() < 0 {
 		return fmt.Errorf("persistence.flush_interval must not be negative")

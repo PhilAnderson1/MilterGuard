@@ -87,6 +87,16 @@ each service to expose a Milter socket or local TCP listener to Postfix.
 Loopback TCP listeners are generally simpler to configure consistently across
 multiple Milter services. Unix sockets also work, but their directory ownership,
 permissions, and any Postfix chroot must be configured correctly.
+If a Unix socket is shared through a group, keep that group limited to Postfix,
+MilterGuard, and any other explicitly trusted mail-filter processes. Every
+member able to connect to the socket is trusted to act as the MTA.
+
+MilterGuard trusts connection details and authentication data supplied through
+its Milter listener, so only Postfix must be able to connect. The supplied
+`milter.allowed_peer_ips` setting permits loopback connections only. If Postfix
+runs on another machine, add only that server's address (or a tightly scoped
+CIDR) and restrict the Milter port with a firewall. Unix listeners rely on their
+directory and socket permissions instead.
 
 These filters must run in this order:
 

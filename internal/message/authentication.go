@@ -2,7 +2,6 @@ package message
 
 import (
 	"fmt"
-	"net/mail"
 	"regexp"
 	"strings"
 
@@ -127,10 +126,10 @@ func availableValue(value string) string {
 }
 
 func visibleFromDomain(value string) string {
-	if address, err := mail.ParseAddress(value); err == nil {
-		return emailDomain(address.Address)
+	if address, ok := MailboxAddress(value); ok {
+		return emailDomain(address)
 	}
-	return emailDomain(value)
+	return ""
 }
 
 func emailDomain(value string) string {

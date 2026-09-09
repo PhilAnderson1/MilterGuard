@@ -82,14 +82,16 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 			}
 		}
 		var combined extractedContent
+		var imageRefs imageRefCollector
 		var textParts, visibleTextParts []string
 		for _, part := range parts {
 			textParts = append(textParts, part.Text)
 			visibleTextParts = append(visibleTextParts, part.VisibleText)
 			combined.Links = append(combined.Links, part.Links...)
-			combined.ImageRefs = append(combined.ImageRefs, part.ImageRefs...)
+			imageRefs.AddAll(part.ImageRefs)
 			combined.Images = append(combined.Images, part.Images...)
 		}
+		combined.ImageRefs = imageRefs.refs
 		combined.Text = strings.Join(textParts, "\n\n")
 		combined.VisibleText = strings.Join(visibleTextParts, "\n\n")
 		return combined

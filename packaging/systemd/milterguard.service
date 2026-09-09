@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=milterguard
 Group=milterguard
+UMask=0007
 RuntimeDirectory=milterguard
 RuntimeDirectoryMode=0750
 StateDirectory=milterguard

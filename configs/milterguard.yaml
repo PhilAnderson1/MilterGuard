@@ -22,6 +22,16 @@ milter:
   # 2m, or 1m30s.
   timeout: 1m
 
+  # Maximum number of simultaneous Milter connections; positive integer.
+  max_connections: 256
+
+  # Real network addresses permitted to connect to the TCP Milter listener.
+  # Keep the loopback defaults when Postfix and MilterGuard run locally. Add
+  # the Postfix server's address or CIDR when it runs on another machine.
+  allowed_peer_ips:
+    - 127.0.0.0/8
+    - ::1/128
+
   # Maximum time for DNS lookups (DNS evidence is used by the AI to classify emails).
   connection_dns_timeout: 5s
 

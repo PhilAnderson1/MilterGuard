@@ -38,10 +38,13 @@ const (
 	minimumProtocolVersion   = uint32(2)
 	supportedProtocolVersion = uint32(6)
 	optionPayloadBytes       = 12
-	maxFrameBytes            = 16 << 20
-	maxSMTPReplyBytes        = 510 // Excludes the terminating CRLF.
-	maxMacroPairs            = 128
-	maxAuthenticationBytes   = 1024
+	// Postfix normally sends message bodies in much smaller chunks. Keeping a
+	// conservative hard ceiling prevents a peer from forcing a large allocation
+	// merely by declaring an oversized frame.
+	maxFrameBytes          = 1 << 20
+	maxSMTPReplyBytes      = 510 // Excludes the terminating CRLF.
+	maxMacroPairs          = 128
+	maxAuthenticationBytes = 1024
 
 	actionAddHeaders    = uint32(0x00000001)
 	actionChangeHeaders = uint32(0x00000010)
@@ -114,14 +117,15 @@ func replyCode(code, enhanced, text string) []byte {
 }
 
 func truncateUTF8(value string, maxBytes int) string {
+	value = strings.ToValidUTF8(value, "�")
 	if len(value) <= maxBytes {
 		return value
 	}
-	value = value[:maxBytes]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
 	}
-	return value
+	return value[:end]
 }
 
 func parseHeader(payload []byte) (string, string, bool) {

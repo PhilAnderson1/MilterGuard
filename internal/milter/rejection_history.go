@@ -51,6 +51,10 @@ func newRejectionHistoryStore(cfg config.RejectionHistoryConfig, log *slog.Logge
 		return cfg.Expiry.Value() > 0 && v.RejectedAt.Before(now.Add(-cfg.Expiry.Value()))
 	}, func(a, b rejectionHistoryEntry) bool { return a.RejectedAt.Before(b.RejectedAt) }, func(a, b rejectionHistoryEntry) bool { return a.RejectedAt.Before(b.RejectedAt) }, log)
 	store.db.SetClock(func() time.Time { return store.now() })
+	store.db.SetClone(func(entry rejectionHistoryEntry) rejectionHistoryEntry {
+		entry.Recipients = append([]string(nil), entry.Recipients...)
+		return entry
+	})
 	if cfg.Expiry.Value() <= 0 {
 		return store
 	}

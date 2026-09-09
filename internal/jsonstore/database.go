@@ -62,21 +62,53 @@ type Stats struct {
 	Flushed bool
 }
 
+type eviction[K comparable, V any] struct {
+	key   K
+	value V
+	size  int
+}
+
 func New[K comparable, V any](name, path string, version, maxEntries int, readLimit int64, key func(V) K, identity Identity[V], expired func(V, time.Time) bool, evictLess, sortLess func(V, V) bool, log *slog.Logger) *Database[K, V] {
 	return &Database[K, V]{name: name, path: path, version: version, maxEntries: maxEntries, readLimit: readLimit, records: make(map[K]V), key: key, identity: identity, now: time.Now, expired: expired, evictLess: evictLess, sortLess: sortLess, log: log}
 }
 
-func (d *Database[K, V]) SetClock(now func() time.Time)                        { d.now = now }
-func (d *Database[K, V]) SetMaintenance(fn func(V, time.Time) (V, bool, bool)) { d.maintain = fn }
-func (d *Database[K, V]) SetWriteHooks(prepare func(V) V, after func(V) V) {
-	d.prepareForWrite, d.afterWrite = prepare, after
+func (d *Database[K, V]) SetClock(now func() time.Time) {
+	d.mu.Lock()
+	d.now = now
+	d.mu.Unlock()
 }
-func (d *Database[K, V]) SetEvictionHook(fn func(K, V, int)) { d.onEvict = fn }
-func (d *Database[K, V]) SetClone(fn func(V) V)              { d.cloneValue = fn }
+
+func (d *Database[K, V]) SetMaintenance(fn func(V, time.Time) (V, bool, bool)) {
+	d.mu.Lock()
+	d.maintain = fn
+	d.mu.Unlock()
+}
+
+func (d *Database[K, V]) SetWriteHooks(prepare func(V) V, after func(V) V) {
+	d.mu.Lock()
+	d.prepareForWrite, d.afterWrite = prepare, after
+	d.mu.Unlock()
+}
+
+func (d *Database[K, V]) SetEvictionHook(fn func(K, V, int)) {
+	d.mu.Lock()
+	d.onEvict = fn
+	d.mu.Unlock()
+}
+
+func (d *Database[K, V]) SetClone(fn func(V) V) {
+	d.mu.Lock()
+	d.cloneValue = fn
+	d.mu.Unlock()
+}
 
 func (d *Database[K, V]) Load(acceptedVersion func(int) bool, normalize func(V) (V, bool, bool)) (bool, error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	var evictions []eviction[K, V]
+	defer func() {
+		d.mu.Unlock()
+		d.notifyEvictions(evictions)
+	}()
 	var file jsonDatabaseFile[V]
 	if err := readFile(d.path, d.readLimit, &file); err != nil {
 		return false, err
@@ -127,7 +159,9 @@ func (d *Database[K, V]) Load(acceptedVersion func(int) bool, normalize func(V) 
 	d.writes += loadWrites
 	d.deletes += loadDeletes
 	for len(d.records) > d.maxEntries {
-		d.evictOneLocked()
+		if event, evicted := d.evictOneLocked(); evicted {
+			evictions = append(evictions, event)
+		}
 		changed = true
 	}
 	if changed {
@@ -152,6 +186,9 @@ func (d *Database[K, V]) Get(key K) (V, bool) {
 		return zero, false
 	}
 	d.reads++
+	if d.cloneValue != nil {
+		value = d.cloneValue(value)
+	}
 	return value, true
 }
 
@@ -169,22 +206,25 @@ func (d *Database[K, V]) Put(value V) error {
 // Add appends records whose keys depend on their newly assigned IDs.
 func (d *Database[K, V]) Add(values ...V) ([]V, error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	var evictions []eviction[K, V]
+	defer func() {
+		d.mu.Unlock()
+		d.notifyEvictions(evictions)
+	}()
 	added := make([]V, 0, len(values))
-	backup := make(map[K]V, len(d.records))
-	for key, value := range d.records {
-		if d.cloneValue != nil {
-			value = d.cloneValue(value)
+	missingIDs := uint64(0)
+	for _, value := range values {
+		if d.identity.Get(value) == 0 {
+			missingIDs++
 		}
-		backup[key] = value
 	}
-	backupLastID := d.lastID
+	if missingIDs > math.MaxUint64-d.lastID {
+		return nil, fmt.Errorf("%s record ID space exhausted", d.name)
+	}
 	for _, value := range values {
 		var err error
 		value, err = d.assignIDLocked(value)
 		if err != nil {
-			d.replaceLocked(backup)
-			d.lastID = backupLastID
 			return nil, err
 		}
 		d.records[d.key(value)] = value
@@ -196,13 +236,13 @@ func (d *Database[K, V]) Add(values ...V) ([]V, error) {
 		d.removeExpiredLocked(d.now().UTC())
 	}
 	for len(d.records) > d.maxEntries {
-		d.evictOneLocked()
+		if event, evicted := d.evictOneLocked(); evicted {
+			evictions = append(evictions, event)
+		}
 	}
 	if !d.deferWrites {
 		if _, err := d.flushLocked("write"); err != nil {
-			d.replaceLocked(backup)
-			d.lastID = backupLastID
-			return nil, err
+			return added, err
 		}
 	}
 	return added, nil
@@ -230,6 +270,9 @@ func (d *Database[K, V]) View(fn func(V) bool) []V {
 		if d.isExpired(value, now) {
 			continue
 		}
+		if d.cloneValue != nil {
+			value = d.cloneValue(value)
+		}
 		if fn(value) {
 			result = append(result, value)
 			d.reads++
@@ -238,19 +281,21 @@ func (d *Database[K, V]) View(fn func(V) bool) []V {
 	return result
 }
 
-// Update provides one atomic transaction for feature operations that need to
-// read and modify several related records.
+// Update runs fn while holding the database's exclusive lock, allowing one
+// atomic operation across multiple records. The supplied map and any values
+// containing reference types are live database state. The callback must not
+// retain or access them after it returns. Mutations made by the callback take
+// effect immediately even when changed is false; changed controls only dirty
+// tracking, persistence, ID assignment, expiry cleanup, and capacity eviction.
+// Returning changed=false is therefore suitable only for deliberate
+// in-memory-only updates whose loss on restart is acceptable.
 func (d *Database[K, V]) Update(fn func(map[K]V) (reads, writes, deletes uint64, changed bool)) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	backup := make(map[K]V, len(d.records))
-	backupLastID := d.lastID
-	for key, value := range d.records {
-		if d.cloneValue != nil {
-			value = d.cloneValue(value)
-		}
-		backup[key] = value
-	}
+	var evictions []eviction[K, V]
+	defer func() {
+		d.mu.Unlock()
+		d.notifyEvictions(evictions)
+	}()
 	reads, writes, deletes, changed := fn(d.records)
 	d.reads += reads
 	if !changed {
@@ -258,33 +303,24 @@ func (d *Database[K, V]) Update(fn func(map[K]V) (reads, writes, deletes uint64,
 	}
 	d.writes += writes
 	d.deletes += deletes
+	d.dirty = true
 	if err := d.assignMissingIDsLocked(); err != nil {
-		d.replaceLocked(backup)
-		d.lastID = backupLastID
 		return err
 	}
-	d.dirty = true
 	if len(d.records) >= d.maxEntries {
 		d.removeExpiredLocked(d.now().UTC())
 	}
 	for len(d.records) > d.maxEntries {
-		d.evictOneLocked()
+		if event, evicted := d.evictOneLocked(); evicted {
+			evictions = append(evictions, event)
+		}
 	}
 	if !d.deferWrites {
 		if _, err := d.flushLocked("write"); err != nil {
-			d.replaceLocked(backup)
-			d.lastID = backupLastID
 			return err
 		}
 	}
 	return nil
-}
-
-func (d *Database[K, V]) replaceLocked(values map[K]V) {
-	clear(d.records)
-	for key, value := range values {
-		d.records[key] = value
-	}
 }
 
 func (d *Database[K, V]) removeExpiredLocked(now time.Time) uint64 {
@@ -321,24 +357,29 @@ func (d *Database[K, V]) removeExpiredLocked(now time.Time) uint64 {
 
 func (d *Database[K, V]) assignMissingIDsLocked() error {
 	seen := make(map[uint64]bool, len(d.records))
+	missing := make([]K, 0)
+	lastID := d.lastID
 	for key, value := range d.records {
 		id := d.identity.Get(value)
-		if id != 0 {
-			if seen[id] {
-				return fmt.Errorf("%s contains duplicate record ID %d", d.name, id)
-			}
-			seen[id] = true
-			if id > d.lastID {
-				d.lastID = id
-			}
+		if id == 0 {
+			missing = append(missing, key)
 			continue
 		}
-		updated, err := d.assignIDLocked(value)
-		if err != nil {
-			return err
+		if seen[id] {
+			return fmt.Errorf("%s contains duplicate record ID %d", d.name, id)
 		}
-		d.records[key] = updated
-		seen[d.identity.Get(updated)] = true
+		seen[id] = true
+		if id > lastID {
+			lastID = id
+		}
+	}
+	if uint64(len(missing)) > math.MaxUint64-lastID {
+		return fmt.Errorf("%s record ID space exhausted", d.name)
+	}
+	d.lastID = lastID
+	for _, key := range missing {
+		d.lastID++
+		d.records[key] = d.identity.Set(d.records[key], d.lastID)
 	}
 	return nil
 }
@@ -358,7 +399,7 @@ func (d *Database[K, V]) isExpired(value V, now time.Time) bool {
 	return d.expired != nil && d.expired(value, now)
 }
 
-func (d *Database[K, V]) evictOneLocked() {
+func (d *Database[K, V]) evictOneLocked() (eviction[K, V], bool) {
 	var victim K
 	var selected V
 	found := false
@@ -370,9 +411,23 @@ func (d *Database[K, V]) evictOneLocked() {
 	if found {
 		delete(d.records, victim)
 		d.deletes++
-		if d.onEvict != nil {
-			d.onEvict(victim, selected, len(d.records))
-		}
+		return eviction[K, V]{key: victim, value: selected, size: len(d.records)}, true
+	}
+	return eviction[K, V]{}, false
+}
+
+func (d *Database[K, V]) notifyEvictions(events []eviction[K, V]) {
+	if len(events) == 0 {
+		return
+	}
+	d.mu.RLock()
+	hook := d.onEvict
+	d.mu.RUnlock()
+	if hook == nil {
+		return
+	}
+	for _, event := range events {
+		hook(event.key, event.value, event.size)
 	}
 }
 
@@ -460,22 +515,34 @@ type managedDatabase interface {
 }
 
 type Manager struct {
-	log    *slog.Logger
-	stores []managedDatabase
+	mu       sync.Mutex
+	log      *slog.Logger
+	stores   []managedDatabase
+	deferred bool
 }
 
 func NewManager(log *slog.Logger) *Manager { return &Manager{log: log} }
 
 func (m *Manager) Add(stores ...managedDatabase) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, store := range stores {
+		store.SetDeferred(m.deferred)
+	}
 	m.stores = append(m.stores, stores...)
 }
 func (m *Manager) SetDeferred(value bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deferred = value
 	for _, store := range m.stores {
 		store.SetDeferred(value)
 	}
 }
 
 func (m *Manager) Flush(trigger string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	parts := make([]string, 0, len(m.stores))
 	for _, store := range m.stores {
 		stats, err := store.Flush()

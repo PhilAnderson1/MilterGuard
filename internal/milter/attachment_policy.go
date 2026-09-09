@@ -12,6 +12,12 @@ func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 	if ss.server.attachments == nil {
 		return false, true
 	}
+	select {
+	case ss.server.slots <- struct{}{}:
+		defer func() { <-ss.server.slots }()
+	case <-ctx.Done():
+		return true, false
+	}
 	finding, scanErr := ss.server.attachments.Scan(
 		ss.message.Header("Content-Type"),
 		ss.message.Header("Content-Transfer-Encoding"),
@@ -85,7 +91,7 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 		attrs = append(attrs, "inspection_error", scanErr)
 	}
 	if ss.server.cfg.Logging.IncludeSubject {
-		attrs = append(attrs, "subject", ss.message.Header("Subject"))
+		attrs = append(attrs, "subject", ss.message.DecodedHeader("Subject"))
 	}
 	if err != nil {
 		attrs = append(attrs, "response_error", err)

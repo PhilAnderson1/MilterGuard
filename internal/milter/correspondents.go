@@ -3,7 +3,6 @@ package milter
 import (
 	"fmt"
 	"log/slog"
-	"net/mail"
 	"os"
 	"sort"
 	"strings"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
 const (
@@ -211,8 +211,15 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 	if len(recipientSet) == 0 {
 		return nil
 	}
+	type candidateEvent struct {
+		recipient string
+		count     int
+		promoted  bool
+	}
+	var candidateEvents []candidateEvent
+	removedEntries := 0
 	now := s.now().UTC()
-	return s.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
+	err := s.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
 		if classification == "unwanted" {
 			if score < unwantedMinScore {
 				return
@@ -231,9 +238,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 			}
 			if removed > 0 {
 				changed = true
-				if s.log != nil {
-					s.log.Debug("inbound-learned correspondent removed after unwanted classification", "correspondent", correspondent, "removed_entries", removed, "entry_count", len(records))
-				}
+				removedEntries = removed
 			}
 			return
 		}
@@ -265,13 +270,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 				records[key] = entry
 				changed = true
 				writes++
-				if s.log != nil {
-					if s.qualified(entry) {
-						s.log.Debug("inbound sender promoted to known correspondent", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", 1)
-					} else {
-						s.log.Debug("inbound sender legitimate candidate updated", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", 1, "required_count", s.cfg.LegitimateSenderMinMessages)
-					}
-				}
+				candidateEvents = append(candidateEvents, candidateEvent{recipient: recipient, count: 1, promoted: s.qualified(entry)})
 				continue
 			}
 			if entry.WhitelistType == whitelistAuthenticatedOutbound || entry.WhitelistType == whitelistManual {
@@ -301,17 +300,25 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 				records[key] = entry
 				changed = true
 				writes++
-				if s.log != nil {
-					if s.qualified(entry) {
-						s.log.Debug("inbound sender promoted to known correspondent", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", entry.LegitimateEmailCount)
-					} else {
-						s.log.Debug("inbound sender legitimate candidate updated", "local_address", recipient, "correspondent", correspondent, "legitimate_email_count", entry.LegitimateEmailCount, "required_count", s.cfg.LegitimateSenderMinMessages)
-					}
-				}
+				candidateEvents = append(candidateEvents, candidateEvent{recipient: recipient, count: entry.LegitimateEmailCount, promoted: s.qualified(entry)})
 			}
 		}
 		return
 	})
+	if err != nil || s.log == nil {
+		return err
+	}
+	if removedEntries > 0 {
+		s.log.Debug("inbound-learned correspondent removed after unwanted classification", "correspondent", correspondent, "removed_entries", removedEntries, "entry_count", s.db.Size())
+	}
+	for _, event := range candidateEvents {
+		if event.promoted {
+			s.log.Debug("inbound sender promoted to known correspondent", "local_address", event.recipient, "correspondent", correspondent, "legitimate_email_count", event.count)
+		} else {
+			s.log.Debug("inbound sender legitimate candidate updated", "local_address", event.recipient, "correspondent", correspondent, "legitimate_email_count", event.count, "required_count", s.cfg.LegitimateSenderMinMessages)
+		}
+	}
+	return nil
 }
 
 func (s *correspondentStore) qualified(entry correspondentEntry) bool {
@@ -409,11 +416,11 @@ func normalizeEmailAddress(value string) string {
 	if value == "" || len(value) > 320 {
 		return ""
 	}
-	address, err := mail.ParseAddress(value)
-	if err != nil || address.Address == "" || strings.Count(address.Address, "@") != 1 {
+	address, ok := message.MailboxAddress(value)
+	if !ok || strings.Count(address, "@") != 1 {
 		return ""
 	}
-	parts := strings.SplitN(address.Address, "@", 2)
+	parts := strings.SplitN(address, "@", 2)
 	local := strings.ToLower(strings.TrimSpace(parts[0]))
 	domain := normalizeDomain(parts[1])
 	if local == "" || len(local)+len(domain)+1 > 254 || safeDNSHostname(domain) == "" {

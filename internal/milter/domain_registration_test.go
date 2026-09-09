@@ -31,6 +31,12 @@ type blockingDomainRegistrationLookup struct {
 	calls      atomic.Int32
 }
 
+type panickingDomainRegistrationLookup struct{}
+
+func (panickingDomainRegistrationLookup) Lookup(context.Context, string) (time.Time, time.Time, error) {
+	panic("test RDAP panic")
+}
+
 func (f *blockingDomainRegistrationLookup) Lookup(ctx context.Context, _ string) (time.Time, time.Time, error) {
 	if f.calls.Add(1) == 1 {
 		close(f.started)
@@ -108,6 +114,14 @@ func TestDomainRegistrationFailureIsTemporarilySuppressed(t *testing.T) {
 	}
 	if lookup.calls.Load() != 1 {
 		t.Fatalf("RDAP calls = %d, want 1 during retry suppression", lookup.calls.Load())
+	}
+}
+
+func TestDomainRegistrationLookupPanicIsRecovered(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	store := newTestDomainRegistrationStore(t, now, panickingDomainRegistrationLookup{})
+	if info, err := store.evidence(context.Background(), "example.com"); err == nil || info.Available {
+		t.Fatalf("panic result = %+v, %v; want unavailable evidence and error", info, err)
 	}
 }
 

@@ -2,9 +2,12 @@ package jsonstore
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -16,9 +19,110 @@ type testJSONRecord struct {
 	Value   string    `json:"value"`
 }
 
+type testSliceRecord struct {
+	StoreID uint64
+	Key     string
+	Values  []string
+}
+
+type testManagedDatabase struct {
+	mu       sync.Mutex
+	deferred bool
+	flushes  int
+}
+
+func (store *testManagedDatabase) SetDeferred(value bool) {
+	store.mu.Lock()
+	store.deferred = value
+	store.mu.Unlock()
+}
+
+func (store *testManagedDatabase) Flush() (Stats, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.flushes++
+	return Stats{Name: "Test"}, nil
+}
+
+func (store *testManagedDatabase) state() (bool, int) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.deferred, store.flushes
+}
+
 var testIdentity = Identity[testJSONRecord]{
 	Get: func(v testJSONRecord) uint64 { return v.StoreID },
 	Set: func(v testJSONRecord, id uint64) testJSONRecord { v.StoreID = id; return v },
+}
+
+var testSliceIdentity = Identity[testSliceRecord]{
+	Get: func(v testSliceRecord) uint64 { return v.StoreID },
+	Set: func(v testSliceRecord, id uint64) testSliceRecord { v.StoreID = id; return v },
+}
+
+func TestJSONDatabaseGetAndViewReturnIsolatedClones(t *testing.T) {
+	db := New("Test", "", 1, 10, 1<<20,
+		func(v testSliceRecord) string { return v.Key }, testSliceIdentity, nil, nil, nil, nil)
+	db.SetClone(func(record testSliceRecord) testSliceRecord {
+		record.Values = append([]string(nil), record.Values...)
+		return record
+	})
+	db.SetDeferred(true)
+	if err := db.Put(testSliceRecord{Key: "record", Values: []string{"stored"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	fromGet, found := db.Get("record")
+	if !found {
+		t.Fatal("record not found")
+	}
+	fromGet.Values[0] = "changed through Get"
+
+	fromView := db.View(func(record testSliceRecord) bool {
+		record.Values[0] = "changed in View callback"
+		return true
+	})
+	if len(fromView) != 1 {
+		t.Fatalf("View returned %d records", len(fromView))
+	}
+	fromView[0].Values[0] = "changed after View"
+
+	stored, found := db.Get("record")
+	if !found || len(stored.Values) != 1 || stored.Values[0] != "stored" {
+		t.Fatalf("returned slice mutated stored state: %#v, %v", stored, found)
+	}
+}
+
+func TestJSONDatabaseSettersAreSafeDuringConcurrentAccess(t *testing.T) {
+	db := New("Test", "", 1, 4, 1<<20,
+		func(v testJSONRecord) string { return v.Key }, testIdentity, nil,
+		func(a, b testJSONRecord) bool { return a.Key < b.Key }, nil, nil)
+	db.SetDeferred(true)
+
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		for range 200 {
+			db.SetClock(time.Now)
+			db.SetMaintenance(func(record testJSONRecord, _ time.Time) (testJSONRecord, bool, bool) {
+				return record, true, false
+			})
+			db.SetWriteHooks(func(record testJSONRecord) testJSONRecord { return record }, func(record testJSONRecord) testJSONRecord { return record })
+			db.SetEvictionHook(func(string, testJSONRecord, int) {})
+			db.SetClone(func(record testJSONRecord) testJSONRecord { return record })
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for index := range 200 {
+			_ = db.Put(testJSONRecord{Key: fmt.Sprintf("key-%d", index)})
+			_, _ = db.Get(fmt.Sprintf("key-%d", index))
+			_ = db.Snapshot()
+			_, _ = db.Flush()
+		}
+	}()
+	workers.Wait()
 }
 
 func TestJSONDatabaseManagerLogsCombinedFlushStatistics(t *testing.T) {
@@ -41,6 +145,56 @@ func TestJSONDatabaseManagerLogsCombinedFlushStatistics(t *testing.T) {
 	for _, want := range []string{`"trigger":"shutdown"`, `IP: r 1, w 1, d 0, f yes`, `Contacts: r 0, w 0, d 0, f no`} {
 		if !strings.Contains(logged, want) {
 			t.Fatalf("flush log missing %q: %s", want, logged)
+		}
+	}
+}
+
+func TestJSONDatabaseManagerAppliesDeferredModeToLateStore(t *testing.T) {
+	manager := NewManager(nil)
+	manager.SetDeferred(true)
+	store := &testManagedDatabase{}
+	manager.Add(store)
+	deferred, _ := store.state()
+	if !deferred {
+		t.Fatal("late store did not inherit deferred-write mode")
+	}
+}
+
+func TestJSONDatabaseManagerConcurrentOperations(t *testing.T) {
+	manager := NewManager(nil)
+	stores := make([]*testManagedDatabase, 100)
+	for index := range stores {
+		stores[index] = &testManagedDatabase{}
+	}
+
+	var workers sync.WaitGroup
+	workers.Add(3)
+	go func() {
+		defer workers.Done()
+		for _, store := range stores {
+			manager.Add(store)
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for index := range stores {
+			manager.SetDeferred(index%2 == 0)
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for range stores {
+			manager.Flush("test")
+		}
+	}()
+	workers.Wait()
+
+	manager.SetDeferred(true)
+	manager.Flush("final")
+	for index, store := range stores {
+		deferred, flushes := store.state()
+		if !deferred || flushes < 1 {
+			t.Fatalf("store %d state: deferred=%v flushes=%d", index, deferred, flushes)
 		}
 	}
 }
@@ -195,6 +349,53 @@ func TestJSONDatabaseAddAssignsIDBeforeDerivingKey(t *testing.T) {
 	}
 }
 
+func TestJSONDatabaseRetainsDirtyUpdateAfterWriteFailure(t *testing.T) {
+	directory := t.TempDir()
+	blocker := filepath.Join(directory, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("block"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db := New("Test", filepath.Join(blocker, "test.json"), 1, 10, 1<<20,
+		func(v testJSONRecord) string { return v.Key }, testIdentity, nil, nil, nil, nil)
+	if err := db.Put(testJSONRecord{Key: "retained", Value: "memory"}); err == nil {
+		t.Fatal("write through a non-directory unexpectedly succeeded")
+	}
+	if record, found := db.Get("retained"); !found || record.Value != "memory" {
+		t.Fatalf("failed write rolled back in-memory update: %#v, %v", record, found)
+	}
+
+	goodPath := filepath.Join(directory, "retry.json")
+	db.mu.Lock()
+	db.path = goodPath
+	db.mu.Unlock()
+	if stats, err := db.Flush(); err != nil || !stats.Flushed {
+		t.Fatalf("retry flush = %#v, %v", stats, err)
+	}
+	if _, err := os.Stat(goodPath); err != nil {
+		t.Fatalf("retry did not persist retained state: %v", err)
+	}
+}
+
+func TestJSONDatabaseRetainsAddedRecordsAfterWriteFailure(t *testing.T) {
+	directory := t.TempDir()
+	blocker := filepath.Join(directory, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("block"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db := New("Test", filepath.Join(blocker, "test.json"), 1, 10, 1<<20,
+		func(v testJSONRecord) uint64 { return v.StoreID }, testIdentity, nil, nil, nil, nil)
+	added, err := db.Add(testJSONRecord{Key: "retained"})
+	if err == nil {
+		t.Fatal("write through a non-directory unexpectedly succeeded")
+	}
+	if len(added) != 1 || added[0].StoreID != 1 {
+		t.Fatalf("failed write did not return retained addition: %#v", added)
+	}
+	if record, found := db.Get(1); !found || record.Key != "retained" {
+		t.Fatalf("failed write rolled back added record: %#v, %v", record, found)
+	}
+}
+
 func TestJSONDatabaseRejectsMissingAndDuplicateIDsWithoutPartialLoad(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -239,5 +440,46 @@ func TestJSONDatabaseRejectsDuplicateLogicalKeysWithoutReplacingLiveState(t *tes
 	}
 	if records := db.Snapshot(); len(records) != 1 || records["existing"].Value != "live" {
 		t.Fatalf("failed load replaced live state: %#v", records)
+	}
+}
+
+func TestJSONDatabaseEvictionHookRunsAfterUnlock(t *testing.T) {
+	db := New("Test", filepath.Join(t.TempDir(), "test.json"), 1, 1, 1<<20,
+		func(v testJSONRecord) string { return v.Key }, testIdentity, nil,
+		func(a, b testJSONRecord) bool { return a.Key < b.Key }, nil, nil)
+	db.SetDeferred(true)
+	if err := db.Put(testJSONRecord{Key: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	type observation struct {
+		key        string
+		reported   int
+		actualSize int
+	}
+	observed := make(chan observation, 1)
+	db.SetEvictionHook(func(key string, _ testJSONRecord, size int) {
+		observed <- observation{key: key, reported: size, actualSize: db.Size()}
+	})
+	done := make(chan error, 1)
+	go func() {
+		done <- db.Put(testJSONRecord{Key: "b"})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Put deadlocked while eviction hook called back into database")
+	}
+	select {
+	case got := <-observed:
+		if got.key != "a" || got.reported != 1 || got.actualSize != 1 {
+			t.Fatalf("eviction observation = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("eviction hook was not called")
 	}
 }

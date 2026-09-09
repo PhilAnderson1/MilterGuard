@@ -8,6 +8,7 @@ import (
 
 type Message struct {
 	Headers            map[string][]string
+	decodedHeaders     map[string][]string
 	Body               strings.Builder
 	Connection         ConnectionInfo
 	Correspondent      CorrespondentInfo
@@ -103,8 +104,15 @@ var retainedHeaders = map[string]bool{
 	"to":                           true,
 }
 
+var humanReadableHeaders = map[string]bool{
+	"from":     true,
+	"reply-to": true,
+	"subject":  true,
+	"to":       true,
+}
+
 func New(maxBytes int64) *Message {
-	return &Message{Headers: make(map[string][]string), MaxBytes: maxBytes}
+	return &Message{Headers: make(map[string][]string), decodedHeaders: make(map[string][]string), MaxBytes: maxBytes}
 }
 func (m *Message) AddHeader(name, value string) {
 	m.addArchiveHeader(name, value)
@@ -124,6 +132,9 @@ func (m *Message) AddHeader(name, value string) {
 	}
 	m.headerSize += entrySize
 	m.Headers[name] = append(m.Headers[name], value)
+	if humanReadableHeaders[name] {
+		m.decodedHeaders[name] = append(m.decodedHeaders[name], decodeHeaderValue(value))
+	}
 }
 
 func (m *Message) addArchiveHeader(name, value string) {
@@ -167,6 +178,23 @@ func (m *Message) AddBody(p []byte) {
 }
 func (m *Message) Header(name string) string {
 	return strings.Join(m.Headers[strings.ToLower(name)], ", ")
+}
+
+// DecodedHeader returns a human-readable RFC 2047-decoded header while the
+// original value remains available through Header for protocol-sensitive use.
+func (m *Message) DecodedHeader(name string) string {
+	name = strings.ToLower(name)
+	if values, ok := m.decodedHeaders[name]; ok {
+		return strings.Join(values, ", ")
+	}
+	return strings.Join(m.Headers[name], ", ")
+}
+
+func (m *Message) decodedHeaderValues(name string) []string {
+	if values, ok := m.decodedHeaders[name]; ok {
+		return values
+	}
+	return m.Headers[name]
 }
 
 // RetainedBytes reports the bounded header and body bytes kept by the Milter.

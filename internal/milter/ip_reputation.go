@@ -60,7 +60,7 @@ func (s *Server) resolveActiveIPHostnames(parent context.Context, entries []acti
 					continue
 				}
 				ctx, cancel := context.WithTimeout(parent, s.cfg.Milter.ConnectionDNSTimeout.Value())
-				names, err := s.resolver.LookupAddr(ctx, addr.String())
+				names, err := s.reverseLookupSafely(ctx, addr)
 				cancel()
 				if err != nil {
 					continue
@@ -86,6 +86,16 @@ func (s *Server) resolveActiveIPHostnames(parent context.Context, entries []acti
 	close(indices)
 	wg.Wait()
 	return entries
+}
+
+func (s *Server) reverseLookupSafely(ctx context.Context, addr netip.Addr) (names []string, err error) {
+	defer func() {
+		if panicValue := recover(); panicValue != nil {
+			s.logRecoveredWorkerPanic(ctx, "IP command reverse-DNS lookup", panicValue, "remote_ip", addr.String())
+			err = fmt.Errorf("reverse-DNS lookup panicked")
+		}
+	}()
+	return s.resolver.LookupAddr(ctx, addr.String())
 }
 
 type rejectedIPRecord struct {

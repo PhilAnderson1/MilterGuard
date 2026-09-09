@@ -50,10 +50,11 @@ type session struct {
 	connectionDNSPending        <-chan connectionDNSResult
 	message                     *message.Message
 	negotiatedActions           uint32
+	idleSince                   time.Time
 }
 
 func newSession(server *Server, conn net.Conn) *session {
-	ss := &session{server: server, conn: conn, reader: bufio.NewReader(conn)}
+	ss := &session{server: server, conn: conn, reader: bufio.NewReader(conn), idleSince: time.Now()}
 	ss.resetMessage(phaseNegotiation)
 	return ss
 }
@@ -64,7 +65,21 @@ func (ss *session) run(ctx context.Context) {
 	})
 	defer stopClose()
 	for {
-		_ = ss.conn.SetDeadline(time.Now().Add(ss.server.cfg.Milter.Timeout.Value()))
+		now := time.Now()
+		deadline := now.Add(ss.server.cfg.Milter.Timeout.Value())
+		if idleDeadline := ss.idleSince.Add(milterIdleTimeout); idleDeadline.Before(deadline) {
+			deadline = idleDeadline
+		}
+		if err := ss.conn.SetDeadline(deadline); err != nil {
+			if ctx.Err() == nil {
+				ss.server.log.Warn("cannot set Milter connection deadline",
+					"stage", "protocol read",
+					"local_addr", ss.conn.LocalAddr().String(),
+					"remote_addr", ss.conn.RemoteAddr().String(),
+					"error", err)
+			}
+			return
+		}
 		frame, bytesRead, err := readFrameProgress(ss.reader)
 		if err != nil {
 			if ss.handleReadError(ctx, bytesRead, err) {
@@ -72,6 +87,7 @@ func (ss *session) run(ctx context.Context) {
 			}
 			return
 		}
+		ss.idleSince = time.Now()
 		if !ss.handleCommand(ctx, frame[0], frame[1:]) {
 			return
 		}
@@ -84,10 +100,13 @@ func (ss *session) handleReadError(ctx context.Context, bytesRead int, err error
 	}
 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		if bytesRead == 0 {
-			ss.server.log.Debug("milter connection remains idle",
-				"idle_interval", ss.server.cfg.Milter.Timeout.Value().String(),
-				"local_addr", ss.conn.LocalAddr().String(),
-				"remote_addr", ss.conn.RemoteAddr().String())
+			if time.Since(ss.idleSince) >= milterIdleTimeout {
+				ss.server.log.Debug("closing idle Milter connection",
+					"idle_timeout", milterIdleTimeout.String(),
+					"local_addr", ss.conn.LocalAddr().String(),
+					"remote_addr", ss.conn.RemoteAddr().String())
+				return false
+			}
 			return true
 		}
 		ss.server.log.Warn("milter connection timed out during frame", "bytes_read", bytesRead, "error", err)
@@ -150,8 +169,8 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		}
 		return ss.sendContinue(command)
 	case commandHelo:
-		if ss.phase != phaseConnection {
-			return ss.protocolError("milter HELO command during active message")
+		if ss.phase != phaseConnection || !ss.connected {
+			return ss.protocolError("milter HELO command without active connection")
 		}
 		ss.heloIdentity = ""
 		if identity, ok := parseSMTPIdentity(payload); ok {
@@ -159,8 +178,8 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		}
 		return ss.sendContinue(command)
 	case commandMail:
-		if ss.phase != phaseConnection {
-			return ss.protocolError("milter MAIL command during active message")
+		if ss.phase != phaseConnection || !ss.connected {
+			return ss.protocolError("milter MAIL command without active connection")
 		}
 		if blocked, keepConnection := ss.rejectReputationIP(ctx); blocked {
 			return keepConnection
@@ -241,6 +260,13 @@ func (ss *session) negotiate(payload []byte) bool {
 		ss.server.log.Warn("result headers disabled for Milter connection because MTA did not offer add/change-header support",
 			"offered_actions", offeredActions)
 	}
+	wantsInternalHeaderRemoval := ss.server.cfg.EmailCommands.Enabled && ss.server.cfg.EmailCommands.SendReplies
+	if wantsInternalHeaderRemoval && offeredActions&actionChangeHeaders != 0 {
+		requestedActions |= actionChangeHeaders
+	} else if wantsInternalHeaderRemoval {
+		ss.server.log.Warn("internal reply protection disabled for Milter connection because MTA did not offer change-header support",
+			"offered_actions", offeredActions)
+	}
 	ss.negotiatedActions = requestedActions
 	if !ss.send(commandOptionNegotiation, optionResponse(version, requestedActions)) {
 		return false
@@ -266,7 +292,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		return ss.protocolError("unexpected milter end-of-body command")
 	}
 	if ss.isInternalMessage() {
-		return ss.finishBypassedMessage(ctx, "internal_command_reply", false, false)
+		return ss.finishInternalMessage(ctx)
 	}
 	if handled, keepConnection := ss.handleEmailCommand(ctx); handled {
 		return keepConnection
@@ -297,7 +323,16 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	}
 	ss.message.TrustedAuthservIDs = ss.trustedAuthservIDs()
 	ss.message.Connection = ss.connectionInformation(ctx)
-	_ = ss.conn.SetDeadline(time.Now().Add(ss.server.analysisTimeout()))
+	if err := ss.conn.SetDeadline(time.Now().Add(ss.server.analysisTimeout())); err != nil {
+		if ctx.Err() == nil {
+			ss.server.log.WarnContext(ctx, "cannot set Milter connection deadline",
+				"stage", "analysis",
+				"local_addr", ss.conn.LocalAddr().String(),
+				"remote_addr", ss.conn.RemoteAddr().String(),
+				"error", err)
+		}
+		return false
+	}
 	result := ss.server.evaluate(ctx, ss.message)
 	var err error
 	if result.selected == actionAccept {
@@ -313,6 +348,23 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	ss.applyPostDecisionUpdates(ctx, result, inbound)
 	ss.resetMessage(phaseConnection)
 	return true
+}
+
+func (ss *session) finishInternalMessage(ctx context.Context) bool {
+	if ss.negotiatedActions&actionChangeHeaders == 0 {
+		ss.server.log.ErrorContext(ctx, "cannot safely accept internal command reply because MTA did not offer header removal")
+		if err := writeFrame(ss.conn, []byte{responseTempfail}); err != nil {
+			return false
+		}
+		ss.resetMessage(phaseConnection)
+		return true
+	}
+	for range ss.message.Headers[strings.ToLower(internalMessageHeader)] {
+		if err := writeFrame(ss.conn, deleteHeaderResponse(internalMessageHeader)); err != nil {
+			return false
+		}
+	}
+	return ss.finishBypassedMessage(ctx, "internal_command_reply", false, false)
 }
 
 func (ss *session) knownCorrespondentLogAttrs() []any {
@@ -534,8 +586,18 @@ func (ss *session) startConnectionDNS(ctx context.Context) {
 	resolver := ss.server.resolver
 	addr := ss.peerIP
 	go func() {
-		pending <- resolveConnectionDNS(ctx, resolver, addr, timeout)
+		pending <- ss.server.resolveConnectionDNSSafely(ctx, resolver, addr, timeout)
 	}()
+}
+
+func (s *Server) resolveConnectionDNSSafely(ctx context.Context, resolver dnsResolver, addr netip.Addr, timeout time.Duration) (result connectionDNSResult) {
+	result = connectionDNSResult{status: message.ReverseDNSLookupFailed}
+	defer func() {
+		if panicValue := recover(); panicValue != nil {
+			s.logRecoveredWorkerPanic(ctx, "connection DNS lookup", panicValue, "remote_ip", addr.String())
+		}
+	}()
+	return resolveConnectionDNS(ctx, resolver, addr, timeout)
 }
 
 func (ss *session) connectionInformation(ctx context.Context) message.ConnectionInfo {
