@@ -44,6 +44,21 @@ func canonicalIP(addr netip.Addr) netip.Addr {
 	return addr.Unmap()
 }
 
+func canonicalIPPrefix(prefix netip.Prefix) (netip.Prefix, bool) {
+	addr := prefix.Addr()
+	bits := prefix.Bits()
+	if addr.Is4In6() {
+		if bits < 96 {
+			return netip.Prefix{}, false
+		}
+		addr = addr.Unmap()
+		bits -= 96
+	} else if addr.Is6() {
+		addr = addr.WithZone("")
+	}
+	return netip.PrefixFrom(addr, bits).Masked(), true
+}
+
 func (s *Server) resolveActiveIPHostnames(parent context.Context, entries []activeIPBlock) []activeIPBlock {
 	if len(entries) == 0 || s.resolver == nil || s.cfg.Milter.ConnectionDNSTimeout.Value() <= 0 {
 		return entries
@@ -180,7 +195,9 @@ func newIPReputationStore(reputation config.IPReputationConfig, log *slog.Logger
 	})
 	for _, entry := range reputation.IPAllowlist {
 		if prefix, err := netip.ParsePrefix(entry); err == nil {
-			cache.allowlist = append(cache.allowlist, prefix)
+			if prefix, ok := canonicalIPPrefix(prefix); ok {
+				cache.allowlist = append(cache.allowlist, prefix)
+			}
 			continue
 		}
 		if addr, err := netip.ParseAddr(entry); err == nil {

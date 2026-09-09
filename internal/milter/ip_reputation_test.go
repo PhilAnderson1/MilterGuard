@@ -59,19 +59,20 @@ func TestRejectedIPCacheHonorsAllowlist(t *testing.T) {
 	cache := newIPReputationStore(config.IPReputationConfig{
 		BlockDuration: config.Duration(time.Hour),
 		MaxEntries:    10,
-		IPAllowlist:   []string{"192.0.2.0/24", "2001:db8::1"},
+		IPAllowlist:   []string{"192.0.2.99/24", "::ffff:198.51.100.99/120", "2001:db8::1"},
 	}, logger)
-	for _, value := range []string{"192.0.2.25", "2001:db8::1"} {
+	for _, value := range []string{"192.0.2.25", "198.51.100.25", "2001:db8::1"} {
 		if cache.add(netip.MustParseAddr(value), 1, connectionDNSResult{}) {
 			t.Errorf("allowlisted address %s was added", value)
 		}
 	}
-	if !cache.add(netip.MustParseAddr("198.51.100.25"), 1, connectionDNSResult{}) {
+	if !cache.add(netip.MustParseAddr("203.0.113.25"), 1, connectionDNSResult{}) {
 		t.Fatal("non-allowlisted address was not added")
 	}
 	logOutput := output.String()
 	for _, wanted := range []string{
 		`"msg":"sending IP excluded from rejection reputation","remote_ip":"192.0.2.25","matched_prefix":"192.0.2.0/24","reason":"ip_allowlist","cache_size":0`,
+		`"msg":"sending IP excluded from rejection reputation","remote_ip":"198.51.100.25","matched_prefix":"198.51.100.0/24","reason":"ip_allowlist","cache_size":0`,
 		`"msg":"sending IP excluded from rejection reputation","remote_ip":"2001:db8::1","matched_prefix":"2001:db8::1/128","reason":"ip_allowlist","cache_size":0`,
 	} {
 		if !strings.Contains(logOutput, wanted) {

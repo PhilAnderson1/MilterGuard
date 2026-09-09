@@ -415,7 +415,7 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 			name: "valid IP CIDR and domain allowlists",
 			configure: func(cfg *Config) {
 				cfg.IPReputation.BlockDuration = Duration(15 * time.Minute)
-				cfg.IPReputation.IPAllowlist = []string{"192.0.2.1", "2001:db8::/32"}
+				cfg.IPReputation.IPAllowlist = []string{"192.0.2.1", "2001:db8::/32", "::ffff:198.51.100.0/120"}
 				cfg.IPReputation.DomainAllowlist = []string{"outlook.com", "MAIL.GOOGLE.COM."}
 			},
 		},
@@ -474,6 +474,13 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 				cfg.IPReputation.IPAllowlist = []string{"not-an-address"}
 			},
 			wantError: "ip_reputation.ip_allowlist",
+		},
+		{
+			name: "unrepresentable IPv4-mapped allowlist prefix",
+			configure: func(cfg *Config) {
+				cfg.IPReputation.IPAllowlist = []string{"::ffff:192.0.2.0/80"}
+			},
+			wantError: "IPv4-mapped prefix must be /96 or longer",
 		},
 		{
 			name: "invalid domain allowlist entry",

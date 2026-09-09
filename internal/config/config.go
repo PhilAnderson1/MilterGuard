@@ -457,7 +457,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("ip_reputation.max_entries must be positive")
 	}
 	for _, entry := range reputation.IPAllowlist {
-		if _, err := netip.ParsePrefix(entry); err == nil {
+		if prefix, err := netip.ParsePrefix(entry); err == nil {
+			if prefix.Addr().Is4In6() && prefix.Bits() < 96 {
+				return fmt.Errorf("invalid ip_reputation.ip_allowlist entry %q: IPv4-mapped prefix must be /96 or longer", entry)
+			}
 			continue
 		}
 		if _, err := netip.ParseAddr(entry); err != nil {
