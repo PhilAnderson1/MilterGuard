@@ -31,7 +31,7 @@ func TestFeatureStoresReportFlushStatistics(t *testing.T) {
 		t.Fatal(err)
 	}
 	contacts.match("friend@example.net", []string{"local@example.com"})
-	if err := rejections.add("sender@example.net", "", []string{"local@example.com"}, []string{"test"}); err != nil {
+	if err := rejections.add("sender@example.net", "", "Test subject", []string{"local@example.com"}, []string{"test"}); err != nil {
 		t.Fatal(err)
 	}
 	rejections.list("local@example.com")

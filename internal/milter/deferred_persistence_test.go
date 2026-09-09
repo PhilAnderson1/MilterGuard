@@ -54,7 +54,7 @@ func TestRejectionHistoryDeferredPersistence(t *testing.T) {
 	cfg := config.RejectionHistoryConfig{File: path, Expiry: config.Duration(24 * time.Hour), MaxEntries: 10}
 	store := newRejectionHistoryStore(cfg, nil)
 	store.db.SetDeferred(true)
-	if err := store.add("sender@example.net", "", []string{"local@example.com"}, []string{"Unwanted message"}); err != nil {
+	if err := store.add("sender@example.net", "", "Test subject", []string{"local@example.com"}, []string{"Unwanted message"}); err != nil {
 		t.Fatal(err)
 	}
 	assertNotPersisted(t, path)

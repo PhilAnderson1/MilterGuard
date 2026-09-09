@@ -18,10 +18,10 @@ func TestRejectionHistoryPersistsOneEventWithMultipleRecipientsAndExpires(t *tes
 	cfg := config.RejectionHistoryConfig{File: filepath.Join(t.TempDir(), "history.json"), Expiry: config.Duration(24 * time.Hour), MaxEntries: 10}
 	store := newRejectionHistoryStore(cfg, nil)
 	store.now = func() time.Time { return now }
-	if err := store.add("Sender <NEWS@Example.NET>", "bounce@example.net", []string{"Alice@Example.com", "bob@example.com", "alice@example.com"}, []string{"Credential theft link"}); err != nil {
+	if err := store.add("Sender <NEWS@Example.NET>", "bounce@example.net", "Account alert", []string{"Alice@Example.com", "bob@example.com", "alice@example.com"}, []string{"Credential theft link"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := store.list("alice@example.com"); len(got) != 1 || got[0].Sender != "news@example.net" || !got[0].RejectedAt.Equal(now) {
+	if got := store.list("alice@example.com"); len(got) != 1 || got[0].Sender != "news@example.net" || got[0].Subject != "Account alert" || !got[0].RejectedAt.Equal(now) {
 		t.Fatalf("Alice history = %#v", got)
 	}
 	all := store.list("*")
@@ -54,7 +54,7 @@ func TestRejectionHistoryEvictsOldest(t *testing.T) {
 	store := newRejectionHistoryStore(cfg, nil)
 	store.now = func() time.Time { return now }
 	for _, sender := range []string{"one@example.net", "two@example.net", "three@example.net"} {
-		if err := store.add(sender, "", []string{"alice@example.com"}, []string{"Unwanted message"}); err != nil {
+		if err := store.add(sender, "", "", []string{"alice@example.com"}, []string{"Unwanted message"}); err != nil {
 			t.Fatal(err)
 		}
 		now = now.Add(time.Minute)
@@ -70,11 +70,11 @@ func TestRejectionHistoryListsMostRecentFirst(t *testing.T) {
 	cfg := config.RejectionHistoryConfig{File: filepath.Join(t.TempDir(), "history.json"), Expiry: config.Duration(24 * time.Hour), MaxEntries: 10}
 	store := newRejectionHistoryStore(cfg, nil)
 	store.now = func() time.Time { return now }
-	if err := store.add("older@example.net", "", []string{"alice@example.com"}, []string{"Older reason"}); err != nil {
+	if err := store.add("older@example.net", "", "Older subject", []string{"alice@example.com"}, []string{"Older reason"}); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Minute)
-	if err := store.add("newer@example.net", "", []string{"alice@example.com"}, []string{"Newer reason"}); err != nil {
+	if err := store.add("newer@example.net", "", "Newer subject", []string{"alice@example.com"}, []string{"Newer reason"}); err != nil {
 		t.Fatal(err)
 	}
 	got := store.list("alice@example.com")
@@ -88,7 +88,7 @@ func TestRejectionHistoryWildcardAndFormatting(t *testing.T) {
 	cfg := config.RejectionHistoryConfig{File: filepath.Join(t.TempDir(), "history.json"), Expiry: config.Duration(time.Hour), MaxEntries: 10}
 	store := newRejectionHistoryStore(cfg, nil)
 	store.now = func() time.Time { return now }
-	if err := store.add("news@example.net", "", []string{"alice@example.com", "bob@example.com"}, []string{"Phishing link", "Impersonated sender"}); err != nil {
+	if err := store.add("news@example.net", "", "Urgent\naccount notice", []string{"alice@example.com", "bob@example.com"}, []string{"Phishing link", "Impersonated sender"}); err != nil {
 		t.Fatal(err)
 	}
 	entries := store.list("*")
@@ -96,7 +96,7 @@ func TestRejectionHistoryWildcardAndFormatting(t *testing.T) {
 		t.Fatalf("wildcard history count = %d", len(entries))
 	}
 	formatted := formatRejectionHistory(entries)
-	want := "From: news@example.net\nTo: alice@example.com, bob@example.com\nDate: 2026-09-03 12:34:56 UTC\nRejection ID: 1\nReason: Phishing link; Impersonated sender\n\n"
+	want := "From: news@example.net\nTo: alice@example.com, bob@example.com\nSubject: Urgent account notice\nDate: 2026-09-03 12:34:56 UTC\nRejection ID: 1\nReason: Phishing link; Impersonated sender\n\n"
 	if !strings.Contains(formatted, want) {
 		t.Errorf("formatted history missing %q: %s", want, formatted)
 	}
@@ -129,6 +129,7 @@ func TestRejectionHistoryEntryBoundCoversMaximumRecord(t *testing.T) {
 	record := rejectionHistoryEntry{
 		ID:         ^uint64(0),
 		Sender:     address,
+		Subject:    strings.Repeat("<", maxRejectionSubjectRunes) + "…",
 		Recipients: recipients,
 		RejectedAt: time.Now().UTC(),
 		Reason:     strings.Repeat("<", maxRejectionReasonRunes) + "…",
@@ -149,7 +150,7 @@ func TestRejectionHistoryCapsRecipientsPerRecord(t *testing.T) {
 	for i := range recipients {
 		recipients[i] = fmt.Sprintf("recipient-%03d@example.com", i)
 	}
-	if err := store.add("sender@example.com", "", recipients, []string{"test"}); err != nil {
+	if err := store.add("sender@example.com", "", "test subject", recipients, []string{"test"}); err != nil {
 		t.Fatal(err)
 	}
 	entries := store.list("*")
@@ -168,7 +169,7 @@ func TestRejectionHistoryLoadPersistsNormalizedAddresses(t *testing.T) {
 		Version: 1,
 		LastID:  1,
 		Entries: []rejectionHistoryEntry{{
-			ID: 1, Sender: "Alice@Example.COM",
+			ID: 1, Sender: "Alice@Example.COM", Subject: "Account\nalert",
 			Recipients: []string{"BOB@Example.COM", "bob@example.com"},
 			RejectedAt: time.Now().UTC(),
 		}},
@@ -196,7 +197,7 @@ func TestRejectionHistoryLoadPersistsNormalizedAddresses(t *testing.T) {
 	if err := json.Unmarshal(persisted, &normalized); err != nil {
 		t.Fatal(err)
 	}
-	if len(normalized.Entries) != 1 || normalized.Entries[0].Sender != "alice@example.com" || !slices.Equal(normalized.Entries[0].Recipients, []string{"bob@example.com"}) {
+	if len(normalized.Entries) != 1 || normalized.Entries[0].Sender != "alice@example.com" || normalized.Entries[0].Subject != "Account alert" || !slices.Equal(normalized.Entries[0].Recipients, []string{"bob@example.com"}) {
 		t.Fatalf("persisted normalized history = %#v", normalized.Entries)
 	}
 }

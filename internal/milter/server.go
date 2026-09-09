@@ -297,7 +297,7 @@ func (s *Server) recordRejection(ctx context.Context, msg *message.Message, enve
 	if msg == nil {
 		return
 	}
-	recordID, err := s.rejectionHistory.addWithID(msg.Header("From"), envelopeSender, recipients, reasons)
+	recordID, err := s.rejectionHistory.addWithID(msg.Header("From"), envelopeSender, msg.Header("Subject"), recipients, reasons)
 	if err != nil {
 		s.log.ErrorContext(ctx, "cannot save rejection history", "message_id", msg.Header("Message-ID"), "error", err)
 		recordID = 0

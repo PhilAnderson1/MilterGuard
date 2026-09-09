@@ -372,6 +372,7 @@ func TestRejectedMessageArchiveUsesRejectionRecordIDs(t *testing.T) {
 	archiveRoot := enableTestRejectedMail(t, server)
 	msg := message.New(1024)
 	msg.AddHeader("From", "Sender <sender@example.net>")
+	msg.AddHeader("Subject", "Archived subject")
 	msg.AddHeader("Message-ID", "<archive-id-test@example.net>")
 	_, _ = msg.Body.WriteString("rejected body")
 
@@ -384,6 +385,9 @@ func TestRejectedMessageArchiveUsesRejectionRecordIDs(t *testing.T) {
 	entry := entries[0]
 	if len(entry.Recipients) != 2 {
 		t.Fatalf("stored recipients = %#v", entry.Recipients)
+	}
+	if entry.Subject != "Archived subject" {
+		t.Fatalf("stored subject = %q", entry.Subject)
 	}
 	path := filepath.Join(archiveRoot, time.Now().UTC().Format("2006"), time.Now().UTC().Format("01"), time.Now().UTC().Format("02"), fmt.Sprintf("%d.eml", entry.ID))
 	if _, err := os.Stat(path); err != nil {

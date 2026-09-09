@@ -15,20 +15,22 @@ import (
 )
 
 const (
-	rejectionHistoryVersion = 1
-	maxRejectionReasonRunes = 1000
+	rejectionHistoryVersion  = 1
+	maxRejectionSubjectRunes = 1000
+	maxRejectionReasonRunes  = 1000
 	// encoding/json can expand one input byte or rune to a six-byte escape
 	// sequence. Allow for the sender, every recipient, the truncation ellipsis,
 	// timestamps, numeric IDs, field names, separators and indentation.
 	maxJSONEncodedUnitBytes            int64 = 6
 	maxPersistedEmailAddressBytes      int64 = 254
 	maxRejectionHistoryStructuralBytes int64 = 512
-	maximumRejectionHistoryEntryBytes        = (int64(maxLearnedRecipients)+1)*maxPersistedEmailAddressBytes*maxJSONEncodedUnitBytes + (int64(maxRejectionReasonRunes)+1)*maxJSONEncodedUnitBytes + maxRejectionHistoryStructuralBytes
+	maximumRejectionHistoryEntryBytes        = (int64(maxLearnedRecipients)+1)*maxPersistedEmailAddressBytes*maxJSONEncodedUnitBytes + (int64(maxRejectionSubjectRunes)+int64(maxRejectionReasonRunes)+2)*maxJSONEncodedUnitBytes + maxRejectionHistoryStructuralBytes
 )
 
 type rejectionHistoryEntry struct {
 	ID         uint64    `json:"id"`
 	Sender     string    `json:"sender"`
+	Subject    string    `json:"subject,omitempty"`
 	Recipients []string  `json:"recipients"`
 	RejectedAt time.Time `json:"rejected_at"`
 	Reason     string    `json:"reason,omitempty"`
@@ -64,12 +66,12 @@ func newRejectionHistoryStore(cfg config.RejectionHistoryConfig, log *slog.Logge
 	return store
 }
 
-func (s *rejectionHistoryStore) add(visibleSender, envelopeSender string, recipients, reasons []string) error {
-	_, err := s.addWithID(visibleSender, envelopeSender, recipients, reasons)
+func (s *rejectionHistoryStore) add(visibleSender, envelopeSender, subject string, recipients, reasons []string) error {
+	_, err := s.addWithID(visibleSender, envelopeSender, subject, recipients, reasons)
 	return err
 }
 
-func (s *rejectionHistoryStore) addWithID(visibleSender, envelopeSender string, recipients, reasons []string) (uint64, error) {
+func (s *rejectionHistoryStore) addWithID(visibleSender, envelopeSender, subject string, recipients, reasons []string) (uint64, error) {
 	if s == nil || s.cfg.Expiry.Value() <= 0 {
 		return 0, nil
 	}
@@ -93,13 +95,14 @@ func (s *rejectionHistoryStore) addWithID(visibleSender, envelopeSender string, 
 		return 0, nil
 	}
 	now := s.now().UTC()
+	subject = rejectionSingleLine(subject, maxRejectionSubjectRunes)
 	reason := rejectionReason(reasons)
 	normalizedRecipients := make([]string, 0, len(unique))
 	for recipient := range unique {
 		normalizedRecipients = append(normalizedRecipients, recipient)
 	}
 	sort.Strings(normalizedRecipients)
-	added, err := s.db.Add(rejectionHistoryEntry{Sender: sender, Recipients: normalizedRecipients, RejectedAt: now, Reason: reason})
+	added, err := s.db.Add(rejectionHistoryEntry{Sender: sender, Subject: subject, Recipients: normalizedRecipients, RejectedAt: now, Reason: reason})
 	if err != nil {
 		return 0, err
 	}
@@ -115,22 +118,26 @@ func (s *rejectionHistoryStore) addWithID(visibleSender, envelopeSender string, 
 func rejectionReason(reasons []string) string {
 	cleaned := make([]string, 0, len(reasons))
 	for _, reason := range reasons {
-		reason = strings.Map(func(r rune) rune {
-			if unicode.IsControl(r) {
-				return ' '
-			}
-			return r
-		}, strings.ToValidUTF8(reason, "�"))
-		reason = strings.Join(strings.Fields(reason), " ")
+		reason = rejectionSingleLine(reason, maxRejectionReasonRunes)
 		if reason != "" {
 			cleaned = append(cleaned, reason)
 		}
 	}
-	combined := strings.Join(cleaned, "; ")
-	if utf8.RuneCountInString(combined) <= maxRejectionReasonRunes {
-		return combined
+	return rejectionSingleLine(strings.Join(cleaned, "; "), maxRejectionReasonRunes)
+}
+
+func rejectionSingleLine(value string, maxRunes int) string {
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, strings.ToValidUTF8(value, "�"))
+	value = strings.Join(strings.Fields(value), " ")
+	if utf8.RuneCountInString(value) <= maxRunes {
+		return value
 	}
-	return string([]rune(combined)[:maxRejectionReasonRunes]) + "…"
+	return string([]rune(value)[:maxRunes]) + "…"
 }
 
 func (s *rejectionHistoryStore) list(recipient string) []rejectionHistoryEntry {
@@ -163,8 +170,10 @@ func (s *rejectionHistoryStore) list(recipient string) []rejectionHistoryEntry {
 func (s *rejectionHistoryStore) load() error {
 	changed, err := s.db.Load(func(version int) bool { return version == rejectionHistoryVersion }, func(entry rejectionHistoryEntry) (rejectionHistoryEntry, bool, bool) {
 		originalSender := entry.Sender
+		originalSubject := entry.Subject
 		originalRecipients := append([]string(nil), entry.Recipients...)
 		entry.Sender = normalizeEmailAddress(entry.Sender)
+		entry.Subject = rejectionSingleLine(entry.Subject, maxRejectionSubjectRunes)
 		unique := make(map[string]bool)
 		for _, recipient := range entry.Recipients {
 			if normalized := normalizeEmailAddress(recipient); normalized != "" {
@@ -179,7 +188,7 @@ func (s *rejectionHistoryStore) load() error {
 		if len(entry.Recipients) > maxLearnedRecipients {
 			entry.Recipients = entry.Recipients[:maxLearnedRecipients]
 		}
-		modified := entry.Sender != originalSender || !slices.Equal(entry.Recipients, originalRecipients)
+		modified := entry.Sender != originalSender || entry.Subject != originalSubject || !slices.Equal(entry.Recipients, originalRecipients)
 		return entry, entry.Sender != "" && len(entry.Recipients) > 0 && !entry.RejectedAt.IsZero(), modified
 	})
 	if err == nil && changed {
