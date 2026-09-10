@@ -18,9 +18,9 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
-	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 )
 
 const analysisResponseMargin = 5 * time.Second
@@ -62,7 +62,7 @@ type Server struct {
 	attachments        *attachment.Scanner
 	internalToken      string
 	replySlots         chan struct{}
-	persistence        *jsonstore.Manager
+	database           *sqlstore.Store
 	wg                 sync.WaitGroup
 	startupErr         error
 }
@@ -73,17 +73,22 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	if cfg.EmailCommands.Enabled && cfg.EmailCommands.SendReplies {
 		internalToken, tokenErr = generateInternalToken(rand.Reader)
 	}
-	server := &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent), sessionSlots: make(chan struct{}, cfg.Milter.MaxConnections), ipReputation: newIPReputationStore(cfg.IPReputation, log), correspondents: newCorrespondentStore(cfg.Correspondents, log), rejectionHistory: newRejectionHistoryStore(cfg.RejectionHistory, log), domainRegistration: newDomainRegistrationStore(cfg.DomainRegistration, log), resolver: net.DefaultResolver, internalToken: internalToken, replySlots: make(chan struct{}, 4)}
+	var database *sqlstore.Store
+	var databaseErr error
+	if correspondentFeaturesEnabled(cfg.Correspondents) || ipReputationFeaturesEnabled(cfg.IPReputation) || rejectionHistoryEnabled(cfg.RejectionHistory) || cfg.DomainRegistration.Enabled {
+		database, databaseErr = sqlstore.Open(context.Background(), cfg.Persistence.DatabaseFile, sqlstore.DefaultOptions())
+	}
+	server := &Server{
+		cfg: cfg, analyzer: analyzer, log: log,
+		slots: make(chan struct{}, cfg.AI.MaxConcurrent), sessionSlots: make(chan struct{}, cfg.Milter.MaxConnections),
+		ipReputation:       newIPReputationStore(cfg.IPReputation, database, log),
+		correspondents:     newCorrespondentStore(cfg.Correspondents, database, log),
+		rejectionHistory:   newRejectionHistoryStore(cfg.RejectionHistory, database, log),
+		domainRegistration: newDomainRegistrationStore(cfg.DomainRegistration, database, log),
+		resolver:           net.DefaultResolver, internalToken: internalToken, replySlots: make(chan struct{}, 4), database: database,
+	}
 	server.allowedPeerIPs = peerPrefixes(cfg.Milter.AllowedPeerIPs)
-	server.startupErr = errors.Join(
-		tokenErr,
-		persistenceLoadError("IP reputation", cfg.IPReputation.StateFile, server.ipReputation.loadErr),
-		persistenceLoadError("correspondent", cfg.Correspondents.File, server.correspondents.loadErr),
-		persistenceLoadError("rejection history", cfg.RejectionHistory.File, server.rejectionHistory.loadErr),
-		persistenceLoadError("domain registration", cfg.DomainRegistration.StateFile, server.domainRegistration.loadErr),
-	)
-	server.persistence = jsonstore.NewManager(log)
-	server.persistence.Add(server.ipReputation.db, server.correspondents.db, server.rejectionHistory.db, server.domainRegistration.db)
+	server.startupErr = errors.Join(tokenErr, databaseErr)
 	if cfg.RejectedMail.Enabled {
 		server.rejectedMail = rejectedmail.New(rejectedmail.Options{
 			Directory: cfg.RejectedMail.Directory, Retention: cfg.RejectedMail.Retention.Value(),
@@ -101,19 +106,23 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	return server
 }
 
+// Close releases persistent database resources. It is safe to call more than
+// once after the server has stopped accepting sessions.
+func (s *Server) Close() error {
+	if s == nil || s.database == nil {
+		return nil
+	}
+	err := s.database.Close()
+	s.database = nil
+	return err
+}
+
 func generateInternalToken(random io.Reader) (string, error) {
 	var tokenBytes [32]byte
 	if _, err := io.ReadFull(random, tokenBytes[:]); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrInternalTokenGeneration, err)
 	}
 	return hex.EncodeToString(tokenBytes[:]), nil
-}
-
-func persistenceLoadError(name, path string, err error) error {
-	if err == nil {
-		return nil
-	}
-	return fmt.Errorf("%s file %s: %w", name, path, err)
 }
 
 // StartupError reports persistent state that could not be loaded safely.
@@ -123,31 +132,33 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	if s.startupErr != nil {
 		return s.startupErr
 	}
-	s.persistence.Flush("startup")
-	defer s.persistence.Flush("shutdown")
+	if err := s.cleanupPersistentStores("startup"); err != nil {
+		return err
+	}
 	s.startRejectedMailCleanup(ctx)
-	if flushInterval := s.cfg.Persistence.FlushInterval.Value(); flushInterval > 0 {
-		s.persistence.SetDeferred(true)
-		flushCtx, stopFlush := context.WithCancel(ctx)
-		flushDone := make(chan struct{})
+	if cleanupInterval := s.cfg.Persistence.CleanupInterval.Value(); cleanupInterval > 0 {
+		maintenanceCtx, stopMaintenance := context.WithCancel(ctx)
+		maintenanceDone := make(chan struct{})
 		go func() {
-			defer close(flushDone)
-			ticker := time.NewTicker(flushInterval)
+			defer close(maintenanceDone)
+			ticker := time.NewTicker(cleanupInterval)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					s.runMaintenance("persistence flush", func() {
-						s.persistence.Flush("timer")
+					s.runMaintenance("persistence cleanup", func() {
+						if err := s.cleanupPersistentStores("timer"); err != nil {
+							s.log.Warn("SQLite cleanup failed", "error", err)
+						}
 					})
-				case <-flushCtx.Done():
+				case <-maintenanceCtx.Done():
 					return
 				}
 			}
 		}()
 		defer func() {
-			stopFlush()
-			<-flushDone
+			stopMaintenance()
+			<-maintenanceDone
 		}()
 	}
 	go func() { <-ctx.Done(); _ = ln.Close() }()
@@ -177,6 +188,34 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			s.handle(ctx, conn)
 		}()
 	}
+}
+
+func (s *Server) cleanupPersistentStores(trigger string) error {
+	ipDeleted, ipErr := s.ipReputation.cleanup()
+	contactsDeleted, contactsErr := s.correspondents.cleanup()
+	rejectionsDeleted, rejectionsErr := s.rejectionHistory.cleanup()
+	domainsDeleted, domainsErr := s.domainRegistration.cleanup()
+
+	s.log.Debug("SQLite cleanup completed",
+		"trigger", trigger,
+		"ip_deleted", ipDeleted,
+		"contacts_deleted", contactsDeleted,
+		"rejections_deleted", rejectionsDeleted,
+		"domains_deleted", domainsDeleted)
+
+	return errors.Join(
+		wrapCleanupError("IP reputation", ipErr),
+		wrapCleanupError("correspondents", contactsErr),
+		wrapCleanupError("rejection history", rejectionsErr),
+		wrapCleanupError("domain registrations", domainsErr),
+	)
+}
+
+func wrapCleanupError(store string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("clean expired %s: %w", store, err)
 }
 
 func (s *Server) acceptConnection(ctx context.Context, ln net.Listener) (net.Conn, error) {
@@ -297,7 +336,7 @@ func (s *Server) recordRejection(ctx context.Context, msg *message.Message, enve
 	if msg == nil {
 		return
 	}
-	recordID, err := s.rejectionHistory.addWithID(msg.Header("From"), envelopeSender, msg.Header("Subject"), recipients, reasons)
+	recordID, err := s.rejectionHistory.addWithID(msg.Header("From"), envelopeSender, msg.DecodedHeader("Subject"), recipients, reasons)
 	if err != nil {
 		s.log.ErrorContext(ctx, "cannot save rejection history", "message_id", msg.Header("Message-ID"), "error", err)
 		recordID = 0

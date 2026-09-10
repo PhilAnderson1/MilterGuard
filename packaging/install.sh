@@ -18,13 +18,20 @@ quickstart_source="$script_dir/QUICKSTART.md"
 operating_guide_source="$script_dir/OPERATING_GUIDE.md"
 readme_source="$script_dir/README.md"
 license_source="$script_dir/LICENSE"
+third_party_notices_source="$script_dir/THIRD_PARTY_NOTICES.md"
+third_party_licenses_source="$script_dir/THIRD_PARTY_LICENSES"
 
-for required_file in "$binary" "$config_source" "$prompt_source" "$trusted_domains_source" "$replay_tool_source" "$quickstart_source" "$operating_guide_source" "$readme_source" "$license_source"; do
+for required_file in "$binary" "$config_source" "$prompt_source" "$trusted_domains_source" "$replay_tool_source" "$quickstart_source" "$operating_guide_source" "$readme_source" "$license_source" "$third_party_notices_source"; do
     if [ ! -f "$required_file" ]; then
         echo "Required release file is missing: $required_file" >&2
         exit 1
     fi
 done
+
+if [ ! -d "$third_party_licenses_source" ]; then
+    echo "Required release directory is missing: $third_party_licenses_source" >&2
+    exit 1
+fi
 
 if ! getent group milterguard >/dev/null 2>&1; then
     if command -v groupadd >/dev/null 2>&1; then
@@ -58,6 +65,15 @@ install -o root -g root -m 0644 "$quickstart_source" /usr/local/share/milterguar
 install -o root -g root -m 0644 "$operating_guide_source" /usr/local/share/milterguard/OPERATING_GUIDE.md
 install -o root -g root -m 0644 "$readme_source" /usr/local/share/milterguard/README.md
 install -o root -g root -m 0644 "$license_source" /usr/local/share/milterguard/LICENSE
+install -o root -g root -m 0644 "$third_party_notices_source" /usr/local/share/milterguard/THIRD_PARTY_NOTICES.md
+install -d -o root -g root -m 0755 /usr/local/share/milterguard/THIRD_PARTY_LICENSES
+for third_party_license in "$third_party_licenses_source"/*.txt; do
+    if [ ! -f "$third_party_license" ]; then
+        echo "No third-party licence files found in: $third_party_licenses_source" >&2
+        exit 1
+    fi
+    install -o root -g root -m 0644 "$third_party_license" /usr/local/share/milterguard/THIRD_PARTY_LICENSES/
+done
 
 install_config_if_missing() {
     source_file=$1

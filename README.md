@@ -121,3 +121,5 @@ Then edit and validate the configuration as described in the installation sectio
 ## License
 
 MilterGuard is available under the [MIT License](LICENSE).
+Licences and notices for software incorporated into the compiled binary are
+listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

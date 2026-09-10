@@ -1,36 +1,34 @@
 package milter
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
-	"os"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
-	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 )
 
 const (
-	correspondentFileVersion               = 1
-	estimatedCorrespondentEntryBytes int64 = 1 << 10
-	maxLearnedRecipients                   = 100
-	whitelistAuthenticatedOutbound         = "authenticated_outbound"
-	whitelistRepeatedLegitimate            = "repeated_legitimate_inbound"
-	whitelistManual                        = "manual"
+	maxLearnedRecipients           = 100
+	whitelistAuthenticatedOutbound = "authenticated_outbound"
+	whitelistRepeatedLegitimate    = "repeated_legitimate_inbound"
+	whitelistManual                = "manual"
 )
 
 type correspondentEntry struct {
-	ID                   uint64    `json:"id"`
-	LocalAddress         string    `json:"local_address"`
-	Correspondent        string    `json:"correspondent"`
-	LearnedAt            time.Time `json:"learned_at"`
-	LastActivityAt       time.Time `json:"last_activity_at"`
-	PersistedActivityAt  time.Time `json:"-"`
-	WhitelistType        string    `json:"whitelist_type"`
-	LegitimateEmailCount int       `json:"legitimate_email_count,omitempty"`
+	ID                   uint64
+	LocalAddress         string
+	Correspondent        string
+	LearnedAt            time.Time
+	LastActivityAt       time.Time
+	WhitelistType        string
+	LegitimateEmailCount int
 }
 
 type correspondentMatch struct {
@@ -40,278 +38,203 @@ type correspondentMatch struct {
 	TotalRecipients      int
 }
 
+// correspondentStore is a purpose-built SQL repository. It deliberately does
+// not expose generic map-like access or reproduce the former JSON-store API.
 type correspondentStore struct {
-	cfg     config.CorrespondentsConfig
-	db      *jsonstore.Database[string, correspondentEntry]
-	now     func() time.Time
-	log     *slog.Logger
-	loadErr error
+	cfg config.CorrespondentsConfig
+	db  *sqlstore.Store
+	now func() time.Time
+	log *slog.Logger
 }
 
-func newCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logger) *correspondentStore {
-	store := newEmptyCorrespondentStore(cfg, log)
-	if !cfg.LearnAuthenticatedRecipients && !cfg.LearnLegitimateSenders && !cfg.UseAllowlist {
-		return store
-	}
-	if err := store.load(); err != nil && !os.IsNotExist(err) {
-		store.loadErr = err
-	}
-	return store
+func newCorrespondentStore(cfg config.CorrespondentsConfig, db *sqlstore.Store, log *slog.Logger) *correspondentStore {
+	return &correspondentStore{cfg: cfg, db: db, now: time.Now, log: log}
 }
 
-func newEmptyCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logger) *correspondentStore {
-	store := &correspondentStore{cfg: cfg, now: time.Now, log: log}
-	store.db = jsonstore.New("Contacts", cfg.File, correspondentFileVersion, cfg.MaxEntries,
-		persistentStoreReadLimit(cfg.MaxEntries, estimatedCorrespondentEntryBytes),
-		func(entry correspondentEntry) string { return store.key(entry.LocalAddress, entry.Correspondent) },
-		jsonstore.Identity[correspondentEntry]{
-			Get: func(entry correspondentEntry) uint64 { return entry.ID },
-			Set: func(entry correspondentEntry, id uint64) correspondentEntry { entry.ID = id; return entry },
-		},
-		func(entry correspondentEntry, now time.Time) bool {
-			staleAfter := cfg.StaleAfter.Value()
-			return staleAfter > 0 && correspondentActivityTime(entry).Before(now.Add(-staleAfter))
-		}, func(a, b correspondentEntry) bool {
-			aq, bq := store.qualified(a), store.qualified(b)
-			return (!aq && bq) || (aq == bq && correspondentActivityTime(a).Before(correspondentActivityTime(b)))
-		}, func(a, b correspondentEntry) bool {
-			return a.LocalAddress < b.LocalAddress || (a.LocalAddress == b.LocalAddress && a.Correspondent < b.Correspondent)
-		}, log)
-	store.db.SetClock(func() time.Time { return store.now() })
-	store.db.SetWriteHooks(func(entry correspondentEntry) correspondentEntry {
-		entry.PersistedActivityAt = entry.LastActivityAt
-		return entry
-	}, func(entry correspondentEntry) correspondentEntry {
-		entry.PersistedActivityAt = entry.LastActivityAt
-		return entry
-	})
-	return store
-}
-
-func (s *correspondentStore) key(localAddress, correspondent string) string {
-	return localAddress + "\x00" + correspondent
+func correspondentFeaturesEnabled(cfg config.CorrespondentsConfig) bool {
+	return cfg.LearnAuthenticatedRecipients || cfg.LearnLegitimateSenders || cfg.UseAllowlist
 }
 
 func (s *correspondentStore) learn(localAddress string, recipients []string) error {
-	if s == nil || !s.cfg.LearnAuthenticatedRecipients {
+	if s == nil || s.db == nil || !s.cfg.LearnAuthenticatedRecipients {
 		return nil
 	}
 	localAddress = normalizeEmailAddress(localAddress)
 	if localAddress == "" {
 		return fmt.Errorf("authenticated envelope sender is unavailable or invalid")
 	}
-	unique := make(map[string]bool)
-	for _, recipient := range recipients {
-		if len(unique) >= maxLearnedRecipients {
-			break
-		}
-		if recipient = normalizeEmailAddress(recipient); recipient != "" {
-			unique[recipient] = true
-		}
-	}
+	unique := normalizedAddressSet(recipients, maxLearnedRecipients)
 	if len(unique) == 0 {
 		return nil
 	}
 
+	ctx := context.Background()
 	now := s.now().UTC()
 	added := 0
-	err := s.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
-		for recipient := range unique {
-			key := s.key(localAddress, recipient)
-			entry, exists := records[key]
-			if exists {
-				reads++
-				if s.entryStale(entry, now) {
-					delete(records, key)
-					deletes++
-					exists = false
-				} else {
-					promoted := entry.WhitelistType != whitelistAuthenticatedOutbound && entry.WhitelistType != whitelistManual
-					persist := s.activityPersistenceDue(entry, now)
-					entry.LastActivityAt = now
-					if entry.WhitelistType != whitelistManual {
-						entry.WhitelistType, entry.LegitimateEmailCount = whitelistAuthenticatedOutbound, 0
-					}
-					records[key] = entry
-					if promoted || persist {
-						writes++
-						changed = true
-					}
-					continue
+	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		added = 0
+		for _, recipient := range sortedSet(unique) {
+			entry, found, err := s.getTx(ctx, tx, localAddress, recipient)
+			if err != nil {
+				return err
+			}
+			if found && s.entryStale(entry, now) {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE id = ?`, entry.ID); err != nil {
+					return err
+				}
+				found = false
+			}
+			if !found {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO correspondents
+					(local_address, correspondent, learned_at_ms, last_activity_at_ms, whitelist_type, legitimate_email_count)
+					VALUES (?, ?, ?, ?, ?, 0)`, localAddress, recipient, unixMillis(now), unixMillis(now), whitelistAuthenticatedOutbound); err != nil {
+					return err
+				}
+				added++
+				continue
+			}
+			if entry.WhitelistType != whitelistManual {
+				if _, err := tx.ExecContext(ctx, `UPDATE correspondents SET whitelist_type = ?, legitimate_email_count = 0,
+					last_activity_at_ms = ? WHERE id = ?`, whitelistAuthenticatedOutbound, unixMillis(now), entry.ID); err != nil {
+					return err
+				}
+			} else if s.activityPersistenceDue(entry, now) {
+				if _, err := tx.ExecContext(ctx, `UPDATE correspondents SET last_activity_at_ms = ? WHERE id = ?`, unixMillis(now), entry.ID); err != nil {
+					return err
 				}
 			}
-			if !exists {
-				records[key] = correspondentEntry{LocalAddress: localAddress, Correspondent: recipient, LearnedAt: now, LastActivityAt: now, WhitelistType: whitelistAuthenticatedOutbound}
-				writes++
-				added++
-				changed = true
-			}
 		}
-		return
+		return s.enforceCapacityTx(ctx, tx)
 	})
 	if err != nil {
 		return err
 	}
 	if s.log != nil {
-		s.log.Debug("correspondent allowlist updated", "new_entries", added, "entry_count", s.db.Size())
+		s.log.Debug("correspondent allowlist updated", "new_entries", added, "entry_count", s.size())
 	}
 	return nil
 }
 
-// touchInbound records qualifying accepted inbound activity only for
-// relationships that participated in matching under the configured scope.
 func (s *correspondentStore) touchInbound(correspondent string, recipients []string) error {
-	if s == nil || !s.cfg.UseAllowlist {
+	if s == nil || s.db == nil || !s.cfg.UseAllowlist {
 		return nil
 	}
 	correspondent = normalizeEmailAddress(correspondent)
 	if correspondent == "" {
 		return nil
 	}
-	recipientSet := make(map[string]bool)
-	for _, recipient := range recipients {
-		if recipient = normalizeEmailAddress(recipient); recipient != "" {
-			recipientSet[recipient] = true
+	now := s.now().UTC()
+	query := `UPDATE correspondents SET last_activity_at_ms = ?
+		WHERE correspondent = ? AND ` + s.qualifiedSQL() + s.notStaleSQL() + s.activityDueSQL()
+	args := []any{unixMillis(now), correspondent, s.cfg.LegitimateSenderMinMessages}
+	args = append(args, s.notStaleArgs(now)...)
+	args = append(args, s.activityDueArgs(now)...)
+	if s.cfg.Scope == "per_sender" {
+		addresses := sortedSet(normalizedAddressSet(recipients, maxLearnedRecipients))
+		if len(addresses) == 0 {
+			return nil
+		}
+		query += " AND local_address IN (" + placeholders(len(addresses)) + ")"
+		for _, address := range addresses {
+			args = append(args, address)
 		}
 	}
-	now := s.now().UTC()
-	return s.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
-		for key, entry := range records {
-			if s.entryStale(entry, now) || entry.Correspondent != correspondent ||
-				(s.cfg.Scope == "per_sender" && !recipientSet[entry.LocalAddress]) || !s.qualified(entry) {
-				continue
-			}
-			reads++
-			persist := s.activityPersistenceDue(entry, now)
-			entry.LastActivityAt = now
-			records[key] = entry
-			if persist {
-				writes++
-				changed = true
-			}
-		}
-		return
-	})
+	_, err := s.db.Exec(context.Background(), query, args...)
+	return err
 }
 
 func (s *correspondentStore) recordInboundClassification(correspondent string, recipients []string, recipientsComplete bool, classification string, score, unwantedMinScore float64, dkimAligned bool) error {
-	if s == nil || !recipientsComplete {
+	if s == nil || s.db == nil || !recipientsComplete {
 		return nil
 	}
 	correspondent = normalizeEmailAddress(correspondent)
-	if correspondent == "" {
+	recipientSet := normalizedAddressSet(recipients, maxLearnedRecipients)
+	if correspondent == "" || len(recipientSet) == 0 {
 		return nil
 	}
-	recipientSet := make(map[string]bool)
-	for _, recipient := range recipients {
-		if recipient = normalizeEmailAddress(recipient); recipient != "" {
-			recipientSet[recipient] = true
+	recipientList := sortedSet(recipientSet)
+	now := s.now().UTC()
+	if classification == "unwanted" {
+		if score < unwantedMinScore {
+			return nil
 		}
-	}
-	if len(recipientSet) == 0 {
+		query := `DELETE FROM correspondents WHERE correspondent = ? AND whitelist_type = ?`
+		args := []any{correspondent, whitelistRepeatedLegitimate}
+		if s.cfg.Scope == "per_sender" {
+			query += " AND local_address IN (" + placeholders(len(recipientList)) + ")"
+			for _, recipient := range recipientList {
+				args = append(args, recipient)
+			}
+		}
+		result, err := s.db.Exec(context.Background(), query, args...)
+		if err != nil {
+			return err
+		}
+		removed, _ := result.RowsAffected()
+		if removed > 0 && s.log != nil {
+			s.log.Debug("inbound-learned correspondent removed after unwanted classification", "correspondent", correspondent, "removed_entries", removed, "entry_count", s.size())
+		}
 		return nil
 	}
+	if classification != "legitimate" {
+		return nil
+	}
+
+	qualifying := s.cfg.LearnLegitimateSenders && score >= s.cfg.LegitimateSenderMinScore && (!s.cfg.LegitimateSenderRequireDKIM || dkimAligned)
 	type candidateEvent struct {
 		recipient string
 		count     int
 		promoted  bool
 	}
-	var candidateEvents []candidateEvent
-	removedEntries := 0
-	now := s.now().UTC()
-	err := s.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
-		if classification == "unwanted" {
-			if score < unwantedMinScore {
-				return
+	var events []candidateEvent
+	ctx := context.Background()
+	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		events = nil
+		for _, recipient := range recipientList {
+			entry, found, err := s.getTx(ctx, tx, recipient, correspondent)
+			if err != nil {
+				return err
 			}
-			removed := 0
-			for key, entry := range records {
-				if entry.Correspondent != correspondent || entry.WhitelistType != whitelistRepeatedLegitimate {
-					continue
+			if found && s.entryStale(entry, now) {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE id = ?`, entry.ID); err != nil {
+					return err
 				}
-				if s.cfg.Scope == "per_sender" && !recipientSet[entry.LocalAddress] {
-					continue
-				}
-				delete(records, key)
-				removed++
-				deletes++
+				found = false
 			}
-			if removed > 0 {
-				changed = true
-				removedEntries = removed
-			}
-			return
-		}
-		if classification != "legitimate" {
-			return
-		}
-
-		qualifying := s.cfg.LearnLegitimateSenders && score >= s.cfg.LegitimateSenderMinScore && (!s.cfg.LegitimateSenderRequireDKIM || dkimAligned)
-		for recipient := range recipientSet {
-			key := s.key(recipient, correspondent)
-			entry, exists := records[key]
-			if exists {
-				reads++
-			}
-			if exists && s.entryStale(entry, now) {
-				delete(records, key)
-				exists = false
-				changed = true
-				deletes++
-			}
-			if !exists {
+			if !found {
 				if !qualifying {
 					continue
 				}
-				entry = correspondentEntry{
-					LocalAddress: recipient, Correspondent: correspondent, LearnedAt: now, LastActivityAt: now,
-					WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 1,
+				if _, err := tx.ExecContext(ctx, `INSERT INTO correspondents
+					(local_address, correspondent, learned_at_ms, last_activity_at_ms, whitelist_type, legitimate_email_count)
+					VALUES (?, ?, ?, ?, ?, 1)`, recipient, correspondent, unixMillis(now), unixMillis(now), whitelistRepeatedLegitimate); err != nil {
+					return err
 				}
-				records[key] = entry
-				changed = true
-				writes++
-				candidateEvents = append(candidateEvents, candidateEvent{recipient: recipient, count: 1, promoted: s.qualified(entry)})
+				events = append(events, candidateEvent{recipient: recipient, count: 1, promoted: s.cfg.LegitimateSenderMinMessages <= 1})
 				continue
 			}
-			if entry.WhitelistType == whitelistAuthenticatedOutbound || entry.WhitelistType == whitelistManual {
-				entry.LastActivityAt = now
+			if entry.WhitelistType == whitelistAuthenticatedOutbound || entry.WhitelistType == whitelistManual || s.qualified(entry) {
 				if s.activityPersistenceDue(entry, now) {
-					changed = true
-					writes++
+					if _, err := tx.ExecContext(ctx, `UPDATE correspondents SET last_activity_at_ms = ? WHERE id = ?`, unixMillis(now), entry.ID); err != nil {
+						return err
+					}
 				}
-				records[key] = entry
 				continue
 			}
-			if entry.WhitelistType != whitelistRepeatedLegitimate {
-				continue
-			}
-			if s.qualified(entry) {
-				entry.LastActivityAt = now
-				if s.activityPersistenceDue(entry, now) {
-					changed = true
-					writes++
-				}
-				records[key] = entry
-				continue
-			}
-			if qualifying {
+			if entry.WhitelistType == whitelistRepeatedLegitimate && qualifying {
 				entry.LegitimateEmailCount++
-				entry.LastActivityAt = now
-				records[key] = entry
-				changed = true
-				writes++
-				candidateEvents = append(candidateEvents, candidateEvent{recipient: recipient, count: entry.LegitimateEmailCount, promoted: s.qualified(entry)})
+				if _, err := tx.ExecContext(ctx, `UPDATE correspondents SET legitimate_email_count = ?, last_activity_at_ms = ? WHERE id = ?`, entry.LegitimateEmailCount, unixMillis(now), entry.ID); err != nil {
+					return err
+				}
+				events = append(events, candidateEvent{recipient: recipient, count: entry.LegitimateEmailCount, promoted: s.qualified(entry)})
 			}
 		}
-		return
+		return s.enforceCapacityTx(ctx, tx)
 	})
 	if err != nil || s.log == nil {
 		return err
 	}
-	if removedEntries > 0 {
-		s.log.Debug("inbound-learned correspondent removed after unwanted classification", "correspondent", correspondent, "removed_entries", removedEntries, "entry_count", s.db.Size())
-	}
-	for _, event := range candidateEvents {
+	for _, event := range events {
 		if event.promoted {
 			s.log.Debug("inbound sender promoted to known correspondent", "local_address", event.recipient, "correspondent", correspondent, "legitimate_email_count", event.count)
 		} else {
@@ -321,19 +244,9 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 	return nil
 }
 
-func (s *correspondentStore) qualified(entry correspondentEntry) bool {
-	return entry.WhitelistType == whitelistAuthenticatedOutbound || entry.WhitelistType == whitelistManual ||
-		(entry.WhitelistType == whitelistRepeatedLegitimate && entry.LegitimateEmailCount >= s.cfg.LegitimateSenderMinMessages)
-}
-
-func (s *correspondentStore) activityPersistenceDue(entry correspondentEntry, now time.Time) bool {
-	interval := s.cfg.ActivityUpdateInterval.Value()
-	return interval == 0 || entry.PersistedActivityAt.IsZero() || !now.Before(entry.PersistedActivityAt.Add(interval))
-}
-
 func (s *correspondentStore) match(correspondent string, recipients []string) correspondentMatch {
 	result := correspondentMatch{}
-	if s == nil || !s.cfg.UseAllowlist {
+	if s == nil || s.db == nil || !s.cfg.UseAllowlist {
 		return result
 	}
 	correspondent = normalizeEmailAddress(correspondent)
@@ -342,37 +255,43 @@ func (s *correspondentStore) match(correspondent string, recipients []string) co
 	}
 	now := s.now().UTC()
 	if s.cfg.Scope == "global" {
-		result.Known = len(s.db.View(func(entry correspondentEntry) bool {
-			return entry.Correspondent == correspondent && !s.entryStale(entry, now) && s.qualified(entry)
-		})) > 0
-		result.AllRecipientsMatched = result.Known
-		result.TotalRecipients = 1
+		var found int
+		query := `SELECT EXISTS(SELECT 1 FROM correspondents WHERE correspondent = ? AND ` + s.qualifiedSQL() + s.notStaleSQL() + `)`
+		args := []any{correspondent, s.cfg.LegitimateSenderMinMessages}
+		args = append(args, s.notStaleArgs(now)...)
+		if err := s.db.QueryRow(context.Background(), query, args...).Scan(&found); err != nil {
+			s.logDatabaseError("match correspondent", err)
+			return result
+		}
+		result.Known, result.AllRecipientsMatched, result.TotalRecipients = found != 0, found != 0, 1
 		if result.Known {
 			result.MatchedRecipients = 1
 		}
 		return result
 	}
-	unique := make(map[string]bool)
-	for _, recipient := range recipients {
-		if recipient = normalizeEmailAddress(recipient); recipient != "" {
-			unique[recipient] = true
-		}
-	}
-	result.TotalRecipients = len(unique)
-	if result.TotalRecipients == 0 {
+	addresses := sortedSet(normalizedAddressSet(recipients, maxLearnedRecipients))
+	result.TotalRecipients = len(addresses)
+	if len(addresses) == 0 {
 		return result
 	}
-	matches := s.db.View(func(entry correspondentEntry) bool {
-		return unique[entry.LocalAddress] && entry.Correspondent == correspondent && !s.entryStale(entry, now) && s.qualified(entry)
-	})
-	result.MatchedRecipients = len(matches)
+	query := `SELECT count(*) FROM correspondents WHERE correspondent = ? AND ` + s.qualifiedSQL() + s.notStaleSQL() +
+		" AND local_address IN (" + placeholders(len(addresses)) + ")"
+	args := []any{correspondent, s.cfg.LegitimateSenderMinMessages}
+	args = append(args, s.notStaleArgs(now)...)
+	for _, address := range addresses {
+		args = append(args, address)
+	}
+	if err := s.db.QueryRow(context.Background(), query, args...).Scan(&result.MatchedRecipients); err != nil {
+		s.logDatabaseError("match correspondent recipients", err)
+		return correspondentMatch{TotalRecipients: len(addresses)}
+	}
 	result.Known = result.MatchedRecipients > 0
 	result.AllRecipientsMatched = result.MatchedRecipients == result.TotalRecipients
 	return result
 }
 
 func (s *correspondentStore) listAllowlist(recipient string) []correspondentEntry {
-	if s == nil {
+	if s == nil || s.db == nil {
 		return nil
 	}
 	allRecipients := recipient == "*"
@@ -383,33 +302,205 @@ func (s *correspondentStore) listAllowlist(recipient string) []correspondentEntr
 		}
 	}
 	now := s.now().UTC()
-	result := s.db.View(func(entry correspondentEntry) bool {
-		return !s.entryStale(entry, now) && s.qualified(entry) && (allRecipients || entry.LocalAddress == recipient)
-	})
-	sort.Slice(result, func(i, j int) bool {
-		iActivity := correspondentActivityTime(result[i])
-		jActivity := correspondentActivityTime(result[j])
-		if !iActivity.Equal(jActivity) {
-			return iActivity.After(jActivity)
+	query := `SELECT id, local_address, correspondent, learned_at_ms, last_activity_at_ms,
+		whitelist_type, legitimate_email_count FROM correspondents WHERE ` + s.qualifiedSQL() + s.notStaleSQL()
+	args := []any{s.cfg.LegitimateSenderMinMessages}
+	args = append(args, s.notStaleArgs(now)...)
+	if !allRecipients {
+		query += " AND local_address = ?"
+		args = append(args, recipient)
+	}
+	query += " ORDER BY last_activity_at_ms DESC, local_address, correspondent"
+	rows, err := s.db.Query(context.Background(), query, args...)
+	if err != nil {
+		s.logDatabaseError("list correspondent allowlist", err)
+		return nil
+	}
+	defer rows.Close()
+	var result []correspondentEntry
+	for rows.Next() {
+		entry, err := scanCorrespondent(rows)
+		if err != nil {
+			s.logDatabaseError("read correspondent allowlist", err)
+			return nil
 		}
-		if result[i].LocalAddress != result[j].LocalAddress {
-			return result[i].LocalAddress < result[j].LocalAddress
-		}
-		return result[i].Correspondent < result[j].Correspondent
-	})
+		result = append(result, entry)
+	}
+	if err := rows.Err(); err != nil {
+		s.logDatabaseError("read correspondent allowlist", err)
+		return nil
+	}
 	return result
 }
 
-func correspondentActivityTime(entry correspondentEntry) time.Time {
-	return entry.LastActivityAt
+func (s *correspondentStore) qualified(entry correspondentEntry) bool {
+	return entry.WhitelistType == whitelistAuthenticatedOutbound || entry.WhitelistType == whitelistManual ||
+		(entry.WhitelistType == whitelistRepeatedLegitimate && entry.LegitimateEmailCount >= s.cfg.LegitimateSenderMinMessages)
+}
+
+func (s *correspondentStore) qualifiedSQL() string {
+	return `(whitelist_type IN ('authenticated_outbound', 'manual') OR
+		(whitelist_type = 'repeated_legitimate_inbound' AND legitimate_email_count >= ?))`
+}
+
+func (s *correspondentStore) notStaleSQL() string {
+	if s.cfg.StaleAfter.Value() <= 0 {
+		return ""
+	}
+	return " AND last_activity_at_ms >= ?"
+}
+
+func (s *correspondentStore) notStaleArgs(now time.Time) []any {
+	if s.cfg.StaleAfter.Value() <= 0 {
+		return nil
+	}
+	return []any{unixMillis(now.Add(-s.cfg.StaleAfter.Value()))}
+}
+
+func (s *correspondentStore) activityDueSQL() string {
+	if s.cfg.ActivityUpdateInterval.Value() <= 0 {
+		return ""
+	}
+	return " AND last_activity_at_ms <= ?"
+}
+
+func (s *correspondentStore) activityDueArgs(now time.Time) []any {
+	if s.cfg.ActivityUpdateInterval.Value() <= 0 {
+		return nil
+	}
+	return []any{unixMillis(now.Add(-s.cfg.ActivityUpdateInterval.Value()))}
+}
+
+func (s *correspondentStore) activityPersistenceDue(entry correspondentEntry, now time.Time) bool {
+	interval := s.cfg.ActivityUpdateInterval.Value()
+	return interval <= 0 || !now.Before(entry.LastActivityAt.Add(interval))
 }
 
 func (s *correspondentStore) entryStale(entry correspondentEntry, now time.Time) bool {
-	staleAfter := s.cfg.StaleAfter.Value()
-	return staleAfter > 0 && correspondentActivityTime(entry).Before(now.Add(-staleAfter))
+	return s.cfg.StaleAfter.Value() > 0 && entry.LastActivityAt.Before(now.Add(-s.cfg.StaleAfter.Value()))
 }
 
-func (s *correspondentStore) snapshot() map[string]correspondentEntry { return s.db.Snapshot() }
+func (s *correspondentStore) getTx(ctx context.Context, tx *sql.Tx, localAddress, correspondent string) (correspondentEntry, bool, error) {
+	row := tx.QueryRowContext(ctx, `SELECT id, local_address, correspondent, learned_at_ms,
+		last_activity_at_ms, whitelist_type, legitimate_email_count FROM correspondents
+		WHERE local_address = ? AND correspondent = ?`, localAddress, correspondent)
+	entry, err := scanCorrespondent(row)
+	if err == sql.ErrNoRows {
+		return correspondentEntry{}, false, nil
+	}
+	return entry, err == nil, err
+}
+
+type rowScanner interface{ Scan(...any) error }
+
+func scanCorrespondent(row rowScanner) (correspondentEntry, error) {
+	var entry correspondentEntry
+	var learnedAt, activityAt int64
+	err := row.Scan(&entry.ID, &entry.LocalAddress, &entry.Correspondent, &learnedAt,
+		&activityAt, &entry.WhitelistType, &entry.LegitimateEmailCount)
+	if err == nil {
+		entry.LearnedAt, entry.LastActivityAt = timeFromMillis(learnedAt), timeFromMillis(activityAt)
+	}
+	return entry, err
+}
+
+func (s *correspondentStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) error {
+	if s.cfg.StaleAfter.Value() > 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE last_activity_at_ms < ?`, unixMillis(s.now().UTC().Add(-s.cfg.StaleAfter.Value()))); err != nil {
+			return err
+		}
+	}
+	var excess int
+	if err := tx.QueryRowContext(ctx, `SELECT max(count(*) - ?, 0) FROM correspondents`, s.cfg.MaxEntries).Scan(&excess); err != nil || excess == 0 {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE id IN (
+		SELECT id FROM correspondents ORDER BY
+		CASE WHEN whitelist_type = 'repeated_legitimate_inbound' AND legitimate_email_count < ? THEN 0 ELSE 1 END,
+		last_activity_at_ms, id LIMIT ?)`, s.cfg.LegitimateSenderMinMessages, excess)
+	return err
+}
+
+func (s *correspondentStore) cleanup() (int64, error) {
+	if s == nil || s.db == nil || s.cfg.StaleAfter.Value() <= 0 {
+		return 0, nil
+	}
+	result, err := s.db.Exec(context.Background(), `DELETE FROM correspondents WHERE last_activity_at_ms < ?`,
+		unixMillis(s.now().UTC().Add(-s.cfg.StaleAfter.Value())))
+	if err != nil {
+		return 0, err
+	}
+	removed, _ := result.RowsAffected()
+	return removed, nil
+}
+
+func (s *correspondentStore) size() int {
+	if s == nil || s.db == nil {
+		return 0
+	}
+	var count int
+	if err := s.db.QueryRow(context.Background(), `SELECT count(*) FROM correspondents`).Scan(&count); err != nil {
+		s.logDatabaseError("count correspondents", err)
+	}
+	return count
+}
+
+func (s *correspondentStore) logDatabaseError(operation string, err error) {
+	if s != nil && s.log != nil && err != nil {
+		s.log.Error("correspondent database operation failed", "operation", operation, "error", err)
+	}
+}
+
+// snapshot is a diagnostic/test helper, not a storage API used by production.
+func (s *correspondentStore) snapshot() map[string]correspondentEntry {
+	result := make(map[string]correspondentEntry)
+	if s == nil || s.db == nil {
+		return result
+	}
+	rows, err := s.db.Query(context.Background(), `SELECT id, local_address, correspondent,
+		learned_at_ms, last_activity_at_ms, whitelist_type, legitimate_email_count FROM correspondents`)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		entry, err := scanCorrespondent(rows)
+		if err != nil {
+			return result
+		}
+		result[entry.LocalAddress+"\x00"+entry.Correspondent] = entry
+	}
+	if rows.Err() != nil {
+		return map[string]correspondentEntry{}
+	}
+	return result
+}
+
+func normalizedAddressSet(values []string, maximum int) map[string]bool {
+	result := make(map[string]bool)
+	for _, value := range values {
+		if len(result) >= maximum {
+			break
+		}
+		if value = normalizeEmailAddress(value); value != "" {
+			result[value] = true
+		}
+	}
+	return result
+}
+
+func sortedSet(values map[string]bool) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func placeholders(count int) string        { return strings.TrimSuffix(strings.Repeat("?,", count), ",") }
+func unixMillis(value time.Time) int64     { return value.UTC().UnixMilli() }
+func timeFromMillis(value int64) time.Time { return time.UnixMilli(value).UTC() }
 
 func normalizeEmailAddress(value string) string {
 	value = strings.TrimSpace(value)

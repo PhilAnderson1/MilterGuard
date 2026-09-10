@@ -362,19 +362,24 @@ This protects shared mail providers without allowing a forged PTR record to
 bypass reputation handling.
 
 Rejection history records the sender address, envelope recipient, rejection
-time, and AI reasons for messages actually rejected in enforce mode. It does not
-record attachment-policy, cached-IP, or unrelated Postfix rejections. The
-`rejection_history` settings control its file, retention period, and maximum
-number of entries; expired and excess oldest entries are removed automatically,
-and an expiry of `0s` disables the history.
+time, subject, and reason for messages rejected after AI or attachment
+inspection in enforce mode. It does not record cached-IP or unrelated Postfix
+rejections. The `rejection_history` settings control its retention period and
+maximum number of entries; expired and excess oldest entries are removed
+automatically, and an expiry of `0s` disables the history.
 
 Learned correspondents, rejection history, IP reputation, and cached domain
 registration data are stored in `/var/lib/milterguard` and survive service
 restarts. Back up this directory if you want to preserve the learned state when
-moving the service to another machine. Changes take effect in memory immediately
-and are written according to `persistence.flush_interval`; a normal service
-shutdown also performs a final write. Set the interval to `0s` to write every
-change immediately.
+moving the service to another machine. Correspondent, IP-reputation, and
+rejection-history, and domain-registration changes are committed to the SQLite
+database immediately. `persistence.cleanup_interval` controls periodic removal
+of expired and excess records and must be at least one minute; cleanup also
+runs at startup. Domain-registration expiry is still enforced during lookups,
+before periodic cleanup physically removes the old row.
+
+For a consistent backup, stop MilterGuard before copying its SQLite database,
+or use a SQLite-aware backup tool while the service is running.
 
 To add or remove correspondent whitelist entries directly from the command
 line, stop MilterGuard while editing its database:
@@ -585,9 +590,9 @@ instance. The installer places it at
 `/usr/local/share/milterguard/tools/replay_mailbox.py`.
 
 Run a separate test instance in `enforce` mode on an unused port. Give its
-configuration separate correspondent, rejection-history, and IP-reputation
-state files so testing cannot alter production data. To ensure every corpus
-message reaches the AI, set `ip_reputation.block_duration` to `0s`,
+configuration a separate `persistence.database_file` so testing cannot alter
+production correspondent, rejection-history, or IP-reputation data. To ensure
+every corpus message reaches the AI, set `ip_reputation.block_duration` to `0s`,
 `ip_reputation.repeat_threshold` to `0`, and `correspondents.use_allowlist` to
 `false` in the test configuration. The replay tool reports the actual Milter
 response, so a test instance in `monitor` mode will report every message as

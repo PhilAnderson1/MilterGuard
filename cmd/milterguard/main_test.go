@@ -9,20 +9,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 )
 
 func TestPersistentStateStartupErrorMessage(t *testing.T) {
-	formatErr := fmt.Errorf("rejection history: %w", jsonstore.ErrIncompatibleFormat)
-	if got := persistentStateStartupErrorMessage(formatErr); got != "incompatible JSON file format" {
-		t.Fatalf("format error message = %q", got)
-	}
-	if got := persistentStateStartupErrorMessage(errors.New("permission denied")); got != "persistent JSON file cannot be read" {
+	if got := persistentStateStartupErrorMessage(errors.New("permission denied")); got != "persistent state cannot be read" {
 		t.Fatalf("read error message = %q", got)
 	}
-	mixed := errors.Join(formatErr, errors.New("permission denied"))
-	if got := persistentStateStartupErrorMessage(mixed); got != "persistent JSON file cannot be read" {
-		t.Fatalf("mixed startup error message = %q", got)
+	sqliteErr := fmt.Errorf("correspondents: %w", sqlstore.ErrIncompatibleDatabase)
+	if got := persistentStateStartupErrorMessage(sqliteErr); got != "incompatible SQLite database format" {
+		t.Fatalf("SQLite format error message = %q", got)
 	}
 }
 

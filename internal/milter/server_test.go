@@ -282,32 +282,6 @@ func testServer(t *testing.T, analyzer Analyzer) (*Server, net.Conn, <-chan stru
 	return s, clientConn, done
 }
 
-func TestIncompatibleJSONPreventsStartupWithoutOverwritingFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "rejections.json")
-	original := []byte("{\n  \"version\": 1,\n  \"entries\": [{\"id\": \"legacy\", \"sender\": \"bad@example.net\", \"recipient\": \"local@example.com\", \"rejected_at\": \"2026-09-07T00:00:00Z\"}]\n}\n")
-	if err := os.WriteFile(path, original, 0640); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Config{
-		AI:               config.AIConfig{MaxConcurrent: 1},
-		RejectionHistory: config.RejectionHistoryConfig{File: path, Expiry: config.Duration(24 * time.Hour), MaxEntries: 10},
-	}
-	server := NewServer(cfg, fixedAnalyzer{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if server.StartupError() == nil {
-		t.Fatal("incompatible rejection history did not prevent startup")
-	}
-	if err := server.Serve(context.Background(), nil); err == nil {
-		t.Fatal("Serve accepted incompatible persistent state")
-	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(after, original) {
-		t.Fatalf("incompatible file was modified:\n%s", after)
-	}
-}
-
 func enableTestRejectedMail(t *testing.T, server *Server) string {
 	t.Helper()
 	root := t.TempDir()
@@ -369,22 +343,26 @@ func TestAIRejectedMessageIsArchived(t *testing.T) {
 func TestRejectedMessageArchiveUsesRejectionRecordIDs(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.Config{
-		AI: config.AIConfig{MaxConcurrent: 1},
+		AI:          config.AIConfig{MaxConcurrent: 1},
+		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(root, "milterguard.db")},
 		RejectionHistory: config.RejectionHistoryConfig{
-			File: filepath.Join(root, "rejections.json"), Expiry: config.Duration(24 * time.Hour), MaxEntries: 10,
+			Expiry: config.Duration(24 * time.Hour), MaxEntries: 10,
 		},
 	}
 	server := NewServer(cfg, fixedAnalyzer{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	archiveRoot := enableTestRejectedMail(t, server)
 	msg := message.New(1024)
 	msg.AddHeader("From", "Sender <sender@example.net>")
-	msg.AddHeader("Subject", "Archived subject")
+	msg.AddHeader("Subject", "=?UTF-8?B?44Oc44O844OK44K544KS4oCN5Y+X44GR5Y+W44Gj44Gm44GP4oCN44Gg44GV44GE?=")
 	msg.AddHeader("Message-ID", "<archive-id-test@example.net>")
 	_, _ = msg.Body.WriteString("rejected body")
 
 	server.recordRejection(context.Background(), msg, "bounce@example.net", []string{"one@example.com", "two@example.com"}, []string{"unwanted"}, "ai")
 
-	entries := server.rejectionHistory.list("*")
+	entries, err := server.rejectionHistory.list("*")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(entries) != 1 {
 		t.Fatalf("rejection entries = %d, want 1", len(entries))
 	}
@@ -392,7 +370,7 @@ func TestRejectedMessageArchiveUsesRejectionRecordIDs(t *testing.T) {
 	if len(entry.Recipients) != 2 {
 		t.Fatalf("stored recipients = %#v", entry.Recipients)
 	}
-	if entry.Subject != "Archived subject" {
+	if entry.Subject != "ボーナスを‍受け取ってく‍ださい" {
 		t.Fatalf("stored subject = %q", entry.Subject)
 	}
 	path := filepath.Join(archiveRoot, time.Now().UTC().Format("2006"), time.Now().UTC().Format("01"), time.Now().UTC().Format("02"), fmt.Sprintf("%d.eml", entry.ID))
@@ -816,7 +794,7 @@ func TestRejectedIPDomainAllowlistReusesConnectionDNS(t *testing.T) {
 	server.cfg.IPReputation.BlockDuration = config.Duration(time.Hour)
 	server.cfg.IPReputation.MaxEntries = 100
 	server.cfg.IPReputation.DomainAllowlist = []string{"google.com"}
-	server.ipReputation = newIPReputationStore(server.cfg.IPReputation, server.log)
+	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
 	resolver := &connectionTestResolver{
 		ptr: []string{"smtp.google.com."},
 		forward: map[string][]net.IPAddr{
@@ -856,7 +834,7 @@ func TestForwardConfirmedDomainAllowlistBypassesExistingIPBlock(t *testing.T) {
 	server.cfg.IPReputation.BlockDuration = config.Duration(time.Hour)
 	server.cfg.IPReputation.MaxEntries = 100
 	server.cfg.IPReputation.DomainAllowlist = []string{"google.com"}
-	server.ipReputation = newIPReputationStore(server.cfg.IPReputation, server.log)
+	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
 	addr := netip.MustParseAddr("8.8.8.8")
 	if !server.ipReputation.add(addr, 1, connectionDNSResult{status: message.ReverseDNSLookupFailed}) {
 		t.Fatal("test IP was not initially blocked")
@@ -1173,11 +1151,11 @@ func TestAuthenticatedAcceptedMessageLearnsEnvelopeRecipients(t *testing.T) {
 	server, conn, _ := testServer(t, analyzer)
 	cfg := config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100,
+		MaxEntries: 100,
 	}
 	server.cfg.Filtering.ScanAuthenticated = false
 	server.cfg.Correspondents = cfg
-	server.correspondents = newCorrespondentStore(cfg, server.log)
+	server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -1216,10 +1194,10 @@ func TestAbortedAuthenticatedMessageDoesNotLearnRecipients(t *testing.T) {
 	server, conn, _ := testServer(t, analyzer)
 	cfg := config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100,
+		MaxEntries: 100,
 	}
 	server.cfg.Correspondents = cfg
-	server.correspondents = newCorrespondentStore(cfg, server.log)
+	server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -1246,10 +1224,10 @@ func TestKnownCorrespondentIsSuppliedAsAIEvidence(t *testing.T) {
 	server, conn, done := testServer(t, analyzer)
 	cfg := config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100,
+		MaxEntries: 100,
 	}
 	server.cfg.Correspondents = cfg
-	server.correspondents = newCorrespondentStore(cfg, server.log)
+	server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
 	if err := server.correspondents.learn("philip@invades.net", []string{"alice@example.com"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1305,10 +1283,10 @@ func TestKnownCorrespondentBypassAuthenticationPolicy(t *testing.T) {
 			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: test.recipientMatch, BypassAI: true,
 				RequireDKIMForBypass: test.requireDKIM,
-				File:                 filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
+				MaxEntries:           100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
 			server.cfg.Correspondents = cfg
-			server.correspondents = newCorrespondentStore(cfg, server.log)
+			server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
 			if err := server.correspondents.learn("philip@invades.net", []string{"alice@example.com"}); err != nil {
 				t.Fatal(err)
 			}
@@ -1357,11 +1335,11 @@ func TestMTAHostnameMacroExpandsTrustedAuthenticationService(t *testing.T) {
 			server, conn, done := testServer(t, analyzer)
 			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-				BypassAI: true, RequireDKIMForBypass: true, File: filepath.Join(t.TempDir(), "allowlist.json"),
+				BypassAI: true, RequireDKIMForBypass: true,
 				MaxEntries: 100, TrustedAuthservIDs: []string{config.MTAHostnameAuthservID},
 			}
 			server.cfg.Correspondents = cfg
-			server.correspondents = newCorrespondentStore(cfg, server.log)
+			server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
 			if err := server.correspondents.learn("philip@invades.net", []string{"alice@example.com"}); err != nil {
 				t.Fatal(err)
 			}
@@ -1412,11 +1390,11 @@ func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
 			server, conn, done := testServer(t, analyzer)
 			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-				BypassAI: true, RequireDKIMForBypass: test.requireDKIM, File: filepath.Join(t.TempDir(), "allowlist.json"),
+				BypassAI: true, RequireDKIMForBypass: test.requireDKIM,
 				MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
 			server.cfg.Correspondents = cfg
-			server.correspondents = newCorrespondentStore(cfg, server.log)
+			server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
 			if test.allowedDomain != "" {
 				server.cfg.Filtering.SenderDomainAllowlist = []string{test.allowedDomain}
 				server.cfg.Filtering.SenderDomainAllowlistRequireDKIM = true
@@ -1443,7 +1421,7 @@ func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
 			expectFrame(t, conn, string([]byte{responseAccept}))
 			_ = conn.Close()
 			<-done
-			activity := server.correspondents.snapshot()[server.correspondents.key("philip@invades.net", "alice@example.com")].LastActivityAt
+			activity := server.correspondents.snapshot()["philip@invades.net\x00alice@example.com"].LastActivityAt
 			want := learnedAt
 			if test.wantRefresh {
 				want = activityAt
@@ -1464,10 +1442,10 @@ func TestAIResultLearnsInboundSender(t *testing.T) {
 	cfg := config.CorrespondentsConfig{
 		LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 		LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
-		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
+		MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 	}
 	server.cfg.Correspondents = cfg
-	server.correspondents = newCorrespondentStore(cfg, server.log)
+	server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
 
 	negotiate(t, conn)
 	sendContinueFrames(t, conn,
@@ -1501,14 +1479,14 @@ func TestNonEnforceModesDoNotLearnFromAIResultsOrDecayIPReputation(t *testing.T)
 			server.cfg.Correspondents = config.CorrespondentsConfig{
 				LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 				LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
-				File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
+				MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
-			server.correspondents = newCorrespondentStore(server.cfg.Correspondents, server.log)
+			server.correspondents = newTestCorrespondentStore(t, server.cfg.Correspondents, server.log)
 			server.cfg.IPReputation = config.IPReputationConfig{
 				BlockDuration: config.Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: config.Duration(24 * time.Hour), LegitimatePerStrike: 1,
-				MaxEntries: 100, StateFile: filepath.Join(t.TempDir(), "ip.json"),
+				MaxEntries: 100,
 			}
-			server.ipReputation = newIPReputationStore(server.cfg.IPReputation, server.log)
+			server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
 			addr := netip.MustParseAddr("192.0.2.90")
 			server.ipReputation.add(addr, 1, connectionDNSResult{})
 
@@ -1547,9 +1525,9 @@ func TestNonEnforceModesDoNotLearnAuthenticatedRecipients(t *testing.T) {
 			server.cfg.Filtering.ScanAuthenticated = false
 			server.cfg.Correspondents = config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-				File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100,
+				MaxEntries: 100,
 			}
-			server.correspondents = newCorrespondentStore(server.cfg.Correspondents, server.log)
+			server.correspondents = newTestCorrespondentStore(t, server.cfg.Correspondents, server.log)
 
 			negotiate(t, conn)
 			sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
@@ -1580,7 +1558,7 @@ func TestRejectedIPBypassesSecondAIAnalysis(t *testing.T) {
 	server, conn, done := testServer(t, analyzer)
 	server.cfg.IPReputation.BlockDuration = config.Duration(15 * time.Minute)
 	server.cfg.IPReputation.MaxEntries = 100
-	server.ipReputation = newIPReputationStore(server.cfg.IPReputation, server.log)
+	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
 	defer conn.Close()
 
 	negotiate(t, conn)

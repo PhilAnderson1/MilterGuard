@@ -26,8 +26,9 @@ func commandTestServer(t *testing.T, allowUsers bool, administrators []string) (
 		AI:             config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
 		Filtering:      config.FilteringConfig{RejectScore: .9, ScanAuthenticated: false},
 		EmailCommands:  config.EmailCommandsConfig{Enabled: true, Recipient: "milterguard@example.com", AllowAuthenticatedUsers: allowUsers, Administrators: administrators, SendReplies: false, MaxMessageBytes: 8192},
-		Correspondents: config.CorrespondentsConfig{UseAllowlist: true, File: filepath.Join(t.TempDir(), "correspondents.json"), MaxEntries: 100, Scope: "per_sender", RecipientMatch: "all"},
+		Correspondents: config.CorrespondentsConfig{UseAllowlist: true, MaxEntries: 100, Scope: "per_sender", RecipientMatch: "all"},
 		IPReputation:   config.IPReputationConfig{MaxEntries: 100},
+		Persistence:    config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db")},
 	}
 	server := NewServer(cfg, analyzer, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	done := make(chan struct{})

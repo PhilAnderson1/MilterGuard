@@ -1,19 +1,22 @@
 package milter
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
-	"os"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 )
 
 // AddManualCorrespondent adds an immediately qualified relationship. The
 // caller must ensure the running daemon is stopped while editing its database.
-func AddManualCorrespondent(cfg config.CorrespondentsConfig, sender, recipient string) (bool, error) {
-	store, err := openCorrespondentStoreForManagement(cfg)
+func AddManualCorrespondent(cfg config.Config, sender, recipient string) (bool, error) {
+	store, database, err := openCorrespondentStoreForManagement(cfg)
 	if err != nil {
 		return false, err
 	}
+	defer database.Close()
 	return store.addManual(sender, recipient)
 }
 
@@ -24,35 +27,39 @@ func (store *correspondentStore) addManual(sender, recipient string) (bool, erro
 		return false, fmt.Errorf("sender and recipient must be valid email addresses")
 	}
 	now := store.now().UTC()
-	key := store.key(recipient, sender)
-	existed := false
-	err := store.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
-		entry, found := records[key]
-		existed = found
-		if found {
-			reads++
-		} else {
-			entry = correspondentEntry{LocalAddress: recipient, Correspondent: sender, LearnedAt: now}
+	created := false
+	ctx := context.Background()
+	err := store.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		created = false
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM correspondents
+			WHERE local_address = ? AND correspondent = ?)`, recipient, sender).Scan(&exists); err != nil {
+			return err
 		}
-		entry.LastActivityAt = now
-		entry.WhitelistType = whitelistManual
-		entry.LegitimateEmailCount = 0
-		records[key] = entry
-		return reads, 1, 0, true
+		created = exists == 0
+		_, err := tx.ExecContext(ctx, `INSERT INTO correspondents
+			(local_address, correspondent, learned_at_ms, last_activity_at_ms, whitelist_type, legitimate_email_count)
+			VALUES (?, ?, ?, ?, ?, 0)
+			ON CONFLICT(local_address, correspondent) DO UPDATE SET
+			last_activity_at_ms = excluded.last_activity_at_ms,
+			whitelist_type = excluded.whitelist_type,
+			legitimate_email_count = 0`, recipient, sender, unixMillis(now), unixMillis(now), whitelistManual)
+		if err != nil {
+			return err
+		}
+		return store.enforceCapacityTx(ctx, tx)
 	})
-	if err != nil {
-		return false, err
-	}
-	return !existed, nil
+	return created, err
 }
 
 // DeleteCorrespondents deletes an exact relationship, or every relationship
 // for sender when recipient is "*". Explicit deletion applies to all types.
-func DeleteCorrespondents(cfg config.CorrespondentsConfig, sender, recipient string) (int, error) {
-	store, err := openCorrespondentStoreForManagement(cfg)
+func DeleteCorrespondents(cfg config.Config, sender, recipient string) (int, error) {
+	store, database, err := openCorrespondentStoreForManagement(cfg)
 	if err != nil {
 		return 0, err
 	}
+	defer database.Close()
 	return store.deleteManual(sender, recipient)
 }
 
@@ -61,33 +68,28 @@ func (store *correspondentStore) deleteManual(sender, recipient string) (int, er
 	if sender == "" {
 		return 0, fmt.Errorf("sender must be a valid email address")
 	}
-	allRecipients := recipient == "*"
-	if !allRecipients {
+	query := `DELETE FROM correspondents WHERE correspondent = ?`
+	args := []any{sender}
+	if recipient != "*" {
 		recipient = normalizeEmailAddress(recipient)
 		if recipient == "" {
 			return 0, fmt.Errorf("recipient must be a valid email address or *")
 		}
+		query += " AND local_address = ?"
+		args = append(args, recipient)
 	}
-	removed := 0
-	err := store.db.Update(func(records map[string]correspondentEntry) (reads, writes, deletes uint64, changed bool) {
-		for key, entry := range records {
-			if entry.Correspondent == sender && (allRecipients || entry.LocalAddress == recipient) {
-				delete(records, key)
-				removed++
-			}
-		}
-		return 0, 0, uint64(removed), removed > 0
-	})
+	result, err := store.db.Exec(context.Background(), query, args...)
 	if err != nil {
 		return 0, err
 	}
-	return removed, nil
+	removed, err := result.RowsAffected()
+	return int(removed), err
 }
 
-func openCorrespondentStoreForManagement(cfg config.CorrespondentsConfig) (*correspondentStore, error) {
-	store := newEmptyCorrespondentStore(cfg, nil)
-	if err := store.load(); err != nil && !os.IsNotExist(err) {
-		return nil, err
+func openCorrespondentStoreForManagement(cfg config.Config) (*correspondentStore, *sqlstore.Store, error) {
+	database, err := sqlstore.Open(context.Background(), cfg.Persistence.DatabaseFile, sqlstore.DefaultOptions())
+	if err != nil {
+		return nil, nil, err
 	}
-	return store, nil
+	return newCorrespondentStore(cfg.Correspondents, database, nil), database, nil
 }

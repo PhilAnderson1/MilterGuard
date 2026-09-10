@@ -16,8 +16,8 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
-	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/milter"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 )
 
 // version is replaced at build time with -ldflags "-X main.version=<version>".
@@ -67,7 +67,7 @@ func main() {
 		}
 		recipient := flag.Args()[0]
 		if *whitelistAdd != "" {
-			created, err := milter.AddManualCorrespondent(cfg.Correspondents, *whitelistAdd, recipient)
+			created, err := milter.AddManualCorrespondent(cfg, *whitelistAdd, recipient)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "cannot add whitelist entry:", err)
 				os.Exit(1)
@@ -79,7 +79,7 @@ func main() {
 			fmt.Printf("whitelist entry %s: sender=%s recipient=%s\n", result, *whitelistAdd, recipient)
 			return
 		}
-		removed, err := milter.DeleteCorrespondents(cfg.Correspondents, *whitelistDelete, recipient)
+		removed, err := milter.DeleteCorrespondents(cfg, *whitelistDelete, recipient)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cannot delete whitelist entry:", err)
 			os.Exit(1)
@@ -99,6 +99,7 @@ func main() {
 	}
 	client := ai.NewClient(cfg.AI, string(prompt), logger)
 	server := milter.NewServer(cfg, client, logger)
+	defer server.Close()
 	if err := server.StartupError(); err != nil {
 		message := persistentStateStartupErrorMessage(err)
 		if errors.Is(err, milter.ErrInternalTokenGeneration) {
@@ -125,26 +126,10 @@ func main() {
 }
 
 func persistentStateStartupErrorMessage(err error) string {
-	if persistentStateErrorsAllFormat(err) {
-		return "incompatible JSON file format"
+	if errors.Is(err, sqlstore.ErrIncompatibleDatabase) {
+		return "incompatible SQLite database format"
 	}
-	return "persistent JSON file cannot be read"
-}
-
-func persistentStateErrorsAllFormat(err error) bool {
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		children := joined.Unwrap()
-		if len(children) == 0 {
-			return false
-		}
-		for _, child := range children {
-			if !persistentStateErrorsAllFormat(child) {
-				return false
-			}
-		}
-		return true
-	}
-	return errors.Is(err, jsonstore.ErrIncompatibleFormat)
+	return "persistent state cannot be read"
 }
 
 func milterListenerActive(address string) bool {

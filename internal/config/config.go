@@ -48,18 +48,17 @@ type Config struct {
 }
 
 type PersistenceConfig struct {
-	FlushInterval Duration `yaml:"flush_interval"`
+	DatabaseFile    string   `yaml:"database_file"`
+	CleanupInterval Duration `yaml:"cleanup_interval"`
 }
 
 type DomainRegistrationConfig struct {
 	Enabled    bool     `yaml:"enabled"`
 	Timeout    Duration `yaml:"timeout"`
 	MaxEntries int      `yaml:"max_entries"`
-	StateFile  string   `yaml:"state_file"`
 }
 
 type RejectionHistoryConfig struct {
-	File       string   `yaml:"file"`
 	Expiry     Duration `yaml:"expiry"`
 	MaxEntries int      `yaml:"max_entries"`
 }
@@ -144,7 +143,6 @@ type IPReputationConfig struct {
 	RepeatRefreshOnAttempt bool     `yaml:"repeat_refresh_on_attempt"`
 	LegitimatePerStrike    int      `yaml:"legitimate_messages_per_strike"`
 	MaxEntries             int      `yaml:"max_entries"`
-	StateFile              string   `yaml:"state_file"`
 	IPAllowlist            []string `yaml:"ip_allowlist"`
 	DomainAllowlist        []string `yaml:"domain_allowlist"`
 }
@@ -165,7 +163,6 @@ type CorrespondentsConfig struct {
 	RecipientMatch               string   `yaml:"recipient_match"`
 	BypassAI                     bool     `yaml:"bypass_ai"`
 	RequireDKIMForBypass         bool     `yaml:"require_dkim_for_bypass"`
-	File                         string   `yaml:"file"`
 	TrustedAuthservIDs           []string `yaml:"trusted_authserv_ids"`
 	MaxEntries                   int      `yaml:"max_entries"`
 	StaleAfter                   Duration `yaml:"stale_after"`
@@ -233,9 +230,12 @@ func defaults() Config {
 			Recipient: "milterguard@example.com", VerifySenderViaAliases: true, SendReplies: true,
 			SMTPHost: "127.0.0.1:25", MaxMessageBytes: 8192, AliasesFile: "/etc/aliases", Administrators: []string{},
 		},
-		Persistence: PersistenceConfig{FlushInterval: Duration(time.Minute)},
+		Persistence: PersistenceConfig{
+			DatabaseFile:    "/var/lib/milterguard/milterguard.db",
+			CleanupInterval: Duration(time.Hour),
+		},
 		RejectionHistory: RejectionHistoryConfig{
-			File: "/var/lib/milterguard/rejection-history.json", Expiry: Duration(30 * 24 * time.Hour), MaxEntries: 10000,
+			Expiry: Duration(30 * 24 * time.Hour), MaxEntries: 10000,
 		},
 		RejectedMail: RejectedMailConfig{
 			Directory: "/var/lib/milterguard/rejected-mail", Retention: Duration(30 * 24 * time.Hour),
@@ -251,7 +251,6 @@ func defaults() Config {
 			BlockDuration: Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: Duration(30 * 24 * time.Hour),
 			RepeatBlockDuration: Duration(30 * 24 * time.Hour), RepeatRefreshOnAttempt: true,
 			LegitimatePerStrike: 3, MaxEntries: 10000,
-			StateFile:   "/var/lib/milterguard/rejected-ip-state.json",
 			IPAllowlist: []string{"127.0.0.0/8", "::1/128"},
 			DomainAllowlist: []string{
 				"google.com", "outlook.com", "yahoo.com", "yahoo.net", "me.com", "icloud.com",
@@ -260,13 +259,12 @@ func defaults() Config {
 		},
 		DomainRegistration: DomainRegistrationConfig{
 			Enabled: true, Timeout: Duration(3 * time.Second), MaxEntries: 10000,
-			StateFile: "/var/lib/milterguard/domain-registration.json",
 		},
 		Correspondents: CorrespondentsConfig{
 			LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true,
 			LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .95, LegitimateSenderRequireDKIM: true,
 			UseAllowlist: true,
-			Scope:        "per_sender", RecipientMatch: "all", File: "/var/lib/milterguard/correspondent-allowlist.json",
+			Scope:        "per_sender", RecipientMatch: "all",
 			BypassAI: true, RequireDKIMForBypass: true,
 			TrustedAuthservIDs: []string{MTAHostnameAuthservID}, MaxEntries: 10000,
 			StaleAfter: Duration(365 * 24 * time.Hour), ActivityUpdateInterval: Duration(24 * time.Hour),
@@ -303,11 +301,14 @@ func (c Config) Validate() error {
 			return fmt.Errorf("invalid milter.allowed_peer_ips entry %q", entry)
 		}
 	}
-	if c.Persistence.FlushInterval.Value() < 0 {
-		return fmt.Errorf("persistence.flush_interval must not be negative")
+	if c.Persistence.CleanupInterval.Value() < time.Minute {
+		return fmt.Errorf("persistence.cleanup_interval must be at least 1m")
 	}
-	if c.DomainRegistration.Enabled && (c.DomainRegistration.Timeout.Value() <= 0 || c.DomainRegistration.MaxEntries < 1 || strings.TrimSpace(c.DomainRegistration.StateFile) == "") {
-		return fmt.Errorf("domain_registration requires a positive timeout, max_entries, and state_file")
+	if strings.TrimSpace(c.Persistence.DatabaseFile) == "" {
+		return fmt.Errorf("persistence.database_file is required")
+	}
+	if c.DomainRegistration.Enabled && (c.DomainRegistration.Timeout.Value() <= 0 || c.DomainRegistration.MaxEntries < 1) {
+		return fmt.Errorf("domain_registration requires a positive timeout and max_entries")
 	}
 	if c.AI.Endpoint == "" || c.AI.Model == "" || c.AI.PromptFile == "" {
 		return fmt.Errorf("ai endpoint, model, and prompt_file are required")
@@ -374,8 +375,8 @@ func (c Config) Validate() error {
 		if commands.SendReplies && !validSMTPHost(commands.SMTPHost) {
 			return fmt.Errorf("email_commands.smtp_host must contain a valid host and port")
 		}
-		if !c.Correspondents.UseAllowlist || strings.TrimSpace(c.Correspondents.File) == "" {
-			return fmt.Errorf("email_commands requires correspondents.use_allowlist and correspondents.file")
+		if !c.Correspondents.UseAllowlist {
+			return fmt.Errorf("email_commands requires correspondents.use_allowlist")
 		}
 		if commands.AllowAuthenticatedUsers && commands.VerifySenderViaAliases && !strings.HasPrefix(commands.AliasesFile, "/") {
 			return fmt.Errorf("email_commands.aliases_file must be an absolute path")
@@ -390,9 +391,6 @@ func (c Config) Validate() error {
 		return fmt.Errorf("rejection_history.expiry must not be negative")
 	}
 	if c.RejectionHistory.Expiry.Value() > 0 {
-		if strings.TrimSpace(c.RejectionHistory.File) == "" {
-			return fmt.Errorf("rejection_history.file is required when rejection history is enabled")
-		}
 		if c.RejectionHistory.MaxEntries < 1 {
 			return fmt.Errorf("rejection_history.max_entries must be positive")
 		}
@@ -450,9 +448,6 @@ func (c Config) Validate() error {
 	if reputation.RepeatThreshold > 0 && (reputation.RepeatWindow.Value() == 0 || reputation.RepeatBlockDuration.Value() == 0) {
 		return fmt.Errorf("ip_reputation.repeat_window and repeat_block_duration must be positive when repeat escalation is enabled")
 	}
-	if (reputation.BlockDuration.Value() > 0 || reputation.RepeatThreshold > 0) && strings.TrimSpace(reputation.StateFile) == "" {
-		return fmt.Errorf("ip_reputation.state_file is required when IP blocking is enabled")
-	}
 	if reputation.MaxEntries < 1 {
 		return fmt.Errorf("ip_reputation.max_entries must be positive")
 	}
@@ -493,9 +488,6 @@ func (c Config) Validate() error {
 	}
 	if allowlist.ActivityUpdateInterval.Value() < 0 {
 		return fmt.Errorf("correspondents.activity_update_interval must not be negative")
-	}
-	if (allowlist.LearnAuthenticatedRecipients || allowlist.UseAllowlist) && strings.TrimSpace(allowlist.File) == "" {
-		return fmt.Errorf("correspondents.file is required when the feature is enabled")
 	}
 	if allowlist.BypassAI && !allowlist.UseAllowlist {
 		return fmt.Errorf("correspondents.bypass_ai requires use_allowlist")

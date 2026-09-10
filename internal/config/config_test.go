@@ -38,12 +38,12 @@ correspondents:
 ip_reputation:
   max_entries: 42
 persistence:
-  flush_interval: 2m
+  database_file: /tmp/milterguard.db
+  cleanup_interval: 2m
 domain_registration:
   enabled: true
   timeout: 4s
   max_entries: 123
-  state_file: /tmp/domains.json
 logging:
   level: warn
 `
@@ -51,7 +51,7 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.FlushInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 {
+	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
@@ -70,7 +70,6 @@ func TestValidateDomainRegistration(t *testing.T) {
 	for _, configure := range []func(*Config){
 		func(cfg *Config) { cfg.DomainRegistration.Timeout = 0 },
 		func(cfg *Config) { cfg.DomainRegistration.MaxEntries = 0 },
-		func(cfg *Config) { cfg.DomainRegistration.StateFile = "" },
 	} {
 		invalid := cfg
 		configure(&invalid)
@@ -80,18 +79,29 @@ func TestValidateDomainRegistration(t *testing.T) {
 	}
 }
 
-func TestValidatePersistenceFlushInterval(t *testing.T) {
-	if defaults().Persistence.FlushInterval.Value() != time.Minute {
-		t.Fatal("persistence flush interval must default to one minute")
+func TestValidatePersistenceCleanupInterval(t *testing.T) {
+	if defaults().Persistence.DatabaseFile != "/var/lib/milterguard/milterguard.db" {
+		t.Fatal("persistence database must default under /var/lib/milterguard")
+	}
+	if defaults().Persistence.CleanupInterval.Value() != time.Hour {
+		t.Fatal("persistence cleanup interval must default to one hour")
 	}
 	cfg := validConfig()
-	cfg.Persistence.FlushInterval = Duration(-time.Second)
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "persistence.flush_interval") {
-		t.Fatalf("negative persistence interval error = %v", err)
+	cfg.Persistence.CleanupInterval = Duration(time.Minute - time.Nanosecond)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "persistence.cleanup_interval") {
+		t.Fatalf("short persistence interval error = %v", err)
 	}
-	cfg.Persistence.FlushInterval = 0
+	cfg.Persistence.CleanupInterval = Duration(time.Minute)
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("immediate persistence rejected: %v", err)
+		t.Fatalf("minimum cleanup interval rejected: %v", err)
+	}
+}
+
+func TestValidatePersistenceDatabaseFile(t *testing.T) {
+	cfg := validConfig()
+	cfg.Persistence.DatabaseFile = ""
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "persistence.database_file") {
+		t.Fatalf("empty persistence database path error = %v", err)
 	}
 }
 
@@ -233,9 +243,9 @@ func TestValidateRejectionHistory(t *testing.T) {
 	}
 	cfg = validConfig()
 	cfg.RejectionHistory.Expiry = Duration(time.Hour)
-	cfg.RejectionHistory.File = ""
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "rejection_history.file") {
-		t.Fatalf("missing history file error = %v", err)
+	cfg.RejectionHistory.MaxEntries = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "rejection_history.max_entries") {
+		t.Fatalf("invalid max entries error = %v", err)
 	}
 }
 
@@ -453,13 +463,6 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 				cfg.IPReputation.RepeatWindow = 0
 			},
 			wantError: "ip_reputation.repeat_window",
-		},
-		{
-			name: "missing state file when blocking enabled",
-			configure: func(cfg *Config) {
-				cfg.IPReputation.StateFile = ""
-			},
-			wantError: "ip_reputation.state_file",
 		},
 		{
 			name: "zero cache size",

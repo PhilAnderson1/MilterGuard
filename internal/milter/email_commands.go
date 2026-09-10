@@ -110,7 +110,10 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 		return true, ss.discardEmailCommand(ctx, identity, "HELP", "help sent", replyTo, "", queued)
 	}
 	if command.kind == "rejections" {
-		entries := ss.server.rejectionHistory.list(command.recipient)
+		entries, err := ss.server.rejectionHistory.list(command.recipient)
+		if err != nil {
+			return true, ss.completeFailedEmailCommand(ctx, identity, replyTo, command, err)
+		}
 		body := formatRejectionHistory(entries)
 		queued := ss.queueCommandReply(replyTo, "MilterGuard rejection history", body)
 		outcome := fmt.Sprintf("listed %d rejection entries", len(entries))

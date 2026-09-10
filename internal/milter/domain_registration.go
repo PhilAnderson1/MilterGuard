@@ -2,6 +2,7 @@ package milter
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,43 +12,39 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
-	"github.com/PhilAnderson1/MilterGuard/internal/jsonstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 	"golang.org/x/net/publicsuffix"
 )
 
 const (
-	domainRegistrationFileVersion               = 1
-	estimatedDomainRegistrationEntryBytes int64 = 512
-	domainRegistrationExpiryGrace               = 14 * 24 * time.Hour
-	domainRegistrationFailureRetry              = time.Hour
-	ianaRDAPBootstrapURL                        = "https://data.iana.org/rdap/dns.json"
-	maxRDAPResponseBytes                  int64 = 1 << 20
+	domainRegistrationExpiryGrace        = 14 * 24 * time.Hour
+	domainRegistrationFailureRetry       = time.Hour
+	ianaRDAPBootstrapURL                 = "https://data.iana.org/rdap/dns.json"
+	maxRDAPResponseBytes           int64 = 1 << 20
 )
 
 type domainRegistrationRecord struct {
-	ID           uint64    `json:"id"`
-	Domain       string    `json:"domain"`
-	RegisteredAt time.Time `json:"registered_at"`
-	ExpiresAt    time.Time `json:"expires_at"`
+	ID           uint64
+	Domain       string
+	RegisteredAt time.Time
+	ExpiresAt    time.Time
 }
 
 type domainRegistrationStore struct {
-	db       *jsonstore.Database[string, domainRegistrationRecord]
+	db       *sqlstore.Store
 	lookup   domainRegistrationLookup
 	timeout  time.Duration
 	slots    chan struct{}
 	maxSize  int
 	now      func() time.Time
 	log      *slog.Logger
-	loadErr  error
 	mu       sync.Mutex
 	failures map[string]time.Time
 	inflight map[string]chan struct{}
@@ -57,44 +54,14 @@ type domainRegistrationLookup interface {
 	Lookup(context.Context, string) (time.Time, time.Time, error)
 }
 
-func newDomainRegistrationStore(cfg config.DomainRegistrationConfig, log *slog.Logger) *domainRegistrationStore {
+func newDomainRegistrationStore(cfg config.DomainRegistrationConfig, db *sqlstore.Store, log *slog.Logger) *domainRegistrationStore {
 	store := &domainRegistrationStore{now: time.Now, log: log, timeout: cfg.Timeout.Value(), maxSize: cfg.MaxEntries, failures: make(map[string]time.Time), inflight: make(map[string]chan struct{})}
 	if cfg.Enabled {
 		store.slots = make(chan struct{}, min(8, cfg.MaxEntries))
+		store.lookup = newRDAPClient(cfg.Timeout.Value())
 	}
-	store.db = jsonstore.New("Domains", cfg.StateFile, domainRegistrationFileVersion, cfg.MaxEntries,
-		persistentStoreReadLimit(cfg.MaxEntries, estimatedDomainRegistrationEntryBytes),
-		func(record domainRegistrationRecord) string { return record.Domain },
-		jsonstore.Identity[domainRegistrationRecord]{
-			Get: func(record domainRegistrationRecord) uint64 { return record.ID },
-			Set: func(record domainRegistrationRecord, id uint64) domainRegistrationRecord {
-				record.ID = id
-				return record
-			},
-		},
-		func(record domainRegistrationRecord, now time.Time) bool {
-			return record.ExpiresAt.Before(now.Add(-domainRegistrationExpiryGrace))
-		},
-		func(a, b domainRegistrationRecord) bool { return a.ExpiresAt.Before(b.ExpiresAt) },
-		func(a, b domainRegistrationRecord) bool { return a.Domain < b.Domain }, log)
-	store.db.SetClock(func() time.Time { return store.now() })
-	if !cfg.Enabled {
-		return store
-	}
-	store.lookup = newRDAPClient(cfg.Timeout.Value())
-	if _, err := store.db.Load(func(version int) bool { return version == domainRegistrationFileVersion }, normalizeDomainRegistrationRecord); err != nil && !os.IsNotExist(err) {
-		store.loadErr = err
-	}
+	store.db = db
 	return store
-}
-
-func normalizeDomainRegistrationRecord(record domainRegistrationRecord) (domainRegistrationRecord, bool, bool) {
-	normalized := registrableDomain(record.Domain)
-	changed := normalized != record.Domain
-	record.Domain = normalized
-	valid := record.Domain != "" && !record.RegisteredAt.IsZero() && !record.ExpiresAt.IsZero() &&
-		!record.ExpiresAt.Before(record.RegisteredAt)
-	return record, valid, changed
 }
 
 func registrableDomain(domain string) string {
@@ -108,11 +75,15 @@ func registrableDomain(domain string) string {
 
 func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (message.DomainRegistrationInfo, error) {
 	domain = registrableDomain(domain)
-	if s == nil || s.lookup == nil || domain == "" {
+	if s == nil || s.db == nil || s.lookup == nil || domain == "" {
 		return message.DomainRegistrationInfo{}, nil
 	}
 	now := s.now().UTC()
-	if record, found := s.db.Get(domain); found && record.ExpiresAt.After(now) {
+	record, found, err := s.get(ctx, domain)
+	if err != nil {
+		return message.DomainRegistrationInfo{}, err
+	}
+	if found && record.ExpiresAt.After(now) {
 		return domainRegistrationEvidence(record), nil
 	}
 
@@ -125,7 +96,11 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 		s.mu.Unlock()
 		select {
 		case <-pending:
-			if record, found := s.db.Get(domain); found && record.ExpiresAt.After(s.now().UTC()) {
+			record, found, err := s.get(ctx, domain)
+			if err != nil {
+				return message.DomainRegistrationInfo{}, err
+			}
+			if found && record.ExpiresAt.After(s.now().UTC()) {
 				return domainRegistrationEvidence(record), nil
 			}
 			return message.DomainRegistrationInfo{}, nil
@@ -140,7 +115,7 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 	lookupCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	var registeredAt, expiresAt time.Time
-	var err error
+	err = nil
 	select {
 	case s.slots <- struct{}{}:
 		registeredAt, expiresAt, err = s.lookupSafely(lookupCtx, domain)
@@ -151,9 +126,9 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 	if err == nil && (!registeredAt.Before(expiresAt) || registeredAt.After(now) || !expiresAt.After(now)) {
 		err = fmt.Errorf("RDAP returned invalid or expired registration dates for %s", domain)
 	}
-	record := domainRegistrationRecord{Domain: domain, RegisteredAt: registeredAt.UTC(), ExpiresAt: expiresAt.UTC()}
+	refreshed := domainRegistrationRecord{Domain: domain, RegisteredAt: registeredAt.UTC(), ExpiresAt: expiresAt.UTC()}
 	if err == nil {
-		err = s.db.Put(record)
+		err = s.put(ctx, refreshed)
 	}
 	s.mu.Lock()
 	delete(s.inflight, domain)
@@ -169,9 +144,96 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 		return message.DomainRegistrationInfo{}, err
 	}
 	if s.log != nil {
-		s.log.DebugContext(ctx, "domain registration cached", "domain", domain, "registered_at", record.RegisteredAt, "expires_at", record.ExpiresAt)
+		s.log.DebugContext(ctx, "domain registration cached", "domain", domain, "registered_at", refreshed.RegisteredAt, "expires_at", refreshed.ExpiresAt)
 	}
-	return domainRegistrationEvidence(record), nil
+	return domainRegistrationEvidence(refreshed), nil
+}
+
+func (s *domainRegistrationStore) get(ctx context.Context, domain string) (domainRegistrationRecord, bool, error) {
+	var record domainRegistrationRecord
+	var id, registeredAt, expiresAt int64
+	err := s.db.QueryRow(ctx, `SELECT id, domain, registered_at_ms, expires_at_ms
+		FROM domain_registrations WHERE domain = ?`, domain).Scan(&id, &record.Domain, &registeredAt, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domainRegistrationRecord{}, false, nil
+	}
+	if err != nil {
+		return domainRegistrationRecord{}, false, err
+	}
+	record.ID = uint64(id)
+	record.RegisteredAt = time.UnixMilli(registeredAt).UTC()
+	record.ExpiresAt = time.UnixMilli(expiresAt).UTC()
+	return record, true, nil
+}
+
+func (s *domainRegistrationStore) put(ctx context.Context, record domainRegistrationRecord) error {
+	return s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO domain_registrations
+			(domain, registered_at_ms, expires_at_ms) VALUES (?, ?, ?)
+			ON CONFLICT(domain) DO UPDATE SET registered_at_ms = excluded.registered_at_ms,
+				expires_at_ms = excluded.expires_at_ms`, record.Domain,
+			unixMillis(record.RegisteredAt), unixMillis(record.ExpiresAt)); err != nil {
+			return err
+		}
+		if err := s.enforceCapacityTx(ctx, tx); err != nil {
+			return err
+		}
+		var retained int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM domain_registrations WHERE domain = ?)`, record.Domain).Scan(&retained); err != nil {
+			return err
+		}
+		if retained == 0 {
+			return errors.New("new domain registration was removed by capacity enforcement")
+		}
+		return nil
+	})
+}
+
+func (s *domainRegistrationStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM domain_registrations WHERE id IN (
+		SELECT id FROM domain_registrations ORDER BY expires_at_ms DESC, id DESC LIMIT -1 OFFSET ?
+	)`, s.maxSize)
+	return err
+}
+
+func (s *domainRegistrationStore) cleanup() (int64, error) {
+	if s == nil || s.db == nil || s.lookup == nil {
+		return 0, nil
+	}
+	ctx := context.Background()
+	var deleted int64
+	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `DELETE FROM domain_registrations WHERE expires_at_ms < ?`,
+			unixMillis(s.now().UTC().Add(-domainRegistrationExpiryGrace)))
+		if err != nil {
+			return err
+		}
+		if n, err := result.RowsAffected(); err == nil {
+			deleted += n
+		}
+		result, err = tx.ExecContext(ctx, `DELETE FROM domain_registrations WHERE id IN (
+			SELECT id FROM domain_registrations ORDER BY expires_at_ms DESC, id DESC LIMIT -1 OFFSET ?
+		)`, s.maxSize)
+		if err != nil {
+			return err
+		}
+		if n, err := result.RowsAffected(); err == nil {
+			deleted += n
+		}
+		return nil
+	})
+	return deleted, err
+}
+
+func (s *domainRegistrationStore) size() int {
+	if s == nil || s.db == nil {
+		return 0
+	}
+	var count int
+	if err := s.db.QueryRow(context.Background(), `SELECT COUNT(*) FROM domain_registrations`).Scan(&count); err != nil {
+		return 0
+	}
+	return count
 }
 
 func (s *domainRegistrationStore) lookupSafely(ctx context.Context, domain string) (registeredAt, expiresAt time.Time, err error) {
