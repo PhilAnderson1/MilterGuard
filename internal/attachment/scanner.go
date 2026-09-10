@@ -213,6 +213,10 @@ func (s *Scanner) scanFile(location, filename, mediaType string, data []byte, ar
 			return nil, &ScanError{Path: cleanLocation(location), Err: fmt.Errorf("invalid gzip archive: %w", err)}
 		}
 		storedName := strings.TrimSpace(reader.Name)
+		if err := s.beginArchiveFile(0, state); err != nil {
+			_ = reader.Close()
+			return nil, &ScanError{Path: cleanLocation(location), Err: err}
+		}
 		decompressed, err := s.readArchiveEntry(reader, state)
 		_ = reader.Close()
 		if err != nil {
@@ -226,6 +230,9 @@ func (s *Scanner) scanFile(location, filename, mediaType string, data []byte, ar
 		}
 		return s.scanFile(joinLocation(location, innerName), innerName, "application/octet-stream", decompressed, archiveDepth+1, state)
 	case "bzip2":
+		if err := s.beginArchiveFile(0, state); err != nil {
+			return nil, &ScanError{Path: cleanLocation(location), Err: err}
+		}
 		decompressed, err := s.readArchiveEntry(bzip2.NewReader(bytes.NewReader(data)), state)
 		if err != nil {
 			return nil, &ScanError{Path: cleanLocation(location), Err: err}
@@ -256,20 +263,19 @@ func (s *Scanner) scanZIP(location string, data []byte, archiveDepth int, state 
 		if extension := s.blockedExtension(file.Name); extension != "" {
 			return &Finding{Path: entryLocation, Detection: "blocked extension ." + extension}, nil
 		}
-		limitErr := s.countArchiveFile(file.UncompressedSize64, state)
+		if err := s.beginArchiveFile(file.UncompressedSize64, state); err != nil {
+			return nil, &ScanError{Path: entryLocation, Err: err}
+		}
 		entry, err := file.Open()
 		if err != nil {
 			return nil, &ScanError{Path: entryLocation, Err: fmt.Errorf("cannot open ZIP entry: %w", err)}
 		}
-		entryData, err := readLimited(entry, s.options.MaxAttachmentBytes)
+		entryData, err := s.readArchiveEntry(entry, state)
 		_ = entry.Close()
 		if s.options.InspectSignatures {
 			if signature := executableSignature(entryData); signature != "" {
 				return &Finding{Path: entryLocation, Detection: signature}, nil
 			}
-		}
-		if limitErr != nil {
-			return nil, &ScanError{Path: entryLocation, Err: limitErr}
 		}
 		if err != nil {
 			return nil, &ScanError{Path: entryLocation, Err: err}
@@ -307,7 +313,9 @@ func (s *Scanner) scanPartialZIP(location string, data []byte, archiveDepth int,
 		if extension := s.blockedExtension(name); extension != "" {
 			return &Finding{Path: entryLocation, Detection: "blocked extension ." + extension}, nil
 		}
-		limitErr := s.countArchiveFile(uncompressedSize, state)
+		if err := s.beginArchiveFile(uncompressedSize, state); err != nil {
+			return nil, &ScanError{Path: entryLocation, Err: err}
+		}
 		availableEnd := len(data)
 		if compressedSize > 0 && compressedSize <= uint64(len(data)-dataStart) {
 			availableEnd = dataStart + int(compressedSize)
@@ -322,7 +330,7 @@ func (s *Scanner) scanPartialZIP(location string, data []byte, archiveDepth int,
 		default:
 			return nil, &ScanError{Path: entryLocation, Err: fmt.Errorf("unsupported ZIP compression method %d", method)}
 		}
-		entryData, readErr := readLimited(entryReader, s.options.MaxAttachmentBytes)
+		entryData, readErr := s.readArchiveEntry(entryReader, state)
 		_ = entryReader.Close()
 		if s.options.InspectSignatures {
 			if signature := executableSignature(entryData); signature != "" {
@@ -334,10 +342,10 @@ func (s *Scanner) scanPartialZIP(location string, data []byte, archiveDepth int,
 				return finding, nil
 			}
 		}
-		if limitErr != nil {
-			return nil, &ScanError{Path: entryLocation, Err: limitErr}
-		}
 		if readErr != nil || compressedSize == 0 || compressedSize > uint64(len(data)-dataStart) || flags&8 != 0 {
+			if readErr != nil {
+				return nil, &ScanError{Path: entryLocation, Err: readErr}
+			}
 			return nil, &ScanError{Path: entryLocation, Err: errors.New("incomplete ZIP entry")}
 		}
 		offset = dataStart + int(compressedSize)
@@ -362,13 +370,13 @@ func (s *Scanner) scanTAR(location string, reader io.Reader, archiveDepth int, s
 		if header.Size < 0 {
 			return nil, &ScanError{Path: entryLocation, Err: errors.New("invalid negative archive entry size")}
 		}
-		if err := s.countArchiveFile(uint64(header.Size), state); err != nil {
+		if err := s.beginArchiveFile(uint64(header.Size), state); err != nil {
 			return nil, &ScanError{Path: entryLocation, Err: err}
 		}
 		if extension := s.blockedExtension(header.Name); extension != "" {
 			return &Finding{Path: entryLocation, Detection: "blocked extension ." + extension}, nil
 		}
-		entryData, err := readLimited(tarReader, s.options.MaxAttachmentBytes)
+		entryData, err := s.readArchiveEntry(tarReader, state)
 		if err != nil {
 			return nil, &ScanError{Path: entryLocation, Err: err}
 		}
@@ -380,29 +388,44 @@ func (s *Scanner) scanTAR(location string, reader io.Reader, archiveDepth int, s
 }
 
 func (s *Scanner) readArchiveEntry(reader io.Reader, state *scanState) ([]byte, error) {
-	data, err := readLimited(reader, s.options.MaxAttachmentBytes)
-	if err != nil {
-		return nil, err
+	remaining := s.options.MaxArchiveUncompressedBytes - state.archiveBytes
+	if remaining <= 0 {
+		return nil, errors.New("archive uncompressed-size limit exceeded")
 	}
-	if err := s.countArchiveFile(uint64(len(data)), state); err != nil {
-		return nil, err
+	limit := min(s.options.MaxAttachmentBytes, remaining)
+	limited := &io.LimitedReader{R: reader, N: limit}
+	data, err := io.ReadAll(limited)
+	state.archiveBytes += int64(len(data))
+	if err != nil {
+		return data, err
+	}
+	var extra [1]byte
+	if count, extraErr := reader.Read(extra[:]); count > 0 {
+		if remaining <= s.options.MaxAttachmentBytes {
+			return data, errors.New("archive uncompressed-size limit exceeded")
+		}
+		return data, errors.New("archive entry size limit exceeded")
+	} else if extraErr != nil && extraErr != io.EOF {
+		return data, extraErr
 	}
 	return data, nil
 }
 
-func (s *Scanner) countArchiveFile(size uint64, state *scanState) error {
+// beginArchiveFile uses declared sizes for early rejection only. The
+// authoritative cumulative accounting is performed on bytes actually produced
+// by readArchiveEntry, so understated archive metadata cannot bypass the limit.
+func (s *Scanner) beginArchiveFile(declaredSize uint64, state *scanState) error {
 	if state.archiveFiles >= s.options.MaxArchiveFiles {
 		return errors.New("archive file-count limit exceeded")
 	}
-	if size > uint64(s.options.MaxAttachmentBytes) {
+	if declaredSize > uint64(s.options.MaxAttachmentBytes) {
 		return errors.New("archive entry size limit exceeded")
 	}
 	remaining := s.options.MaxArchiveUncompressedBytes - state.archiveBytes
-	if remaining < 0 || size > uint64(remaining) {
+	if remaining < 0 || declaredSize > uint64(remaining) {
 		return errors.New("archive uncompressed-size limit exceeded")
 	}
 	state.archiveFiles++
-	state.archiveBytes += int64(size)
 	return nil
 }
 

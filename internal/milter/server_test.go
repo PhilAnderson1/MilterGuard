@@ -33,7 +33,7 @@ type countingAnalyzer struct {
 	calls    atomic.Int32
 }
 
-func TestSessionPanicIsRecoveredAndTempfailed(t *testing.T) {
+func TestSessionPanicIsRecoveredAndConnectionClosed(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
 	defer clientConn.Close()
@@ -49,14 +49,20 @@ func TestSessionPanicIsRecoveredAndTempfailed(t *testing.T) {
 		}()
 	}()
 
-	expectFrame(t, clientConn, string([]byte{responseTempfail}))
+	if err := clientConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 1)
+	if count, err := clientConn.Read(buffer); count != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("read after panic = (%d, %v), want (0, EOF) with no response frame", count, err)
+	}
 	select {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("panic recovery did not return")
 	}
 	logs := logOutput.String()
-	for _, wanted := range []string{"MilterGuard worker recovered from panic", `"worker":"milter session"`, "test parser panic", `"response_sent":true`, "goroutine"} {
+	for _, wanted := range []string{"MilterGuard worker recovered from panic", `"worker":"milter session"`, "test parser panic", `"connection_closed":true`, "goroutine"} {
 		if !strings.Contains(logs, wanted) {
 			t.Errorf("panic recovery log does not contain %q: %s", wanted, logs)
 		}
@@ -522,6 +528,85 @@ func TestBelowThresholdUnwantedAddsTrustedResultHeaders(t *testing.T) {
 	expectFrame(t, conn, string([]byte{responseAccept}))
 }
 
+func TestResultHeaderRemovalSurvivesRetentionLimit(t *testing.T) {
+	analyzer := fixedAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
+	server, conn, done := testServer(t, analyzer)
+	server.cfg.Filtering.AddEmailHeaders = true
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiateWithActions(t, conn, resultHeaderActions)
+	frames := [][]byte{
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "sender@example.com"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+	}
+	for range 3 {
+		frames = append(frames, headerFrame("To", strings.Repeat("x", 8192)))
+	}
+	frames = append(frames,
+		headerFrame("Date", strings.Repeat("x", 8170)),
+		headerFrame(classificationHeader, "forged-first"),
+		headerFrame(classificationHeader, "forged-second"),
+		[]byte{commandEndHeaders},
+	)
+	sendContinueFrames(t, conn, frames...)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string(deleteHeaderResponse(classificationHeader)))
+	expectFrame(t, conn, string(deleteHeaderResponse(classificationHeader)))
+	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "legitimate")))
+	expectFrame(t, conn, string(addHeaderResponse(scoreHeader, "1")))
+	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "high")))
+	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted")))
+	expectFrame(t, conn, string([]byte{responseAccept}))
+}
+
+func TestSenderResultHeadersRemovedWhenResultGenerationDisabled(t *testing.T) {
+	server, conn, done := testServer(t, fixedAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}})
+	server.cfg.Filtering.AddEmailHeaders = false
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiateWithActions(t, conn, resultHeaderActions)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "sender@example.com"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+		headerFrame(classificationHeader, "forged"),
+		headerFrame(scoreHeader, "1"),
+		headerFrame("From", "Sender <sender@example.com>"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string(deleteHeaderResponse(classificationHeader)))
+	expectFrame(t, conn, string(deleteHeaderResponse(scoreHeader)))
+	expectFrame(t, conn, string([]byte{responseAccept}))
+}
+
+func TestCounterfeitResultHeadersDoNotAffectDeliveryWithoutMTASupport(t *testing.T) {
+	server, conn, done := testServer(t, fixedAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}})
+	server.cfg.Filtering.AddEmailHeaders = true
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "sender@example.com"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+		headerFrame(classificationHeader, "forged"),
+		headerFrame("From", "Sender <sender@example.com>"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	// The message remains deliverable, but MilterGuard does not add a second,
+	// conflicting result set when the supplied value cannot be removed.
+	expectFrame(t, conn, string([]byte{responseAccept}))
+}
+
 func TestAcceptedLegitimateAddsTrustedResultHeaders(t *testing.T) {
 	analyzer := fixedAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0.79, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
@@ -975,6 +1060,41 @@ func TestAuthenticatedMessagesCanBypassAndAuthenticationPersists(t *testing.T) {
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	if got := analyzer.calls.Load(); got != 1 {
 		t.Fatalf("AI analysis calls after a new unauthenticated connection = %d, want 1", got)
+	}
+}
+
+func TestExplicitEmptyAuthenticationMacroClearsAuthentication(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
+	server, conn, _ := testServer(t, analyzer)
+	server.cfg.Filtering.ScanAuthenticated = false
+	defer conn.Close()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
+	if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip@example.com")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn, []byte{commandMail}, []byte{commandEndHeaders})
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if got := analyzer.calls.Load(); got != 0 {
+		t.Fatalf("AI analysis calls for authenticated message = %d, want 0", got)
+	}
+
+	if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn, []byte{commandMail}, []byte{commandEndHeaders})
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if got := analyzer.calls.Load(); got != 1 {
+		t.Fatalf("AI analysis calls after explicit authentication clear = %d, want 1", got)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 type Message struct {
 	Headers            map[string][]string
 	decodedHeaders     map[string][]string
+	headerOccurrences  map[string]int
 	Body               strings.Builder
 	Connection         ConnectionInfo
 	Correspondent      CorrespondentInfo
@@ -19,6 +20,7 @@ type Message struct {
 	MaxBytes           int64
 	bodySize           int64
 	headerSize         int64
+	headerBytesByName  map[string]int64
 	archiveHeaders     bytes.Buffer
 	archiveHeaderBytes int64
 	archiveTruncated   bool
@@ -80,8 +82,9 @@ type Analysis struct {
 }
 
 const (
-	maxRetainedHeaderBytes = 32 << 10
-	maxHeaderValueBytes    = 8 << 10
+	maxRetainedHeaderBytesPerName = 16 << 10
+	maxAuthenticationHeaderBytes  = 32 << 10
+	maxHeaderValueBytes           = 8 << 10
 )
 
 var retainedHeaders = map[string]bool{
@@ -111,12 +114,29 @@ var humanReadableHeaders = map[string]bool{
 	"to":       true,
 }
 
+var countedSecurityHeaders = map[string]bool{
+	"x-milterguard-action":         true,
+	"x-milterguard-classification": true,
+	"x-milterguard-confidence":     true,
+	"x-milterguard-internal":       true,
+	"x-milterguard-score":          true,
+}
+
 func New(maxBytes int64) *Message {
-	return &Message{Headers: make(map[string][]string), decodedHeaders: make(map[string][]string), MaxBytes: maxBytes}
+	return &Message{
+		Headers:           make(map[string][]string),
+		decodedHeaders:    make(map[string][]string),
+		headerOccurrences: make(map[string]int),
+		headerBytesByName: make(map[string]int64),
+		MaxBytes:          maxBytes,
+	}
 }
 func (m *Message) AddHeader(name, value string) {
 	m.addArchiveHeader(name, value)
 	name = strings.ToLower(strings.TrimSpace(name))
+	if countedSecurityHeaders[name] {
+		m.headerOccurrences[name]++
+	}
 	if !retainedHeaders[name] {
 		return
 	}
@@ -126,15 +146,26 @@ func (m *Message) AddHeader(name, value string) {
 		m.Truncated = true
 	}
 	entrySize := int64(len(name) + len(value) + 2)
-	if m.headerSize+entrySize > maxRetainedHeaderBytes {
+	limit := int64(maxRetainedHeaderBytesPerName)
+	if name == "authentication-results" {
+		limit = maxAuthenticationHeaderBytes
+	}
+	if m.headerBytesByName[name]+entrySize > limit {
 		m.Truncated = true
 		return
 	}
 	m.headerSize += entrySize
+	m.headerBytesByName[name] += entrySize
 	m.Headers[name] = append(m.Headers[name], value)
 	if humanReadableHeaders[name] {
 		m.decodedHeaders[name] = append(m.decodedHeaders[name], decodeHeaderValue(value))
 	}
+}
+
+// HeaderOccurrences returns the number of security-sensitive headers received,
+// including occurrences omitted from Headers by the retained-header byte limit.
+func (m *Message) HeaderOccurrences(name string) int {
+	return m.headerOccurrences[strings.ToLower(strings.TrimSpace(name))]
 }
 
 func (m *Message) addArchiveHeader(name, value string) {
@@ -154,7 +185,10 @@ func (m *Message) addArchiveHeader(name, value string) {
 	value = strings.ReplaceAll(value, "\r", "\n")
 	value = strings.ReplaceAll(value, "\n", "\r\n ")
 	line := name + ": " + value + "\r\n"
-	if m.archiveHeaderBytes+int64(len(line)) > m.MaxBytes {
+	// Reserve at least half of the configured message budget for the body so
+	// excessive headers cannot suppress all content presented for analysis.
+	headerLimit := m.MaxBytes / 2
+	if m.archiveHeaderBytes+int64(len(line)) > headerLimit {
 		m.archiveTruncated = true
 		return
 	}
@@ -162,7 +196,7 @@ func (m *Message) addArchiveHeader(name, value string) {
 	_, _ = m.archiveHeaders.WriteString(line)
 }
 func (m *Message) AddBody(p []byte) {
-	remaining := m.MaxBytes - m.bodySize
+	remaining := m.MaxBytes - m.archiveHeaderBytes - m.bodySize
 	if remaining <= 0 {
 		m.Truncated = true
 		m.BodyTruncated = true
@@ -197,8 +231,8 @@ func (m *Message) decodedHeaderValues(name string) []string {
 	return m.Headers[name]
 }
 
-// RetainedBytes reports the bounded header and body bytes kept by the Milter.
-func (m *Message) RetainedBytes() int64 { return m.headerSize + m.bodySize }
+// RetainedBytes reports the bounded raw header and body bytes kept by the Milter.
+func (m *Message) RetainedBytes() int64 { return m.archiveHeaderBytes + m.bodySize }
 
 // ArchiveBytes returns a bounded RFC 5322/MIME message reconstructed from the
 // headers and body supplied through the Milter protocol.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -192,6 +193,100 @@ func TestRDAPClientReadsRegistrationAndExpirationEvents(t *testing.T) {
 	}
 	if registered.Format("2006-01-02") != "2026-09-01" || expires.Format("2006-01-02") != "2027-09-01" {
 		t.Fatalf("unexpected RDAP dates: registered=%v expires=%v", registered, expires)
+	}
+}
+
+func TestRDAPClientLoadsBootstrapOnceForConcurrentLookups(t *testing.T) {
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	client := newRDAPClient(time.Second)
+	client.http.Transport = domainRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if r.URL.String() != ianaRDAPBootstrapURL {
+			t.Fatalf("unexpected URL %q", r.URL)
+		}
+		if calls.Load() == 1 {
+			close(started)
+		}
+		<-release
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"services":[[["com"],["https://rdap.example/"]]]}`))}, nil
+	})
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := client.rdapServices(context.Background())
+			errCh <- err
+		}()
+	}
+	<-started
+	close(release)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("bootstrap requests = %d, want 1", got)
+	}
+}
+
+func TestRDAPClientBootstrapWaitRespectsContext(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	client := newRDAPClient(time.Second)
+	client.http.Transport = domainRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		close(started)
+		<-release
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"services":[]}`))}, nil
+	})
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := client.rdapServices(context.Background())
+		leaderDone <- err
+	}()
+	<-started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := client.rdapServices(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiting error = %v, want context canceled", err)
+	}
+	close(release)
+	if err := <-leaderDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRDAPClientCachesBootstrapFailure(t *testing.T) {
+	var calls atomic.Int32
+	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	client := newRDAPClient(time.Second)
+	client.now = func() time.Time { return now }
+	client.http.Transport = domainRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("bootstrap unavailable")
+	})
+	for range 2 {
+		if _, err := client.rdapServices(context.Background()); err == nil {
+			t.Fatal("bootstrap failure was accepted")
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("bootstrap requests during retry interval = %d, want 1", got)
+	}
+	now = now.Add(domainRegistrationFailureRetry)
+	if _, err := client.rdapServices(context.Background()); err == nil {
+		t.Fatal("bootstrap retry failure was accepted")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("bootstrap requests after retry interval = %d, want 2", got)
 	}
 }
 

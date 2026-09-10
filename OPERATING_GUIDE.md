@@ -109,6 +109,30 @@ must be included in MilterGuard's `correspondents.trusted_authserv_ids` setting.
 The supplied `$mta_hostname` value normally handles results identified with the
 Postfix hostname.
 
+Before relying on those results, configure Postfix to remove externally
+supplied `Authentication-Results` headers. Their authentication service
+identifier is not proof that they were created locally, so without this step a
+remote sender could forge evidence that MilterGuard trusts. Add the following
+rule to `/etc/postfix/header_checks`:
+
+```text
+/^Authentication-Results:/ IGNORE
+/^X-MilterGuard-(Classification|Score|Confidence|Action):/ IGNORE
+```
+
+Enable the table in `/etc/postfix/main.cf`, merging it with any existing
+`header_checks` configuration:
+
+```text
+header_checks = regexp:/etc/postfix/header_checks
+```
+
+Postfix removes the supplied authentication and MilterGuard result headers as
+it receives the message. OpenDKIM and OpenDMARC then add freshly calculated
+authentication results before MilterGuard runs, and MilterGuard may add its own
+result headers. Do not apply these removal rules through `milter_header_checks`,
+which operates on headers added by Milters.
+
 ## Connect MilterGuard to Postfix
 
 Add MilterGuard to the end of each applicable Milter list in
@@ -518,7 +542,10 @@ When `filtering.add_email_headers` is enabled, every accepted message receives
 rule to place borderline messages in a Junk folder. Bypassed messages and
 analysis failures are marked as unavailable rather than being given an invented
 score. MilterGuard removes incoming headers with these names before adding its
-own values.
+own values when Postfix offers Milter change-header support. The recommended
+Postfix `header_checks` rule also removes them at the SMTP boundary. Downstream
+filters should not trust these headers unless one of these protections is in
+place.
 
 Review `/etc/milterguard/trusted-sender-domains.txt` periodically and remove
 domains that no longer represent low-risk, organization-controlled senders. Add

@@ -252,18 +252,16 @@ func (ss *session) negotiate(payload []byte) bool {
 	if version > supportedProtocolVersion {
 		version = supportedProtocolVersion
 	}
-	requestedActions := uint32(0)
+	// Request result-header capabilities even when result generation is disabled:
+	// sender-supplied X-MilterGuard result headers must still be removable.
+	requestedActions := offeredActions & resultHeaderActions
 	wantsResultHeaders := ss.server.cfg.Filtering.AddEmailHeaders || ss.server.cfg.Mode == "tag"
-	if wantsResultHeaders && offeredActions&resultHeaderActions == resultHeaderActions {
-		requestedActions = resultHeaderActions
-	} else if wantsResultHeaders {
-		ss.server.log.Warn("result headers disabled for Milter connection because MTA did not offer add/change-header support",
+	if wantsResultHeaders && offeredActions&actionAddHeaders == 0 {
+		ss.server.log.Warn("result headers disabled for Milter connection because MTA did not offer add-header support",
 			"offered_actions", offeredActions)
 	}
 	wantsInternalHeaderRemoval := ss.server.cfg.EmailCommands.Enabled && ss.server.cfg.EmailCommands.SendReplies
-	if wantsInternalHeaderRemoval && offeredActions&actionChangeHeaders != 0 {
-		requestedActions |= actionChangeHeaders
-	} else if wantsInternalHeaderRemoval {
+	if wantsInternalHeaderRemoval && offeredActions&actionChangeHeaders == 0 {
 		ss.server.log.Warn("internal reply protection disabled for Milter connection because MTA did not offer change-header support",
 			"offered_actions", offeredActions)
 	}
@@ -359,7 +357,7 @@ func (ss *session) finishInternalMessage(ctx context.Context) bool {
 		ss.resetMessage(phaseConnection)
 		return true
 	}
-	for range ss.message.Headers[strings.ToLower(internalMessageHeader)] {
+	for range ss.message.HeaderOccurrences(internalMessageHeader) {
 		if err := writeFrame(ss.conn, deleteHeaderResponse(internalMessageHeader)); err != nil {
 			return false
 		}
@@ -488,9 +486,7 @@ func (ss *session) captureSessionMacros(payload []byte) {
 		return
 	}
 	identity := cleanSMTPIdentity(values.AuthenticationIdentity)
-	if identity != "" {
-		ss.authentication = authenticationState{Authenticated: true, Identity: identity}
-	}
+	ss.authentication = authenticationState{Authenticated: identity != "", Identity: identity}
 }
 
 func (ss *session) trustedAuthservIDs() []string {

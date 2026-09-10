@@ -335,14 +335,10 @@ func (s *Server) recoverSessionPanic(ctx context.Context, conn net.Conn) {
 	if panicValue == nil {
 		return
 	}
-	err := writeFrame(conn, []byte{responseTempfail})
-	attrs := []any{
-		"panic", fmt.Sprint(panicValue),
-		"stack", string(debug.Stack()),
-		"response_sent", err == nil,
-	}
-	if err != nil {
-		attrs = append(attrs, "response_error", err)
+	closeErr := conn.Close()
+	attrs := []any{"connection_closed", closeErr == nil}
+	if closeErr != nil {
+		attrs = append(attrs, "close_error", closeErr)
 	}
 	s.logRecoveredWorkerPanic(ctx, "milter session", panicValue, attrs...)
 }

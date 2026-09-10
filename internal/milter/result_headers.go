@@ -1,9 +1,6 @@
 package milter
 
-import (
-	"strconv"
-	"strings"
-)
+import "strconv"
 
 const (
 	classificationHeader = "X-MilterGuard-Classification"
@@ -19,7 +16,7 @@ var resultHeaderNames = []string{classificationHeader, scoreHeader, confidenceHe
 // classification, an AI failure, or a bypass.
 func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 	if !ss.server.cfg.Filtering.AddEmailHeaders && ss.server.cfg.Mode != "tag" {
-		return nil
+		return ss.replaceResultHeaders(nil)
 	}
 	if result == nil {
 		return ss.writeTagHeaders("not-scanned", nil, "accepted-bypass")
@@ -81,15 +78,29 @@ func (ss *session) confidenceLabel(classification string, score float64) string 
 }
 
 func (ss *session) replaceResultHeaders(headers [][2]string) error {
-	if ss.negotiatedActions&resultHeaderActions != resultHeaderActions {
-		return nil
-	}
+	received := make([]string, 0, len(resultHeaderNames))
 	for _, name := range resultHeaderNames {
-		for range ss.message.Headers[strings.ToLower(name)] {
-			if err := writeFrame(ss.conn, deleteHeaderResponse(name)); err != nil {
-				return err
+		if ss.message.HeaderOccurrences(name) > 0 {
+			received = append(received, name)
+		}
+	}
+	if ss.negotiatedActions&actionChangeHeaders != 0 {
+		for _, name := range received {
+			for range ss.message.HeaderOccurrences(name) {
+				if err := writeFrame(ss.conn, deleteHeaderResponse(name)); err != nil {
+					return err
+				}
 			}
 		}
+	} else if len(received) > 0 {
+		ss.server.log.Warn("sender-supplied MilterGuard result headers could not be removed because the MTA did not offer change-header support",
+			"message_id", ss.message.Header("Message-ID"), "headers", received)
+		// Do not add genuine values alongside counterfeit values that could not be
+		// removed; the conflicting result set would be ambiguous downstream.
+		return nil
+	}
+	if ss.negotiatedActions&actionAddHeaders == 0 {
+		return nil
 	}
 	for _, header := range headers {
 		if err := writeFrame(ss.conn, addHeaderResponse(header[0], header[1])); err != nil {

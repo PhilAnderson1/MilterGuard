@@ -229,7 +229,7 @@ func TestPromptTruncates(t *testing.T) {
 	}
 }
 
-func TestHeaderPaddingCannotConsumeBodyBudget(t *testing.T) {
+func TestHeadersAndBodyShareMessageBudgetWithoutSuppressingBody(t *testing.T) {
 	m := New(128)
 	for range 300 {
 		m.AddHeader("Authentication-Results", strings.Repeat("padding", 200))
@@ -239,7 +239,26 @@ func TestHeaderPaddingCannotConsumeBodyBudget(t *testing.T) {
 	m.AddBody([]byte(body))
 	prompt := m.Prompt(1000)
 	if !strings.Contains(prompt, body) {
-		t.Fatalf("header padding consumed body allowance: %s", prompt)
+		t.Fatalf("header padding suppressed the body: %s", prompt)
+	}
+	if got := m.RetainedBytes(); got > m.MaxBytes {
+		t.Fatalf("retained bytes = %d, want at most %d", got, m.MaxBytes)
+	}
+}
+
+func TestBodyIsTruncatedToRemainingCombinedMessageBudget(t *testing.T) {
+	m := New(64)
+	m.AddHeader("Subject", "test")
+	headerBytes := m.archiveHeaderBytes
+	m.AddBody([]byte(strings.Repeat("x", 64)))
+	if got, want := int64(m.Body.Len()), m.MaxBytes-headerBytes; got != want {
+		t.Fatalf("retained body bytes = %d, want %d", got, want)
+	}
+	if !m.BodyTruncated || !m.Truncated {
+		t.Fatal("message exceeding the combined header and body budget was not marked truncated")
+	}
+	if got := m.RetainedBytes(); got != m.MaxBytes {
+		t.Fatalf("retained bytes = %d, want %d", got, m.MaxBytes)
 	}
 }
 
@@ -1194,6 +1213,53 @@ func TestArchiveBytesRetainsAllHeadersAndBody(t *testing.T) {
 	for _, want := range []string{"X-Unselected: preserved\r\n", "Subject: test\r\n", "\r\nmessage body"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("archive missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestHeaderFamiliesCannotSuppressSecurityHeaders(t *testing.T) {
+	m := New(1 << 20)
+	for range 3 {
+		m.AddHeader("To", strings.Repeat("x", maxHeaderValueBytes))
+	}
+	for _, name := range []string{
+		"X-MilterGuard-Classification",
+		"X-MilterGuard-Score",
+		"X-MilterGuard-Confidence",
+		"X-MilterGuard-Action",
+		"X-MilterGuard-Internal",
+	} {
+		m.AddHeader(name, "forged")
+		m.AddHeader(strings.ToLower(name), "second")
+		if got := m.HeaderOccurrences(name); got != 2 {
+			t.Errorf("%s occurrences = %d, want 2", name, got)
+		}
+		if values := m.Headers[strings.ToLower(name)]; len(values) != 2 {
+			t.Errorf("%s retained values = %q, want both occurrences", name, values)
+		}
+	}
+}
+
+func TestHeaderFamiliesCannotSuppressIdentityMIMEOrAuthentication(t *testing.T) {
+	m := New(1 << 20)
+	for range 10 {
+		m.AddHeader("To", strings.Repeat("x", maxHeaderValueBytes))
+	}
+	m.AddHeader("From", "Sender <sender@example.com>")
+	m.AddHeader("Subject", "Important message")
+	m.AddHeader("Content-Type", `multipart/mixed; boundary="parts"`)
+	m.AddHeader("Content-Transfer-Encoding", "7bit")
+	m.AddHeader("Authentication-Results", "mx.example; dkim=pass header.d=example.com")
+
+	for name, want := range map[string]string{
+		"From":                      "Sender <sender@example.com>",
+		"Subject":                   "Important message",
+		"Content-Type":              `multipart/mixed; boundary="parts"`,
+		"Content-Transfer-Encoding": "7bit",
+		"Authentication-Results":    "mx.example; dkim=pass header.d=example.com",
+	} {
+		if got := m.Header(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
 		}
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -281,6 +283,30 @@ func TestArchiveLimitsAreEnforced(t *testing.T) {
 	}
 }
 
+func TestPartialZIPUnderstatedSizesCannotBypassActualByteBudget(t *testing.T) {
+	scanner := testScanner()
+	scanner.options.MaxAttachmentBytes = 1024
+	scanner.options.MaxArchiveUncompressedBytes = 20
+	archive := append(partialZIPEntry(t, "one.txt", bytes.Repeat([]byte("a"), 16), 1),
+		partialZIPEntry(t, "two.txt", bytes.Repeat([]byte("b"), 16), 1)...)
+
+	finding, err := scanner.Scan("application/zip", "", `attachment; filename="partial.zip"`, archive)
+	if finding != nil || err == nil || !strings.Contains(err.Error(), "archive uncompressed-size limit exceeded") {
+		t.Fatalf("finding = %#v, error = %v", finding, err)
+	}
+}
+
+func TestDeclaredArchiveLimitRejectedBeforeReading(t *testing.T) {
+	scanner := testScanner()
+	state := &scanState{archiveBytes: scanner.options.MaxArchiveUncompressedBytes - 1}
+	if err := scanner.beginArchiveFile(2, state); err == nil || !strings.Contains(err.Error(), "archive uncompressed-size limit exceeded") {
+		t.Fatalf("error = %v", err)
+	}
+	if state.archiveFiles != 0 || state.archiveBytes != scanner.options.MaxArchiveUncompressedBytes-1 {
+		t.Fatalf("state changed after rejected declaration: %#v", state)
+	}
+}
+
 func TestInvalidArchiveReportedAsUnscannable(t *testing.T) {
 	finding, err := testScanner().Scan("application/zip", "", `attachment; filename="broken.zip"`, []byte("not a zip"))
 	if finding != nil || err == nil || !strings.Contains(err.Error(), "invalid ZIP") {
@@ -305,4 +331,28 @@ func makeZIP(t *testing.T, files map[string][]byte) []byte {
 		t.Fatal(err)
 	}
 	return output.Bytes()
+}
+
+func partialZIPEntry(t *testing.T, name string, content []byte, declaredSize uint32) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer, err := flate.NewWriter(&compressed, flate.BestCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	header := make([]byte, 30)
+	binary.LittleEndian.PutUint32(header[0:4], 0x04034b50)
+	binary.LittleEndian.PutUint16(header[4:6], 20)
+	binary.LittleEndian.PutUint16(header[8:10], zip.Deflate)
+	binary.LittleEndian.PutUint32(header[18:22], uint32(compressed.Len()))
+	binary.LittleEndian.PutUint32(header[22:26], declaredSize)
+	binary.LittleEndian.PutUint16(header[26:28], uint16(len(name)))
+	entry := append(header, name...)
+	return append(entry, compressed.Bytes()...)
 }

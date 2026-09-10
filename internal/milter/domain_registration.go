@@ -207,14 +207,23 @@ func domainRegistrationEvidence(record domainRegistrationRecord) message.DomainR
 }
 
 type rdapClient struct {
-	http     *http.Client
-	resolve  func(context.Context, string) ([]net.IPAddr, error)
-	mu       sync.Mutex
-	services map[string][]string
+	http              *http.Client
+	resolve           func(context.Context, string) ([]net.IPAddr, error)
+	now               func() time.Time
+	bootstrapURL      string
+	mu                sync.Mutex
+	services          map[string][]string
+	bootstrapInflight chan struct{}
+	bootstrapErr      error
+	bootstrapRetryAt  time.Time
 }
 
 func newRDAPClient(timeout time.Duration) *rdapClient {
-	rdap := &rdapClient{resolve: net.DefaultResolver.LookupIPAddr}
+	rdap := &rdapClient{
+		resolve:      net.DefaultResolver.LookupIPAddr,
+		now:          time.Now,
+		bootstrapURL: ianaRDAPBootstrapURL,
+	}
 	rdap.http = &http.Client{Timeout: timeout}
 	rdap.http.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 3 {
@@ -291,15 +300,53 @@ func (c *rdapClient) Lookup(ctx context.Context, domain string) (time.Time, time
 }
 
 func (c *rdapClient) rdapServices(ctx context.Context) (map[string][]string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.services != nil {
-		return c.services, nil
+	for {
+		c.mu.Lock()
+		if c.services != nil {
+			services := c.services
+			c.mu.Unlock()
+			return services, nil
+		}
+		if c.bootstrapRetryAt.After(c.now()) {
+			err := c.bootstrapErr
+			c.mu.Unlock()
+			return nil, err
+		}
+		if pending := c.bootstrapInflight; pending != nil {
+			c.mu.Unlock()
+			select {
+			case <-pending:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		pending := make(chan struct{})
+		c.bootstrapInflight = pending
+		c.mu.Unlock()
+
+		services, err := c.fetchRDAPServices(ctx)
+		c.mu.Lock()
+		if err == nil {
+			c.services = services
+			c.bootstrapErr = nil
+			c.bootstrapRetryAt = time.Time{}
+		} else if !errors.Is(err, context.Canceled) {
+			c.bootstrapErr = err
+			c.bootstrapRetryAt = c.now().Add(domainRegistrationFailureRetry)
+		}
+		c.bootstrapInflight = nil
+		close(pending)
+		c.mu.Unlock()
+		return services, err
 	}
+}
+
+func (c *rdapClient) fetchRDAPServices(ctx context.Context) (map[string][]string, error) {
 	var bootstrap struct {
 		Services [][][]string `json:"services"`
 	}
-	if err := c.getJSON(ctx, ianaRDAPBootstrapURL, &bootstrap); err != nil {
+	if err := c.getJSON(ctx, c.bootstrapURL, &bootstrap); err != nil {
 		return nil, err
 	}
 	services := make(map[string][]string)
@@ -317,7 +364,6 @@ func (c *rdapClient) rdapServices(ctx context.Context) (map[string][]string, err
 			}
 		}
 	}
-	c.services = services
 	return services, nil
 }
 
