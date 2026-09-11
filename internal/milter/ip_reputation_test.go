@@ -82,9 +82,9 @@ func TestRejectedIPCacheHonorsAllowlist(t *testing.T) {
 	}
 	logOutput := output.String()
 	for _, wanted := range []string{
-		`"msg":"sending IP excluded from rejection reputation","remote_ip":"192.0.2.25","matched_prefix":"192.0.2.0/24","reason":"ip_allowlist","cache_size":0`,
-		`"msg":"sending IP excluded from rejection reputation","remote_ip":"198.51.100.25","matched_prefix":"198.51.100.0/24","reason":"ip_allowlist","cache_size":0`,
-		`"msg":"sending IP excluded from rejection reputation","remote_ip":"2001:db8::1","matched_prefix":"2001:db8::1/128","reason":"ip_allowlist","cache_size":0`,
+		`"msg":"sending IP excluded from rejection reputation","remote_ip":"192.0.2.25","matched_prefix":"192.0.2.0/24","reason":"ip_allowlist"`,
+		`"msg":"sending IP excluded from rejection reputation","remote_ip":"198.51.100.25","matched_prefix":"198.51.100.0/24","reason":"ip_allowlist"`,
+		`"msg":"sending IP excluded from rejection reputation","remote_ip":"2001:db8::1","matched_prefix":"2001:db8::1/128","reason":"ip_allowlist"`,
 	} {
 		if !strings.Contains(logOutput, wanted) {
 			t.Errorf("debug log does not contain %s: %s", wanted, logOutput)
@@ -92,7 +92,7 @@ func TestRejectedIPCacheHonorsAllowlist(t *testing.T) {
 	}
 }
 
-func TestRejectedIPCacheEvictsEarliestExpiry(t *testing.T) {
+func TestRejectedIPCleanupEvictsOldestShortBlock(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	cache := newTestIPReputationStore(t, config.IPReputationConfig{
 		BlockDuration: config.Duration(10 * time.Minute),
@@ -107,6 +107,12 @@ func TestRejectedIPCacheEvictsEarliestExpiry(t *testing.T) {
 	cache.add(second, 1, connectionDNSResult{})
 	now = now.Add(time.Minute)
 	cache.add(third, 1, connectionDNSResult{})
+	if cache.size() != 3 {
+		t.Fatal("capacity was enforced before periodic cleanup")
+	}
+	if _, err := cache.cleanup(); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := cache.lookup(first); ok {
 		t.Fatal("earliest-expiring entry was not evicted")
 	}

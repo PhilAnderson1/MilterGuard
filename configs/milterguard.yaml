@@ -217,7 +217,8 @@ rejection_history:
   # Uses Go duration syntax; 0s disables rejection history.
   expiry: 720h
 
-  # Maximum retained rejection records. The oldest records are removed first.
+  # Retention target for rejection records. Periodic cleanup removes the oldest
+  # records above this number.
   max_entries: 10000
 
 rejected_mail:
@@ -253,7 +254,8 @@ ip_reputation:
   # Legitimate emails required to remove one IP strike. Set to 0 to disable.
   legitimate_messages_per_strike: 3
 
-  # Maximum stored sending IP records; positive integer.
+  # Retention target for sending IP records; positive integer. Periodic cleanup
+  # removes the least useful records above this number.
   max_entries: 10000
 
   # Strikes and active blocks persist in persistence.database_file.
@@ -288,7 +290,8 @@ domain_registration:
   # Maximum duration of an RDAP lookup.
   timeout: 3s
 
-  # Maximum cached domain records.
+  # Retention target for cached domains. Periodic cleanup removes the records
+  # with the earliest expiry dates above this number.
   max_entries: 10000
 
   # Registration data persists in persistence.database_file.
@@ -331,7 +334,8 @@ correspondents:
   # bypass AI. Disable to permit bypass without authentication.
   require_dkim_for_bypass: true
 
-  # Maximum number of retained relationships.
+  # Retention target for relationships. Periodic cleanup removes unpromoted and
+  # then oldest records above this number.
   max_entries: 10000
 
   # Remove relationships with no qualifying inbound or outbound activity for
@@ -353,9 +357,9 @@ persistence:
   # SQLite database containing all persistent MilterGuard state.
   database_file: /var/lib/milterguard/milterguard.db
 
-  # How often expired database records are removed. Uses Go duration syntax
-  # and must be at least 1m. Cleanup also runs when MilterGuard starts.
-  cleanup_interval: 1h
+  # How often expired and excess records are removed and SQLite's write-ahead
+  # log is checkpointed. Must be at least 1m; maintenance also runs at startup.
+  cleanup_interval: 10m
 
 logging:
   # Minimum log level: debug, info, warn, or error.

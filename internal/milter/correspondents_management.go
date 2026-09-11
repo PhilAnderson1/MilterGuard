@@ -47,7 +47,7 @@ func (store *correspondentStore) addManual(sender, recipient string) (bool, erro
 		if err != nil {
 			return err
 		}
-		return store.enforceCapacityTx(ctx, tx)
+		return nil
 	})
 	return created, err
 }

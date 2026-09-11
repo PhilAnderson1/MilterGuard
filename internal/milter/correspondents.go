@@ -104,13 +104,13 @@ func (s *correspondentStore) learn(localAddress string, recipients []string) err
 				}
 			}
 		}
-		return s.enforceCapacityTx(ctx, tx)
+		return nil
 	})
 	if err != nil {
 		return err
 	}
 	if s.log != nil {
-		s.log.Debug("correspondent allowlist updated", "new_entries", added, "entry_count", s.size())
+		s.log.Debug("correspondent allowlist updated", "new_entries", added)
 	}
 	return nil
 }
@@ -172,7 +172,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 		}
 		removed, _ := result.RowsAffected()
 		if removed > 0 && s.log != nil {
-			s.log.Debug("inbound-learned correspondent removed after unwanted classification", "correspondent", correspondent, "removed_entries", removed, "entry_count", s.size())
+			s.log.Debug("inbound-learned correspondent removed after unwanted classification", "correspondent", correspondent, "removed_entries", removed)
 		}
 		return nil
 	}
@@ -229,7 +229,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 				events = append(events, candidateEvent{recipient: recipient, count: entry.LegitimateEmailCount, promoted: s.qualified(entry)})
 			}
 		}
-		return s.enforceCapacityTx(ctx, tx)
+		return nil
 	})
 	if err != nil || s.log == nil {
 		return err
@@ -404,34 +404,54 @@ func scanCorrespondent(row rowScanner) (correspondentEntry, error) {
 	return entry, err
 }
 
-func (s *correspondentStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) error {
-	if s.cfg.StaleAfter.Value() > 0 {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE last_activity_at_ms < ?`, unixMillis(s.now().UTC().Add(-s.cfg.StaleAfter.Value()))); err != nil {
-			return err
-		}
-	}
+func (s *correspondentStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
 	var excess int
 	if err := tx.QueryRowContext(ctx, `SELECT max(count(*) - ?, 0) FROM correspondents`, s.cfg.MaxEntries).Scan(&excess); err != nil || excess == 0 {
-		return err
+		return 0, err
 	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE id IN (
-		SELECT id FROM correspondents ORDER BY
-		CASE WHEN whitelist_type = 'repeated_legitimate_inbound' AND legitimate_email_count < ? THEN 0 ELSE 1 END,
-		last_activity_at_ms, id LIMIT ?)`, s.cfg.LegitimateSenderMinMessages, excess)
-	return err
-}
-
-func (s *correspondentStore) cleanup() (int64, error) {
-	if s == nil || s.db == nil || s.cfg.StaleAfter.Value() <= 0 {
-		return 0, nil
-	}
-	result, err := s.db.Exec(context.Background(), `DELETE FROM correspondents WHERE last_activity_at_ms < ?`,
-		unixMillis(s.now().UTC().Add(-s.cfg.StaleAfter.Value())))
+	result, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE id IN (
+		SELECT id FROM correspondents
+		WHERE whitelist_type = 'repeated_legitimate_inbound' AND legitimate_email_count < ?
+		ORDER BY last_activity_at_ms, id LIMIT ?)`, s.cfg.LegitimateSenderMinMessages, excess)
 	if err != nil {
 		return 0, err
 	}
-	removed, _ := result.RowsAffected()
-	return removed, nil
+	removed, err := result.RowsAffected()
+	if err != nil || int(removed) >= excess {
+		return removed, err
+	}
+	result, err = tx.ExecContext(ctx, `DELETE FROM correspondents WHERE id IN (
+		SELECT id FROM correspondents ORDER BY last_activity_at_ms, id LIMIT ?)`, excess-int(removed))
+	if err != nil {
+		return 0, err
+	}
+	remainingRemoved, err := result.RowsAffected()
+	return removed + remainingRemoved, err
+}
+
+func (s *correspondentStore) cleanup() (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	ctx := context.Background()
+	var deleted int64
+	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		if s.cfg.StaleAfter.Value() > 0 {
+			result, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE last_activity_at_ms < ?`,
+				unixMillis(s.now().UTC().Add(-s.cfg.StaleAfter.Value())))
+			if err != nil {
+				return err
+			}
+			deleted, _ = result.RowsAffected()
+		}
+		removed, err := s.enforceCapacityTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		deleted += removed
+		return nil
+	})
+	return deleted, err
 }
 
 func (s *correspondentStore) size() int {

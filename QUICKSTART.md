@@ -26,10 +26,19 @@
    sudo systemctl enable --now milterguard
    ```
 
-6. Remove externally supplied `Authentication-Results` headers before the
+6. Add MilterGuard to the end of the Milter lists in
+   `/etc/postfix/main.cf`. For example, when an existing DKIM Milter uses port
+   8891:
+
+   ```text
+   smtpd_milters = inet:localhost:8891, inet:127.0.0.1:8895
+   non_smtpd_milters = inet:localhost:8891, inet:127.0.0.1:8895
+   ```
+
+7. Add this rule to `/etc/postfix/header_checks` to make Postfix remove
+   externally supplied `Authentication-Results` headers before the
    authentication Milters run. Otherwise a remote sender could forge results
-   that MilterGuard treats as local authentication evidence. Add this rule to
-   `/etc/postfix/header_checks`:
+   that MilterGuard treats as local authentication evidence.
 
    ```text
    /^Authentication-Results:/ IGNORE
@@ -41,15 +50,6 @@
 
    ```text
    header_checks = regexp:/etc/postfix/header_checks
-   ```
-
-7. Add MilterGuard to the end of the Milter lists in
-   `/etc/postfix/main.cf`. For example, when an existing DKIM Milter uses port
-   8891:
-
-   ```text
-   smtpd_milters = inet:localhost:8891, inet:127.0.0.1:8895
-   non_smtpd_milters = inet:localhost:8891, inet:127.0.0.1:8895
    ```
 
 8. Check and reload Postfix:

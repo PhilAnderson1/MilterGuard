@@ -249,6 +249,14 @@ func TestDomainRegistrationCapacityKeepsLatestExpirations(t *testing.T) {
 	for i, domain := range []string{"soon.example", "middle.example", "late.example"} {
 		putTestDomainRegistration(t, store, domainRegistrationRecord{Domain: domain, RegisteredAt: now.Add(-24 * time.Hour), ExpiresAt: now.Add(time.Duration(i+1) * 24 * time.Hour)})
 	}
+	if store.size() != 3 {
+		t.Fatal("capacity was enforced before periodic cleanup")
+	}
+	if deleted, err := store.cleanup(); err != nil {
+		t.Fatal(err)
+	} else if deleted != 1 {
+		t.Fatalf("capacity cleanup deleted %d records, want 1", deleted)
+	}
 	if _, found, err := store.get(context.Background(), "soon.example"); err != nil || found {
 		t.Fatalf("earliest record retained: found=%v, err=%v", found, err)
 	}

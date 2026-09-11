@@ -365,8 +365,9 @@ Rejection history records the sender address, envelope recipient, rejection
 time, subject, and reason for messages rejected after AI or attachment
 inspection in enforce mode. It does not record cached-IP or unrelated Postfix
 rejections. The `rejection_history` settings control its retention period and
-maximum number of entries; expired and excess oldest entries are removed
-automatically, and an expiry of `0s` disables the history.
+maximum retained number of entries. The database may temporarily exceed this
+target between maintenance runs; expired and excess oldest entries are then
+removed automatically. An expiry of `0s` disables the history.
 
 Learned correspondents, rejection history, IP reputation, and cached domain
 registration data are stored in `/var/lib/milterguard` and survive service
@@ -375,8 +376,9 @@ moving the service to another machine. Correspondent, IP-reputation, and
 rejection-history, and domain-registration changes are committed to the SQLite
 database immediately. `persistence.cleanup_interval` controls periodic removal
 of expired and excess records and must be at least one minute; cleanup also
-runs at startup. Domain-registration expiry is still enforced during lookups,
-before periodic cleanup physically removes the old row.
+runs at startup. The same maintenance task checkpoints SQLite's write-ahead log
+without delaying active mail processing. Domain-registration expiry is still
+enforced during lookups, before periodic cleanup physically removes the old row.
 
 For a consistent backup, stop MilterGuard before copying its SQLite database,
 or use a SQLite-aware backup tool while the service is running.

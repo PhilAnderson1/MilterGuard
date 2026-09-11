@@ -55,6 +55,14 @@ type Store struct {
 	retryDelay time.Duration
 }
 
+// CheckpointResult reports the outcome of a WAL checkpoint. Busy is non-zero
+// when active database users prevented SQLite from checkpointing every frame.
+type CheckpointResult struct {
+	Busy               int
+	LogFrames          int
+	CheckpointedFrames int
+}
+
 // Row defers execution until Scan so transient lock errors can be retried.
 type Row struct {
 	store *Store
@@ -106,6 +114,7 @@ func sqliteDSN(path string, busyTimeout time.Duration) string {
 	query.Set("_foreign_keys", "on")
 	query.Set("_defensive", "true")
 	query.Set("_dqs", "false")
+	query.Add("_pragma", "wal_autocheckpoint(0)")
 	u.RawQuery = query.Encode()
 	return u.String()
 }
@@ -202,6 +211,17 @@ func (s *Store) Query(ctx context.Context, query string, args ...any) (*sql.Rows
 
 func (s *Store) QueryRow(ctx context.Context, query string, args ...any) *Row {
 	return &Row{store: s, ctx: ctx, query: query, args: args}
+}
+
+// CheckpointPassive moves completed WAL frames into the main database without
+// waiting for active readers or writers. Any frames it cannot process remain
+// available for a later checkpoint.
+func (s *Store) CheckpointPassive(ctx context.Context) (CheckpointResult, error) {
+	var result CheckpointResult
+	err := s.QueryRow(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(
+		&result.Busy, &result.LogFrames, &result.CheckpointedFrames,
+	)
+	return result, err
 }
 
 func (r *Row) Scan(dest ...any) error {

@@ -81,7 +81,7 @@ func TestCorrespondentStoreScopeChangesOnlyMatching(t *testing.T) {
 	}
 }
 
-func TestCorrespondentStoreEvictsLeastUsefulAtCapacity(t *testing.T) {
+func TestCorrespondentCleanupEvictsLeastUsefulAtCapacity(t *testing.T) {
 	cfg := config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true, UseAllowlist: true,
 		Scope: "global", LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .99, MaxEntries: 2,
@@ -100,6 +100,12 @@ func TestCorrespondentStoreEvictsLeastUsefulAtCapacity(t *testing.T) {
 	if err := store.recordInboundClassification("candidate2@example.net", []string{"owner@example.com"}, true, "legitimate", 1, .9, true); err != nil {
 		t.Fatal(err)
 	}
+	if len(store.snapshot()) != 3 {
+		t.Fatal("capacity was enforced before periodic cleanup")
+	}
+	if _, err := store.cleanup(); err != nil {
+		t.Fatal(err)
+	}
 	if !store.match("trusted@example.net", nil).Known {
 		t.Fatal("candidate evicted qualified relationship")
 	}
@@ -108,7 +114,7 @@ func TestCorrespondentStoreEvictsLeastUsefulAtCapacity(t *testing.T) {
 	}
 }
 
-func TestCorrespondentStoreEvictsOldestQualifiedAtCapacity(t *testing.T) {
+func TestCorrespondentCleanupEvictsOldestQualifiedAtCapacity(t *testing.T) {
 	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "global", MaxEntries: 2,
 	}, nil)
@@ -125,6 +131,9 @@ func TestCorrespondentStoreEvictsOldestQualifiedAtCapacity(t *testing.T) {
 	}
 	now = now.Add(time.Hour)
 	if err := store.learn("owner@example.com", []string{"third@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.cleanup(); err != nil {
 		t.Fatal(err)
 	}
 	if !store.match("first@example.net", nil).Known || store.match("second@example.net", nil).Known || !store.match("third@example.net", nil).Known {
@@ -149,8 +158,11 @@ func TestCorrespondentStoreIgnoresAndCleansStaleRelationships(t *testing.T) {
 	if err := store.learn("owner@example.com", []string{"bob@example.net"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.cleanup(); err != nil {
+		t.Fatal(err)
+	}
 	if len(store.snapshot()) != 1 {
-		t.Fatal("stale relationship was not removed during write maintenance")
+		t.Fatal("stale relationship was not removed during periodic cleanup")
 	}
 }
 

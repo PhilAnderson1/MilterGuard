@@ -83,8 +83,8 @@ func TestValidatePersistenceCleanupInterval(t *testing.T) {
 	if defaults().Persistence.DatabaseFile != "/var/lib/milterguard/milterguard.db" {
 		t.Fatal("persistence database must default under /var/lib/milterguard")
 	}
-	if defaults().Persistence.CleanupInterval.Value() != time.Hour {
-		t.Fatal("persistence cleanup interval must default to one hour")
+	if defaults().Persistence.CleanupInterval.Value() != 10*time.Minute {
+		t.Fatal("persistence cleanup interval must default to ten minutes")
 	}
 	cfg := validConfig()
 	cfg.Persistence.CleanupInterval = Duration(time.Minute - time.Nanosecond)

@@ -49,6 +49,40 @@ func TestOpenCreatesAndReopensSchema(t *testing.T) {
 	}
 }
 
+func TestOpenDisablesAutomaticWALCheckpointing(t *testing.T) {
+	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "checkpoint.db"), DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var pages int
+	if err := store.QueryRow(context.Background(), "PRAGMA wal_autocheckpoint").Scan(&pages); err != nil {
+		t.Fatal(err)
+	}
+	if pages != 0 {
+		t.Fatalf("wal_autocheckpoint = %d, want 0", pages)
+	}
+}
+
+func TestPassiveWALCheckpoint(t *testing.T) {
+	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "checkpoint.db"), DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Exec(context.Background(), `INSERT INTO rejections
+		(sender, rejected_at_ms) VALUES (?, ?)`, "sender@example.com", 1); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.CheckpointPassive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Busy != 0 || result.LogFrames < 1 || result.CheckpointedFrames < 1 {
+		t.Fatalf("checkpoint result = %+v", result)
+	}
+}
+
 func TestOpenRejectsNewerSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "newer.db")
 	store, err := Open(context.Background(), path, DefaultOptions())

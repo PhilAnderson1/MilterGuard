@@ -3,7 +3,6 @@ package milter
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -19,8 +18,6 @@ const (
 	maxRejectionSubjectRunes = 1000
 	maxRejectionReasonRunes  = 1000
 )
-
-var errNewRejectionNotRetained = errors.New("new rejection was removed by capacity enforcement")
 
 type rejectionHistoryEntry struct {
 	ID         uint64
@@ -93,26 +90,13 @@ func (s *rejectionHistoryStore) addWithID(visibleSender, envelopeSender, subject
 				return err
 			}
 		}
-		if err := s.deleteExpiredTx(ctx, tx, now); err != nil {
-			return err
-		}
-		if err := s.enforceCapacityTx(ctx, tx); err != nil {
-			return err
-		}
-		var retained int
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM rejections WHERE id = ?)`, recordID).Scan(&retained); err != nil {
-			return err
-		}
-		if retained == 0 {
-			return errNewRejectionNotRetained
-		}
 		return nil
 	})
 	if err != nil {
 		return 0, err
 	}
 	if s.log != nil {
-		s.log.Debug("rejection history updated", "new_entries", 1, "recipient_count", len(normalizedRecipients), "entry_count", s.size())
+		s.log.Debug("rejection history updated", "new_entries", 1, "recipient_count", len(normalizedRecipients))
 	}
 	return uint64(recordID), nil
 }
@@ -200,19 +184,18 @@ func (s *rejectionHistoryStore) list(recipient string) ([]rejectionHistoryEntry,
 	return entries, rows.Err()
 }
 
-func (s *rejectionHistoryStore) deleteExpiredTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
-	if s.cfg.Expiry.Value() <= 0 {
-		return nil
+func (s *rejectionHistoryStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+	var excess int
+	if err := tx.QueryRowContext(ctx, `SELECT max(count(*) - ?, 0) FROM rejections`, s.cfg.MaxEntries).Scan(&excess); err != nil || excess == 0 {
+		return 0, err
 	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM rejections WHERE rejected_at_ms < ?`, unixMillis(now.Add(-s.cfg.Expiry.Value())))
-	return err
-}
-
-func (s *rejectionHistoryStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, `DELETE FROM rejections WHERE id IN (
-		SELECT id FROM rejections ORDER BY rejected_at_ms DESC, id DESC LIMIT -1 OFFSET ?
-	)`, s.cfg.MaxEntries)
-	return err
+	result, err := tx.ExecContext(ctx, `DELETE FROM rejections WHERE id IN (
+		SELECT id FROM rejections ORDER BY rejected_at_ms, id LIMIT ?
+	)`, excess)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (s *rejectionHistoryStore) cleanup() (int64, error) {
@@ -231,15 +214,11 @@ func (s *rejectionHistoryStore) cleanup() (int64, error) {
 				deleted += n
 			}
 		}
-		result, err := tx.ExecContext(ctx, `DELETE FROM rejections WHERE id IN (
-			SELECT id FROM rejections ORDER BY rejected_at_ms DESC, id DESC LIMIT -1 OFFSET ?
-		)`, s.cfg.MaxEntries)
+		capacityDeleted, err := s.enforceCapacityTx(ctx, tx)
 		if err != nil {
 			return err
 		}
-		if n, err := result.RowsAffected(); err == nil {
-			deleted += n
-		}
+		deleted += capacityDeleted
 		return nil
 	})
 	return deleted, err

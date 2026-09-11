@@ -232,7 +232,7 @@ func defaults() Config {
 		},
 		Persistence: PersistenceConfig{
 			DatabaseFile:    "/var/lib/milterguard/milterguard.db",
-			CleanupInterval: Duration(time.Hour),
+			CleanupInterval: Duration(10 * time.Minute),
 		},
 		RejectionHistory: RejectionHistoryConfig{
 			Expiry: Duration(30 * 24 * time.Hour), MaxEntries: 10000,

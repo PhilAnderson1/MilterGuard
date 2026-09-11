@@ -175,25 +175,22 @@ func (s *domainRegistrationStore) put(ctx context.Context, record domainRegistra
 			unixMillis(record.RegisteredAt), unixMillis(record.ExpiresAt)); err != nil {
 			return err
 		}
-		if err := s.enforceCapacityTx(ctx, tx); err != nil {
-			return err
-		}
-		var retained int
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM domain_registrations WHERE domain = ?)`, record.Domain).Scan(&retained); err != nil {
-			return err
-		}
-		if retained == 0 {
-			return errors.New("new domain registration was removed by capacity enforcement")
-		}
 		return nil
 	})
 }
 
-func (s *domainRegistrationStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, `DELETE FROM domain_registrations WHERE id IN (
-		SELECT id FROM domain_registrations ORDER BY expires_at_ms DESC, id DESC LIMIT -1 OFFSET ?
-	)`, s.maxSize)
-	return err
+func (s *domainRegistrationStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+	var excess int
+	if err := tx.QueryRowContext(ctx, `SELECT max(count(*) - ?, 0) FROM domain_registrations`, s.maxSize).Scan(&excess); err != nil || excess == 0 {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM domain_registrations WHERE id IN (
+		SELECT id FROM domain_registrations ORDER BY expires_at_ms, id LIMIT ?
+	)`, excess)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (s *domainRegistrationStore) cleanup() (int64, error) {
@@ -211,15 +208,11 @@ func (s *domainRegistrationStore) cleanup() (int64, error) {
 		if n, err := result.RowsAffected(); err == nil {
 			deleted += n
 		}
-		result, err = tx.ExecContext(ctx, `DELETE FROM domain_registrations WHERE id IN (
-			SELECT id FROM domain_registrations ORDER BY expires_at_ms DESC, id DESC LIMIT -1 OFFSET ?
-		)`, s.maxSize)
+		capacityDeleted, err := s.enforceCapacityTx(ctx, tx)
 		if err != nil {
 			return err
 		}
-		if n, err := result.RowsAffected(); err == nil {
-			deleted += n
-		}
+		deleted += capacityDeleted
 		return nil
 	})
 	return deleted, err

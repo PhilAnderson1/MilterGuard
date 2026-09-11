@@ -82,6 +82,14 @@ func TestRejectionHistoryExpiryAndCapacityCascadeRecipients(t *testing.T) {
 		}
 		base = base.Add(time.Minute)
 	}
+	if got := rejectionEntries(t, store, "alice@example.com"); len(got) != 3 {
+		t.Fatalf("history was bounded before periodic cleanup: %#v", got)
+	}
+	if deleted, err := store.cleanup(); err != nil {
+		t.Fatal(err)
+	} else if deleted != 1 {
+		t.Fatalf("capacity cleanup deleted %d records, want 1", deleted)
+	}
 	got := rejectionEntries(t, store, "alice@example.com")
 	if len(got) != 2 || got[0].Sender != "three@example.net" || got[1].Sender != "two@example.net" {
 		t.Fatalf("bounded history = %#v", got)

@@ -112,6 +112,9 @@ func (s *Server) Close() error {
 	if s == nil || s.database == nil {
 		return nil
 	}
+	if _, err := s.database.CheckpointPassive(context.Background()); err != nil && s.log != nil {
+		s.log.Warn("final SQLite WAL checkpoint failed", "error", err)
+	}
 	err := s.database.Close()
 	s.database = nil
 	return err
@@ -195,13 +198,29 @@ func (s *Server) cleanupPersistentStores(trigger string) error {
 	contactsDeleted, contactsErr := s.correspondents.cleanup()
 	rejectionsDeleted, rejectionsErr := s.rejectionHistory.cleanup()
 	domainsDeleted, domainsErr := s.domainRegistration.cleanup()
+	checkpoint, checkpointErr := sqlstore.CheckpointResult{}, error(nil)
+	if s.database != nil {
+		checkpoint, checkpointErr = s.database.CheckpointPassive(context.Background())
+		if checkpointErr != nil && s.log != nil {
+			s.log.Warn("SQLite WAL checkpoint failed", "trigger", trigger, "error", checkpointErr)
+		}
+	}
 
-	s.log.Debug("SQLite cleanup completed",
-		"trigger", trigger,
-		"ip_deleted", ipDeleted,
-		"contacts_deleted", contactsDeleted,
-		"rejections_deleted", rejectionsDeleted,
-		"domains_deleted", domainsDeleted)
+	if s.log != nil && s.log.Enabled(context.Background(), slog.LevelDebug) {
+		s.log.Debug("SQLite cleanup completed",
+			"trigger", trigger,
+			"ip_deleted", ipDeleted,
+			"ip_records", s.ipReputation.size(),
+			"contacts_deleted", contactsDeleted,
+			"contacts_records", s.correspondents.size(),
+			"rejections_deleted", rejectionsDeleted,
+			"rejections_records", s.rejectionHistory.size(),
+			"domains_deleted", domainsDeleted,
+			"domains_records", s.domainRegistration.size(),
+			"wal_busy", checkpoint.Busy,
+			"wal_frames", checkpoint.LogFrames,
+			"wal_checkpointed_frames", checkpoint.CheckpointedFrames)
+	}
 
 	return errors.Join(
 		wrapCleanupError("IP reputation", ipErr),
