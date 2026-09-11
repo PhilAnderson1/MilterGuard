@@ -10,7 +10,7 @@ type Message struct {
 	Headers            map[string][]string
 	decodedHeaders     map[string][]string
 	headerOccurrences  map[string]int
-	Body               strings.Builder
+	Body               bytes.Buffer
 	Connection         ConnectionInfo
 	Correspondent      CorrespondentInfo
 	DomainRegistration DomainRegistrationInfo
@@ -234,6 +234,11 @@ func (m *Message) decodedHeaderValues(name string) []string {
 // RetainedBytes reports the bounded raw header and body bytes kept by the Milter.
 func (m *Message) RetainedBytes() int64 { return m.archiveHeaderBytes + m.bodySize }
 
+// BodyBytes returns the retained message body without copying it. Callers must
+// treat the returned bytes as read-only and must not retain them after Message
+// processing completes.
+func (m *Message) BodyBytes() []byte { return m.Body.Bytes() }
+
 // ArchiveBytes returns a bounded RFC 5322/MIME message reconstructed from the
 // headers and body supplied through the Milter protocol.
 func (m *Message) ArchiveBytes() []byte {
@@ -242,6 +247,16 @@ func (m *Message) ArchiveBytes() []byte {
 		limit = 0
 	}
 	var output bytes.Buffer
+	estimated := m.archiveHeaderBytes + 2 + m.bodySize
+	if m.archiveTruncated || m.BodyTruncated {
+		estimated += int64(len("X-MilterGuard-Archive-Truncated: yes\r\n"))
+	}
+	if estimated > limit {
+		estimated = limit
+	}
+	if estimated > 0 && estimated <= int64(int(^uint(0)>>1)) {
+		output.Grow(int(estimated))
+	}
 	_, _ = output.Write(m.archiveHeaders.Bytes())
 	if m.archiveTruncated || m.BodyTruncated {
 		_, _ = output.WriteString("X-MilterGuard-Archive-Truncated: yes\r\n")
@@ -249,19 +264,19 @@ func (m *Message) ArchiveBytes() []byte {
 	_, _ = output.WriteString("\r\n")
 	remaining := limit - int64(output.Len())
 	if remaining <= 0 {
-		return append([]byte(nil), output.Bytes()[:min(int64(output.Len()), limit)]...)
+		return output.Bytes()[:min(int64(output.Len()), limit)]
 	}
-	body := []byte(m.Body.String())
+	body := m.BodyBytes()
 	if int64(len(body)) > remaining {
 		body = body[:remaining]
 	}
 	_, _ = output.Write(body)
-	return append([]byte(nil), output.Bytes()...)
+	return output.Bytes()
 }
 
 // CommandText returns decoded visible MIME text for the authenticated command
 // mailbox. Callers separately constrain the accepted top-level MIME types.
 func (m *Message) CommandText() string {
-	content := extractMIME(m.Header("Content-Type"), m.Header("Content-Transfer-Encoding"), "", []byte(m.Body.String()), 0)
+	content := extractMIME(m.Header("Content-Type"), m.Header("Content-Transfer-Encoding"), "", m.BodyBytes(), 0)
 	return stripInvisibleFormatting(content.VisibleText)
 }

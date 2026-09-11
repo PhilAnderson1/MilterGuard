@@ -40,7 +40,10 @@ type Options struct {
 
 func DefaultOptions() Options {
 	return Options{
-		BusyTimeout: 5 * time.Second,
+		// modernc SQLite checks context cancellation after a busy-handler wait.
+		// Keep each wait short and let the context-aware retry loop provide the
+		// remaining contention tolerance without stalling a Milter request.
+		BusyTimeout: time.Second,
 		BusyRetries: 3,
 		RetryDelay:  25 * time.Millisecond,
 		MaxOpen:     8,
@@ -114,6 +117,10 @@ func sqliteDSN(path string, busyTimeout time.Duration) string {
 	query.Set("_foreign_keys", "on")
 	query.Set("_defensive", "true")
 	query.Set("_dqs", "false")
+	// Every transaction opened through Store.WithTx performs writes. Acquire
+	// SQLite's reserved writer lock when the transaction begins so callers do
+	// not need dummy writes to avoid deferred read-to-write upgrade races.
+	query.Set("_txlock", "immediate")
 	query.Add("_pragma", "wal_autocheckpoint(0)")
 	u.RawQuery = query.Encode()
 	return u.String()

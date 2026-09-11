@@ -2,10 +2,12 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestOpenCreatesAndReopensSchema(t *testing.T) {
@@ -172,6 +174,50 @@ func TestNewDatabasePassesSQLiteIntegrityChecks(t *testing.T) {
 		t.Fatal("foreign_key_check reported a violation")
 	}
 	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBusyWriteHonorsContextDeadline(t *testing.T) {
+	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "busy.db"), DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- store.WithTx(context.Background(), nil, func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`INSERT INTO rejections (sender, subject, rejected_at_ms, reason)
+				VALUES ('lock@example.net', '', 1, '')`); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = store.Exec(ctx, `INSERT INTO rejections (sender, subject, rejected_at_ms, reason)
+		VALUES ('waiting@example.net', '', 2, '')`)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		close(release)
+		<-done
+		t.Fatalf("blocked write error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 1500*time.Millisecond {
+		close(release)
+		<-done
+		t.Fatalf("blocked write took %s after context deadline", elapsed)
+	}
+	close(release)
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 }

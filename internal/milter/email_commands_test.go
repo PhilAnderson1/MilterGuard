@@ -71,7 +71,7 @@ func TestAuthenticatedUserEmailCommandAddsOwnRelationshipAndDiscards(t *testing.
 	if analyzer.calls.Load() != 0 {
 		t.Fatal("command message was sent to AI")
 	}
-	match := server.correspondents.match("news@example.net", []string{"phil@example.com"})
+	match := server.correspondents.match(context.Background(), "news@example.net", []string{"phil@example.com"})
 	if !match.Known {
 		t.Fatal("command did not add live correspondent relationship")
 	}

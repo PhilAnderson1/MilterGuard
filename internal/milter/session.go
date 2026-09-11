@@ -46,6 +46,8 @@ type session struct {
 	envelopeSender              string
 	envelopeRecipients          []string
 	envelopeRecipientsTruncated bool
+	visibleSender               string
+	visibleSenderDomain         string
 	connectionDNS               connectionDNSResult
 	connectionDNSPending        <-chan connectionDNSResult
 	message                     *message.Message
@@ -286,9 +288,13 @@ func (ss *session) addHeader(payload []byte) bool {
 }
 
 func (ss *session) finishMessage(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, ss.server.analysisTimeout())
+	defer cancel()
 	if ss.phase != phaseBody {
 		return ss.protocolError("unexpected milter end-of-body command")
 	}
+	ss.visibleSender = normalizeEmailAddress(ss.message.Header("From"))
+	ss.visibleSenderDomain = emailAddressDomain(ss.visibleSender)
 	if ss.isInternalMessage() {
 		return ss.finishInternalMessage(ctx)
 	}
@@ -301,7 +307,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if handled, keepConnection := ss.applyAttachments(ctx); handled {
 		return keepConnection
 	}
-	inbound := ss.prepareInboundEvidence()
+	inbound := ss.prepareInboundEvidence(ctx)
 	if inbound.allowedSenderDomain != "" {
 		return ss.finishBypassedMessage(ctx, "sender_domain_allowlist", false, inbound.knownCorrespondent && inbound.trustedDKIM,
 			"sender_domain", inbound.allowedSenderDomain,
@@ -366,7 +372,7 @@ func (ss *session) finishInternalMessage(ctx context.Context) bool {
 }
 
 func (ss *session) knownCorrespondentLogAttrs() []any {
-	attrs := []any{"correspondent", normalizeEmailAddress(ss.message.Header("From"))}
+	attrs := []any{"correspondent", ss.visibleSender}
 	seen := make(map[string]bool, len(ss.envelopeRecipients))
 	localAddresses := make([]string, 0, len(ss.envelopeRecipients))
 	for _, recipient := range ss.envelopeRecipients {
@@ -392,27 +398,24 @@ type inboundEvidence struct {
 	authenticatedDomain string
 }
 
-func (ss *session) prepareInboundEvidence() inboundEvidence {
+func (ss *session) prepareInboundEvidence(ctx context.Context) inboundEvidence {
 	evidence := inboundEvidence{recipientsComplete: ss.recipientSetComplete()}
 	if ss.authentication.Authenticated {
 		return evidence
 	}
-	authentication := trustedSenderAuthentication(ss.message, ss.trustedAuthservIDs(), ss.message.Header("From"))
+	authentication := trustedSenderAuthentication(ss.message, ss.trustedAuthservIDs(), ss.visibleSenderDomain)
 	evidence.trustedDKIM = authentication.DKIMAligned
 	if authentication.anyAligned() {
-		address := normalizeEmailAddress(ss.message.Header("From"))
-		if separator := strings.LastIndexByte(address, '@'); separator >= 0 {
-			evidence.authenticatedDomain = address[separator+1:]
-		}
+		evidence.authenticatedDomain = ss.visibleSenderDomain
 	}
-	if domain := allowedSenderDomain(ss.message.Header("From"), ss.server.cfg.Filtering.SenderDomainAllowlist); domain != "" &&
+	if domain := allowedSenderDomain(ss.visibleSenderDomain, ss.server.cfg.Filtering.SenderDomainAllowlist); domain != "" &&
 		(!ss.server.cfg.Filtering.SenderDomainAllowlistRequireDKIM || authentication.DKIMAligned) {
 		evidence.allowedSenderDomain = domain
 	}
 	if !ss.server.cfg.Correspondents.UseAllowlist {
 		return evidence
 	}
-	match := ss.server.correspondents.match(ss.message.Header("From"), ss.envelopeRecipients)
+	match := ss.server.correspondents.match(ctx, ss.visibleSender, ss.envelopeRecipients)
 	known := match.Known
 	if ss.server.cfg.Correspondents.Scope == "per_sender" && ss.server.cfg.Correspondents.RecipientMatch == "all" {
 		known = evidence.recipientsComplete && match.AllRecipientsMatched
@@ -446,11 +449,11 @@ func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluati
 		return
 	}
 	if result.selected == actionReject {
-		ss.server.recordRejection(ctx, ss.message, ss.envelopeSender, ss.envelopeRecipients, result.reasons, "ai")
-		ss.server.ipReputation.add(ss.peerIP, result.score, ss.connectionDNS)
+		ss.server.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, result.reasons, "ai")
+		ss.server.ipReputation.add(ctx, ss.peerIP, result.score, ss.connectionDNS)
 	}
 	if result.err == nil && result.classification == "legitimate" {
-		ss.server.ipReputation.recordLegitimate(ss.peerIP)
+		ss.server.ipReputation.recordLegitimate(ctx, ss.peerIP)
 	}
 	if result.selected == actionAccept && ss.authentication.Authenticated {
 		ss.learnAuthenticatedRecipients(ctx)
@@ -460,8 +463,8 @@ func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluati
 }
 
 func (ss *session) recordInboundClassification(ctx context.Context, result evaluationResult, recipientsComplete, dkimAligned bool) {
-	if err := ss.server.correspondents.recordInboundClassification(
-		ss.message.Header("From"), ss.envelopeRecipients, recipientsComplete,
+	if err := ss.server.correspondents.recordInboundClassification(ctx,
+		ss.visibleSender, ss.envelopeRecipients, recipientsComplete,
 		result.classification, result.score, ss.server.cfg.Filtering.RejectScore, dkimAligned,
 	); err != nil {
 		ss.server.log.ErrorContext(ctx, "cannot update inbound correspondent learning", "error", err)
@@ -561,13 +564,13 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 }
 
 func (ss *session) touchInboundCorrespondent(ctx context.Context) {
-	if err := ss.server.correspondents.touchInbound(ss.message.Header("From"), ss.envelopeRecipients); err != nil {
+	if err := ss.server.correspondents.touchInbound(ctx, ss.visibleSender, ss.envelopeRecipients); err != nil {
 		ss.server.log.ErrorContext(ctx, "cannot update correspondent activity", "error", err)
 	}
 }
 
 func (ss *session) learnAuthenticatedRecipients(ctx context.Context) {
-	if err := ss.server.correspondents.learn(ss.envelopeSender, ss.envelopeRecipients); err != nil {
+	if err := ss.server.correspondents.learn(ctx, ss.envelopeSender, ss.envelopeRecipients); err != nil {
 		ss.server.log.ErrorContext(ctx, "cannot update correspondent allowlist", "error", err)
 	}
 }
@@ -641,6 +644,8 @@ func cleanSMTPIdentity(value string) string {
 }
 
 func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
+	ctx, cancel := context.WithTimeout(ctx, ss.server.cfg.Milter.Timeout.Value())
+	defer cancel()
 	if ss.server.cfg.Mode != "enforce" {
 		return false, true
 	}
@@ -655,7 +660,7 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 			return false, true
 		}
 	}
-	entry, ok := ss.server.ipReputation.lookup(ss.peerIP)
+	entry, ok := ss.server.ipReputation.lookup(ctx, ss.peerIP)
 	if !ok {
 		return false, true
 	}
@@ -686,6 +691,8 @@ func (ss *session) resetMessage(phase protocolPhase) {
 	ss.envelopeSender = ""
 	ss.envelopeRecipients = nil
 	ss.envelopeRecipientsTruncated = false
+	ss.visibleSender = ""
+	ss.visibleSenderDomain = ""
 	ss.phase = phase
 }
 

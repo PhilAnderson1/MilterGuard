@@ -13,8 +13,8 @@ func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 		return false, true
 	}
 	select {
-	case ss.server.slots <- struct{}{}:
-		defer func() { <-ss.server.slots }()
+	case ss.server.attachmentSlots <- struct{}{}:
+		defer func() { <-ss.server.attachmentSlots }()
 	case <-ctx.Done():
 		return true, false
 	}
@@ -22,7 +22,7 @@ func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 		ss.message.Header("Content-Type"),
 		ss.message.Header("Content-Transfer-Encoding"),
 		ss.message.Header("Content-Disposition"),
-		[]byte(ss.message.Body.String()),
+		ss.message.BodyBytes(),
 	)
 	if finding != nil {
 		return true, ss.finishAttachmentDecision(ctx, actionReject, finding.Path, finding.Detection, nil)
@@ -104,7 +104,7 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 		if path != "" {
 			reason += ": " + path
 		}
-		ss.server.recordRejection(ctx, ss.message, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, "attachment_policy")
+		ss.server.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, "attachment_policy")
 	}
 	ss.resetMessage(phaseConnection)
 	return true

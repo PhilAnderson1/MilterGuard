@@ -261,7 +261,6 @@ func TestValidateRejectedMail(t *testing.T) {
 	}{
 		{name: "relative directory", change: func(c *Config) { c.RejectedMail.Directory = "rejected-mail" }},
 		{name: "zero retention", change: func(c *Config) { c.RejectedMail.Retention = 0 }},
-		{name: "zero messages", change: func(c *Config) { c.RejectedMail.MaxMessages = 0 }},
 		{name: "byte limit below message limit", change: func(c *Config) { c.RejectedMail.MaxTotalBytes = c.Milter.MaxMessageSize - 1 }},
 	}
 	for _, test := range tests {

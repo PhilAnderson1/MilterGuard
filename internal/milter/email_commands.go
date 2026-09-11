@@ -25,7 +25,7 @@ type emailCommand struct {
 }
 
 func (ss *session) isCommandRecipient(recipient string) bool {
-	return ss.server.cfg.EmailCommands.Enabled && normalizeEmailAddress(recipient) == normalizeEmailAddress(ss.server.cfg.EmailCommands.Recipient)
+	return ss.server.cfg.EmailCommands.Enabled && normalizeEmailAddress(recipient) == ss.server.commandRecipient
 }
 
 func (ss *session) commandIdentityAuthorization() (bool, string) {
@@ -58,10 +58,9 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	if !cfg.Enabled {
 		return false, true
 	}
-	commandRecipient := normalizeEmailAddress(cfg.Recipient)
 	hasCommandRecipient := false
 	for _, recipient := range ss.envelopeRecipients {
-		if normalizeEmailAddress(recipient) == commandRecipient {
+		if normalizeEmailAddress(recipient) == ss.server.commandRecipient {
 			hasCommandRecipient = true
 		}
 	}

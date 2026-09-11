@@ -13,25 +13,19 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 type Options struct {
 	Directory     string
 	Retention     time.Duration
-	MaxMessages   int
 	MaxTotalBytes int64
 }
 
 type Archive struct {
-	mu      sync.Mutex
-	opts    Options
-	log     *slog.Logger
-	now     func() time.Time
-	files   []storedFile
-	bytes   int64
-	indexed bool
+	opts Options
+	log  *slog.Logger
+	now  func() time.Time
 }
 
 type storedFile struct {
@@ -44,29 +38,44 @@ func New(opts Options, log *slog.Logger) *Archive {
 	return &Archive{opts: opts, log: log, now: time.Now}
 }
 
-// Cleanup removes expired date trees hierarchically, then refreshes the
-// capacity index and removes the oldest individual messages if required.
+// Cleanup removes expired date trees, measures the remaining archive, and
+// removes the oldest individual messages only when the byte limit is exceeded.
 func (a *Archive) Cleanup() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	if err := os.MkdirAll(a.opts.Directory, 0750); err != nil {
 		return err
 	}
 	cutoff := dateOnly(a.now().UTC().Add(-a.opts.Retention))
-	removedTrees, err := a.removeExpiredDateTreesLocked(cutoff)
+	removedTrees, err := a.removeExpiredDateTrees(cutoff)
 	if err != nil {
 		return err
 	}
-	if err := a.indexLocked(); err != nil {
-		return err
-	}
-	removedCapacity, err := a.enforceCapacityLocked(0, 0)
+	totalBytes, err := a.archiveSize()
 	if err != nil {
 		return err
+	}
+	removedCapacity := 0
+	if totalBytes > a.opts.MaxTotalBytes {
+		files, indexedBytes, err := a.indexFiles()
+		if err != nil {
+			return err
+		}
+		totalBytes = indexedBytes
+		sortStoredFiles(files)
+		for _, file := range files {
+			if totalBytes <= a.opts.MaxTotalBytes {
+				break
+			}
+			if err := os.Remove(file.path); err != nil {
+				return err
+			}
+			totalBytes -= file.size
+			removedCapacity++
+			removeEmptyParents(filepath.Dir(file.path), a.opts.Directory)
+		}
 	}
 	if a.log != nil {
 		a.log.Debug("rejected mail archive cleaned", "expired_date_trees", removedTrees,
-			"capacity_messages_removed", removedCapacity, "message_count", len(a.files), "total_bytes", a.bytes)
+			"capacity_messages_removed", removedCapacity, "total_bytes", totalBytes)
 	}
 	return nil
 }
@@ -84,21 +93,8 @@ func (a *Archive) SaveWithRecordID(message []byte, recordID uint64) (string, err
 }
 
 func (a *Archive) save(message []byte, recordID uint64) (string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	if int64(len(message)) > a.opts.MaxTotalBytes {
 		return "", fmt.Errorf("message exceeds rejected mail archive byte limit")
-	}
-	if !a.indexed {
-		if err := os.MkdirAll(a.opts.Directory, 0750); err != nil {
-			return "", err
-		}
-		if err := a.indexLocked(); err != nil {
-			return "", err
-		}
-	}
-	if _, err := a.enforceCapacityLocked(int64(len(message)), 1); err != nil {
-		return "", err
 	}
 	now := a.now().UTC()
 	directory := filepath.Join(a.opts.Directory, now.Format("2006"), now.Format("01"), now.Format("02"))
@@ -116,47 +112,26 @@ func (a *Archive) save(message []byte, recordID uint64) (string, error) {
 		name = now.Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(random[:]) + ".eml"
 	}
 	path := filepath.Join(directory, name)
-	if _, err := os.Lstat(path); err == nil {
-		return "", fmt.Errorf("rejected message archive file already exists: %s", path)
-	} else if !os.IsNotExist(err) {
-		return "", err
-	}
-	temporary, err := os.CreateTemp(directory, ".milterguard-rejected-*")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
 	if err != nil {
+		if os.IsExist(err) {
+			return "", fmt.Errorf("rejected message archive file already exists: %s", path)
+		}
 		return "", err
 	}
-	temporaryPath := temporary.Name()
-	cleanup := func() {
-		_ = temporary.Close()
-		_ = os.Remove(temporaryPath)
-	}
-	if err := temporary.Chmod(0640); err != nil {
-		cleanup()
+	if _, err := file.Write(message); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
 		return "", err
 	}
-	if _, err := temporary.Write(message); err != nil {
-		cleanup()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
 		return "", err
 	}
-	if err := temporary.Sync(); err != nil {
-		cleanup()
-		return "", err
-	}
-	if err := temporary.Close(); err != nil {
-		_ = os.Remove(temporaryPath)
-		return "", err
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		_ = os.Remove(temporaryPath)
-		return "", err
-	}
-	a.files = append(a.files, storedFile{path: path, size: int64(len(message)), modifiedAt: now})
-	sortStoredFiles(a.files)
-	a.bytes += int64(len(message))
 	return path, nil
 }
 
-func (a *Archive) removeExpiredDateTreesLocked(cutoff time.Time) (int, error) {
+func (a *Archive) removeExpiredDateTrees(cutoff time.Time) (int, error) {
 	years, err := os.ReadDir(a.opts.Directory)
 	if err != nil {
 		return 0, err
@@ -214,8 +189,8 @@ func (a *Archive) removeExpiredDateTreesLocked(cutoff time.Time) (int, error) {
 	return removed, nil
 }
 
-func (a *Archive) indexLocked() error {
-	a.files, a.bytes = nil, 0
+func (a *Archive) archiveSize() (int64, error) {
+	var total int64
 	err := filepath.WalkDir(a.opts.Directory, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -233,16 +208,37 @@ func (a *Archive) indexLocked() error {
 		if err != nil {
 			return err
 		}
-		a.files = append(a.files, storedFile{path: path, size: info.Size(), modifiedAt: info.ModTime()})
-		a.bytes += info.Size()
+		total += info.Size()
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	sortStoredFiles(a.files)
-	a.indexed = true
-	return nil
+	return total, err
+}
+
+func (a *Archive) indexFiles() ([]storedFile, int64, error) {
+	var files []storedFile
+	var total int64
+	err := filepath.WalkDir(a.opts.Directory, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".eml") || !a.validMessagePath(path) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		files = append(files, storedFile{path: path, size: info.Size(), modifiedAt: info.ModTime()})
+		total += info.Size()
+		return nil
+	})
+	return files, total, err
 }
 
 func sortStoredFiles(files []storedFile) {
@@ -271,21 +267,6 @@ func (a *Archive) validMessagePath(path string) bool {
 	}
 	date := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
 	return date.Year() == year && int(date.Month()) == month && date.Day() == day
-}
-
-func (a *Archive) enforceCapacityLocked(incomingBytes int64, incomingMessages int) (int, error) {
-	removed := 0
-	for len(a.files) > 0 && (len(a.files)+incomingMessages > a.opts.MaxMessages || a.bytes+incomingBytes > a.opts.MaxTotalBytes) {
-		oldest := a.files[0]
-		if err := os.Remove(oldest.path); err != nil && !os.IsNotExist(err) {
-			return removed, err
-		}
-		a.files = a.files[1:]
-		a.bytes -= oldest.size
-		removed++
-		removeEmptyParents(filepath.Dir(oldest.path), a.opts.Directory)
-	}
-	return removed, nil
 }
 
 func dateOnly(value time.Time) time.Time {

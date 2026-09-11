@@ -67,7 +67,6 @@ type RejectedMailConfig struct {
 	Enabled       bool     `yaml:"enabled"`
 	Directory     string   `yaml:"directory"`
 	Retention     Duration `yaml:"retention"`
-	MaxMessages   int      `yaml:"max_messages"`
 	MaxTotalBytes int64    `yaml:"max_total_bytes"`
 }
 
@@ -239,7 +238,7 @@ func defaults() Config {
 		},
 		RejectedMail: RejectedMailConfig{
 			Directory: "/var/lib/milterguard/rejected-mail", Retention: Duration(30 * 24 * time.Hour),
-			MaxMessages: 10000, MaxTotalBytes: 5 << 30,
+			MaxTotalBytes: 1 << 30,
 		},
 		Filtering: FilteringConfig{
 			RejectScore: .9, LegitimateLowConfidenceScore: .8, AddEmailHeaders: true,
@@ -401,9 +400,6 @@ func (c Config) Validate() error {
 		}
 		if c.RejectedMail.Retention.Value() <= 0 {
 			return fmt.Errorf("rejected_mail.retention must be positive")
-		}
-		if c.RejectedMail.MaxMessages < 1 {
-			return fmt.Errorf("rejected_mail.max_messages must be positive")
 		}
 		if c.RejectedMail.MaxTotalBytes < c.Milter.MaxMessageSize {
 			return fmt.Errorf("rejected_mail.max_total_bytes must be at least milter.max_message_size")

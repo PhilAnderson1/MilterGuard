@@ -50,9 +50,14 @@ func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
 			fmt.Fprintf(&b, "%s: %s\n", canonicalHeaderName(key), promptHeaderValue(value))
 		}
 	}
-	content := extractMIME(m.Header("Content-Type"), m.Header("Content-Transfer-Encoding"), "", []byte(m.Body.String()), 0)
-	content.Text = stripInvisibleFormatting(content.Text)
-	content.VisibleText = stripInvisibleFormatting(content.VisibleText)
+	content := extractMIME(m.Header("Content-Type"), m.Header("Content-Transfer-Encoding"), "", m.BodyBytes(), 0)
+	if content.Text == content.VisibleText {
+		content.Text = stripInvisibleFormatting(content.Text)
+		content.VisibleText = content.Text
+	} else {
+		content.Text = stripInvisibleFormatting(content.Text)
+		content.VisibleText = stripInvisibleFormatting(content.VisibleText)
+	}
 	body := sampleBody(strings.ToValidUTF8(content.Text, "�"), maxChars)
 	b.WriteString("\nBODY:\n")
 	b.WriteString(body)
@@ -161,16 +166,26 @@ func normalizeAuthservID(value string) string {
 // preheader padding or text obfuscation. Removing rather than replacing them
 // rejoins deliberately split words, while collapsing leftover ASCII padding.
 func stripInvisibleFormatting(value string) string {
-	value = strings.Map(func(r rune) rune {
-		if unicode.In(r, unicode.Cf) || r == '\u034f' {
-			return -1
+	value = strings.ToValidUTF8(value, "�")
+	previousSpace := false
+	changed := false
+	for _, r := range value {
+		if unicode.In(r, unicode.Cf) || r == '\u034f' || (r == ' ' && previousSpace) {
+			changed = true
+			break
 		}
-		return r
-	}, strings.ToValidUTF8(value, "�"))
+		previousSpace = r == ' '
+	}
+	if !changed {
+		return value
+	}
 	var b strings.Builder
 	b.Grow(len(value))
-	previousSpace := false
+	previousSpace = false
 	for _, r := range value {
+		if unicode.In(r, unicode.Cf) || r == '\u034f' {
+			continue
+		}
 		if r == ' ' {
 			if previousSpace {
 				continue
@@ -179,7 +194,11 @@ func stripInvisibleFormatting(value string) string {
 		} else {
 			previousSpace = false
 		}
-		b.WriteRune(r)
+		if r < utf8.RuneSelf {
+			b.WriteByte(byte(r))
+		} else {
+			b.WriteRune(r)
+		}
 	}
 	return b.String()
 }
@@ -295,20 +314,42 @@ func promptHeaderValue(value string) string {
 }
 
 func sampleBody(body string, maxChars int) string {
-	runes := []rune(body)
-	if len(runes) <= maxChars {
+	runeCount := utf8.RuneCountInString(body)
+	if runeCount <= maxChars {
 		return body
 	}
 	if maxChars < 6 {
 		head := (maxChars + 1) / 2
-		return string(runes[:head]) + "\n[... body omitted ...]\n" + string(runes[len(runes)-(maxChars-head):]) + "\n[body truncated; beginning and end retained]"
+		tailStart := runeCount - (maxChars - head)
+		offsets := runeByteOffsets(body, head, tailStart)
+		return body[:offsets[0]] + "\n[... body omitted ...]\n" + body[offsets[1]:] + "\n[body truncated; beginning and end retained]"
 	}
 	headCount, middleCount := maxChars/2, maxChars/4
 	tailCount := maxChars - headCount - middleCount
-	middleStart, tailStart := (len(runes)-middleCount)/2, len(runes)-tailCount
-	return string(runes[:headCount]) + "\n[... body section omitted ...]\n" +
-		string(runes[middleStart:middleStart+middleCount]) + "\n[... body section omitted ...]\n" +
-		string(runes[tailStart:]) + "\n[body truncated; beginning, middle, and end retained]"
+	middleStart, tailStart := (runeCount-middleCount)/2, runeCount-tailCount
+	offsets := runeByteOffsets(body, headCount, middleStart, middleStart+middleCount, tailStart)
+	return body[:offsets[0]] + "\n[... body section omitted ...]\n" +
+		body[offsets[1]:offsets[2]] + "\n[... body section omitted ...]\n" +
+		body[offsets[3]:] + "\n[body truncated; beginning, middle, and end retained]"
+}
+
+func runeByteOffsets(value string, runeIndexes ...int) []int {
+	offsets := make([]int, len(runeIndexes))
+	runeIndex := 0
+	for byteIndex := range value {
+		for i, wanted := range runeIndexes {
+			if runeIndex == wanted {
+				offsets[i] = byteIndex
+			}
+		}
+		runeIndex++
+	}
+	for i, wanted := range runeIndexes {
+		if wanted == runeIndex {
+			offsets[i] = len(value)
+		}
+	}
+	return offsets
 }
 
 func findHTTPURLs(text string) []string {

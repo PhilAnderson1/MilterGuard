@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-func TestSaveUsesDateDirectoriesAndEnforcesCapacity(t *testing.T) {
+func TestSaveUsesDateDirectoriesWithoutSynchronousCapacityWork(t *testing.T) {
 	root := t.TempDir()
 	now := time.Date(2026, 9, 7, 12, 34, 56, 123, time.UTC)
-	archive := New(Options{Directory: root, Retention: 30 * 24 * time.Hour, MaxMessages: 2, MaxTotalBytes: 100}, nil)
+	archive := New(Options{Directory: root, Retention: 30 * 24 * time.Hour, MaxTotalBytes: 5}, nil)
 	archive.now = func() time.Time { return now }
 	for _, body := range []string{"one", "two", "three"} {
 		path, err := archive.Save([]byte(body))
@@ -30,8 +30,17 @@ func TestSaveUsesDateDirectoriesAndEnforcesCapacity(t *testing.T) {
 		}
 		now = now.Add(time.Nanosecond)
 	}
-	if len(archive.files) != 2 || archive.bytes != int64(len("two")+len("three")) {
-		t.Fatalf("capacity state = %d files, %d bytes", len(archive.files), archive.bytes)
+	var count int
+	if err := filepath.WalkDir(root, func(_ string, entry os.DirEntry, err error) error {
+		if err == nil && !entry.IsDir() && filepath.Ext(entry.Name()) == ".eml" {
+			count++
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("saved message count = %d, want 3 before cleanup", count)
 	}
 }
 
@@ -53,7 +62,7 @@ func TestCleanupRemovesExpiredTreesHierarchically(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	archive := New(Options{Directory: root, Retention: 30 * 24 * time.Hour, MaxMessages: 100, MaxTotalBytes: 1 << 20}, nil)
+	archive := New(Options{Directory: root, Retention: 30 * 24 * time.Hour, MaxTotalBytes: 1 << 20}, nil)
 	archive.now = func() time.Time { return time.Date(2026, 9, 7, 18, 0, 0, 0, time.UTC) }
 	if err := archive.Cleanup(); err != nil {
 		t.Fatal(err)
@@ -70,10 +79,10 @@ func TestCleanupRemovesExpiredTreesHierarchically(t *testing.T) {
 	}
 }
 
-func TestSaveEnforcesTotalByteLimit(t *testing.T) {
+func TestCleanupEnforcesTotalByteLimit(t *testing.T) {
 	root := t.TempDir()
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
-	archive := New(Options{Directory: root, Retention: 24 * time.Hour, MaxMessages: 10, MaxTotalBytes: 5}, nil)
+	archive := New(Options{Directory: root, Retention: 24 * time.Hour, MaxTotalBytes: 5}, nil)
 	archive.now = func() time.Time { return now }
 	if _, err := archive.Save([]byte("123")); err != nil {
 		t.Fatal(err)
@@ -82,15 +91,22 @@ func TestSaveEnforcesTotalByteLimit(t *testing.T) {
 	if _, err := archive.Save([]byte("456")); err != nil {
 		t.Fatal(err)
 	}
-	if len(archive.files) != 1 || archive.bytes != 3 {
-		t.Fatalf("byte capacity state = %d files, %d bytes", len(archive.files), archive.bytes)
+	if err := archive.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	total, err := archive.archiveSize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 {
+		t.Fatalf("archive size after cleanup = %d, want 3", total)
 	}
 }
 
 func TestSaveWithRecordIDUsesRecordIDAndDoesNotOverwrite(t *testing.T) {
 	root := t.TempDir()
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
-	archive := New(Options{Directory: root, Retention: 24 * time.Hour, MaxMessages: 10, MaxTotalBytes: 100}, nil)
+	archive := New(Options{Directory: root, Retention: 24 * time.Hour, MaxTotalBytes: 100}, nil)
 	archive.now = func() time.Time { return now }
 
 	path, err := archive.SaveWithRecordID([]byte("first"), 123)
@@ -112,7 +128,7 @@ func TestSaveWithRecordIDUsesRecordIDAndDoesNotOverwrite(t *testing.T) {
 	}
 }
 
-func TestCapacityEvictionUsesModificationTimeAfterReindex(t *testing.T) {
+func TestCapacityCleanupUsesModificationTime(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "2026", "09", "07")
 	if err := os.MkdirAll(directory, 0750); err != nil {
@@ -134,9 +150,12 @@ func TestCapacityEvictionUsesModificationTimeAfterReindex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	archive := New(Options{Directory: root, Retention: 30 * 24 * time.Hour, MaxMessages: 2, MaxTotalBytes: 1 << 20}, nil)
+	archive := New(Options{Directory: root, Retention: 30 * 24 * time.Hour, MaxTotalBytes: int64(len(newPath) + len("newest"))}, nil)
 	archive.now = func() time.Time { return newTime.Add(time.Hour) }
 	if _, err := archive.SaveWithRecordID([]byte("newest"), 11); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Cleanup(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {

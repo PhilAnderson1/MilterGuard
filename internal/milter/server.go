@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -51,6 +52,7 @@ type Server struct {
 	analyzer           Analyzer
 	log                *slog.Logger
 	slots              chan struct{}
+	attachmentSlots    chan struct{}
 	sessionSlots       chan struct{}
 	allowedPeerIPs     []netip.Prefix
 	ipReputation       *ipReputationStore
@@ -61,6 +63,7 @@ type Server struct {
 	resolver           dnsResolver
 	attachments        *attachment.Scanner
 	internalToken      string
+	commandRecipient   string
 	replySlots         chan struct{}
 	database           *sqlstore.Store
 	wg                 sync.WaitGroup
@@ -80,19 +83,23 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	}
 	server := &Server{
 		cfg: cfg, analyzer: analyzer, log: log,
-		slots: make(chan struct{}, cfg.AI.MaxConcurrent), sessionSlots: make(chan struct{}, cfg.Milter.MaxConnections),
+		slots:              make(chan struct{}, cfg.AI.MaxConcurrent),
+		attachmentSlots:    make(chan struct{}, attachmentConcurrency(cfg.Milter.MaxConnections)),
+		sessionSlots:       make(chan struct{}, cfg.Milter.MaxConnections),
 		ipReputation:       newIPReputationStore(cfg.IPReputation, database, log),
 		correspondents:     newCorrespondentStore(cfg.Correspondents, database, log),
 		rejectionHistory:   newRejectionHistoryStore(cfg.RejectionHistory, database, log),
 		domainRegistration: newDomainRegistrationStore(cfg.DomainRegistration, database, log),
-		resolver:           net.DefaultResolver, internalToken: internalToken, replySlots: make(chan struct{}, 4), database: database,
+		resolver:           net.DefaultResolver, internalToken: internalToken,
+		commandRecipient: normalizeEmailAddress(cfg.EmailCommands.Recipient),
+		replySlots:       make(chan struct{}, 4), database: database,
 	}
 	server.allowedPeerIPs = peerPrefixes(cfg.Milter.AllowedPeerIPs)
 	server.startupErr = errors.Join(tokenErr, databaseErr)
 	if cfg.RejectedMail.Enabled {
 		server.rejectedMail = rejectedmail.New(rejectedmail.Options{
 			Directory: cfg.RejectedMail.Directory, Retention: cfg.RejectedMail.Retention.Value(),
-			MaxMessages: cfg.RejectedMail.MaxMessages, MaxTotalBytes: cfg.RejectedMail.MaxTotalBytes,
+			MaxTotalBytes: cfg.RejectedMail.MaxTotalBytes,
 		}, log)
 	}
 	if cfg.Attachments.BlockExecutables {
@@ -104,6 +111,16 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 		})
 	}
 	return server
+}
+
+func attachmentConcurrency(maxConnections int) int {
+	if maxConnections < 1 {
+		return 1
+	}
+	if parallelism := runtime.GOMAXPROCS(0); parallelism < maxConnections {
+		return parallelism
+	}
+	return maxConnections
 }
 
 // Close releases persistent database resources. It is safe to call more than
@@ -351,11 +368,11 @@ func (s *Server) runMaintenance(name string, operation func()) {
 	operation()
 }
 
-func (s *Server) recordRejection(ctx context.Context, msg *message.Message, envelopeSender string, recipients, reasons []string, source string) {
+func (s *Server) recordRejection(ctx context.Context, msg *message.Message, visibleSender, envelopeSender string, recipients, reasons []string, source string) {
 	if msg == nil {
 		return
 	}
-	recordID, err := s.rejectionHistory.addWithID(msg.Header("From"), envelopeSender, msg.DecodedHeader("Subject"), recipients, reasons)
+	recordID, err := s.rejectionHistory.addWithID(ctx, visibleSender, envelopeSender, msg.DecodedHeader("Subject"), recipients, reasons)
 	if err != nil {
 		s.log.ErrorContext(ctx, "cannot save rejection history", "message_id", msg.Header("Message-ID"), "error", err)
 		recordID = 0

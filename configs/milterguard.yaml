@@ -233,9 +233,9 @@ rejected_mail:
   # Remove expired messages at startup and every 24 hours.
   retention: 720h
 
-  # Storage limits. The oldest retained messages are removed first when needed.
-  max_messages: 10000
-  max_total_bytes: 5368709120
+  # Target maximum archive size. If it is exceeded, daily cleanup deletes the
+  # oldest messages; the archive can therefore exceed this temporarily.
+  max_total_bytes: 1073741824
 
 ip_reputation:
   # Temporarily blacklist the sending IP after rejecting an email, avoiding further

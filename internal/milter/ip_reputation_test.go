@@ -3,6 +3,7 @@ package milter
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"log/slog"
 	"net/netip"
 	"path/filepath"
@@ -35,14 +36,14 @@ func TestRejectedIPCacheExpiresEntries(t *testing.T) {
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.10")
-	if !cache.add(addr, 1, connectionDNSResult{}) {
+	if !cache.add(context.Background(), addr, 1, connectionDNSResult{}) {
 		t.Fatal("IP was not added")
 	}
-	if _, ok := cache.lookup(addr); !ok {
+	if _, ok := cache.lookup(context.Background(), addr); !ok {
 		t.Fatal("IP was not found before expiry")
 	}
 	now = now.Add(10 * time.Minute)
-	if _, ok := cache.lookup(addr); ok {
+	if _, ok := cache.lookup(context.Background(), addr); ok {
 		t.Fatal("IP remained cached at its expiry time")
 	}
 }
@@ -53,10 +54,10 @@ func TestRejectedIPCacheCanonicalizesIPv6Zones(t *testing.T) {
 	}, nil)
 	zoned := netip.MustParseAddr("2001:db8::25%untrusted")
 	plain := netip.MustParseAddr("2001:db8::25")
-	if !cache.add(zoned, 1, connectionDNSResult{}) {
+	if !cache.add(context.Background(), zoned, 1, connectionDNSResult{}) {
 		t.Fatal("zoned IPv6 address was not added")
 	}
-	if _, blocked := cache.lookup(plain); !blocked {
+	if _, blocked := cache.lookup(context.Background(), plain); !blocked {
 		t.Fatal("zone created a distinct IP reputation key")
 	}
 	if records := cache.snapshot(); len(records) != 1 || records[plain].IP != plain.String() {
@@ -73,11 +74,11 @@ func TestRejectedIPCacheHonorsAllowlist(t *testing.T) {
 		IPAllowlist:   []string{"192.0.2.99/24", "::ffff:198.51.100.99/120", "2001:db8::1"},
 	}, logger)
 	for _, value := range []string{"192.0.2.25", "198.51.100.25", "2001:db8::1"} {
-		if cache.add(netip.MustParseAddr(value), 1, connectionDNSResult{}) {
+		if cache.add(context.Background(), netip.MustParseAddr(value), 1, connectionDNSResult{}) {
 			t.Errorf("allowlisted address %s was added", value)
 		}
 	}
-	if !cache.add(netip.MustParseAddr("203.0.113.25"), 1, connectionDNSResult{}) {
+	if !cache.add(context.Background(), netip.MustParseAddr("203.0.113.25"), 1, connectionDNSResult{}) {
 		t.Fatal("non-allowlisted address was not added")
 	}
 	logOutput := output.String()
@@ -102,22 +103,22 @@ func TestRejectedIPCleanupEvictsOldestShortBlock(t *testing.T) {
 	first := netip.MustParseAddr("192.0.2.1")
 	second := netip.MustParseAddr("192.0.2.2")
 	third := netip.MustParseAddr("192.0.2.3")
-	cache.add(first, 1, connectionDNSResult{})
+	cache.add(context.Background(), first, 1, connectionDNSResult{})
 	now = now.Add(time.Minute)
-	cache.add(second, 1, connectionDNSResult{})
+	cache.add(context.Background(), second, 1, connectionDNSResult{})
 	now = now.Add(time.Minute)
-	cache.add(third, 1, connectionDNSResult{})
+	cache.add(context.Background(), third, 1, connectionDNSResult{})
 	if cache.size() != 3 {
 		t.Fatal("capacity was enforced before periodic cleanup")
 	}
 	if _, err := cache.cleanup(); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := cache.lookup(first); ok {
+	if _, ok := cache.lookup(context.Background(), first); ok {
 		t.Fatal("earliest-expiring entry was not evicted")
 	}
 	for _, addr := range []netip.Addr{second, third} {
-		if _, ok := cache.lookup(addr); !ok {
+		if _, ok := cache.lookup(context.Background(), addr); !ok {
 			t.Errorf("expected %s to remain cached", addr)
 		}
 	}
@@ -131,10 +132,10 @@ func TestRejectedIPCacheShortBlockDoesNotRefreshOnAttempt(t *testing.T) {
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.10")
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 
 	now = now.Add(45 * time.Second)
-	entry, ok := cache.lookup(addr)
+	entry, ok := cache.lookup(context.Background(), addr)
 	if !ok {
 		t.Fatal("IP was not found before its original expiry")
 	}
@@ -144,12 +145,12 @@ func TestRejectedIPCacheShortBlockDoesNotRefreshOnAttempt(t *testing.T) {
 	}
 
 	now = now.Add(30 * time.Second)
-	if _, ok := cache.lookup(addr); ok {
+	if _, ok := cache.lookup(context.Background(), addr); ok {
 		t.Fatal("short block was refreshed by a cached attempt")
 	}
 }
 
-func TestRejectedIPCacheLogsSizeOnAddAndRemove(t *testing.T) {
+func TestRejectedIPCacheLogsUpdates(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
@@ -160,20 +161,98 @@ func TestRejectedIPCacheLogsSizeOnAddAndRemove(t *testing.T) {
 	cache.now = func() time.Time { return now }
 	first := netip.MustParseAddr("192.0.2.1")
 	second := netip.MustParseAddr("192.0.2.2")
-	cache.add(first, 1, connectionDNSResult{})
-	cache.add(second, 0.95, connectionDNSResult{})
-	now = now.Add(time.Minute)
-	cache.lookup(second)
+	cache.add(context.Background(), first, 1, connectionDNSResult{})
+	cache.add(context.Background(), second, 0.95, connectionDNSResult{})
 
 	logOutput := output.String()
 	for _, wanted := range []string{
 		`"msg":"sending IP reputation updated","remote_ip":"192.0.2.1"`,
 		`"msg":"sending IP reputation updated","remote_ip":"192.0.2.2"`,
-		`"msg":"sending IP short block expired","remote_ip":"192.0.2.2"`,
 	} {
 		if !strings.Contains(logOutput, wanted) {
 			t.Errorf("debug log does not contain %s: %s", wanted, logOutput)
 		}
+	}
+}
+
+func TestRejectedIPUnknownLookupDoesNotWaitForWriter(t *testing.T) {
+	cache := newTestIPReputationStore(t, config.IPReputationConfig{
+		BlockDuration: config.Duration(time.Minute),
+		MaxEntries:    10,
+	}, nil)
+	writerStarted := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	writerDone := make(chan error, 1)
+	go func() {
+		writerDone <- cache.db.WithTx(context.Background(), nil, func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`UPDATE ip_reputation SET ip=ip WHERE ip='writer-lock-test'`); err != nil {
+				return err
+			}
+			close(writerStarted)
+			<-releaseWriter
+			return nil
+		})
+	}()
+	<-writerStarted
+
+	lookupDone := make(chan bool, 1)
+	go func() {
+		_, found := cache.lookup(context.Background(), netip.MustParseAddr("192.0.2.200"))
+		lookupDone <- found
+	}()
+	select {
+	case found := <-lookupDone:
+		if found {
+			t.Fatal("unknown IP unexpectedly had reputation")
+		}
+	case <-time.After(500 * time.Millisecond):
+		close(releaseWriter)
+		t.Fatal("read-only IP lookup waited for SQLite's writer lock")
+	}
+	close(releaseWriter)
+	if err := <-writerDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegitimateIPWithoutReputationDoesNotWaitForWriter(t *testing.T) {
+	cache := newTestIPReputationStore(t, config.IPReputationConfig{
+		BlockDuration:       config.Duration(time.Minute),
+		RepeatThreshold:     3,
+		RepeatWindow:        config.Duration(time.Hour),
+		RepeatBlockDuration: config.Duration(24 * time.Hour),
+		LegitimatePerStrike: 3,
+		MaxEntries:          10,
+	}, nil)
+	writerStarted := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	writerDone := make(chan error, 1)
+	go func() {
+		writerDone <- cache.db.WithTx(context.Background(), nil, func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`UPDATE ip_reputation SET ip=ip WHERE ip='writer-lock-test'`); err != nil {
+				return err
+			}
+			close(writerStarted)
+			<-releaseWriter
+			return nil
+		})
+	}()
+	<-writerStarted
+
+	recordDone := make(chan struct{})
+	go func() {
+		cache.recordLegitimate(context.Background(), netip.MustParseAddr("192.0.2.201"))
+		close(recordDone)
+	}()
+	select {
+	case <-recordDone:
+	case <-time.After(500 * time.Millisecond):
+		close(releaseWriter)
+		t.Fatal("legitimate IP without reputation waited for SQLite's writer lock")
+	}
+	close(releaseWriter)
+	if err := <-writerDone; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -188,10 +267,10 @@ func TestRejectedIPCacheHonorsForwardConfirmedDomainAllowlist(t *testing.T) {
 		status: message.ReverseDNSAvailable,
 		names:  []message.ReverseDNSName{{Hostname: "mail.outbound.protection.outlook.com", Confirmation: message.ForwardConfirmed}},
 	}
-	if cache.add(addr, 1, dns) {
+	if cache.add(context.Background(), addr, 1, dns) {
 		t.Fatal("forward-confirmed outlook.com subdomain was blacklisted")
 	}
-	if _, found := cache.lookup(addr); found {
+	if _, found := cache.lookup(context.Background(), addr); found {
 		t.Fatal("domain-allowlisted address was present in cache")
 	}
 }
@@ -217,7 +296,7 @@ func TestDomainAllowlistRequiresLabelBoundaryAndForwardConfirmation(t *testing.T
 				status: message.ReverseDNSAvailable,
 				names:  []message.ReverseDNSName{{Hostname: test.hostname, Confirmation: test.confirmation}},
 			}
-			if !cache.add(addr, 1, dns) {
+			if !cache.add(context.Background(), addr, 1, dns) {
 				t.Fatal("untrusted reverse DNS prevented blacklisting")
 			}
 		})
@@ -230,7 +309,7 @@ func TestDomainAllowlistFailsOpenOnUnavailableDNSResult(t *testing.T) {
 		MaxEntries:      10,
 		DomainAllowlist: []string{"outlook.com"},
 	}, nil)
-	if !cache.add(netip.MustParseAddr("192.0.2.25"), 1, connectionDNSResult{status: message.ReverseDNSLookupFailed}) {
+	if !cache.add(context.Background(), netip.MustParseAddr("192.0.2.25"), 1, connectionDNSResult{status: message.ReverseDNSLookupFailed}) {
 		t.Fatal("unavailable DNS evidence prevented blacklisting")
 	}
 }
@@ -247,8 +326,8 @@ func TestRejectedIPCachePromotesRepeatedAIRejections(t *testing.T) {
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.40")
 	for strike := 1; strike <= 3; strike++ {
-		cache.add(addr, .99, connectionDNSResult{})
-		entry, ok := cache.lookup(addr)
+		cache.add(context.Background(), addr, .99, connectionDNSResult{})
+		entry, ok := cache.lookup(context.Background(), addr)
 		if !ok {
 			t.Fatalf("strike %d did not produce a block", strike)
 		}
@@ -274,10 +353,10 @@ func TestRejectedIPCachePrunesStrikesOutsideWindow(t *testing.T) {
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.41")
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 	now = now.Add(11 * time.Minute)
-	cache.add(addr, 1, connectionDNSResult{})
-	entry, ok := cache.lookup(addr)
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
+	entry, ok := cache.lookup(context.Background(), addr)
 	if !ok || entry.level != rejectedIPBlockShort || entry.strikeCount != 1 {
 		t.Fatalf("old strike was not pruned: %+v, found=%v", entry, ok)
 	}
@@ -295,19 +374,25 @@ func TestRejectedIPCacheRefreshesOnlyRepeatBlockWithoutAddingStrike(t *testing.T
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.42")
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 	if record := cache.snapshot()[addr]; record.ID == 0 {
 		t.Fatal("IP reputation record was not assigned an ID")
 	}
 	now = now.Add(2 * time.Minute)
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 	now = now.Add(time.Hour)
-	entry, ok := cache.lookup(addr)
+	entry, ok := cache.lookup(context.Background(), addr)
 	if !ok || entry.strikeCount != 2 || !entry.expires.Equal(now.Add(24*time.Hour)) {
 		t.Fatalf("repeat refresh changed strikes or expiry incorrectly: %+v, found=%v", entry, ok)
 	}
-	now = now.Add(time.Minute)
-	entry, ok = cache.lookup(addr)
+	firstRefresh := entry.expires
+	now = now.Add(30 * time.Second)
+	entry, ok = cache.lookup(context.Background(), addr)
+	if !ok || !entry.expires.Equal(firstRefresh) {
+		t.Fatalf("repeat block was refreshed inside throttle interval: %+v, found=%v", entry, ok)
+	}
+	now = now.Add(30 * time.Second)
+	entry, ok = cache.lookup(context.Background(), addr)
 	if !ok || !entry.expires.Equal(now.Add(24*time.Hour)) {
 		t.Fatalf("second repeat refresh did not extend expiry: %+v, found=%v", entry, ok)
 	}
@@ -331,14 +416,14 @@ func TestRejectedIPCachePersistsReputation(t *testing.T) {
 	cache := newIPReputationStore(policy, db, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.43")
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 	now = now.Add(2 * time.Minute)
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 	reloaded := newIPReputationStore(policy, db, nil)
 	if record := reloaded.snapshot()[addr]; record.ID == 0 {
 		t.Fatal("reloaded IP reputation record has no ID")
 	}
-	entry, ok := reloaded.lookup(addr)
+	entry, ok := reloaded.lookup(context.Background(), addr)
 	if !ok || entry.level != rejectedIPBlockRepeat || entry.strikeCount != 2 {
 		t.Fatalf("persisted repeat reputation was not restored: %+v, found=%v", entry, ok)
 	}
@@ -355,9 +440,9 @@ func TestIPReputationRetainsDistinctStrikesAtSameMillisecond(t *testing.T) {
 	}, nil)
 	store.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.99")
-	store.add(addr, 1, connectionDNSResult{})
-	store.add(addr, 1, connectionDNSResult{})
-	block, found := store.lookup(addr)
+	store.add(context.Background(), addr, 1, connectionDNSResult{})
+	store.add(context.Background(), addr, 1, connectionDNSResult{})
+	block, found := store.lookup(context.Background(), addr)
 	if !found || block.level != rejectedIPBlockRepeat || block.strikeCount != 2 {
 		t.Fatalf("same-millisecond strikes = %+v, found=%v", block, found)
 	}
@@ -377,10 +462,10 @@ func TestIPReputationConcurrentStrikesAreAtomic(t *testing.T) {
 	var wait sync.WaitGroup
 	for range strikes {
 		wait.Add(1)
-		go func() { defer wait.Done(); store.add(addr, 1, connectionDNSResult{}) }()
+		go func() { defer wait.Done(); store.add(context.Background(), addr, 1, connectionDNSResult{}) }()
 	}
 	wait.Wait()
-	block, found := store.lookup(addr)
+	block, found := store.lookup(context.Background(), addr)
 	if !found || block.level != rejectedIPBlockRepeat || block.strikeCount != strikes {
 		t.Fatalf("concurrent strikes = %+v, found=%v", block, found)
 	}
@@ -424,7 +509,7 @@ func TestIPReputationCleanupRemovesExpiredSQLState(t *testing.T) {
 	}, nil)
 	store.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.100")
-	store.add(addr, 1, connectionDNSResult{})
+	store.add(context.Background(), addr, 1, connectionDNSResult{})
 	now = now.Add(2 * time.Hour)
 	if deleted, err := store.cleanup(); err != nil {
 		t.Fatal(err)
@@ -447,15 +532,15 @@ func TestRejectedIPCacheRepeatExpiryDiscardsStrikeHistory(t *testing.T) {
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.44")
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 	now = now.Add(2 * time.Minute)
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 	now = now.Add(time.Hour)
-	if _, ok := cache.lookup(addr); ok {
+	if _, ok := cache.lookup(context.Background(), addr); ok {
 		t.Fatal("repeat block remained active at expiry")
 	}
-	cache.add(addr, 1, connectionDNSResult{})
-	entry, _ := cache.lookup(addr)
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
+	entry, _ := cache.lookup(context.Background(), addr)
 	if entry.level != rejectedIPBlockShort || entry.strikeCount != 1 {
 		t.Fatalf("expired repeat history was retained: %+v", entry)
 	}
@@ -473,20 +558,20 @@ func TestRejectedIPCacheLegitimateMessagesRemoveOldestStrike(t *testing.T) {
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.45")
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 	now = now.Add(2 * time.Minute)
-	cache.lookup(addr) // expire the short block while retaining its strike
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.lookup(context.Background(), addr) // expire the short block while retaining its strike
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 	now = now.Add(2 * time.Minute)
-	cache.lookup(addr)
+	cache.lookup(context.Background(), addr)
 
-	cache.recordLegitimate(addr)
-	cache.recordLegitimate(addr)
+	cache.recordLegitimate(context.Background(), addr)
+	cache.recordLegitimate(context.Background(), addr)
 	if got := cache.snapshot()[addr]; got.LegitimateCount != 2 || len(got.Strikes) != 2 {
 		t.Fatalf("credits before threshold = %d, strikes = %d", got.LegitimateCount, len(got.Strikes))
 	}
 	oldest := cache.snapshot()[addr].Strikes[0]
-	cache.recordLegitimate(addr)
+	cache.recordLegitimate(context.Background(), addr)
 	got := cache.snapshot()[addr]
 	if got.LegitimateCount != 0 || len(got.Strikes) != 1 || !got.Strikes[0].After(oldest) {
 		t.Fatalf("legitimate threshold did not remove oldest strike: %+v", got)
@@ -505,12 +590,12 @@ func TestRejectedIPCacheNewStrikeResetsLegitimateCredit(t *testing.T) {
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.46")
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 	now = now.Add(2 * time.Minute)
-	cache.lookup(addr)
-	cache.recordLegitimate(addr)
-	cache.recordLegitimate(addr)
-	cache.add(addr, 1, connectionDNSResult{})
+	cache.lookup(context.Background(), addr)
+	cache.recordLegitimate(context.Background(), addr)
+	cache.recordLegitimate(context.Background(), addr)
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
 	if got := cache.snapshot()[addr]; got.LegitimateCount != 0 || len(got.Strikes) != 2 {
 		t.Fatalf("new rejection did not reset credit: %+v", got)
 	}
@@ -528,9 +613,9 @@ func TestRejectedIPCacheLegitimateDecayDoesNotCancelActiveBlock(t *testing.T) {
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.47")
-	cache.add(addr, 1, connectionDNSResult{})
-	cache.recordLegitimate(addr)
-	entry, ok := cache.lookup(addr)
+	cache.add(context.Background(), addr, 1, connectionDNSResult{})
+	cache.recordLegitimate(context.Background(), addr)
+	entry, ok := cache.lookup(context.Background(), addr)
 	if !ok || entry.level != rejectedIPBlockShort || entry.strikeCount != 0 {
 		t.Fatalf("legitimate decay cancelled an active block: %+v, found=%v", entry, ok)
 	}
@@ -546,7 +631,7 @@ func TestManualIPManagementListsOnlyActiveBlocks(t *testing.T) {
 	if err != nil || block.Level != rejectedIPBlockRepeat || !block.ExpiresAt.Equal(now.Add(24*time.Hour)) {
 		t.Fatalf("manual block = %+v, %v", block, err)
 	}
-	cache.add(netip.MustParseAddr("192.0.2.81"), 1, connectionDNSResult{})
+	cache.add(context.Background(), netip.MustParseAddr("192.0.2.81"), 1, connectionDNSResult{})
 	if got := cache.listActive(); len(got) != 2 {
 		t.Fatalf("active blocks = %#v", got)
 	}

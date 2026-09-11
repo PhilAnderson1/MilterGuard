@@ -23,14 +23,11 @@ func (e senderAuthenticationEvidence) anyAligned() bool {
 	return e.DKIMAligned || e.DMARCAligned
 }
 
-func trustedSenderAuthentication(msg *message.Message, trustedAuthservIDs []string, fromAddress string) senderAuthenticationEvidence {
+func trustedSenderAuthentication(msg *message.Message, trustedAuthservIDs []string, fromDomain string) senderAuthenticationEvidence {
 	var evidence senderAuthenticationEvidence
-	fromAddress = normalizeEmailAddress(fromAddress)
-	separator := strings.LastIndexByte(fromAddress, '@')
-	if separator < 0 {
+	if fromDomain == "" {
 		return evidence
 	}
-	fromDomain := fromAddress[separator+1:]
 	trusted := make(map[string]bool, len(trustedAuthservIDs))
 	for _, value := range trustedAuthservIDs {
 		if value = normalizeDomain(value); value != "" {
@@ -62,13 +59,11 @@ func trustedSenderAuthentication(msg *message.Message, trustedAuthservIDs []stri
 	return evidence
 }
 
-func allowedSenderDomain(fromAddress string, allowedDomains []string) string {
-	address := normalizeEmailAddress(fromAddress)
-	separator := strings.LastIndexByte(address, '@')
-	if separator < 0 {
+func allowedSenderDomain(fromDomain string, allowedDomains []string) string {
+	fromDomain = normalizeDomain(fromDomain)
+	if fromDomain == "" {
 		return ""
 	}
-	fromDomain := normalizeDomain(address[separator+1:])
 	for _, allowed := range allowedDomains {
 		if domainMatches(fromDomain, normalizeDomain(allowed)) {
 			return fromDomain

@@ -46,12 +46,12 @@ func rejectionHistoryEnabled(cfg config.RejectionHistoryConfig) bool {
 	return cfg.Expiry.Value() > 0
 }
 
-func (s *rejectionHistoryStore) add(visibleSender, envelopeSender, subject string, recipients, reasons []string) error {
-	_, err := s.addWithID(visibleSender, envelopeSender, subject, recipients, reasons)
+func (s *rejectionHistoryStore) add(ctx context.Context, visibleSender, envelopeSender, subject string, recipients, reasons []string) error {
+	_, err := s.addWithID(ctx, visibleSender, envelopeSender, subject, recipients, reasons)
 	return err
 }
 
-func (s *rejectionHistoryStore) addWithID(visibleSender, envelopeSender, subject string, recipients, reasons []string) (uint64, error) {
+func (s *rejectionHistoryStore) addWithID(ctx context.Context, visibleSender, envelopeSender, subject string, recipients, reasons []string) (uint64, error) {
 	if s == nil || s.db == nil || !rejectionHistoryEnabled(s.cfg) {
 		return 0, nil
 	}
@@ -70,8 +70,9 @@ func (s *rejectionHistoryStore) addWithID(visibleSender, envelopeSender, subject
 	now := s.now().UTC()
 	subject = rejectionSingleLine(subject, maxRejectionSubjectRunes)
 	reason := rejectionReason(reasons)
+	recipientQuery := `INSERT INTO rejection_recipients (rejection_id, recipient) VALUES ` +
+		valuePlaceholders(len(normalizedRecipients), 2)
 
-	ctx := context.Background()
 	var recordID int64
 	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `INSERT INTO rejections
@@ -84,11 +85,12 @@ func (s *rejectionHistoryStore) addWithID(visibleSender, envelopeSender, subject
 		if err != nil {
 			return fmt.Errorf("read rejection ID: %w", err)
 		}
+		args := make([]any, 0, len(normalizedRecipients)*2)
 		for _, recipient := range normalizedRecipients {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO rejection_recipients
-				(rejection_id, recipient) VALUES (?, ?)`, recordID, recipient); err != nil {
-				return err
-			}
+			args = append(args, recordID, recipient)
+		}
+		if _, err := tx.ExecContext(ctx, recipientQuery, args...); err != nil {
+			return err
 		}
 		return nil
 	})

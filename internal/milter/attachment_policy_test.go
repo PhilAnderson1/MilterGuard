@@ -30,16 +30,16 @@ func enableTestAttachments(server *Server) {
 	})
 }
 
-func TestAttachmentScanWaitingForSlotStopsWithContext(t *testing.T) {
+func TestAttachmentScanWaitingForAttachmentSlotStopsWithContext(t *testing.T) {
 	server := &Server{
-		cfg:   config.Config{Attachments: config.AttachmentsConfig{BlockExecutables: true}},
-		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		slots: make(chan struct{}, 1),
+		cfg:             config.Config{Attachments: config.AttachmentsConfig{BlockExecutables: true}},
+		log:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		attachmentSlots: make(chan struct{}, 1),
 		attachments: attachment.New(attachment.Options{
 			BlockedExtensions: []string{"exe"},
 		}),
 	}
-	server.slots <- struct{}{}
+	server.attachmentSlots <- struct{}{}
 	ss := &session{server: server, message: message.New(1024)}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -47,6 +47,25 @@ func TestAttachmentScanWaitingForSlotStopsWithContext(t *testing.T) {
 	handled, keepConnection := ss.applyAttachments(ctx)
 	if !handled || keepConnection {
 		t.Fatalf("cancelled attachment scan = handled %v, keep connection %v", handled, keepConnection)
+	}
+}
+
+func TestAttachmentScanDoesNotWaitForAISlot(t *testing.T) {
+	server := &Server{
+		cfg:             config.Config{Attachments: config.AttachmentsConfig{BlockExecutables: true}},
+		log:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		slots:           make(chan struct{}, 1),
+		attachmentSlots: make(chan struct{}, 1),
+		attachments: attachment.New(attachment.Options{
+			BlockedExtensions: []string{"exe"},
+		}),
+	}
+	server.slots <- struct{}{}
+	ss := &session{server: server, message: message.New(1024)}
+
+	handled, keepConnection := ss.applyAttachments(context.Background())
+	if handled || !keepConnection {
+		t.Fatalf("clean attachment scan = handled %v, keep connection %v", handled, keepConnection)
 	}
 }
 

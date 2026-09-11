@@ -45,7 +45,7 @@ func TestCorrespondentStorePersistsPerSenderRelationships(t *testing.T) {
 	cfg := config.CorrespondentsConfig{LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", MaxEntries: 10}
 	database := testCorrespondentDatabase(t, path)
 	store := newCorrespondentStore(cfg, database, slog.Default())
-	if err := store.learn("Owner@Example.COM", []string{"Alice@Example.net", "alice@example.net", "invalid"}); err != nil {
+	if err := store.learn(context.Background(), "Owner@Example.COM", []string{"Alice@Example.net", "alice@example.net", "invalid"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Close(); err != nil {
@@ -53,10 +53,10 @@ func TestCorrespondentStorePersistsPerSenderRelationships(t *testing.T) {
 	}
 	reopened := testCorrespondentDatabase(t, path)
 	reloaded := newCorrespondentStore(cfg, reopened, slog.Default())
-	if match := reloaded.match("alice@example.net", []string{"owner@example.com"}); !match.Known || !match.AllRecipientsMatched {
+	if match := reloaded.match(context.Background(), "alice@example.net", []string{"owner@example.com"}); !match.Known || !match.AllRecipientsMatched {
 		t.Fatalf("saved relationship did not reload: %#v", match)
 	}
-	if match := reloaded.match("alice@example.net", []string{"other@example.com"}); match.Known {
+	if match := reloaded.match(context.Background(), "alice@example.net", []string{"other@example.com"}); match.Known {
 		t.Fatalf("per-sender relationship leaked to another user: %#v", match)
 	}
 }
@@ -65,18 +65,18 @@ func TestCorrespondentStoreScopeChangesOnlyMatching(t *testing.T) {
 	database := testCorrespondentDatabase(t, filepath.Join(t.TempDir(), "milterguard.db"))
 	cfg := config.CorrespondentsConfig{LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "global", MaxEntries: 10}
 	store := newCorrespondentStore(cfg, database, nil)
-	if err := store.learn("owner@example.com", []string{"alice@example.net"}); err != nil {
+	if err := store.learn(context.Background(), "owner@example.com", []string{"alice@example.net"}); err != nil {
 		t.Fatal(err)
 	}
-	if match := store.match("alice@example.net", []string{"anyone@example.com"}); !match.Known {
+	if match := store.match(context.Background(), "alice@example.net", []string{"anyone@example.com"}); !match.Known {
 		t.Fatalf("global relationship did not match: %#v", match)
 	}
 	cfg.Scope = "per_sender"
 	perSender := newCorrespondentStore(cfg, database, nil)
-	if !perSender.match("alice@example.net", []string{"owner@example.com"}).Known {
+	if !perSender.match(context.Background(), "alice@example.net", []string{"owner@example.com"}).Known {
 		t.Fatal("relationship was not retained under per-sender matching")
 	}
-	if perSender.match("alice@example.net", []string{"anyone@example.com"}).Known {
+	if perSender.match(context.Background(), "alice@example.net", []string{"anyone@example.com"}).Known {
 		t.Fatal("per-sender relationship leaked to another local address")
 	}
 }
@@ -89,15 +89,15 @@ func TestCorrespondentCleanupEvictsLeastUsefulAtCapacity(t *testing.T) {
 	store := newTestCorrespondentStore(t, cfg, nil)
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
-	if err := store.learn("owner@example.com", []string{"trusted@example.net"}); err != nil {
+	if err := store.learn(context.Background(), "owner@example.com", []string{"trusted@example.net"}); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Hour)
-	if err := store.recordInboundClassification("candidate1@example.net", []string{"owner@example.com"}, true, "legitimate", 1, .9, true); err != nil {
+	if err := store.recordInboundClassification(context.Background(), "candidate1@example.net", []string{"owner@example.com"}, true, "legitimate", 1, .9, true); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Hour)
-	if err := store.recordInboundClassification("candidate2@example.net", []string{"owner@example.com"}, true, "legitimate", 1, .9, true); err != nil {
+	if err := store.recordInboundClassification(context.Background(), "candidate2@example.net", []string{"owner@example.com"}, true, "legitimate", 1, .9, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(store.snapshot()) != 3 {
@@ -106,7 +106,7 @@ func TestCorrespondentCleanupEvictsLeastUsefulAtCapacity(t *testing.T) {
 	if _, err := store.cleanup(); err != nil {
 		t.Fatal(err)
 	}
-	if !store.match("trusted@example.net", nil).Known {
+	if !store.match(context.Background(), "trusted@example.net", nil).Known {
 		t.Fatal("candidate evicted qualified relationship")
 	}
 	if _, exists := store.snapshot()["owner@example.com\x00candidate1@example.net"]; exists {
@@ -121,22 +121,22 @@ func TestCorrespondentCleanupEvictsOldestQualifiedAtCapacity(t *testing.T) {
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
 	for _, sender := range []string{"first@example.net", "second@example.net"} {
-		if err := store.learn("owner@example.com", []string{sender}); err != nil {
+		if err := store.learn(context.Background(), "owner@example.com", []string{sender}); err != nil {
 			t.Fatal(err)
 		}
 		now = now.Add(time.Hour)
 	}
-	if err := store.learn("owner@example.com", []string{"first@example.net"}); err != nil {
+	if err := store.learn(context.Background(), "owner@example.com", []string{"first@example.net"}); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Hour)
-	if err := store.learn("owner@example.com", []string{"third@example.net"}); err != nil {
+	if err := store.learn(context.Background(), "owner@example.com", []string{"third@example.net"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.cleanup(); err != nil {
 		t.Fatal(err)
 	}
-	if !store.match("first@example.net", nil).Known || store.match("second@example.net", nil).Known || !store.match("third@example.net", nil).Known {
+	if !store.match(context.Background(), "first@example.net", nil).Known || store.match(context.Background(), "second@example.net", nil).Known || !store.match(context.Background(), "third@example.net", nil).Known {
 		t.Fatal("capacity eviction did not retain most recently active relationships")
 	}
 }
@@ -148,14 +148,14 @@ func TestCorrespondentStoreIgnoresAndCleansStaleRelationships(t *testing.T) {
 	}, nil)
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
-	if err := store.learn("owner@example.com", []string{"alice@example.net"}); err != nil {
+	if err := store.learn(context.Background(), "owner@example.com", []string{"alice@example.net"}); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(25 * time.Hour)
-	if store.match("alice@example.net", nil).Known {
+	if store.match(context.Background(), "alice@example.net", nil).Known {
 		t.Fatal("stale relationship still matched")
 	}
-	if err := store.learn("owner@example.com", []string{"bob@example.net"}); err != nil {
+	if err := store.learn(context.Background(), "owner@example.com", []string{"bob@example.net"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.cleanup(); err != nil {
@@ -192,23 +192,100 @@ func TestCorrespondentActivityUpdatesAreThrottled(t *testing.T) {
 	}, nil)
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
-	if err := store.learn("owner@example.com", []string{"alice@example.net"}); err != nil {
+	if err := store.learn(context.Background(), "owner@example.com", []string{"alice@example.net"}); err != nil {
 		t.Fatal(err)
 	}
 	initial := store.snapshot()["owner@example.com\x00alice@example.net"].LastActivityAt
 	now = now.Add(time.Hour)
-	if err := store.touchInbound("alice@example.net", []string{"owner@example.com"}); err != nil {
+	if err := store.touchInbound(context.Background(), "alice@example.net", []string{"owner@example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := store.snapshot()["owner@example.com\x00alice@example.net"].LastActivityAt; !got.Equal(initial) {
 		t.Fatalf("activity updated before interval: %s", got)
 	}
 	now = now.Add(24 * time.Hour)
-	if err := store.touchInbound("alice@example.net", []string{"owner@example.com"}); err != nil {
+	if err := store.touchInbound(context.Background(), "alice@example.net", []string{"owner@example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := store.snapshot()["owner@example.com\x00alice@example.net"].LastActivityAt; !got.Equal(now) {
 		t.Fatalf("activity = %s, want %s", got, now)
+	}
+}
+
+func TestCorrespondentOutboundBatchPreservesRelationshipRules(t *testing.T) {
+	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
+		LearnAuthenticatedRecipients: true,
+		UseAllowlist:                 true,
+		Scope:                        "per_sender",
+		LegitimateSenderMinMessages:  3,
+		ActivityUpdateInterval:       config.Duration(24 * time.Hour),
+		StaleAfter:                   config.Duration(48 * time.Hour),
+		MaxEntries:                   20,
+	}, nil)
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	manualActivity := now.Add(-time.Hour)
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "manual@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: manualActivity})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "candidate@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "stale@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-96 * time.Hour), LastActivityAt: now.Add(-49 * time.Hour)})
+
+	if err := store.learn(context.Background(), "owner@example.com", []string{
+		"manual@example.net", "candidate@example.net", "stale@example.net", "new@example.net",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records := store.snapshot()
+	if len(records) != 4 {
+		t.Fatalf("batch learned %d relationships, want 4", len(records))
+	}
+	manual := records["owner@example.com\x00manual@example.net"]
+	if manual.WhitelistType != whitelistManual || !manual.LastActivityAt.Equal(manualActivity) {
+		t.Fatalf("manual relationship changed unexpectedly: %+v", manual)
+	}
+	for _, correspondent := range []string{"candidate@example.net", "stale@example.net", "new@example.net"} {
+		entry := records["owner@example.com\x00"+correspondent]
+		if entry.WhitelistType != whitelistAuthenticatedOutbound || entry.LegitimateEmailCount != 0 || !entry.LastActivityAt.Equal(now) {
+			t.Errorf("outbound relationship %s = %+v", correspondent, entry)
+		}
+	}
+	if stale := records["owner@example.com\x00stale@example.net"]; !stale.LearnedAt.Equal(now) {
+		t.Fatalf("stale relationship was not recreated: %+v", stale)
+	}
+}
+
+func TestCorrespondentInboundBatchPreservesRelationshipRules(t *testing.T) {
+	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
+		LearnLegitimateSenders:      true,
+		UseAllowlist:                true,
+		Scope:                       "per_sender",
+		LegitimateSenderMinMessages: 3,
+		LegitimateSenderMinScore:    .9,
+		ActivityUpdateInterval:      config.Duration(24 * time.Hour),
+		StaleAfter:                  config.Duration(48 * time.Hour),
+		MaxEntries:                  20,
+	}, nil)
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "candidate@example.com", Correspondent: "sender@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "manual@example.com", Correspondent: "sender@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "stale@example.com", Correspondent: "sender@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-96 * time.Hour), LastActivityAt: now.Add(-49 * time.Hour)})
+
+	recipients := []string{"candidate@example.com", "manual@example.com", "stale@example.com", "new@example.com"}
+	if err := store.recordInboundClassification(context.Background(), "sender@example.net", recipients, true, "legitimate", .95, .9, true); err != nil {
+		t.Fatal(err)
+	}
+	records := store.snapshot()
+	if candidate := records["candidate@example.com\x00sender@example.net"]; candidate.LegitimateEmailCount != 3 || !store.qualified(candidate) {
+		t.Fatalf("existing candidate was not promoted: %+v", candidate)
+	}
+	if manual := records["manual@example.com\x00sender@example.net"]; manual.WhitelistType != whitelistManual {
+		t.Fatalf("manual relationship changed unexpectedly: %+v", manual)
+	}
+	for _, recipient := range []string{"stale@example.com", "new@example.com"} {
+		entry := records[recipient+"\x00sender@example.net"]
+		if entry.WhitelistType != whitelistRepeatedLegitimate || entry.LegitimateEmailCount != 1 || !entry.LearnedAt.Equal(now) {
+			t.Errorf("new inbound candidate for %s = %+v", recipient, entry)
+		}
 	}
 }
 
@@ -221,7 +298,7 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	store := newTestCorrespondentStore(t, cfg, nil)
 	record := func(classification string, score float64, dkim bool) {
 		t.Helper()
-		if err := store.recordInboundClassification("news@example.net", []string{"owner@example.com"}, true, classification, score, .9, dkim); err != nil {
+		if err := store.recordInboundClassification(context.Background(), "news@example.net", []string{"owner@example.com"}, true, classification, score, .9, dkim); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -241,7 +318,7 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	}
 	record("legitimate", 1, true)
 	record("legitimate", 1, true)
-	if !store.match("news@example.net", []string{"owner@example.com"}).Known {
+	if !store.match(context.Background(), "news@example.net", []string{"owner@example.com"}).Known {
 		t.Fatal("qualified inbound sender is not known")
 	}
 	record("unwanted", .9, true)
@@ -249,7 +326,7 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 		t.Fatal("unwanted classification did not remove learned candidate")
 	}
 	record("legitimate", 1, true)
-	if err := store.learn("owner@example.com", []string{"news@example.net"}); err != nil {
+	if err := store.learn(context.Background(), "owner@example.com", []string{"news@example.net"}); err != nil {
 		t.Fatal(err)
 	}
 	record("unwanted", 1, true)
@@ -275,7 +352,7 @@ func TestManualCorrespondentManagement(t *testing.T) {
 	}
 	database := testCorrespondentDatabase(t, path)
 	store := newCorrespondentStore(cfg.Correspondents, database, nil)
-	if !store.match("news@example.net", []string{"owner@example.com"}).Known {
+	if !store.match(context.Background(), "news@example.net", []string{"owner@example.com"}).Known {
 		t.Fatal("manual entry is not immediately qualified")
 	}
 	_ = database.Close()
@@ -319,7 +396,7 @@ func TestCorrespondentConcurrentLearningIsAtomic(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			if err := store.learn("owner@example.com", []string{"friend@example.net"}); err != nil {
+			if err := store.learn(context.Background(), "owner@example.com", []string{"friend@example.net"}); err != nil {
 				t.Errorf("learn: %v", err)
 			}
 		}()

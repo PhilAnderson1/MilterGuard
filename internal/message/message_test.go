@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -226,6 +227,29 @@ func TestPromptTruncates(t *testing.T) {
 	p := m.Prompt(3)
 	if !strings.Contains(p, "ab\n[... body omitted ...]\nf\n[body truncated; beginning and end retained]") {
 		t.Fatalf("not truncated: %s", p)
+	}
+}
+
+func TestSampleBodyPreservesUTF8RuneBoundaries(t *testing.T) {
+	body := "零一二三四五六七八九"
+	got := sampleBody(body, 8)
+	want := "零一二三\n[... body section omitted ...]\n四五\n[... body section omitted ...]\n八九\n[body truncated; beginning, middle, and end retained]"
+	if got != want {
+		t.Fatalf("sampleBody() = %q, want %q", got, want)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("sampleBody() produced invalid UTF-8: %q", got)
+	}
+}
+
+func TestStripInvisibleFormattingDoesNotAllocateForCleanText(t *testing.T) {
+	const clean = "Already clean UTF-8 text ✓"
+	if allocations := testing.AllocsPerRun(100, func() {
+		if got := stripInvisibleFormatting(clean); got != clean {
+			t.Fatalf("stripInvisibleFormatting() = %q, want %q", got, clean)
+		}
+	}); allocations != 0 {
+		t.Fatalf("clean formatting pass allocated %.1f times, want 0", allocations)
 	}
 }
 

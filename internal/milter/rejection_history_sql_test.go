@@ -43,7 +43,7 @@ func TestRejectionHistoryPersistsOneEventWithMultipleRecipients(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	store := newRejectionHistoryStore(cfg, db, nil)
 	store.now = func() time.Time { return now }
-	id, err := store.addWithID("Sender <NEWS@Example.NET>", "bounce@example.net", "Account alert", []string{"Alice@Example.com", "bob@example.com", "alice@example.com"}, []string{"Credential theft link"})
+	id, err := store.addWithID(context.Background(), "Sender <NEWS@Example.NET>", "bounce@example.net", "Account alert", []string{"Alice@Example.com", "bob@example.com", "alice@example.com"}, []string{"Credential theft link"})
 	if err != nil || id == 0 {
 		t.Fatalf("add ID = %d, err = %v", id, err)
 	}
@@ -77,7 +77,7 @@ func TestRejectionHistoryExpiryAndCapacityCascadeRecipients(t *testing.T) {
 	store, db := newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{Expiry: config.Duration(time.Hour), MaxEntries: 2})
 	store.now = func() time.Time { return base }
 	for _, sender := range []string{"one@example.net", "two@example.net", "three@example.net"} {
-		if err := store.add(sender, "", "", []string{"alice@example.com"}, []string{"unwanted"}); err != nil {
+		if err := store.add(context.Background(), sender, "", "", []string{"alice@example.com"}, []string{"unwanted"}); err != nil {
 			t.Fatal(err)
 		}
 		base = base.Add(time.Minute)
@@ -118,7 +118,7 @@ func TestRejectionHistorySameTimestampUsesNewestIDFirst(t *testing.T) {
 	store, _ := newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{Expiry: config.Duration(time.Hour), MaxEntries: 10})
 	store.now = func() time.Time { return now }
 	for _, sender := range []string{"older@example.net", "newer@example.net"} {
-		if err := store.add(sender, "", "", []string{"alice@example.com"}, nil); err != nil {
+		if err := store.add(context.Background(), sender, "", "", []string{"alice@example.com"}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -132,7 +132,7 @@ func TestRejectionHistoryFormattingAndBounds(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 34, 56, 0, time.UTC)
 	store, _ := newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{Expiry: config.Duration(time.Hour), MaxEntries: 10})
 	store.now = func() time.Time { return now }
-	if err := store.add("news@example.net", "", "Urgent\naccount notice", []string{"alice@example.com", "bob@example.com"}, []string{"Phishing link", "Impersonated sender"}); err != nil {
+	if err := store.add(context.Background(), "news@example.net", "", "Urgent\naccount notice", []string{"alice@example.com", "bob@example.com"}, []string{"Phishing link", "Impersonated sender"}); err != nil {
 		t.Fatal(err)
 	}
 	formatted := formatRejectionHistory(rejectionEntries(t, store, "*"))
@@ -152,7 +152,7 @@ func TestRejectionHistoryCapsRecipientsPerRecord(t *testing.T) {
 	for i := range recipients {
 		recipients[i] = fmt.Sprintf("recipient-%03d@example.com", i)
 	}
-	if err := store.add("sender@example.com", "", "test", recipients, nil); err != nil {
+	if err := store.add(context.Background(), "sender@example.com", "", "test", recipients, nil); err != nil {
 		t.Fatal(err)
 	}
 	entries := rejectionEntries(t, store, "*")
@@ -170,7 +170,7 @@ func TestRejectionHistoryConcurrentInsertions(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := store.addWithID(fmt.Sprintf("sender-%d@example.net", i), "", "test", []string{"local@example.com"}, nil)
+			_, err := store.addWithID(context.Background(), fmt.Sprintf("sender-%d@example.net", i), "", "test", []string{"local@example.com"}, nil)
 			errs <- err
 		}()
 	}
@@ -196,7 +196,7 @@ func TestRejectionHistoryRollsBackParentWhenRecipientInsertFails(t *testing.T) {
 		WHEN NEW.recipient = 'fail@example.com' BEGIN SELECT RAISE(ABORT, 'test failure'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.add("sender@example.net", "", "test", []string{"ok@example.com", "fail@example.com"}, nil); err == nil {
+	if err := store.add(context.Background(), "sender@example.net", "", "test", []string{"ok@example.com", "fail@example.com"}, nil); err == nil {
 		t.Fatal("recipient insertion failure was ignored")
 	}
 	if got := store.size(); got != 0 {
