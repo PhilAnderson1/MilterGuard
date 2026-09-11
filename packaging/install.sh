@@ -67,7 +67,7 @@ install -o root -g root -m 0644 "$readme_source" /usr/local/share/milterguard/RE
 install -o root -g root -m 0644 "$license_source" /usr/local/share/milterguard/LICENSE
 install -o root -g root -m 0644 "$third_party_notices_source" /usr/local/share/milterguard/THIRD_PARTY_NOTICES.md
 install -d -o root -g root -m 0755 /usr/local/share/milterguard/THIRD_PARTY_LICENSES
-for third_party_license in "$third_party_licenses_source"/*.txt; do
+for third_party_license in "$third_party_licenses_source"/*; do
     if [ ! -f "$third_party_license" ]; then
         echo "No third-party licence files found in: $third_party_licenses_source" >&2
         exit 1
