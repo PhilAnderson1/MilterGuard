@@ -44,10 +44,12 @@ The recommended model has relatively modest hardware requirements and can
 perform well with a suitable GPU. See Running AI locally for setup guidance.
 
 To use OpenRouter instead, create an account and API key at
-https://openrouter.ai. The supplied configuration already contains the
+https://openrouter.ai. Using the recommended model typically costs around
+US$0.35 per 1,000 scanned emails, although the actual cost varies with message
+length and provider pricing. The supplied configuration already contains the
 necessary OpenRouter settings; replace the placeholder `ai.api_key` with your
-key. If the configured model is no longer available, select a current
-compatible model and test it before enabling rejection.
+key. If the configured model is no longer available, select a current compatible
+model and test it before enabling rejection.
 
 MilterGuard sends the email data used for classification to the configured AI
 endpoint, including selected headers, extracted text, links, and qualifying
