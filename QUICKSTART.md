@@ -1,44 +1,70 @@
 # MilterGuard Quick Start
 
-1. Install MilterGuard as root from the extracted release directory:
+This guide takes you from downloading MilterGuard to a working Postfix
+integration in monitor mode. See the Operating Guide for detailed
+configuration, security, testing, and maintenance information.
+
+1. Download the archive for your Linux architecture from the latest MilterGuard
+   release, then extract it and enter the resulting directory, replacing
+   `VERSION` and the architecture as appropriate:
+
+   https://github.com/PhilAnderson1/MilterGuard/releases/latest
+
+   ```sh
+   tar -xzf milterguard-VERSION-linux-amd64.tar.gz
+   cd milterguard-VERSION-linux-amd64
+   ```
+
+2. Install MilterGuard as root:
 
    ```sh
    sudo ./install.sh
    ```
 
-2. If you do not operate a compatible local AI server and do not already have a
-   compatible hosted API key, create an OpenRouter account and key at
+3. Choose the AI service MilterGuard will use. A compatible locally hosted AI
+   server is recommended; see the Operating Guide for more information. If you
+   do not operate one, create an OpenRouter account and API key at
    https://openrouter.ai.
 
-3. Edit `/etc/milterguard/milterguard.yaml` and put the API key in the
-   `ai.api_key` setting.
+4. Edit `/etc/milterguard/milterguard.yaml`. For OpenRouter, the supplied
+   settings should work after adding your API key to `ai.api_key`. For another
+   hosted service or a local AI server, configure the endpoint URL, endpoint
+   type, model name, and API key. If the local server does not require
+   authentication, use a non-empty placeholder key.
 
-4. Validate the configuration:
+5. Validate the configuration:
 
    ```sh
-   sudo milterguard \
+   sudo /usr/local/sbin/milterguard \
      --config /etc/milterguard/milterguard.yaml --check-config
    ```
 
-5. Enable and start MilterGuard:
+6. Enable and start MilterGuard:
 
    ```sh
    sudo systemctl enable --now milterguard
    ```
 
-6. Add MilterGuard to the end of the Milter lists in
-   `/etc/postfix/main.cf`. For example, when an existing DKIM Milter uses port
-   8891:
+7. Add MilterGuard to the end of the Milter lists in
+   `/etc/postfix/main.cf`. Use the appropriate example for your server:
 
    ```text
-   smtpd_milters = inet:localhost:8891, inet:127.0.0.1:8895
-   non_smtpd_milters = inet:localhost:8891, inet:127.0.0.1:8895
+   # MilterGuard only
+   smtpd_milters = inet:127.0.0.1:8895
+   non_smtpd_milters = inet:127.0.0.1:8895
+
+   # OpenDKIM, OpenDMARC and MilterGuard
+   smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
+   non_smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
    ```
 
-7. Add this rule to `/etc/postfix/header_checks` to make Postfix remove
-   externally supplied `Authentication-Results` headers before the
-   authentication Milters run. Otherwise a remote sender could forge results
-   that MilterGuard treats as local authentication evidence.
+   If you use OpenDKIM without OpenDMARC, omit the port 8892 entry. Use the
+   actual ports or sockets configured on your server, and keep MilterGuard
+   last.
+
+8. Configure Postfix to remove externally supplied authentication and
+   MilterGuard result headers before the Milters run, preventing remote senders
+   from forging trusted evidence. Add this rule to `/etc/postfix/header_checks`:
 
    ```text
    /^Authentication-Results:/ IGNORE
@@ -52,7 +78,7 @@
    header_checks = regexp:/etc/postfix/header_checks
    ```
 
-8. Check and reload Postfix:
+9. Check and reload Postfix:
 
    ```sh
    sudo postfix check

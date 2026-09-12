@@ -8,28 +8,37 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-binary="$script_dir/milterguard"
-config_source="$script_dir/configs/milterguard.yaml"
-prompt_source="$script_dir/configs/detection-prompt.txt"
-trusted_domains_source="$script_dir/configs/trusted-sender-domains.txt"
-replay_tool_source="$script_dir/tools/replay_mailbox.py"
-service_source="$script_dir/packaging/systemd/milterguard.service"
-quickstart_source="$script_dir/QUICKSTART.md"
-operating_guide_source="$script_dir/OPERATING_GUIDE.md"
-readme_source="$script_dir/README.md"
-license_source="$script_dir/LICENSE"
-third_party_notices_source="$script_dir/THIRD_PARTY_NOTICES.md"
-third_party_licenses_source="$script_dir/THIRD_PARTY_LICENSES"
+
+# Release archives place install.sh and milterguard at their root. In a source
+# checkout this script remains under packaging/ and make writes bin/milterguard.
+content_root="$script_dir"
+binary="$content_root/milterguard"
+if [ ! -f "$binary" ] && [ -f "$script_dir/../go.mod" ]; then
+    content_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+    binary="$content_root/bin/milterguard"
+fi
+
+config_source="$content_root/configs/milterguard.yaml"
+prompt_source="$content_root/configs/detection-prompt.txt"
+trusted_domains_source="$content_root/configs/trusted-sender-domains.txt"
+replay_tool_source="$content_root/tools/replay_mailbox.py"
+service_source="$content_root/packaging/systemd/milterguard.service"
+quickstart_source="$content_root/QUICKSTART.md"
+operating_guide_source="$content_root/OPERATING_GUIDE.md"
+readme_source="$content_root/README.md"
+license_source="$content_root/LICENSE"
+third_party_notices_source="$content_root/THIRD_PARTY_NOTICES.md"
+third_party_licenses_source="$content_root/THIRD_PARTY_LICENSES"
 
 for required_file in "$binary" "$config_source" "$prompt_source" "$trusted_domains_source" "$replay_tool_source" "$quickstart_source" "$operating_guide_source" "$readme_source" "$license_source" "$third_party_notices_source"; do
     if [ ! -f "$required_file" ]; then
-        echo "Required release file is missing: $required_file" >&2
+        echo "Required installation file is missing: $required_file" >&2
         exit 1
     fi
 done
 
 if [ ! -d "$third_party_licenses_source" ]; then
-    echo "Required release directory is missing: $third_party_licenses_source" >&2
+    echo "Required installation directory is missing: $third_party_licenses_source" >&2
     exit 1
 fi
 

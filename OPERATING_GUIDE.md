@@ -1,13 +1,13 @@
 # MilterGuard Operating Guide
 
-Using the supplied default configuration, MilterGuard will use AI to identify
-unwanted spam and scam email, including threats concealed in images, and provide
-basic virus protection by blocking executable attachments. By default, it will
-not scan authenticated outbound email. It will initially monitor inbound email
-without rejecting it, allowing you to confirm that its decisions are reliable
-before enabling enforcement. Over time, it will learn and whitelist trusted email
-senders, and identify and blacklist problematic sending IP addresses to reduce
-false positives, false negatives, AI usage, and operating costs.
+Using the supplied default configuration, MilterGuard will initially monitor
+inbound email and report how it would identify unwanted spam, scams, threats
+concealed in images, and executable attachments without rejecting anything. It
+will not scan authenticated outbound email. After enforcement is enabled, it
+will provide basic virus protection by blocking executable attachments and will
+learn and whitelist trusted email senders and identify and blacklist problematic
+sending IP addresses to reduce false positives, false negatives, AI usage, and
+operating costs.
 
 **Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
 the repository URL, https://github.com/PhilAnderson1/MilterGuard, and ask it to
@@ -38,38 +38,37 @@ MilterGuard's configuration file is `/etc/milterguard/milterguard.yaml`.
 Edit it before starting the service, preserving its YAML indentation and using
 spaces rather than tabs.
 
-With the supplied OpenRouter configuration, replace the placeholder `ai.api_key`
-with a valid key from https://openrouter.ai. The remaining settings can be used
-unchanged for initial testing. If the example model is no longer available,
-choose a current compatible model and retest before enabling rejection.
+Running the AI model locally provides greater privacy, reliability and
+consistency, with no per-request API charges, so it is the recommended option.
+The recommended model has relatively modest hardware requirements and can
+perform well with a suitable GPU. See Running AI locally for setup guidance.
 
-The email data used for classification is sent to the configured AI endpoint,
-including selected headers, extracted message text, links, and qualifying inline
-images. If email content must remain entirely private, use MilterGuard with a
-locally hosted AI server; see the Running AI locally section. If you use
-OpenRouter, its Privacy settings include a Zero Data Retention option that
-restricts routing to providers with a zero-data-retention policy.
+To use OpenRouter instead, create an account and API key at
+https://openrouter.ai. The supplied configuration already contains the
+necessary OpenRouter settings; replace the placeholder `ai.api_key` with your
+key. If the configured model is no longer available, select a current
+compatible model and test it before enabling rejection.
 
-MilterGuard can use a locally operated llama.cpp server for AI functionality.
-Set the endpoint and model in the configuration to match your local server. The
-`endpoint_type` setting selects the endpoint-specific request used to disable
-model thinking; choose `openrouter`, `llamacpp`, or `openai` to match the server. The
-model must support image input if you want MilterGuard to examine email whose
-message is contained in an image.
+MilterGuard sends the email data used for classification to the configured AI
+endpoint, including selected headers, extracted text, links, and qualifying
+inline images. When using a hosted service, review its data-handling policy
+carefully. OpenRouter can restrict requests to providers with a Zero Data
+Retention policy through its Privacy settings.
 
-Image analysis detects scams that conceal their message inside an image to
-evade text-based filtering. Set `vision_mode` to `off` to disable it,
-`fallback` to examine qualifying inline images when insufficient text is
-available, or `always` to examine them in every message. MilterGuard never
+MilterGuard supports OpenRouter, OpenAI, and llama.cpp-compatible endpoints.
+Set `endpoint`, `endpoint_type`, `model`, and `api_key` to match the service.
+The selected model must support image input if image analysis is enabled.
+
+Image analysis detects scams that conceal their message inside images. Set
+`vision_mode` to `off`, `fallback` to inspect images when insufficient text is
+available, or `always` to inspect them with every message. MilterGuard never
 downloads remote images.
 
-Before starting MilterGuard, review
-`/etc/milterguard/detection-prompt.txt` and confirm that its unwanted-email
-rules match what you want to reject. The supplied prompt and settings have been
-tested with the configured model; another model may interpret the rules or
-confidence scale differently. Keep prompt changes concise, and test any changed
-prompt or model in monitor mode against representative legitimate and unwanted
-email before enabling rejection.
+Before starting MilterGuard, review `/etc/milterguard/detection-prompt.txt` and
+confirm that its rules match the email you want to reject. The supplied prompt
+has been tested with the configured model; test any prompt or model changes in
+monitor mode against representative legitimate and unwanted email before
+enabling rejection.
 
 ## Install and configure OpenDKIM and OpenDMARC (optional)
 
@@ -319,9 +318,10 @@ cannot be saved.
 
 The archive may contain private correspondence and dangerous attachments, so
 restrict access to it. Retention cleanup runs at startup and every 24 hours;
-expired date directories are removed hierarchically. Message-count and total-size
-limits remove the oldest retained copies when necessary. Archive errors are
-logged but never alter the SMTP filtering decision.
+expired date directories are removed hierarchically. If the archive exceeds its
+configured target size, daily cleanup removes the oldest retained messages until
+it is below the target. Archive errors are logged but never alter the SMTP
+filtering decision.
 
 ## Trusted mail and adaptive filtering
 
@@ -372,13 +372,13 @@ removed automatically. An expiry of `0s` disables the history.
 Learned correspondents, rejection history, IP reputation, and cached domain
 registration data are stored in `/var/lib/milterguard` and survive service
 restarts. Back up this directory if you want to preserve the learned state when
-moving the service to another machine. Correspondent, IP-reputation, and
+moving the service to another machine. Correspondent, IP reputation,
 rejection-history, and domain-registration changes are committed to the SQLite
 database immediately. `persistence.cleanup_interval` controls periodic removal
-of expired and excess records and must be at least one minute; cleanup also
-runs at startup. The same maintenance task checkpoints SQLite's write-ahead log
-without delaying active mail processing. Domain-registration expiry is still
-enforced during lookups, before periodic cleanup physically removes the old row.
+of expired and excess records and must be at least one minute; cleanup also runs
+at startup. The same background maintenance task also checkpoints SQLite's
+write-ahead log. Domain-registration expiry is still enforced during lookups,
+before periodic cleanup physically removes the old row.
 
 For a consistent backup, stop MilterGuard before copying its SQLite database,
 or use a SQLite-aware backup tool while the service is running.
@@ -496,41 +496,37 @@ replies can contain allowlist and rejection-history data.
 
 ## Running AI locally
 
-A local AI model keeps sensitive email content within your own infrastructure
-instead of sending it to a hosted AI provider, providing the strongest privacy
-option. It also removes per-message API charges.
+Running the AI locally is the recommended option. Email content remains on your
+own infrastructure, classifications remain consistent, availability is under
+your control, and there are no per-message API charges.
 
-Choose a model that follows structured instructions reliably and returns
-consistent classifications. Vision support is required to analyse scams
-presented as images.
+The recommended Qwen3.6-35B-A3B model provides strong results with relatively
+modest hardware requirements. A system with an 8 GB GPU and 32 GB of system RAM
+should work well with a suitable quantization and configuration.
 
-The default model, Qwen3.6-35B-A3B (freely available under open weights), has
-relatively modest hardware requirements and can perform very well locally
-when the mail server is fitted with a suitable GPU. It will even run entirely
-on the CPU at reduced throughput if the server has sufficient free
-RAM (approx. 32 GB) to load a reasonable quantization of the model.
-
-The model may be downloaded from here:
+The model is available from:
 
 https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF
 
-Choose the biggest version that will fit your available memory, although
-anything below 4-bit quantization may be less reliable and is not
-recommended.
+Choose the largest quantization that fits comfortably within the available GPU
+and system memory. Quantizations below 4-bit may reduce classification quality
+and are not recommended.
 
-Serve the model using llama.cpp, available for download from here:
+This practical guide explains how to run the model efficiently with limited GPU
+memory:
+
+https://piefed.crash.cx/c/localllama/p/123973/how-to-run-qwen-35b-a3b-on-4gb-to-8gb-of-vram-with-24-gb-system-ram
+
+Serve the model through llama.cpp, available from:
 
 https://github.com/ggml-org/llama.cpp
 
-Allow enough AI timeout for the slowest messages you expect to process. Large
-messages and image analysis generally take longer than short text messages. Also
-keep the MTA's Milter timeout longer than MilterGuard's AI timeout so that the
-MTA does not abandon the request while analysis is still running.
+Set MilterGuard's AI timeout high enough for the slowest messages and image
+analysis. The MTA's Milter timeout must be longer than MilterGuard's AI timeout.
 
-Before adopting a local model, replay a representative collection of legitimate,
-spam, and scam messages against a separate MilterGuard test instance. Compare
-both accuracy and response time with the hosted model before switching production
-traffic.
+Before using a local model on live mail, replay a representative collection of
+legitimate, spam, and scam messages through a separate MilterGuard test instance.
+Check both classification accuracy and response time before enabling enforcement.
 
 ## Routine operation
 
