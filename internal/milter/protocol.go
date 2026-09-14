@@ -34,6 +34,7 @@ const (
 	responseReply        = byte('y')
 	responseAddHeader    = byte('h')
 	responseChangeHeader = byte('m')
+	responseProgress     = byte('p')
 
 	minimumProtocolVersion   = uint32(2)
 	supportedProtocolVersion = uint32(6)

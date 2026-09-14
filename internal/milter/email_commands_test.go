@@ -1,10 +1,15 @@
 package milter
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"io"
 	"log/slog"
+	"mime"
+	"mime/multipart"
 	"net"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,19 +82,44 @@ func TestAuthenticatedUserEmailCommandAddsOwnRelationshipAndDiscards(t *testing.
 	}
 }
 
-func TestUnauthenticatedCommandRecipientIsRejectedAtRCPT(t *testing.T) {
+func TestEmailCommandBatchRunsSequentiallyAndStopsAtText(t *testing.T) {
+	server, analyzer, conn, done := commandTestServer(t, true, nil)
+	defer func() { _ = conn.Close(); <-done }()
+	body := "WHITELIST ADD old@example.net\nWHITELIST DELETE old@example.net\nWHITELIST ADD current@example.net\nThanks"
+	response := submitCommand(t, conn, "philip", "phil@example.com", []string{"milterguard@example.com"}, body)
+	if len(response) != 1 || response[0] != responseDiscard {
+		t.Fatalf("response = %q, want discard", response)
+	}
+	if analyzer.calls.Load() != 0 {
+		t.Fatal("command message was sent to AI")
+	}
+	if server.correspondents.match(context.Background(), "old@example.net", []string{"phil@example.com"}).Known {
+		t.Fatal("deleted batch entry remains")
+	}
+	if !server.correspondents.match(context.Background(), "current@example.net", []string{"phil@example.com"}).Known {
+		t.Fatal("later batch command was not executed")
+	}
+}
+
+func TestUnauthenticatedCommandRecipientIsContinuedAtRCPTAndRejectedAtEOM(t *testing.T) {
 	_, analyzer, conn, done := commandTestServer(t, true, nil)
 	defer func() { _ = conn.Close(); <-done }()
 	negotiate(t, conn)
 	sendContinueFrames(t, conn, connectFrame('4', "192.0.2.10"), envelopeFrame(commandMail, "outsider@example.net"))
-	if err := writeFrame(conn, envelopeFrame(commandRecipient, "milterguard@example.com")); err != nil {
+	sendContinueFrames(t, conn,
+		envelopeFrame(commandRecipient, "milterguard@example.com"),
+		headerFrame("Content-Type", "text/plain; charset=UTF-8"),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("HELP")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
 		t.Fatal(err)
 	}
 	response, err := readFrame(conn)
 	if err != nil || len(response) == 0 || response[0] != responseReply {
-		t.Fatalf("response = %q, err = %v; want SMTP rejection", response, err)
+		t.Fatalf("EOM response = %q, err = %v; want SMTP rejection", response, err)
 	}
-	if !strings.Contains(string(response), "SMTP authentication is required") {
+	if !strings.Contains(string(response), "authentication required") {
 		t.Fatalf("response does not explain authentication failure: %q", response)
 	}
 	if analyzer.calls.Load() != 0 {
@@ -192,6 +222,18 @@ func TestAllowlistAddedDescriptions(t *testing.T) {
 	}
 }
 
+func TestAdministratorHelpShowsWildcardPeriodOrder(t *testing.T) {
+	help := commandHelp(true)
+	for _, example := range []string{"WHITELIST LIST * month", "REJECTIONS * year"} {
+		if !strings.Contains(help, example) {
+			t.Errorf("administrator help does not contain %q", example)
+		}
+	}
+	if strings.Contains(commandHelp(false), "WHITELIST LIST * month") {
+		t.Fatal("ordinary-user help contains administrator wildcard example")
+	}
+}
+
 func TestIPCommandsAreAdministratorOnly(t *testing.T) {
 	for _, text := range []string{"IP LIST", "IP LIST LOOKUP", "IP ADD 192.0.2.10", "IP DELETE 2001:db8::1"} {
 		if _, _, err := parseEmailCommand(text, "phil@example.com", false); err == nil {
@@ -211,34 +253,204 @@ func TestIPCommandsAreAdministratorOnly(t *testing.T) {
 	}
 }
 
+func TestListingCommandPeriods(t *testing.T) {
+	tests := []struct {
+		text      string
+		admin     bool
+		kind      string
+		period    commandPeriod
+		recipient string
+	}{
+		{text: "WHITELIST LIST", kind: "whitelist_list", period: periodWeek, recipient: "phil@example.com"},
+		{text: "WHITELIST LIST month", kind: "whitelist_list", period: periodMonth, recipient: "phil@example.com"},
+		{text: "WHITELIST LIST * all", admin: true, kind: "whitelist_list", period: periodAll, recipient: "*"},
+		{text: "REJECTIONS day", kind: "rejections", period: periodDay, recipient: "phil@example.com"},
+		{text: "REJECTIONS other@example.com year", admin: true, kind: "rejections", period: periodYear, recipient: "other@example.com"},
+		{text: "IP LIST week", admin: true, kind: "ip_list", period: periodWeek},
+		{text: "IP LIST LOOKUP month", admin: true, kind: "ip_list_lookup", period: periodMonth},
+	}
+	for _, test := range tests {
+		command, _, err := parseEmailCommand(test.text, "phil@example.com", test.admin)
+		if err != nil || command.kind != test.kind || command.period != test.period || command.recipient != test.recipient {
+			t.Errorf("parse %q = %#v, %v", test.text, command, err)
+		}
+	}
+	for _, invalid := range []string{"IP LIST fortnight", "IP LIST LOOKUP day extra", "REJECTIONS * week extra", "WHITELIST LIST * month extra"} {
+		if _, _, err := parseEmailCommand(invalid, "phil@example.com", true); err == nil {
+			t.Errorf("invalid listing command %q was accepted", invalid)
+		}
+	}
+}
+
+func TestRejectionDetailCommandRequiresPositiveID(t *testing.T) {
+	command, _, err := parseEmailCommand("REJECTION 123", "phil@example.com", false)
+	if err != nil || command.kind != "rejection" || command.rejectionID != 123 {
+		t.Fatalf("rejection detail command = %#v, %v", command, err)
+	}
+	for _, invalid := range []string{"REJECTION", "REJECTION 0", "REJECTION -1", "REJECTION invalid", "REJECTION 9223372036854775808", "REJECTION 1 extra"} {
+		if _, _, err := parseEmailCommand(invalid, "phil@example.com", false); err == nil {
+			t.Errorf("invalid command %q was accepted", invalid)
+		}
+	}
+}
+
+func TestRejectionDetailFormattingContainsOnlyStoredMetadataAndBody(t *testing.T) {
+	entry := rejectionHistoryEntry{ID: 12, Sender: "sender@example.net", Recipients: []string{"local@example.com"},
+		Subject: "Example", RejectedAt: time.Date(2026, 9, 13, 5, 30, 0, 0, time.UTC), Reason: "Unwanted"}
+	formatted := formatRejectionDetail(entry, "Cleaned body")
+	for _, want := range []string{"Rejection ID: 12", "From: sender@example.net", "To: local@example.com", "Subject: Example", "Date: 2026-09-13 05:30:00 UTC", "Reason for rejection: Unwanted", "Processed email body text:\nCleaned body"} {
+		if !strings.Contains(formatted, want) {
+			t.Errorf("detail missing %q: %s", want, formatted)
+		}
+	}
+	for _, unwanted := range []string{"CONNECTION INFORMATION", "AUTHENTICATION INFORMATION", "CORRESPONDENT INFORMATION"} {
+		if strings.Contains(formatted, unwanted) {
+			t.Errorf("detail contains analysis section %q", unwanted)
+		}
+	}
+}
+
+func TestCommandReplyPayloadAttachesOriginalMessage(t *testing.T) {
+	original := []byte("From: sender@example.net\r\nTo: local@example.com\r\nSubject: Original\r\n\r\nOriginal body\r\n")
+	payload, err := buildCommandReplyPayload(
+		"milterguard@example.com", "local@example.com", "MilterGuard command results",
+		"Sun, 13 Sep 2026 07:00:00 +0000", "token",
+		commandReplyContent{
+			Text: "Rejection details\n",
+			Attachments: []commandReplyAttachment{{
+				Filename: "rejection-12.eml", MediaType: "application/octet-stream", Contents: original,
+			}},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaType, params, err := mime.ParseMediaType(message.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/mixed" {
+		t.Fatalf("Content-Type = %q, params=%v, err=%v", mediaType, params, err)
+	}
+	reader := multipart.NewReader(message.Body, params["boundary"])
+	textPart, err := reader.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	textBody, err := io.ReadAll(textPart)
+	if err != nil || !strings.Contains(string(textBody), "Rejection details") {
+		t.Fatalf("text part = %q, err=%v", textBody, err)
+	}
+	attachment, err := reader.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attachment.FileName() != "rejection-12.eml" || attachment.Header.Get("Content-Transfer-Encoding") != "base64" {
+		t.Fatalf("attachment headers = %#v", attachment.Header)
+	}
+	attachmentType, _, err := mime.ParseMediaType(attachment.Header.Get("Content-Type"))
+	if err != nil || attachmentType != "application/octet-stream" {
+		t.Fatalf("attachment Content-Type = %q, err=%v", attachmentType, err)
+	}
+	decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, attachment))
+	if err != nil || !bytes.Equal(decoded, original) {
+		t.Fatalf("decoded attachment = %q, err=%v", decoded, err)
+	}
+	if _, err := reader.NextPart(); err != io.EOF {
+		t.Fatalf("unexpected extra MIME part: %v", err)
+	}
+}
+
+func TestBoundedCommandReplyPayloadOmitsOversizedAttachment(t *testing.T) {
+	payload, err := buildBoundedCommandReplyPayload(
+		"milterguard@example.com", "local@example.com", "Results", "date", "token",
+		commandReplyContent{
+			Text: "Rejection details\n",
+			Attachments: []commandReplyAttachment{{
+				Filename: "rejection-12.eml", MediaType: "application/octet-stream", Contents: bytes.Repeat([]byte("x"), 1024),
+			}},
+		}, 512,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(message.Header.Get("Content-Type"), "multipart/") {
+		t.Fatalf("oversized reply remained multipart: %s", message.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(message.Body)
+	if err != nil || !strings.Contains(string(body), "too large to attach") {
+		t.Fatalf("fallback body = %q, err=%v", body, err)
+	}
+}
+
+func TestCommandPeriodCutoffs(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	if got := periodDay.cutoff(now); !got.Equal(now.Add(-24 * time.Hour)) {
+		t.Fatalf("day cutoff = %v", got)
+	}
+	if got := periodWeek.cutoff(now); !got.Equal(now.Add(-7 * 24 * time.Hour)) {
+		t.Fatalf("week cutoff = %v", got)
+	}
+	if got := periodMonth.cutoff(now); !got.Equal(now.AddDate(0, -1, 0)) {
+		t.Fatalf("month cutoff = %v", got)
+	}
+	if got := periodYear.cutoff(now); !got.Equal(now.AddDate(-1, 0, 0)) {
+		t.Fatalf("year cutoff = %v", got)
+	}
+	if got := periodAll.cutoff(now); !got.IsZero() {
+		t.Fatalf("all cutoff = %v", got)
+	}
+}
+
 func TestCommandMessageRequiresSmallPlainTextBody(t *testing.T) {
 	msg := message.New(1024)
 	msg.AddHeader("Content-Type", "text/plain; charset=UTF-8")
 	msg.AddHeader("Content-Transfer-Encoding", "quoted-printable")
 	msg.AddBody([]byte("WHITELIST ADD news=40example.net\n\nQuoted reply and signature"))
-	text, err := commandMessageText(msg, 1024)
-	if err != nil || text != "WHITELIST ADD news@example.net" {
-		t.Fatalf("decoded command = %q, %v", text, err)
+	lines, err := commandMessageLines(msg, 1024)
+	if err != nil || len(lines) != 2 || lines[0] != "WHITELIST ADD news@example.net" {
+		t.Fatalf("decoded commands = %q, %v", lines, err)
 	}
 	msg = message.New(1024)
 	msg.AddHeader("Content-Type", "multipart/mixed; boundary=x")
 	msg.AddBody([]byte("--x"))
-	if _, err := commandMessageText(msg, 1024); err == nil {
+	if _, err := commandMessageLines(msg, 1024); err == nil {
 		t.Fatal("multipart command message was accepted")
 	}
 	msg = message.New(4096)
 	msg.AddHeader("Content-Type", "text/html; charset=UTF-8")
 	msg.AddBody([]byte("<html><body><p>WHITELIST DELETE news@example.net</p><blockquote>Old reply text</blockquote></body></html>"))
-	text, err = commandMessageText(msg, 4096)
-	if err != nil || text != "WHITELIST DELETE news@example.net" {
-		t.Fatalf("HTML command = %q, %v", text, err)
+	lines, err = commandMessageLines(msg, 4096)
+	if err != nil || len(lines) == 0 || lines[0] != "WHITELIST DELETE news@example.net" {
+		t.Fatalf("HTML commands = %q, %v", lines, err)
 	}
 	msg = message.New(4096)
 	msg.AddHeader("Content-Type", "multipart/alternative; boundary=x")
 	msg.AddBody([]byte("--x\r\nContent-Type: text/plain\r\n\r\nWHITELIST ADD old@example.net\r\n--x\r\nContent-Type: text/html\r\n\r\n<div>WHITELIST ADD news@example.net</div><div>Previous message</div>\r\n--x--\r\n"))
-	text, err = commandMessageText(msg, 4096)
-	if err != nil || text != "WHITELIST ADD news@example.net" {
-		t.Fatalf("multipart HTML command = %q, %v", text, err)
+	lines, err = commandMessageLines(msg, 4096)
+	if err != nil || len(lines) == 0 || lines[0] != "WHITELIST ADD news@example.net" {
+		t.Fatalf("multipart HTML commands = %q, %v", lines, err)
+	}
+}
+
+func TestCommandMessageTrimsOversizedReplyInsteadOfRejecting(t *testing.T) {
+	msg := message.New(96)
+	msg.AddHeader("Content-Type", "text/plain; charset=UTF-8")
+	msg.AddBody([]byte("WHITELIST ADD news@example.net\n\nOn an earlier date someone wrote:\n" + strings.Repeat("quoted history ", 20)))
+	if !msg.BodyTruncated {
+		t.Fatal("test message was not truncated by the Milter retention limit")
+	}
+	lines, err := commandMessageLines(msg, 64)
+	if err != nil {
+		t.Fatalf("oversized command reply rejected: %v", err)
+	}
+	if len(lines) == 0 || lines[0] != "WHITELIST ADD news@example.net" {
+		t.Fatalf("decoded lines = %q", lines)
 	}
 }
 

@@ -208,6 +208,22 @@ func TestResponseExcerptIsBounded(t *testing.T) {
 	}
 }
 
+func TestSafeHTTPResponseExcerpt(t *testing.T) {
+	if got := safeHTTPResponseExcerpt("text/html; charset=utf-8", []byte(`{"error":"hidden by content type"}`)); got != "" {
+		t.Fatalf("HTML content-type excerpt = %q", got)
+	}
+	if got := safeHTTPResponseExcerpt("", []byte("  <!DOCTYPE html><title>Not Found</title>")); got != "" {
+		t.Fatalf("HTML body excerpt = %q", got)
+	}
+	if got := safeHTTPResponseExcerpt("application/json", []byte(` {"error":"model not found"} `)); got != `{"error":"model not found"}` {
+		t.Fatalf("JSON excerpt = %q", got)
+	}
+	long := []byte(strings.Repeat("x", maxHTTPResponseExcerptBytes+1))
+	if got := safeHTTPResponseExcerpt("text/plain", long); got != strings.Repeat("x", maxHTTPResponseExcerptBytes)+"...[truncated]" {
+		t.Fatalf("bounded excerpt length or contents are wrong: %q", got)
+	}
+}
+
 func TestAnalyzeRetriesConnectionFailure(t *testing.T) {
 	var attempts atomic.Int32
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -260,6 +276,55 @@ func TestAnalyzeDoesNotRetryHTTPError(t *testing.T) {
 	}
 	if attempts.Load() != 1 {
 		t.Fatalf("attempts = %d, want 1", attempts.Load())
+	}
+}
+
+func TestAnalyzeCategorizesEndpointErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		resp *http.Response
+		kind ErrorKind
+	}{
+		{
+			name: "credentials",
+			resp: &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("invalid key"))},
+			kind: ErrorCredentials,
+		},
+		{
+			name: "HTTP",
+			resp: &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("model not found"))},
+			kind: ErrorHTTP,
+		},
+		{
+			name: "payment required",
+			resp: &http.Response{StatusCode: http.StatusPaymentRequired, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("insufficient credits"))},
+			kind: ErrorPaymentRequired,
+		},
+		{
+			name: "response envelope",
+			resp: &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("not JSON"))},
+			kind: ErrorResponse,
+		},
+		{
+			name: "decision JSON",
+			resp: decisionResponse(`{"classification":"unwanted","score":0.9,"reasons":[1]}`),
+			kind: ErrorDecision,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := retryTestClient(roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return test.resp, nil
+			}), 0)
+			_, err := client.Analyze(context.Background(), Input{Text: "test"})
+			var endpointErr *EndpointError
+			if !errors.As(err, &endpointErr) {
+				t.Fatalf("error = %v, want EndpointError", err)
+			}
+			if endpointErr.Kind != test.kind {
+				t.Fatalf("error kind = %v, want %v", endpointErr.Kind, test.kind)
+			}
+		})
 	}
 }
 

@@ -1152,6 +1152,85 @@ func TestVisionFallbackSelectsReferencedInlineImage(t *testing.T) {
 	}
 }
 
+func TestVisionFallbackIgnoresGeneratedLinkAndImageEvidenceForTextThreshold(t *testing.T) {
+	longDestination := "https://security.example/review?token=" + strings.Repeat("x", 400)
+	m := multipartRelatedMessage("Fallback", `<a href="`+longDestination+`"><img alt="Long generated image description" src="cid:notice"></a>`, "<notice>")
+	analysis := m.BuildAnalysis(2000, VisionOptions{
+		Mode: "fallback", MinTextChars: 20, MaxImages: 2,
+		MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if !strings.Contains(analysis.Prompt, longDestination) || !strings.Contains(analysis.Prompt, "![Long generated image description](cid:notice)") {
+		t.Fatalf("link or image evidence missing from prompt: %s", analysis.Prompt)
+	}
+	if len(analysis.Images) != 1 {
+		t.Fatalf("generated evidence inflated visible-text threshold; selected images = %d", len(analysis.Images))
+	}
+}
+
+func TestVisionFallbackCountsVisibleAnchorLabel(t *testing.T) {
+	visibleLabel := strings.Repeat("visible words ", 20)
+	m := multipartRelatedMessage("Fallback", `<a href="https://example.test/review">`+visibleLabel+`</a><img src="cid:notice">`, "<notice>")
+	analysis := m.BuildAnalysis(2000, VisionOptions{
+		Mode: "fallback", MinTextChars: 20, MaxImages: 2,
+		MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if len(analysis.Images) != 0 {
+		t.Fatalf("visible anchor label was excluded from text threshold: %#v", analysis.Images)
+	}
+}
+
+func TestAlternativeSelectsRelatedHTMLWithLinkedCIDImage(t *testing.T) {
+	m := New(1 << 20)
+	m.AddHeader("Content-Type", `multipart/alternative; boundary="alternative"`)
+	m.AddBody([]byte("--alternative\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n\r\nPlain fallback without the destination.\r\n" +
+		"--alternative\r\nContent-Type: multipart/related; boundary=\"related\"\r\n\r\n" +
+		"--related\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n" +
+		`<a href="https://security.example/review"><img src="cid:notice" alt="Review security notice"></a>` + "\r\n" +
+		"--related\r\nContent-Type: image/png; name=notice.png\r\n" +
+		"Content-ID: <notice>\r\nContent-Disposition: inline\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n" + onePixelPNG + "\r\n" +
+		"--related--\r\n--alternative--\r\n"))
+
+	analysis := m.BuildAnalysis(1000, VisionOptions{
+		Mode: "fallback", MinTextChars: 200, MaxImages: 2,
+		MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if strings.Contains(analysis.Prompt, "Plain fallback") {
+		t.Fatalf("selected plain alternative instead of related HTML: %s", analysis.Prompt)
+	}
+	if !strings.Contains(analysis.Prompt, "https://security.example/review") {
+		t.Fatalf("linked-image destination missing: %s", analysis.Prompt)
+	}
+	if !strings.Contains(analysis.Prompt, "![Review security notice](cid:notice)") {
+		t.Fatalf("CID image reference missing: %s", analysis.Prompt)
+	}
+	if len(analysis.Images) != 1 {
+		t.Fatalf("selected images = %d, want 1; prompt=%s", len(analysis.Images), analysis.Prompt)
+	}
+}
+
+func TestAlternativeDoesNotTreatRelatedImageWithoutHTMLAsHTML(t *testing.T) {
+	m := New(1 << 20)
+	m.AddHeader("Content-Type", `multipart/alternative; boundary="alternative"`)
+	m.AddBody([]byte("--alternative\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n\r\nPreferred plain text.\r\n" +
+		"--alternative\r\nContent-Type: multipart/related; boundary=\"related\"\r\n\r\n" +
+		"--related\r\nContent-Type: image/png\r\nContent-ID: <notice>\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n" + onePixelPNG + "\r\n" +
+		"--related--\r\n--alternative--\r\n"))
+
+	analysis := m.BuildAnalysis(1000, VisionOptions{
+		Mode: "always", MaxImages: 2, MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if !strings.Contains(analysis.Prompt, "Preferred plain text.") {
+		t.Fatalf("plain alternative missing: %s", analysis.Prompt)
+	}
+	if len(analysis.Images) != 0 {
+		t.Fatalf("related image-only branch displaced plain alternative: %#v", analysis.Images)
+	}
+}
+
 func TestVisionFallbackIgnoresUnreferencedImage(t *testing.T) {
 	m := imageOnlyMessage("cid:different-image", "<scam-image>")
 	analysis := m.BuildAnalysis(1000, VisionOptions{

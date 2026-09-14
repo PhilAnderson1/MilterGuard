@@ -645,11 +645,18 @@ func (s *ipReputationStore) manualDelete(addr netip.Addr) (bool, error) {
 	}
 	return n > 0, nil
 }
-func (s *ipReputationStore) listActive() []activeIPBlock {
+func (s *ipReputationStore) listActive(activitySince time.Time) []activeIPBlock {
 	if !s.enabled() {
 		return nil
 	}
-	rows, err := s.db.Query(context.Background(), `SELECT ip,block_level,blocked_until_ms FROM ip_reputation WHERE block_level IS NOT NULL AND blocked_until_ms>? ORDER BY ip`, unixMillis(s.now().UTC()))
+	query := `SELECT ip,block_level,blocked_until_ms FROM ip_reputation WHERE block_level IS NOT NULL AND blocked_until_ms>?`
+	args := []any{unixMillis(s.now().UTC())}
+	if !activitySince.IsZero() {
+		query += ` AND last_activity_at_ms>=?`
+		args = append(args, unixMillis(activitySince))
+	}
+	query += ` ORDER BY ip`
+	rows, err := s.db.Query(context.Background(), query, args...)
 	if err != nil {
 		s.logDatabaseError("list active sending IP blocks", err)
 		return nil

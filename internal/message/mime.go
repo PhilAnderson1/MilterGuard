@@ -17,6 +17,7 @@ type extractedContent struct {
 	Links       []string
 	ImageRefs   []string
 	Images      []extractedImage
+	HTML        bool
 }
 
 type extractedImage struct {
@@ -61,10 +62,13 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 			parts = append(parts, content)
 			if mediaType == "multipart/alternative" {
 				partMediaType, _, _ := mime.ParseMediaType(partContentType)
-				switch partMediaType {
-				case "text/html":
+				switch {
+				case content.HTML:
+					// HTML with CID resources is normally wrapped in
+					// multipart/related. Preserve that complete branch rather
+					// than selecting the direct text/plain alternative.
 					alternativeHTML = content
-				case "text/plain":
+				case partMediaType == "text/plain":
 					alternativePlain = content
 				}
 			}
@@ -90,6 +94,7 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 			combined.Links = append(combined.Links, part.Links...)
 			imageRefs.AddAll(part.ImageRefs)
 			combined.Images = append(combined.Images, part.Images...)
+			combined.HTML = combined.HTML || part.HTML
 		}
 		combined.ImageRefs = imageRefs.refs
 		combined.Text = strings.Join(textParts, "\n\n")
@@ -105,7 +110,9 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 	}
 	text := string(decoded)
 	if mediaType == "text/html" {
-		return htmlToText(text)
+		content := htmlToText(text)
+		content.HTML = true
+		return content
 	}
 	return extractedContent{Text: text, VisibleText: text, Links: findHTTPURLs(text)}
 }

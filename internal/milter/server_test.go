@@ -291,6 +291,87 @@ func enableTestRejectedMail(t *testing.T, server *Server) string {
 	return root
 }
 
+func TestServerUsesUnifiedRejectionHistoryArchiveSettings(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "rejected-mail")
+	cfg := config.Config{
+		Milter:      config.MilterConfig{MaxConnections: 1},
+		AI:          config.AIConfig{MaxConcurrent: 1},
+		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db")},
+		RejectionHistory: config.RejectionHistoryConfig{
+			Expiry: config.Duration(24 * time.Hour), MaxEntries: 10, SaveMessages: true,
+			MessageDirectory: root, MessageMaxTotalBytes: 1 << 20,
+		},
+	}
+	server := NewServer(cfg, fixedAnalyzer{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { _ = server.Close() })
+	if server.rejectedMail == nil {
+		t.Fatal("unified rejection-history settings did not enable the message archive")
+	}
+	if _, err := server.rejectedMail.SaveWithRecordID([]byte("test"), 7); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, time.Now().UTC().Format("2006"), time.Now().UTC().Format("01"), time.Now().UTC().Format("02"), "7.eml")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("archive does not use configured message directory: %v", err)
+	}
+}
+
+func TestRejectionCommandRetrievesProcessedArchivedMessage(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "rejected-mail")
+	cfg := config.Config{
+		Milter:      config.MilterConfig{MaxConnections: 1, MaxMessageSize: 1 << 20},
+		AI:          config.AIConfig{MaxConcurrent: 1},
+		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db")},
+		RejectionHistory: config.RejectionHistoryConfig{
+			Expiry: config.Duration(24 * time.Hour), MaxEntries: 10, SaveMessages: true,
+			MessageDirectory: root, MessageMaxTotalBytes: 1 << 20,
+		},
+	}
+	server := NewServer(cfg, fixedAnalyzer{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { _ = server.Close() })
+	msg := message.New(cfg.Milter.MaxMessageSize)
+	msg.AddHeader("From", "Sender <sender@example.net>")
+	msg.AddHeader("Subject", "Archived subject")
+	msg.AddHeader("Content-Type", "text/html; charset=UTF-8")
+	msg.AddBody([]byte(`<p>Review <a href="https://example.net/account">account</a></p>`))
+	server.recordRejection(context.Background(), msg, "sender@example.net", "", []string{"owner@example.com"}, []string{"test reason"}, "ai")
+	entries, err := server.rejectionHistory.list("owner@example.com", time.Time{})
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("rejection history = %#v, %v", entries, err)
+	}
+	command := emailCommand{kind: "rejection", canonical: fmt.Sprintf("REJECTION %d", entries[0].ID), rejectionID: entries[0].ID}
+	owner := &session{server: server, envelopeSender: "owner@example.com"}
+	body, err := owner.executeEmailCommand(command, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := body()
+	for _, want := range []string{"Archived subject", "test reason", `[account](https://example.net/account)`} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("retrieved message missing %q: %s", want, result.Text)
+		}
+	}
+	if len(result.Attachments) != 1 || result.Attachments[0].Filename != fmt.Sprintf("rejection-%d.eml", entries[0].ID) ||
+		result.Attachments[0].MediaType != "application/octet-stream" || !bytes.Contains(result.Attachments[0].Contents, []byte("Review")) {
+		t.Fatalf("retrieved attachment = %#v", result.Attachments)
+	}
+	archivePath := filepath.Join(root, entries[0].RejectedAt.UTC().Format("2006"), entries[0].RejectedAt.UTC().Format("01"), entries[0].RejectedAt.UTC().Format("02"), fmt.Sprintf("%d.eml", entries[0].ID))
+	if err := os.Remove(archivePath); err != nil {
+		t.Fatal(err)
+	}
+	body, err = owner.executeEmailCommand(command, false)
+	missing := body()
+	if err != nil || !strings.Contains(missing.Text, "Saved message is not available") || len(missing.Attachments) != 0 {
+		t.Fatalf("missing archive result = %#v, %v", missing, err)
+	}
+	other := &session{server: server, envelopeSender: "other@example.com"}
+	body, err = other.executeEmailCommand(command, false)
+	unauthorized := body()
+	if err != nil || unauthorized.Text != "Rejection record not found.\n" || len(unauthorized.Attachments) != 0 {
+		t.Fatalf("unauthorized result = %#v, %v", unauthorized, err)
+	}
+}
+
 func archivedMessages(t *testing.T, root string) []string {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
@@ -359,7 +440,7 @@ func TestRejectedMessageArchiveUsesRejectionRecordIDs(t *testing.T) {
 
 	server.recordRejection(context.Background(), msg, "sender@example.net", "bounce@example.net", []string{"one@example.com", "two@example.com"}, []string{"unwanted"}, "ai")
 
-	entries, err := server.rejectionHistory.list("*")
+	entries, err := server.rejectionHistory.list("*", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

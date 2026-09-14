@@ -1,6 +1,7 @@
 package rejectedmail
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,5 +164,44 @@ func TestCapacityCleanupUsesModificationTime(t *testing.T) {
 	}
 	if _, err := os.Stat(newPath); err != nil {
 		t.Fatalf("newer file was incorrectly evicted: %v", err)
+	}
+}
+
+func TestReadWithRecordIDUsesStoredDateAndBounds(t *testing.T) {
+	root := t.TempDir()
+	when := time.Date(2026, 9, 7, 23, 59, 59, 0, time.UTC)
+	archive := New(Options{Directory: root, Retention: 30 * 24 * time.Hour, MaxTotalBytes: 1024}, nil)
+	if _, err := archive.SaveWithRecordIDAt([]byte("message"), 123, when); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := archive.ReadWithRecordID(123, when, 1024)
+	if err != nil || string(contents) != "message" {
+		t.Fatalf("read = %q, %v", contents, err)
+	}
+	if _, err := archive.ReadWithRecordID(123, when.Add(24*time.Hour), 1024); !errors.Is(err, ErrMessageNotFound) {
+		t.Fatalf("wrong-date read error = %v", err)
+	}
+	if _, err := archive.ReadWithRecordID(123, when, 3); err == nil || !strings.Contains(err.Error(), "exceeds read limit") {
+		t.Fatalf("bounded read error = %v", err)
+	}
+}
+
+func TestReadWithRecordIDRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	when := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	directory := filepath.Join(root, "2026", "09", "07")
+	if err := os.MkdirAll(directory, 0750); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(target, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(directory, "9.eml")); err != nil {
+		t.Fatal(err)
+	}
+	archive := New(Options{Directory: root, Retention: 30 * 24 * time.Hour, MaxTotalBytes: 1024}, nil)
+	if _, err := archive.ReadWithRecordID(9, when, 1024); err == nil {
+		t.Fatal("symlinked saved message was read")
 	}
 }

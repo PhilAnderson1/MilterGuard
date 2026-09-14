@@ -28,8 +28,9 @@ type lexicalAnchor struct {
 }
 
 type lexicalOutput struct {
-	text   strings.Builder
-	anchor *lexicalAnchor
+	text    strings.Builder
+	visible strings.Builder
+	anchor  *lexicalAnchor
 }
 
 type lexicalLinkCollector struct {
@@ -111,6 +112,7 @@ func (output *lexicalOutput) WriteString(value string) {
 }
 
 func (output *lexicalOutput) appendByte(value byte) {
+	output.visible.WriteByte(value)
 	if output.anchor != nil {
 		output.anchor.label.WriteByte(value)
 		output.anchor.plainLabel.WriteByte(value)
@@ -309,7 +311,7 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 
 	decoded := text.text.String()
 	flatText := strings.Join(strings.Fields(decoded), " ")
-	visibleText := lexicalVisibleText(decoded)
+	visibleText := lexicalVisibleText(text.visible.String())
 	links.AddAll(findHTTPURLs(flatText))
 	return extractedContent{Text: flatText, VisibleText: visibleText, Links: links.links, ImageRefs: imageRefs.refs}
 }
@@ -323,6 +325,7 @@ func lexicalWriteDecodedText(text *lexicalOutput, value string) {
 // Keep the unescaped form separately for an unclosed anchor, which is deliberately
 // emitted as plain text rather than Markdown.
 func (output *lexicalOutput) WriteUntrustedString(value string) {
+	output.visible.WriteString(value)
 	if output.anchor == nil {
 		output.text.WriteString(value)
 		return

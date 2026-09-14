@@ -26,7 +26,7 @@ func newTestRejectionHistoryStore(t *testing.T, cfg config.RejectionHistoryConfi
 
 func rejectionEntries(t *testing.T, store *rejectionHistoryStore, recipient string) []rejectionHistoryEntry {
 	t.Helper()
-	entries, err := store.list(recipient)
+	entries, err := store.list(recipient, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +69,51 @@ func TestRejectionHistoryPersistsOneEventWithMultipleRecipients(t *testing.T) {
 	reloaded := newRejectionHistoryStore(cfg, reopened, nil)
 	if got := rejectionEntries(t, reloaded, "bob@example.com"); len(got) != 1 || got[0].ID != id {
 		t.Fatalf("reloaded history = %#v", got)
+	}
+}
+
+func TestRejectionHistoryListAppliesRequestedCutoff(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	store, _ := newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{Expiry: config.Duration(30 * 24 * time.Hour), MaxEntries: 10})
+	store.now = func() time.Time { return now.Add(-8 * 24 * time.Hour) }
+	if err := store.add(context.Background(), "old@example.net", "", "Old", []string{"local@example.com"}, []string{"unwanted"}); err != nil {
+		t.Fatal(err)
+	}
+	store.now = func() time.Time { return now }
+	if err := store.add(context.Background(), "new@example.net", "", "New", []string{"local@example.com"}, []string{"unwanted"}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := store.list("local@example.com", now.Add(-7*24*time.Hour))
+	if err != nil || len(entries) != 1 || entries[0].Sender != "new@example.net" {
+		t.Fatalf("recent history = %#v, %v", entries, err)
+	}
+}
+
+func TestRejectionHistoryGetByIDEnforcesRecipientAndExpiry(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	store, _ := newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{Expiry: config.Duration(24 * time.Hour), MaxEntries: 10})
+	store.now = func() time.Time { return now }
+	id, err := store.addWithID(context.Background(), "sender@example.net", "", "Subject", []string{"alice@example.com", "bob@example.com"}, []string{"Reason"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, found, err := store.getByID(id, "ALICE@example.com", false)
+	if err != nil || !found || !slices.Equal(entry.Recipients, []string{"alice@example.com"}) {
+		t.Fatalf("owner lookup = %#v, found=%v, err=%v", entry, found, err)
+	}
+	if _, found, err := store.getByID(id, "other@example.com", false); err != nil || found {
+		t.Fatalf("unauthorized lookup: found=%v err=%v", found, err)
+	}
+	entry, found, err = store.getByID(id, "", true)
+	if err != nil || !found || !slices.Equal(entry.Recipients, []string{"alice@example.com", "bob@example.com"}) {
+		t.Fatalf("administrator lookup = %#v, found=%v, err=%v", entry, found, err)
+	}
+	store.now = func() time.Time { return now.Add(24*time.Hour + time.Millisecond) }
+	if _, found, err := store.getByID(id, "alice@example.com", false); err != nil || found {
+		t.Fatalf("expired lookup: found=%v err=%v", found, err)
+	}
+	if _, found, err := store.getByID(id+1, "alice@example.com", false); err != nil || found {
+		t.Fatalf("missing lookup: found=%v err=%v", found, err)
 	}
 }
 
@@ -236,7 +281,7 @@ func TestRejectionHistoryListReportsDatabaseFailure(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.list("local@example.com"); err == nil {
+	if _, err := store.list("local@example.com", time.Time{}); err == nil {
 		t.Fatal("closed database was reported as empty history")
 	}
 }

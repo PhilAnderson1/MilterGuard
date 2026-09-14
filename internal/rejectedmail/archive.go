@@ -5,7 +5,9 @@ package rejectedmail
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -13,8 +15,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
+
+var ErrMessageNotFound = errors.New("saved rejected message not found")
 
 type Options struct {
 	Directory     string
@@ -86,17 +91,68 @@ func (a *Archive) Save(message []byte) (string, error) {
 
 // SaveWithRecordID saves a message using its rejection-history record ID.
 func (a *Archive) SaveWithRecordID(message []byte, recordID uint64) (string, error) {
+	return a.SaveWithRecordIDAt(message, recordID, a.now().UTC())
+}
+
+// SaveWithRecordIDAt saves a message using the rejection record's timestamp so
+// later retrieval can derive the exact date directory from the database row.
+func (a *Archive) SaveWithRecordIDAt(message []byte, recordID uint64, rejectedAt time.Time) (string, error) {
 	if recordID == 0 {
 		return "", fmt.Errorf("rejection record ID must be greater than zero")
 	}
-	return a.save(message, recordID)
+	if rejectedAt.IsZero() {
+		return "", fmt.Errorf("rejection time must be set")
+	}
+	return a.saveAt(message, recordID, rejectedAt.UTC())
+}
+
+// ReadWithRecordID reads the exact message associated with a rejection record.
+// Its path components are derived exclusively from typed database values.
+func (a *Archive) ReadWithRecordID(recordID uint64, rejectedAt time.Time, maxBytes int64) ([]byte, error) {
+	if a == nil || recordID == 0 || rejectedAt.IsZero() {
+		return nil, ErrMessageNotFound
+	}
+	if maxBytes < 1 {
+		return nil, fmt.Errorf("saved message read limit must be positive")
+	}
+	rejectedAt = rejectedAt.UTC()
+	path := filepath.Join(a.opts.Directory, rejectedAt.Format("2006"), rejectedAt.Format("01"), rejectedAt.Format("02"), strconv.FormatUint(recordID, 10)+".eml")
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, ErrMessageNotFound
+		}
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("saved message is not a regular file")
+	}
+	if info.Size() > maxBytes {
+		return nil, fmt.Errorf("saved message exceeds read limit")
+	}
+	contents, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(contents)) > maxBytes {
+		return nil, fmt.Errorf("saved message exceeds read limit")
+	}
+	return contents, nil
 }
 
 func (a *Archive) save(message []byte, recordID uint64) (string, error) {
+	return a.saveAt(message, recordID, a.now().UTC())
+}
+
+func (a *Archive) saveAt(message []byte, recordID uint64, now time.Time) (string, error) {
 	if int64(len(message)) > a.opts.MaxTotalBytes {
 		return "", fmt.Errorf("message exceeds rejected mail archive byte limit")
 	}
-	now := a.now().UTC()
 	directory := filepath.Join(a.opts.Directory, now.Format("2006"), now.Format("01"), now.Format("02"))
 	if err := os.MkdirAll(directory, 0750); err != nil {
 		return "", err

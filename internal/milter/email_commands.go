@@ -1,50 +1,97 @@
 package milter
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"mime"
+	"mime/multipart"
 	"net"
 	"net/netip"
 	"net/smtp"
+	"net/textproto"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 )
 
 const internalMessageHeader = "X-MilterGuard-Internal"
 
+const maxCommandsPerMessage = 100
+
+const maxRejectionReplyBodyRunes = 50000
+
+type commandPeriod string
+
+const (
+	periodDay   commandPeriod = "day"
+	periodWeek  commandPeriod = "week"
+	periodMonth commandPeriod = "month"
+	periodYear  commandPeriod = "year"
+	periodAll   commandPeriod = "all"
+)
+
 type emailCommand struct {
-	kind      string
-	verb      string
-	sender    string
-	recipient string
-	canonical string
-	ip        netip.Addr
+	kind        string
+	verb        string
+	sender      string
+	recipient   string
+	canonical   string
+	ip          netip.Addr
+	period      commandPeriod
+	errorText   string
+	rejectionID uint64
+}
+
+type commandReplyAttachment struct {
+	Filename  string
+	MediaType string
+	Contents  []byte
+}
+
+type commandReplyContent struct {
+	Text        string
+	Attachments []commandReplyAttachment
+}
+
+type commandResult func() commandReplyContent
+
+func textCommandResult(render func() string) commandResult {
+	return func() commandReplyContent { return commandReplyContent{Text: render()} }
+}
+
+func parseCommandPeriod(value string) (commandPeriod, bool) {
+	switch commandPeriod(strings.ToLower(value)) {
+	case periodDay, periodWeek, periodMonth, periodYear, periodAll:
+		return commandPeriod(strings.ToLower(value)), true
+	default:
+		return "", false
+	}
+}
+
+func (p commandPeriod) cutoff(now time.Time) time.Time {
+	switch p {
+	case periodDay:
+		return now.Add(-24 * time.Hour)
+	case periodMonth:
+		return now.AddDate(0, -1, 0)
+	case periodYear:
+		return now.AddDate(-1, 0, 0)
+	case periodAll:
+		return time.Time{}
+	default:
+		return now.Add(-7 * 24 * time.Hour)
+	}
 }
 
 func (ss *session) isCommandRecipient(recipient string) bool {
 	return ss.server.cfg.EmailCommands.Enabled && normalizeEmailAddress(recipient) == ss.server.commandRecipient
-}
-
-func (ss *session) commandIdentityAuthorization() (bool, string) {
-	if !ss.authentication.Authenticated {
-		return false, "SMTP authentication is required"
-	}
-	if ss.isCommandAdministrator(ss.authentication.Identity) {
-		return true, ""
-	}
-	cfg := ss.server.cfg.EmailCommands
-	if !cfg.AllowAuthenticatedUsers {
-		return false, "this authenticated user is not authorized to use email commands"
-	}
-	if cfg.VerifySenderViaAliases {
-		if err := senderOwnedViaAliases(cfg.AliasesFile, ss.envelopeSender, ss.authentication.Identity, cfg.Recipient); err != nil {
-			return false, "the envelope sender is not owned by the authenticated user"
-		}
-	}
-	return true, ""
 }
 
 func (ss *session) isInternalMessage() bool {
@@ -96,121 +143,104 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 		return true, ss.rejectEmailCommand(ctx, "authenticated envelope sender is invalid", false)
 	}
 
-	text, err := commandMessageText(ss.message, cfg.MaxMessageBytes)
+	lines, err := commandMessageLines(ss.message, cfg.MaxMessageBytes)
 	if err != nil {
 		return true, ss.completeInvalidEmailCommand(ctx, identity, replyTo, err.Error())
 	}
-	command, help, err := parseEmailCommand(text, replyTo, admin)
-	if err != nil {
-		return true, ss.completeInvalidEmailCommand(ctx, identity, replyTo, err.Error())
-	}
-	if help {
-		queued := ss.queueCommandReply(replyTo, "MilterGuard command help", commandHelp(admin))
-		return true, ss.discardEmailCommand(ctx, identity, "HELP", "help sent", replyTo, "", queued)
-	}
-	if command.kind == "rejections" {
-		entries, err := ss.server.rejectionHistory.list(command.recipient)
-		if err != nil {
-			return true, ss.completeFailedEmailCommand(ctx, identity, replyTo, command, err)
+	commands := make([]emailCommand, 0, len(lines))
+	for _, line := range lines {
+		command, help, parseErr := parseEmailCommand(line, replyTo, admin)
+		if parseErr != nil {
+			if len(commands) == 0 {
+				return true, ss.completeInvalidEmailCommand(ctx, identity, replyTo, parseErr.Error())
+			}
+			if recognizedCommandLine(line) {
+				commands = append(commands, emailCommand{kind: "parse_error", canonical: line, errorText: parseErr.Error()})
+			}
+			break
 		}
-		body := formatRejectionHistory(entries)
-		queued := ss.queueCommandReply(replyTo, "MilterGuard rejection history", body)
-		outcome := fmt.Sprintf("listed %d rejection entries", len(entries))
-		return true, ss.discardEmailCommand(ctx, identity, command.canonical, outcome, "", command.recipient, queued)
-	}
-	if command.kind == "whitelist_list" {
-		entries := ss.server.correspondents.listAllowlist(command.recipient)
-		body := formatAllowlist(entries, includeAllowlistRecipient(admin, command.recipient))
-		queued := ss.queueCommandReply(replyTo, "MilterGuard correspondent allowlist", body)
-		outcome := fmt.Sprintf("listed %d allowlist entries", len(entries))
-		return true, ss.discardEmailCommand(ctx, identity, command.canonical, outcome, "", command.recipient, queued)
-	}
-	if command.kind == "ip_list" || command.kind == "ip_list_lookup" {
-		entries := ss.server.ipReputation.listActive()
-		lookup := command.kind == "ip_list_lookup"
-		var queued bool
-		if lookup {
-			queued = ss.queueCommandReplyFunc(replyTo, "MilterGuard active IP blocks", func() string {
-				return formatActiveIPBlocks(ss.server.resolveActiveIPHostnames(context.Background(), entries), true)
-			})
-		} else {
-			queued = ss.queueCommandReply(replyTo, "MilterGuard active IP blocks", formatActiveIPBlocks(entries, false))
+		if help {
+			command = emailCommand{kind: "help", canonical: "HELP"}
 		}
-		outcome := fmt.Sprintf("listed %d active IP blocks", len(entries))
-		return true, ss.discardEmailCommand(ctx, identity, command.canonical, outcome, "", "", queued)
+		commands = append(commands, command)
+		if len(commands) == maxCommandsPerMessage {
+			break
+		}
 	}
-	if command.kind == "ip_add" {
-		block, operationErr := ss.server.ipReputation.manualAdd(command.ip)
-		if operationErr != nil {
-			return true, ss.completeFailedEmailCommand(ctx, identity, replyTo, command, operationErr)
-		}
-		outcome := fmt.Sprintf("blocked %s until %s", block.IP, block.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
-		queued := ss.queueCommandReply(replyTo, "MilterGuard command completed", command.canonical+"\n\n"+outcome+".\n")
-		return true, ss.discardEmailCommand(ctx, identity, command.canonical, outcome, "", "", queued)
-	}
-	if command.kind == "ip_delete" {
-		removed, operationErr := ss.server.ipReputation.manualDelete(command.ip)
-		if operationErr != nil {
-			return true, ss.completeFailedEmailCommand(ctx, identity, replyTo, command, operationErr)
-		}
-		outcome := "IP address was not present"
-		if removed {
-			outcome = "IP reputation record deleted"
-		}
-		queued := ss.queueCommandReply(replyTo, "MilterGuard command completed", command.canonical+"\n\n"+outcome+".\n")
-		return true, ss.discardEmailCommand(ctx, identity, command.canonical, outcome, "", "", queued)
+	if len(commands) == 0 {
+		return true, ss.completeInvalidEmailCommand(ctx, identity, replyTo, "command body is empty")
 	}
 
-	var outcome string
-	if command.verb == "ADD" {
-		created, operationErr := ss.server.correspondents.addManual(command.sender, command.recipient)
+	parts := make([]commandResult, 0, len(commands))
+	canonicals := make([]string, 0, len(commands))
+	for _, command := range commands {
+		body, operationErr := ss.executeEmailCommand(command, admin)
+		canonicals = append(canonicals, command.canonical)
 		if operationErr != nil {
-			return true, ss.completeFailedEmailCommand(ctx, identity, replyTo, command, operationErr)
+			ss.server.log.ErrorContext(ctx, "email command operation failed", "authenticated_identity", identity, "command", command.canonical, "error", operationErr)
+			parts = append(parts, textCommandResult(func() string { return "The command could not be completed. Check the server log.\n" }))
+			continue
 		}
-		if created {
-			outcome = "allowlist entry added"
-		} else {
-			outcome = "allowlist entry already existed and was refreshed"
-		}
-	} else {
-		removed, operationErr := ss.server.correspondents.deleteManual(command.sender, command.recipient)
-		if operationErr != nil {
-			return true, ss.completeFailedEmailCommand(ctx, identity, replyTo, command, operationErr)
-		}
-		outcome = fmt.Sprintf("removed %d allowlist entries", removed)
+		parts = append(parts, body)
 	}
-	queued := ss.queueCommandReply(replyTo, "MilterGuard command completed", command.canonical+"\n\n"+outcome+".\n")
-	return true, ss.discardEmailCommand(ctx, identity, command.canonical, outcome, command.sender, command.recipient, queued)
+	queued := ss.queueCommandReplyContentFunc(replyTo, "MilterGuard command results", func() commandReplyContent {
+		var body strings.Builder
+		var attachments []commandReplyAttachment
+		attached := make(map[string]bool)
+		for i, command := range commands {
+			result := parts[i]()
+			fmt.Fprintf(&body, "%s\n\n%s", command.canonical, result.Text)
+			if !strings.HasSuffix(result.Text, "\n") {
+				body.WriteByte('\n')
+			}
+			body.WriteByte('\n')
+			for _, attachment := range result.Attachments {
+				if !attached[attachment.Filename] {
+					attachments = append(attachments, attachment)
+					attached[attachment.Filename] = true
+				}
+			}
+		}
+		return commandReplyContent{Text: body.String(), Attachments: attachments}
+	})
+	return true, ss.discardEmailCommand(ctx, identity, strings.Join(canonicals, "; "), fmt.Sprintf("processed %d commands", len(commands)), "", "", queued)
 }
 
-func commandMessageText(m *message.Message, maxBytes int64) (string, error) {
-	if m.BodyTruncated || m.RetainedBytes() > maxBytes {
-		return "", fmt.Errorf("command message is too large")
-	}
+func commandMessageLines(m *message.Message, maxBytes int64) ([]string, error) {
 	if strings.TrimSpace(m.Header("Content-Disposition")) != "" {
-		return "", fmt.Errorf("attachments are not allowed")
+		return nil, fmt.Errorf("attachments are not allowed")
 	}
 	mediaType := "text/plain"
 	if value := strings.TrimSpace(m.Header("Content-Type")); value != "" {
 		var err error
 		mediaType, _, err = mime.ParseMediaType(value)
 		if err != nil {
-			return "", fmt.Errorf("invalid Content-Type")
+			return nil, fmt.Errorf("invalid Content-Type")
 		}
 	}
 	if mediaType != "text/plain" && mediaType != "text/html" && mediaType != "multipart/alternative" {
-		return "", fmt.Errorf("command email must contain plain text or HTML without attachments")
+		return nil, fmt.Errorf("command email must contain plain text or HTML without attachments")
 	}
-	text := m.CommandText()
+	text := m.CommandText(maxBytes)
 	if strings.ContainsRune(text, '\x00') {
-		return "", fmt.Errorf("command body contains invalid characters")
+		return nil, fmt.Errorf("command body contains invalid characters")
 	}
+	var lines []string
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
-			return line, nil
+			lines = append(lines, line)
 		}
 	}
-	return "", fmt.Errorf("command body is empty")
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("command body is empty")
+	}
+	return lines, nil
+}
+
+func recognizedCommandLine(line string) bool {
+	fields := strings.Fields(line)
+	return len(fields) > 0 && (strings.EqualFold(fields[0], "HELP") || strings.EqualFold(fields[0], "IP") ||
+		strings.EqualFold(fields[0], "REJECTION") || strings.EqualFold(fields[0], "REJECTIONS") || strings.EqualFold(fields[0], "WHITELIST"))
 }
 
 func parseEmailCommand(text, authenticatedSender string, admin bool) (emailCommand, bool, error) {
@@ -218,15 +248,30 @@ func parseEmailCommand(text, authenticatedSender string, admin bool) (emailComma
 	if len(fields) == 1 && strings.EqualFold(fields[0], "HELP") {
 		return emailCommand{}, true, nil
 	}
+	if len(fields) >= 1 && strings.EqualFold(fields[0], "REJECTION") {
+		if len(fields) != 2 {
+			return emailCommand{}, false, fmt.Errorf("REJECTION requires one positive rejection ID")
+		}
+		id, err := strconv.ParseUint(fields[1], 10, 63)
+		if err != nil || id == 0 {
+			return emailCommand{}, false, fmt.Errorf("REJECTION requires one positive rejection ID")
+		}
+		return emailCommand{kind: "rejection", canonical: "REJECTION " + strconv.FormatUint(id, 10), rejectionID: id}, false, nil
+	}
 	if len(fields) >= 1 && strings.EqualFold(fields[0], "IP") {
 		if !admin {
 			return emailCommand{}, false, fmt.Errorf("IP commands are restricted to administrators")
 		}
-		if len(fields) == 2 && strings.EqualFold(fields[1], "LIST") {
-			return emailCommand{kind: "ip_list", canonical: "IP LIST"}, false, nil
-		}
-		if len(fields) == 3 && strings.EqualFold(fields[1], "LIST") && strings.EqualFold(fields[2], "LOOKUP") {
-			return emailCommand{kind: "ip_list_lookup", canonical: "IP LIST LOOKUP"}, false, nil
+		if len(fields) >= 2 && strings.EqualFold(fields[1], "LIST") {
+			kind, canonical, periodIndex := "ip_list", "IP LIST", 2
+			if len(fields) >= 3 && strings.EqualFold(fields[2], "LOOKUP") {
+				kind, canonical, periodIndex = "ip_list_lookup", "IP LIST LOOKUP", 3
+			}
+			period, err := listCommandPeriod(fields, periodIndex)
+			if err != nil {
+				return emailCommand{}, false, fmt.Errorf("IP LIST period must be day, week, month, year, or all")
+			}
+			return emailCommand{kind: kind, canonical: canonical + " " + string(period), period: period}, false, nil
 		}
 		if len(fields) != 3 || (!strings.EqualFold(fields[1], "ADD") && !strings.EqualFold(fields[1], "DELETE")) {
 			return emailCommand{}, false, fmt.Errorf("IP command must be IP LIST, IP LIST LOOKUP, IP ADD address, or IP DELETE address")
@@ -240,11 +285,18 @@ func parseEmailCommand(text, authenticatedSender string, admin bool) (emailComma
 		return emailCommand{kind: "ip_" + strings.ToLower(verb), canonical: "IP " + verb + " " + addr.String(), ip: addr}, false, nil
 	}
 	if len(fields) >= 1 && strings.EqualFold(fields[0], "REJECTIONS") {
-		if len(fields) > 2 {
-			return emailCommand{}, false, fmt.Errorf("REJECTIONS accepts at most one recipient")
+		if len(fields) > 3 {
+			return emailCommand{}, false, fmt.Errorf("REJECTIONS accepts at most one recipient and one period")
 		}
 		recipient := authenticatedSender
-		if len(fields) == 2 {
+		period := periodWeek
+		end := len(fields)
+		if len(fields) > 1 {
+			if parsed, ok := parseCommandPeriod(fields[len(fields)-1]); ok {
+				period, end = parsed, len(fields)-1
+			}
+		}
+		if end == 2 {
 			recipient = fields[1]
 			if recipient == "*" {
 				if !admin {
@@ -259,19 +311,29 @@ func parseEmailCommand(text, authenticatedSender string, admin bool) (emailComma
 					return emailCommand{}, false, fmt.Errorf("users may view only their own rejection history")
 				}
 			}
+		} else if end > 2 {
+			return emailCommand{}, false, fmt.Errorf("REJECTIONS accepts at most one recipient and one period")
 		}
 		canonical := "REJECTIONS"
-		if len(fields) == 2 {
+		if end == 2 {
 			canonical += " " + recipient
 		}
-		return emailCommand{kind: "rejections", recipient: recipient, canonical: canonical}, false, nil
+		canonical += " " + string(period)
+		return emailCommand{kind: "rejections", recipient: recipient, canonical: canonical, period: period}, false, nil
 	}
 	if len(fields) >= 2 && strings.EqualFold(fields[0], "WHITELIST") && strings.EqualFold(fields[1], "LIST") {
-		if len(fields) > 3 {
-			return emailCommand{}, false, fmt.Errorf("WHITELIST LIST accepts at most one recipient")
+		if len(fields) > 4 {
+			return emailCommand{}, false, fmt.Errorf("WHITELIST LIST accepts at most one recipient and one period")
 		}
 		recipient := authenticatedSender
-		if len(fields) == 3 {
+		period := periodWeek
+		end := len(fields)
+		if len(fields) > 2 {
+			if parsed, ok := parseCommandPeriod(fields[len(fields)-1]); ok {
+				period, end = parsed, len(fields)-1
+			}
+		}
+		if end == 3 {
 			recipient = fields[2]
 			if recipient == "*" {
 				if !admin {
@@ -286,12 +348,15 @@ func parseEmailCommand(text, authenticatedSender string, admin bool) (emailComma
 					return emailCommand{}, false, fmt.Errorf("users may view only their own allowlist")
 				}
 			}
+		} else if end > 3 {
+			return emailCommand{}, false, fmt.Errorf("WHITELIST LIST accepts at most one recipient and one period")
 		}
 		canonical := "WHITELIST LIST"
-		if len(fields) == 3 {
+		if end == 3 {
 			canonical += " " + recipient
 		}
-		return emailCommand{kind: "whitelist_list", recipient: recipient, canonical: canonical}, false, nil
+		canonical += " " + string(period)
+		return emailCommand{kind: "whitelist_list", recipient: recipient, canonical: canonical, period: period}, false, nil
 	}
 	if len(fields) != 3 && len(fields) != 4 {
 		return emailCommand{}, false, fmt.Errorf("invalid command; send HELP for syntax")
@@ -328,12 +393,130 @@ func parseEmailCommand(text, authenticatedSender string, admin bool) (emailComma
 	return emailCommand{kind: "whitelist", verb: verb, sender: sender, recipient: recipient, canonical: canonical}, false, nil
 }
 
+func listCommandPeriod(fields []string, index int) (commandPeriod, error) {
+	if len(fields) == index {
+		return periodWeek, nil
+	}
+	if len(fields) != index+1 {
+		return "", fmt.Errorf("too many arguments")
+	}
+	period, ok := parseCommandPeriod(fields[index])
+	if !ok {
+		return "", fmt.Errorf("invalid period")
+	}
+	return period, nil
+}
+
+func (ss *session) executeEmailCommand(command emailCommand, admin bool) (commandResult, error) {
+	cutoff := command.period.cutoff(time.Now().UTC())
+	switch command.kind {
+	case "parse_error":
+		return textCommandResult(func() string { return command.errorText + ".\n" }), nil
+	case "help":
+		return textCommandResult(func() string { return commandHelp(admin) }), nil
+	case "rejections":
+		entries, err := ss.server.rejectionHistory.list(command.recipient, cutoff)
+		return textCommandResult(func() string { return formatRejectionHistory(entries) }), err
+	case "rejection":
+		entry, found, err := ss.server.rejectionHistory.getByID(command.rejectionID, ss.envelopeSender, admin)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return textCommandResult(func() string { return "Rejection record not found.\n" }), nil
+		}
+		return func() commandReplyContent { return ss.rejectionDetail(entry) }, nil
+	case "whitelist_list":
+		entries := ss.server.correspondents.listAllowlist(command.recipient, cutoff)
+		return textCommandResult(func() string { return formatAllowlist(entries, includeAllowlistRecipient(admin, command.recipient)) }), nil
+	case "ip_list", "ip_list_lookup":
+		entries := ss.server.ipReputation.listActive(cutoff)
+		lookup := command.kind == "ip_list_lookup"
+		return textCommandResult(func() string {
+			if lookup {
+				return formatActiveIPBlocks(ss.server.resolveActiveIPHostnames(context.Background(), entries), true)
+			}
+			return formatActiveIPBlocks(entries, false)
+		}), nil
+	case "ip_add":
+		block, err := ss.server.ipReputation.manualAdd(command.ip)
+		outcome := fmt.Sprintf("blocked %s until %s", block.IP, block.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+		return textCommandResult(func() string { return outcome + ".\n" }), err
+	case "ip_delete":
+		removed, err := ss.server.ipReputation.manualDelete(command.ip)
+		outcome := "IP address was not present"
+		if removed {
+			outcome = "IP reputation record deleted"
+		}
+		return textCommandResult(func() string { return outcome + ".\n" }), err
+	case "whitelist":
+		var outcome string
+		if command.verb == "ADD" {
+			created, err := ss.server.correspondents.addManual(command.sender, command.recipient)
+			if created {
+				outcome = "allowlist entry added"
+			} else {
+				outcome = "allowlist entry already existed and was refreshed"
+			}
+			return textCommandResult(func() string { return outcome + ".\n" }), err
+		}
+		removed, err := ss.server.correspondents.deleteManual(command.sender, command.recipient)
+		outcome = fmt.Sprintf("removed %d allowlist entries", removed)
+		return textCommandResult(func() string { return outcome + ".\n" }), err
+	default:
+		return nil, fmt.Errorf("unsupported command")
+	}
+}
+
 func commandHelp(admin bool) string {
-	text := "Send one command on the first visible line:\n\nWHITELIST ADD sender@example.com\nWHITELIST DELETE sender@example.com\nWHITELIST LIST\nREJECTIONS\nHELP\n\nThe local address is taken from your authenticated envelope sender.\n"
+	text := "Send one or more commands, one per line:\n\nWHITELIST ADD sender@example.com\nWHITELIST DELETE sender@example.com\nWHITELIST LIST [day|week|month|year|all]\nREJECTIONS [day|week|month|year|all]\nREJECTION id\nHELP\n\nListing commands default to the previous week. The local address is taken from your authenticated envelope sender.\n"
 	if admin {
-		text += "\nAdministrator commands:\nIP LIST\nIP LIST LOOKUP\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\n\nAdministrators may append a local recipient address to whitelist commands. They may use * with WHITELIST DELETE or REJECTIONS.\n"
+		text += "\nAdministrator commands:\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\n\nAdministrators may append a local recipient address before the period in WHITELIST LIST and REJECTIONS commands, and to modification commands. They may use * with WHITELIST DELETE, WHITELIST LIST, or REJECTIONS. For example:\n\nWHITELIST LIST * month\nREJECTIONS * year\n"
 	}
 	return text
+}
+
+func (ss *session) rejectionDetail(entry rejectionHistoryEntry) commandReplyContent {
+	processedBody := "Saved message is not available."
+	var attachments []commandReplyAttachment
+	if ss.server.rejectedMail != nil {
+		contents, err := ss.server.rejectedMail.ReadWithRecordID(entry.ID, entry.RejectedAt, ss.server.cfg.Milter.MaxMessageSize)
+		switch {
+		case err == nil:
+			attachments = append(attachments, commandReplyAttachment{
+				Filename:  fmt.Sprintf("rejection-%d.eml", entry.ID),
+				MediaType: "application/octet-stream",
+				Contents:  contents,
+			})
+			archived, parseErr := message.ParseArchived(contents, ss.server.cfg.Milter.MaxMessageSize)
+			if parseErr == nil {
+				processedBody = archived.ProcessedBody(maxRejectionReplyBodyRunes)
+				if strings.TrimSpace(processedBody) == "" {
+					processedBody = "No readable message text was found."
+				}
+			} else {
+				ss.server.log.Warn("cannot process saved rejected message", "rejection_id", entry.ID, "error", parseErr)
+			}
+		case errors.Is(err, rejectedmail.ErrMessageNotFound):
+		default:
+			ss.server.log.Warn("cannot read saved rejected message", "rejection_id", entry.ID, "error", err)
+		}
+	}
+	return commandReplyContent{Text: formatRejectionDetail(entry, processedBody), Attachments: attachments}
+}
+
+func formatRejectionDetail(entry rejectionHistoryEntry, processedBody string) string {
+	subject := entry.Subject
+	if subject == "" {
+		subject = "Unavailable"
+	}
+	reason := entry.Reason
+	if reason == "" {
+		reason = "Unavailable"
+	}
+	return fmt.Sprintf("Rejection ID: %d\nFrom: %s\nTo: %s\nSubject: %s\nDate: %s\nReason for rejection: %s\n\nProcessed email body text:\n%s\n",
+		entry.ID, entry.Sender, strings.Join(entry.Recipients, ", "), subject,
+		entry.RejectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), reason, processedBody)
 }
 
 func formatAllowlist(entries []correspondentEntry, includeRecipient bool) string {
@@ -411,12 +594,6 @@ func (ss *session) completeInvalidEmailCommand(ctx context.Context, identity, re
 	return ss.discardEmailCommand(ctx, identity, "invalid", reason, replyTo, "", queued)
 }
 
-func (ss *session) completeFailedEmailCommand(ctx context.Context, identity, replyTo string, command emailCommand, err error) bool {
-	queued := ss.queueCommandReply(replyTo, "MilterGuard command failed", command.canonical+"\n\nThe command could not be completed. Check the server log.\n")
-	ss.server.log.ErrorContext(ctx, "email command operation failed", "authenticated_identity", identity, "command", command.canonical, "error", err)
-	return ss.discardEmailCommand(ctx, identity, command.canonical, "operation failed", command.sender, command.recipient, queued)
-}
-
 func (ss *session) isCommandAdministrator(identity string) bool {
 	for _, configured := range ss.server.cfg.EmailCommands.Administrators {
 		if strings.EqualFold(strings.TrimSpace(configured), identity) {
@@ -452,10 +629,12 @@ func (ss *session) discardEmailCommand(ctx context.Context, identity, command, r
 }
 
 func (ss *session) queueCommandReply(recipient, subject, body string) bool {
-	return ss.queueCommandReplyFunc(recipient, subject, func() string { return body })
+	return ss.queueCommandReplyContentFunc(recipient, subject, func() commandReplyContent {
+		return commandReplyContent{Text: body}
+	})
 }
 
-func (ss *session) queueCommandReplyFunc(recipient, subject string, body func() string) bool {
+func (ss *session) queueCommandReplyContentFunc(recipient, subject string, content func() commandReplyContent) bool {
 	if !ss.server.cfg.EmailCommands.SendReplies {
 		return false
 	}
@@ -477,8 +656,11 @@ func (ss *session) queueCommandReplyFunc(recipient, subject string, body func() 
 		}()
 		from := normalizeEmailAddress(cfg.Recipient)
 		date := time.Now().UTC().Format(time.RFC1123Z)
-		payload := fmt.Sprintf("From: MilterGuard <%s>\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nAuto-Submitted: auto-replied\r\nX-Auto-Response-Suppress: All\r\n%s: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s", from, recipient, subject, date, internalMessageHeader, token, body())
-		err := submitSMTP(cfg.SMTPHost, recipient, []byte(payload))
+		reply := content()
+		payload, err := buildBoundedCommandReplyPayload(from, recipient, subject, date, token, reply, ss.server.cfg.Milter.MaxMessageSize)
+		if err == nil {
+			err = submitSMTP(cfg.SMTPHost, recipient, payload)
+		}
 		if err != nil {
 			log.Error("cannot send email command confirmation", "recipient", recipient, "smtp_host", cfg.SMTPHost, "error", err)
 			return
@@ -486,6 +668,72 @@ func (ss *session) queueCommandReplyFunc(recipient, subject string, body func() 
 		log.Debug("email command confirmation submitted", "recipient", recipient)
 	}()
 	return true
+}
+
+func buildBoundedCommandReplyPayload(from, recipient, subject, date, token string, reply commandReplyContent, maxBytes int64) ([]byte, error) {
+	payload, err := buildCommandReplyPayload(from, recipient, subject, date, token, reply)
+	if err != nil || len(reply.Attachments) == 0 || maxBytes <= 0 || int64(len(payload)) <= maxBytes {
+		return payload, err
+	}
+	reply.Text += "\nOne or more original saved messages were too large to attach.\n"
+	reply.Attachments = nil
+	return buildCommandReplyPayload(from, recipient, subject, date, token, reply)
+}
+
+func buildCommandReplyPayload(from, recipient, subject, date, token string, reply commandReplyContent) ([]byte, error) {
+	var payload bytes.Buffer
+	fmt.Fprintf(&payload, "From: MilterGuard <%s>\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nAuto-Submitted: auto-replied\r\nX-Auto-Response-Suppress: All\r\n%s: %s\r\n", from, recipient, subject, date, internalMessageHeader, token)
+	if len(reply.Attachments) == 0 {
+		payload.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
+		payload.WriteString(reply.Text)
+		return payload.Bytes(), nil
+	}
+
+	var multipartBody bytes.Buffer
+	writer := multipart.NewWriter(&multipartBody)
+	fmt.Fprintf(&payload, "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=%q\r\n\r\n", writer.Boundary())
+	textHeader := make(textproto.MIMEHeader)
+	textHeader.Set("Content-Type", "text/plain; charset=UTF-8")
+	textHeader.Set("Content-Transfer-Encoding", "8bit")
+	part, err := writer.CreatePart(textHeader)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.WriteString(part, reply.Text); err != nil {
+		return nil, err
+	}
+	for _, attachment := range reply.Attachments {
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Type", mime.FormatMediaType(attachment.MediaType, map[string]string{"name": attachment.Filename}))
+		header.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": attachment.Filename}))
+		header.Set("Content-Transfer-Encoding", "base64")
+		part, err = writer.CreatePart(header)
+		if err != nil {
+			return nil, err
+		}
+		if err := writeMIMEBase64(part, attachment.Contents); err != nil {
+			return nil, err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	if _, err := multipartBody.WriteTo(&payload); err != nil {
+		return nil, err
+	}
+	return payload.Bytes(), nil
+}
+
+func writeMIMEBase64(writer io.Writer, contents []byte) error {
+	encoded := base64.StdEncoding.EncodeToString(contents)
+	for len(encoded) > 76 {
+		if _, err := io.WriteString(writer, encoded[:76]+"\r\n"); err != nil {
+			return err
+		}
+		encoded = encoded[76:]
+	}
+	_, err := io.WriteString(writer, encoded+"\r\n")
+	return err
 }
 
 func submitSMTP(address, recipient string, payload []byte) error {

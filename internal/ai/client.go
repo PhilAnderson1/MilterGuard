@@ -20,6 +20,27 @@ type Decision struct {
 	Reasons        []string `json:"reasons"`
 }
 
+type ErrorKind uint8
+
+const (
+	ErrorHTTP ErrorKind = iota + 1
+	ErrorCredentials
+	ErrorPaymentRequired
+	ErrorResponse
+	ErrorDecision
+)
+
+// EndpointError identifies which stage of an AI endpoint request failed while
+// preserving the detailed underlying error for logs and diagnostics.
+type EndpointError struct {
+	Kind       ErrorKind
+	StatusCode int
+	Err        error
+}
+
+func (e *EndpointError) Error() string { return e.Err.Error() }
+func (e *EndpointError) Unwrap() error { return e.Err }
+
 type Image struct {
 	MediaType string
 	Data      []byte
@@ -125,7 +146,28 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, 
 		return Decision{}, true, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Decision{}, false, fmt.Errorf("AI endpoint returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		kind := ErrorHTTP
+		switch resp.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			kind = ErrorCredentials
+		case http.StatusPaymentRequired:
+			kind = ErrorPaymentRequired
+		}
+		if kind != ErrorCredentials {
+			if detail := safeHTTPResponseExcerpt(resp.Header.Get("Content-Type"), raw); detail != "" {
+				c.log.DebugContext(ctx, "AI endpoint HTTP error response",
+					"endpoint", c.cfg.Endpoint, "status_code", resp.StatusCode,
+					"response_excerpt", detail)
+			}
+		}
+		httpErr := fmt.Errorf("AI endpoint %s returned HTTP %d", c.cfg.Endpoint, resp.StatusCode)
+		if kind == ErrorCredentials {
+			httpErr = fmt.Errorf("AI endpoint rejected credentials with HTTP %d", resp.StatusCode)
+		}
+		return Decision{}, false, &EndpointError{
+			Kind: kind, StatusCode: resp.StatusCode,
+			Err: httpErr,
+		}
 	}
 	var envelope struct {
 		Choices []struct {
@@ -135,28 +177,45 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, 
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return Decision{}, true, fmt.Errorf("decode endpoint response: %w", err)
+		return Decision{}, true, &EndpointError{Kind: ErrorResponse, Err: fmt.Errorf("decode endpoint response: %w", err)}
 	}
 	if len(envelope.Choices) == 0 {
-		return Decision{}, true, fmt.Errorf("endpoint returned no choices: response_body=%q", responseExcerpt(raw))
+		return Decision{}, true, &EndpointError{
+			Kind: ErrorResponse,
+			Err:  fmt.Errorf("endpoint returned no choices: response_body=%q", responseExcerpt(raw)),
+		}
 	}
 	var d Decision
 	dec := json.NewDecoder(strings.NewReader(envelope.Choices[0].Message.Content))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&d); err != nil {
-		return Decision{}, true, fmt.Errorf("invalid decision JSON: %w", err)
+		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: fmt.Errorf("invalid decision JSON: %w", err)}
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
-		return Decision{}, true, fmt.Errorf("invalid decision JSON: trailing content")
+		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: fmt.Errorf("invalid decision JSON: trailing content")}
 	}
 	if err := validate(d); err != nil {
-		return Decision{}, true, err
+		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: err}
 	}
 	return d, false, nil
 }
 
 const maxResponseExcerptBytes = 2048
+const maxHTTPResponseExcerptBytes = 512
+
+func safeHTTPResponseExcerpt(contentType string, raw []byte) string {
+	trimmed := bytes.TrimSpace(raw)
+	lower := bytes.ToLower(trimmed)
+	if strings.Contains(strings.ToLower(contentType), "text/html") ||
+		bytes.HasPrefix(lower, []byte("<!doctype html")) || bytes.HasPrefix(lower, []byte("<html")) {
+		return ""
+	}
+	if len(trimmed) <= maxHTTPResponseExcerptBytes {
+		return string(trimmed)
+	}
+	return string(trimmed[:maxHTTPResponseExcerptBytes]) + "...[truncated]"
+}
 
 func responseExcerpt(raw []byte) string {
 	trimmed := bytes.TrimSpace(raw)

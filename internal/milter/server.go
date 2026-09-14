@@ -25,6 +25,7 @@ import (
 )
 
 const analysisResponseMargin = 5 * time.Second
+const defaultMilterProgressInterval = 30 * time.Second
 const rejectedMailCleanupInterval = 24 * time.Hour
 const milterIdleTimeout = 5 * time.Minute
 const initialAcceptRetryDelay = 5 * time.Millisecond
@@ -66,6 +67,7 @@ type Server struct {
 	commandRecipient   string
 	replySlots         chan struct{}
 	database           *sqlstore.Store
+	progressInterval   time.Duration
 	wg                 sync.WaitGroup
 	startupErr         error
 }
@@ -93,13 +95,14 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 		resolver:           net.DefaultResolver, internalToken: internalToken,
 		commandRecipient: normalizeEmailAddress(cfg.EmailCommands.Recipient),
 		replySlots:       make(chan struct{}, 4), database: database,
+		progressInterval: defaultMilterProgressInterval,
 	}
 	server.allowedPeerIPs = peerPrefixes(cfg.Milter.AllowedPeerIPs)
 	server.startupErr = errors.Join(tokenErr, databaseErr)
-	if cfg.RejectedMail.Enabled {
+	if cfg.RejectionHistory.SaveMessages && rejectionHistoryEnabled(cfg.RejectionHistory) {
 		server.rejectedMail = rejectedmail.New(rejectedmail.Options{
-			Directory: cfg.RejectedMail.Directory, Retention: cfg.RejectedMail.Retention.Value(),
-			MaxTotalBytes: cfg.RejectedMail.MaxTotalBytes,
+			Directory: cfg.RejectionHistory.MessageDirectory, Retention: cfg.RejectionHistory.Expiry.Value(),
+			MaxTotalBytes: cfg.RejectionHistory.MessageMaxTotalBytes,
 		}, log)
 	}
 	if cfg.Attachments.BlockExecutables {
@@ -372,7 +375,8 @@ func (s *Server) recordRejection(ctx context.Context, msg *message.Message, visi
 	if msg == nil {
 		return
 	}
-	recordID, err := s.rejectionHistory.addWithID(ctx, visibleSender, envelopeSender, msg.DecodedHeader("Subject"), recipients, reasons)
+	rejectedAt := time.Now().UTC()
+	recordID, err := s.rejectionHistory.addWithIDAt(ctx, visibleSender, envelopeSender, msg.DecodedHeader("Subject"), recipients, reasons, rejectedAt)
 	if err != nil {
 		s.log.ErrorContext(ctx, "cannot save rejection history", "message_id", msg.Header("Message-ID"), "error", err)
 		recordID = 0
@@ -381,16 +385,16 @@ func (s *Server) recordRejection(ctx context.Context, msg *message.Message, visi
 		return
 	}
 	contents := msg.ArchiveBytes()
-	s.saveRejectedMailCopy(ctx, msg, contents, source, recordID)
+	s.saveRejectedMailCopy(ctx, msg, contents, source, recordID, rejectedAt)
 }
 
-func (s *Server) saveRejectedMailCopy(ctx context.Context, msg *message.Message, contents []byte, source string, recordID uint64) {
+func (s *Server) saveRejectedMailCopy(ctx context.Context, msg *message.Message, contents []byte, source string, recordID uint64, rejectedAt time.Time) {
 	var path string
 	var err error
 	if recordID == 0 {
 		path, err = s.rejectedMail.Save(contents)
 	} else {
-		path, err = s.rejectedMail.SaveWithRecordID(contents, recordID)
+		path, err = s.rejectedMail.SaveWithRecordIDAt(contents, recordID, rejectedAt)
 	}
 	if err != nil {
 		s.log.WarnContext(ctx, "cannot save rejected message copy", "message_id", msg.Header("Message-ID"), "source", source, "rejection_id", recordID, "error", err)

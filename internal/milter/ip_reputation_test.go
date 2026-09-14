@@ -632,19 +632,22 @@ func TestManualIPManagementListsOnlyActiveBlocks(t *testing.T) {
 		t.Fatalf("manual block = %+v, %v", block, err)
 	}
 	cache.add(context.Background(), netip.MustParseAddr("192.0.2.81"), 1, connectionDNSResult{})
-	if got := cache.listActive(); len(got) != 2 {
+	if got := cache.listActive(time.Time{}); len(got) != 2 {
 		t.Fatalf("active blocks = %#v", got)
 	}
+	if got := cache.listActive(now.Add(time.Second)); len(got) != 0 {
+		t.Fatalf("old active blocks passed activity cutoff: %#v", got)
+	}
 	now = now.Add(2 * time.Minute)
-	got := cache.listActive()
+	got := cache.listActive(time.Time{})
 	if len(got) != 1 || got[0].IP != manual.String() {
 		t.Fatalf("expired short block was listed: %#v", got)
 	}
 	removed, err := cache.manualDelete(manual)
-	if err != nil || !removed || len(cache.listActive()) != 0 {
+	if err != nil || !removed || len(cache.listActive(time.Time{})) != 0 {
 		t.Fatalf("manual delete = %v, %v", removed, err)
 	}
-	if len(cache.listActive()) != 0 {
+	if len(cache.listActive(time.Time{})) != 0 {
 		t.Fatal("manual deletion was not persisted")
 	}
 }

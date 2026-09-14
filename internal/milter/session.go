@@ -195,18 +195,7 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		if ss.phase != phaseEnvelope {
 			return ss.protocolError("milter transaction command outside message", "command", commandName(command))
 		}
-		if recipient, ok := parseEnvelopeAddress(payload); ok && ss.isCommandRecipient(recipient) {
-			authorized, reason := ss.commandIdentityAuthorization()
-			if !authorized {
-				ss.server.log.WarnContext(ctx, "email command recipient rejected", "authenticated_identity", ss.authentication.Identity, "authenticated", ss.authentication.Authenticated, "reason", reason)
-				return ss.send(commandRecipient, replyCode("550", "5.7.1", "MilterGuard command rejected: "+reason))
-			}
-			if len(ss.envelopeRecipients) < maxLearnedRecipients {
-				ss.envelopeRecipients = append(ss.envelopeRecipients, recipient)
-			} else {
-				ss.envelopeRecipientsTruncated = true
-			}
-		} else if ok && len(ss.envelopeRecipients) < maxLearnedRecipients {
+		if recipient, ok := parseEnvelopeAddress(payload); ok && len(ss.envelopeRecipients) < maxLearnedRecipients {
 			ss.envelopeRecipients = append(ss.envelopeRecipients, recipient)
 		} else if ok {
 			ss.envelopeRecipientsTruncated = true
@@ -317,16 +306,6 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.trustedDKIM,
 			ss.knownCorrespondentLogAttrs()...)
 	}
-	if inbound.authenticatedDomain != "" {
-		info, err := ss.server.domainRegistration.evidence(ctx, inbound.authenticatedDomain)
-		if err != nil {
-			ss.server.log.DebugContext(ctx, "domain registration lookup unavailable", "domain", registrableDomain(inbound.authenticatedDomain), "error", err)
-		} else {
-			ss.message.DomainRegistration = info
-		}
-	}
-	ss.message.TrustedAuthservIDs = ss.trustedAuthservIDs()
-	ss.message.Connection = ss.connectionInformation(ctx)
 	if err := ss.conn.SetDeadline(time.Now().Add(ss.server.analysisTimeout())); err != nil {
 		if ctx.Err() == nil {
 			ss.server.log.WarnContext(ctx, "cannot set Milter connection deadline",
@@ -337,7 +316,11 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		}
 		return false
 	}
-	result := ss.server.evaluate(ctx, ss.message)
+	result, progressErr := ss.evaluateWithProgress(ctx, inbound)
+	if progressErr != nil {
+		ss.server.log.WarnContext(ctx, "cannot send Milter progress response", "error", progressErr)
+		return false
+	}
 	var err error
 	if result.selected == actionAccept {
 		err = ss.writeAcceptedResultHeaders(&result)
@@ -352,6 +335,51 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	ss.applyPostDecisionUpdates(ctx, result, inbound)
 	ss.resetMessage(phaseConnection)
 	return true
+}
+
+func (ss *session) evaluateWithProgress(ctx context.Context, inbound inboundEvidence) (evaluationResult, error) {
+	started := time.Now()
+	results := make(chan evaluationResult, 1)
+	go func() {
+		defer func() {
+			if panicValue := recover(); panicValue != nil {
+				ss.server.logRecoveredWorkerPanic(ctx, "message analysis", panicValue)
+				results <- ss.server.analysisFailure(fmt.Errorf("message analysis panic: %v", panicValue), started)
+			}
+		}()
+		results <- ss.evaluateMessage(ctx, inbound)
+	}()
+
+	interval := ss.server.progressInterval
+	if interval <= 0 {
+		interval = defaultMilterProgressInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-results:
+			return result, nil
+		case <-ticker.C:
+			if err := writeFrame(ss.conn, []byte{responseProgress}); err != nil {
+				return evaluationResult{}, err
+			}
+		}
+	}
+}
+
+func (ss *session) evaluateMessage(ctx context.Context, inbound inboundEvidence) evaluationResult {
+	if inbound.authenticatedDomain != "" {
+		info, err := ss.server.domainRegistration.evidence(ctx, inbound.authenticatedDomain)
+		if err != nil {
+			ss.server.log.DebugContext(ctx, "domain registration lookup unavailable", "domain", registrableDomain(inbound.authenticatedDomain), "error", err)
+		} else {
+			ss.message.DomainRegistration = info
+		}
+	}
+	ss.message.TrustedAuthservIDs = ss.trustedAuthservIDs()
+	ss.message.Connection = ss.connectionInformation(ctx)
+	return ss.server.evaluate(ctx, ss.message)
 }
 
 func (ss *session) finishInternalMessage(ctx context.Context) bool {

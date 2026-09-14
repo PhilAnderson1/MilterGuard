@@ -274,9 +274,14 @@ func (m *Message) ArchiveBytes() []byte {
 	return output.Bytes()
 }
 
-// CommandText returns decoded visible MIME text for the authenticated command
-// mailbox. Callers separately constrain the accepted top-level MIME types.
-func (m *Message) CommandText() string {
-	content := extractMIME(m.Header("Content-Type"), m.Header("Content-Transfer-Encoding"), "", m.BodyBytes(), 0)
+// CommandText returns decoded visible MIME text from a bounded prefix of an
+// authenticated command message. Callers separately constrain the accepted
+// top-level MIME types.
+func (m *Message) CommandText(maxBytes int64) string {
+	body := m.BodyBytes()
+	if maxBytes >= 0 && int64(len(body)) > maxBytes {
+		body = body[:maxBytes]
+	}
+	content := extractMIME(m.Header("Content-Type"), m.Header("Content-Transfer-Encoding"), "", body, 0)
 	return stripInvisibleFormatting(content.VisibleText)
 }

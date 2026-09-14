@@ -62,7 +62,7 @@ filtering.
 - The annotated example configuration is available at
   [configs/milterguard.yaml](configs/milterguard.yaml).
 
-## Build from source
+## Build and install from source
 
 Building requires Go 1.25 or later:
 

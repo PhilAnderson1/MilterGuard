@@ -25,7 +25,7 @@ For initial installation and activation, follow the
 4. [Start in monitor mode](#start-in-monitor-mode)
 5. [Enable enforcement](#enable-enforcement)
 6. [Basic virus protection](#basic-virus-protection)
-7. [Rejected message archive](#rejected-message-archive)
+7. [Rejection history and saved messages](#rejection-history-and-saved-messages)
 8. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
 9. [Email commands](#email-commands)
 10. [Running AI locally](#running-ai-locally)
@@ -45,7 +45,7 @@ perform well with a suitable GPU. See Running AI locally for setup guidance.
 
 To use OpenRouter instead, create an account and API key at
 https://openrouter.ai. Using the recommended model typically costs around
-US$0.35 per 1,000 scanned emails, although the actual cost varies with message
+US$0.25 per 1,000 scanned emails, although the actual cost varies with message
 length and provider pricing. The supplied configuration already contains the
 necessary OpenRouter settings; replace the placeholder `ai.api_key` with your
 key. If the configured model is no longer available, select a current compatible
@@ -251,6 +251,21 @@ sudo postfix check
 sudo postfix reload
 ```
 
+### Optional early rejection with Spamhaus ZEN
+
+Spamhaus ZEN can reject mail from known abusive sending IP addresses before
+MilterGuard receives the message body or starts AI analysis. This reduces mail
+processing and API usage while complementing, rather than replacing,
+MilterGuard's content analysis.
+
+Configure the check in Postfix so trusted networks and authenticated submission
+clients bypass it. Ensure that your use complies with the
+[Spamhaus usage terms](https://www.spamhaus.com/terms-of-use-fair-use-policy-for-free-data-query-service/)
+and follow the current
+[Spamhaus DNSBL guidance](https://www.spamhaus.org/faqs/dnsbl-usage/).
+Do not query the public Spamhaus service through a public DNS resolver such as
+`1.1.1.1` or `8.8.8.8`; use a suitable local resolver or Spamhaus DQS.
+
 ## Start in monitor mode
 
 The default `monitor` mode analyses email and logs the action MilterGuard
@@ -279,6 +294,58 @@ Alternatively, setting `mode: tag` accepts all mail while adding result
 headers. Successfully analysed mail includes its classification and score.
 Attachment policy and IP reputation do not reject mail in tag mode, and adaptive
 correspondent and IP reputation data is not changed.
+
+### Deliver tagged mail to the Junk folder
+
+MilterGuard's result headers can be used by a server-side delivery filter or
+mail client to move flagged messages into a Junk or Spam folder. For example,
+this Dovecot Sieve rule moves every message classified as unwanted:
+
+```sieve
+require ["fileinto"];
+
+if header :is "X-MilterGuard-Classification" "unwanted" {
+    fileinto "Junk";
+    stop;
+}
+```
+
+This is particularly useful with `mode: tag`, where MilterGuard accepts all
+mail and leaves the final delivery decision to another filter. To move only
+lower-confidence unwanted classifications, use:
+
+```sieve
+require ["fileinto"];
+
+if allof (
+    header :is "X-MilterGuard-Classification" "unwanted",
+    header :is "X-MilterGuard-Confidence" "low"
+) {
+    fileinto "Junk";
+    stop;
+}
+```
+
+In `enforce` mode, unwanted messages at or above `reject_score` are rejected;
+the rule above handles unwanted messages accepted because their score is below
+that threshold. To review low-confidence legitimate classifications as well,
+use a corresponding rule:
+
+```sieve
+if allof (
+    header :is "X-MilterGuard-Classification" "legitimate",
+    header :is "X-MilterGuard-Confidence" "low"
+) {
+    fileinto "Junk";
+    stop;
+}
+```
+
+Set `filtering.add_email_headers` to `true` unless using `mode: tag`, which
+always adds result headers. Adjust `Junk` if your destination mailbox has a
+different name. Equivalent rules can be configured in a mail client instead of
+Sieve. Do not trust these headers downstream unless Postfix removes forged
+incoming `X-MilterGuard-*` headers as described earlier in this guide.
 
 Continue reviewing decisions after enabling enforcement. AI classification is
 not perfectly deterministic, and changes made by an AI provider can alter a
@@ -310,20 +377,23 @@ configuration, encrypted archives are rejected while other unscannable content
 is accepted and continues to AI analysis. Monitor mode records the proposed
 attachment action but still accepts the message.
 
-## Rejected message archive
+## Rejection history and saved messages
 
-The optional `rejected_mail` configuration saves `.eml` copies of messages
-rejected by AI or attachment inspection. Copies are organized beneath the
-configured directory as `YYYY/MM/DD`, making them easy to inspect or reuse for
-testing. Cached IP rejections happen before the email is received and therefore
-cannot be saved.
+The `rejection_history` configuration records the sender address, envelope
+recipients, rejection time, subject, and reason for messages rejected by AI or
+attachment inspection in enforce mode. It can also save the corresponding
+original message as an `.eml` file when `save_messages` is enabled. Copies are
+organized beneath `message_directory` as `YYYY/MM/DD`, with the rejection ID as
+the filename. Cached IP rejections happen before the email is received and
+therefore cannot be recorded or saved.
 
 The archive may contain private correspondence and dangerous attachments, so
 restrict access to it. Retention cleanup runs at startup and every 24 hours;
 expired date directories are removed hierarchically. If the archive exceeds its
-configured target size, daily cleanup removes the oldest retained messages until
-it is below the target. Archive errors are logged but never alter the SMTP
-filtering decision.
+`message_max_total_bytes` target size, daily cleanup removes the oldest retained
+messages until it is below the target. `rejection_history.expiry` controls both
+the database record and saved-message lifetime, keeping the two parts aligned.
+Archive errors are logged but never alter the SMTP filtering decision.
 
 ## Trusted mail and adaptive filtering
 
@@ -363,13 +433,10 @@ but only after the hostname has been forward-resolved back to the connecting IP.
 This protects shared mail providers without allowing a forged PTR record to
 bypass reputation handling.
 
-Rejection history records the sender address, envelope recipient, rejection
-time, subject, and reason for messages rejected after AI or attachment
-inspection in enforce mode. It does not record cached-IP or unrelated Postfix
-rejections. The `rejection_history` settings control its retention period and
-maximum retained number of entries. The database may temporarily exceed this
-target between maintenance runs; expired and excess oldest entries are then
-removed automatically. An expiry of `0s` disables the history.
+The rejection database may temporarily exceed its `max_entries` target between
+maintenance runs; expired and excess oldest entries are then removed
+automatically. Setting `rejection_history.expiry` to `0s` disables the history
+and requires `save_messages` to be disabled as well.
 
 Learned correspondents, rejection history, IP reputation, and cached domain
 registration data are stored in `/var/lib/milterguard` and survive service
@@ -445,40 +512,60 @@ allowlist and view their rejection history.
 
 To execute a command, send an email to the configured command address
 (`milterguard@example.com` in the example above) as its sole recipient, with
-the required command as the first line of the email body.
+one command on each line of the email body. Commands run in order, so a later
+listing reflects changes made by earlier commands in the same email. Processing
+stops at the first unrecognized line, allowing quoted replies and signatures to
+follow the commands. A command with invalid syntax reports an error and stops
+the batch. A single result email contains the output from every command run.
 
 Available commands:
 
 ```text
 WHITELIST ADD sender@example.com
 WHITELIST DELETE sender@example.com
-WHITELIST LIST
-REJECTIONS
+WHITELIST LIST [day|week|month|year|all]
+REJECTIONS [day|week|month|year|all]
+REJECTION id
 HELP
 ```
+
+- `WHITELIST ADD` adds a sender to the allowlist for your verified local
+  address.
+- `WHITELIST DELETE` removes a sender from that allowlist.
+- `WHITELIST LIST` lists allowlisted senders active during the selected period.
+- `REJECTIONS` lists emails rejected for your address during the selected
+  period, including the rejection ID and reason.
+- `REJECTION <id>` returns an email containing the rejection reason and the
+  decoded, cleaned plain-text body. When available, the original message is
+  attached as `rejection-<id>.eml`.
+- `HELP` emails a command summary appropriate to your permissions.
+
+Adding `day`, `week`, `month`, `year`, or `all` to a listing command limits the
+date range of the data returned. If no period is supplied, the default is
+`week`.
 
 Administrators may specify a recipient:
 
 ```text
 WHITELIST ADD sender@example.com recipient@example.com
 WHITELIST DELETE sender@example.com recipient@example.com
-WHITELIST LIST recipient@example.com
-REJECTIONS recipient@example.com
+WHITELIST LIST recipient@example.com [day|week|month|year|all]
+REJECTIONS recipient@example.com [day|week|month|year|all]
 ```
 
 They may also use:
 
 ```text
 WHITELIST DELETE sender@example.com *
-WHITELIST LIST *
-REJECTIONS *
+WHITELIST LIST * [day|week|month|year|all]
+REJECTIONS * [day|week|month|year|all]
 ```
 
 Administrators can also manage the sending-IP block database:
 
 ```text
-IP LIST
-IP LIST LOOKUP
+IP LIST [day|week|month|year|all]
+IP LIST LOOKUP [day|week|month|year|all]
 IP ADD 192.0.2.1
 IP DELETE 192.0.2.1
 ```
@@ -488,6 +575,22 @@ repeat-offender block. `IP LIST LOOKUP` also performs reverse-DNS lookups and
 includes the hostname or `(not found)` after each address. Manually added
 addresses use the configured repeat-offender block duration, or the short block
 duration when repeat-offender blocking is disabled.
+
+`day`, `week`, `month`, and `year` select activity since the corresponding
+point in the past; `all` removes the additional date filter while still
+respecting the configured retention and expiry rules. Whitelist and active-IP
+listings use their last-activity time, while rejection history uses the
+rejection time.
+
+`REJECTION <id>` returns an email containing the rejection reason and the
+decoded, cleaned plain-text body. When available, the original message is
+attached as `rejection-<id>.eml`. Use the rejection ID shown by `REJECTIONS`.
+Normal authenticated users may retrieve only records addressed to their own
+verified local address; administrators may retrieve any record. The processed
+body is regenerated using the current MIME and HTML parser, so it is not
+necessarily identical to the text supplied to the AI when the message was
+originally rejected. Connection and authentication analysis is not
+reconstructed.
 
 Command-result emails are submitted to the SMTP server configured by
 `email_commands.smtp_host`, which defaults to `127.0.0.1:25`. Change it when
@@ -503,8 +606,8 @@ own infrastructure, classifications remain consistent, availability is under
 your control, and there are no per-message API charges.
 
 The recommended Qwen3.6-35B-A3B model provides strong results with relatively
-modest hardware requirements. A system with an 8 GB GPU and 32 GB of system RAM
-should work well with a suitable quantization and configuration.
+modest hardware requirements. A system with an 8 GB GPU (e.g., RTX 4060) and
+32 GB of system RAM should work well with a suitable quantization and configuration.
 
 The model is available from:
 
@@ -525,6 +628,11 @@ https://github.com/ggml-org/llama.cpp
 
 Set MilterGuard's AI timeout high enough for the slowest messages and image
 analysis. The MTA's Milter timeout must be longer than MilterGuard's AI timeout.
+
+A local AI server will usually handle fewer simultaneous requests than a hosted
+service. Start with `ai.max_concurrent: 2`, then increase it only if the server
+has enough processing capacity and memory to run additional requests without
+substantially increasing response times.
 
 Before using a local model on live mail, replay a representative collection of
 legitimate, spam, and scam messages through a separate MilterGuard test instance.
@@ -570,11 +678,22 @@ writes the complete textual AI input - including message content, links, and
 personal data - to the system journal. Use it only temporarily for diagnostics;
 inline image bytes are not logged.
 
-Validate configuration changes before applying them:
+Validate configuration changes and test the configured AI endpoint before
+applying them:
 
 ```sh
-milterguard --config /etc/milterguard/milterguard.yaml --check-config
+milterguard --config /etc/milterguard/milterguard.yaml \
+  --check-config --check-endpoint
 ```
+
+The endpoint check sends one synthetic test email through the configured model
+and detection prompt. Success is reported as `configuration is valid` followed
+by `Endpoint OK`.
+
+Before starting MilterGuard for the first time, add `--check-port` to confirm
+that its configured Milter listener is available. Run this check only while
+MilterGuard is stopped; a running instance already occupies its listener and
+will correctly cause the check to fail.
 
 ## Replay saved email
 
@@ -589,14 +708,17 @@ submits every `.eml` file in a directory directly to a test MilterGuard
 instance. The installer places it at
 `/usr/local/share/milterguard/tools/replay_mailbox.py`.
 
-Run a separate test instance in `enforce` mode on an unused port. Give its
-configuration a separate `persistence.database_file` so testing cannot alter
-production correspondent, rejection-history, or IP-reputation data. To ensure
-every corpus message reaches the AI, set `ip_reputation.block_duration` to `0s`,
-`ip_reputation.repeat_threshold` to `0`, and `correspondents.use_allowlist` to
-`false` in the test configuration. The replay tool reports the actual Milter
-response, so a test instance in `monitor` mode will report every message as
-accepted even when MilterGuard recommends rejection.
+Run a separate test instance of MilterGuard in `enforce` mode on an unused port.
+Give its configuration a separate `persistence.database_file` so testing cannot
+alter production correspondent, rejection-history, or IP-reputation data. To
+ensure every corpus message reaches the AI, set `ip_reputation.block_duration`
+to `0s`, `ip_reputation.repeat_threshold` to `0`, and
+`correspondents.use_allowlist` to `false` in the test configuration. The replay
+tool reports the actual Milter response rather than only the AI classification.
+A test instance in `monitor` mode will therefore report every message as
+accepted even when MilterGuard recommends rejection. In `enforce` mode, a
+message classified as unwanted will still be reported as accepted when its
+score is below the rejection threshold defined in the configuration file.
 
 By default, the replay tool reconstructs the SMTP peer IP, client hostname,
 HELO identity, and receiving MTA hostname from the saved `Received` headers.

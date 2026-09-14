@@ -39,7 +39,6 @@ type Config struct {
 	EmailCommands      EmailCommandsConfig      `yaml:"email_commands"`
 	Persistence        PersistenceConfig        `yaml:"persistence"`
 	RejectionHistory   RejectionHistoryConfig   `yaml:"rejection_history"`
-	RejectedMail       RejectedMailConfig       `yaml:"rejected_mail"`
 	Correspondents     CorrespondentsConfig     `yaml:"correspondents"`
 	IPReputation       IPReputationConfig       `yaml:"ip_reputation"`
 	DomainRegistration DomainRegistrationConfig `yaml:"domain_registration"`
@@ -59,15 +58,11 @@ type DomainRegistrationConfig struct {
 }
 
 type RejectionHistoryConfig struct {
-	Expiry     Duration `yaml:"expiry"`
-	MaxEntries int      `yaml:"max_entries"`
-}
-
-type RejectedMailConfig struct {
-	Enabled       bool     `yaml:"enabled"`
-	Directory     string   `yaml:"directory"`
-	Retention     Duration `yaml:"retention"`
-	MaxTotalBytes int64    `yaml:"max_total_bytes"`
+	Expiry               Duration `yaml:"expiry"`
+	MaxEntries           int      `yaml:"max_entries"`
+	SaveMessages         bool     `yaml:"save_messages"`
+	MessageDirectory     string   `yaml:"message_directory"`
+	MessageMaxTotalBytes int64    `yaml:"message_max_total_bytes"`
 }
 
 type EmailCommandsConfig struct {
@@ -213,7 +208,7 @@ func defaults() Config {
 			Model: "qwen/qwen3.6-35b-a3b", DisableThinking: true,
 			PromptFile: "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
 			Retries: 1, MaxConcurrent: 8, MaxBodyChars: 50000,
-			VisionMode: "fallback", VisionMinTextChars: 200,
+			VisionMode: "fallback", VisionMinTextChars: 500,
 			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000,
 			SiteURL: "https://github.com/PhilAnderson1/MilterGuard", AppName: "MilterGuard",
 		},
@@ -227,18 +222,15 @@ func defaults() Config {
 		},
 		EmailCommands: EmailCommandsConfig{
 			Recipient: "milterguard@example.com", VerifySenderViaAliases: true, SendReplies: true,
-			SMTPHost: "127.0.0.1:25", MaxMessageBytes: 8192, AliasesFile: "/etc/aliases", Administrators: []string{},
+			SMTPHost: "127.0.0.1:25", MaxMessageBytes: 65536, AliasesFile: "/etc/aliases", Administrators: []string{},
 		},
 		Persistence: PersistenceConfig{
 			DatabaseFile:    "/var/lib/milterguard/milterguard.db",
 			CleanupInterval: Duration(10 * time.Minute),
 		},
 		RejectionHistory: RejectionHistoryConfig{
-			Expiry: Duration(30 * 24 * time.Hour), MaxEntries: 10000,
-		},
-		RejectedMail: RejectedMailConfig{
-			Directory: "/var/lib/milterguard/rejected-mail", Retention: Duration(30 * 24 * time.Hour),
-			MaxTotalBytes: 1 << 30,
+			Expiry: Duration(30 * 24 * time.Hour), MaxEntries: 10000, SaveMessages: true,
+			MessageDirectory: "/var/lib/milterguard/rejected-mail", MessageMaxTotalBytes: 1 << 30,
 		},
 		Filtering: FilteringConfig{
 			RejectScore: .9, LegitimateLowConfidenceScore: .8, AddEmailHeaders: true,
@@ -394,15 +386,15 @@ func (c Config) Validate() error {
 			return fmt.Errorf("rejection_history.max_entries must be positive")
 		}
 	}
-	if c.RejectedMail.Enabled {
-		if !filepath.IsAbs(c.RejectedMail.Directory) {
-			return fmt.Errorf("rejected_mail.directory must be an absolute path")
+	if c.RejectionHistory.SaveMessages {
+		if c.RejectionHistory.Expiry.Value() <= 0 {
+			return fmt.Errorf("rejection_history.expiry must be positive when save_messages is enabled")
 		}
-		if c.RejectedMail.Retention.Value() <= 0 {
-			return fmt.Errorf("rejected_mail.retention must be positive")
+		if !filepath.IsAbs(c.RejectionHistory.MessageDirectory) {
+			return fmt.Errorf("rejection_history.message_directory must be an absolute path")
 		}
-		if c.RejectedMail.MaxTotalBytes < c.Milter.MaxMessageSize {
-			return fmt.Errorf("rejected_mail.max_total_bytes must be at least milter.max_message_size")
+		if c.RejectionHistory.MessageMaxTotalBytes < c.Milter.MaxMessageSize {
+			return fmt.Errorf("rejection_history.message_max_total_bytes must be at least milter.max_message_size")
 		}
 	}
 	if c.Filtering.RejectScore < 0 || c.Filtering.RejectScore > 1 {

@@ -24,9 +24,9 @@ configuration, security, testing, and maintenance information.
 3. Choose the AI service MilterGuard will use. A compatible locally hosted AI
    server is recommended; see the Operating Guide for more information. If you
    do not operate one, create an OpenRouter account and API key at
-   https://openrouter.ai. Using the recommended model typically costs around
-   US$0.35 per 1,000 scanned emails, although the actual cost varies with message
-   length and provider pricing.
+   https://openrouter.ai. Using the model named in the supplied configuration
+   typically costs around US$0.25 per 1,000 scanned emails, although the actual
+   cost varies with message length and provider pricing.
 
 4. Edit `/etc/milterguard/milterguard.yaml`. For OpenRouter, the supplied
    settings should work after adding your API key to `ai.api_key`. For another
@@ -38,8 +38,13 @@ configuration, security, testing, and maintenance information.
 
    ```sh
    sudo /usr/local/sbin/milterguard \
-     --config /etc/milterguard/milterguard.yaml --check-config
+     --config /etc/milterguard/milterguard.yaml \
+     --check-config --check-port --check-endpoint
    ```
+
+   This checks that the configuration file is valid and the configured Milter
+   port is available, then sends a synthetic test email to the configured AI
+   service and checks its response.
 
 6. Enable and start MilterGuard:
 

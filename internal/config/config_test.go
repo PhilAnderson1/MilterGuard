@@ -44,6 +44,12 @@ domain_registration:
   enabled: true
   timeout: 4s
   max_entries: 123
+rejection_history:
+  expiry: 48h
+  max_entries: 321
+  save_messages: true
+  message_directory: /tmp/rejected-mail
+  message_max_total_bytes: 52428800
 logging:
   level: warn
 `
@@ -51,13 +57,17 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 {
+	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
 	legacy := valid + "\npolicy:\n  reject_score: 0.9\n"
 	if _, err := Load(writeConfig(t, legacy)); err == nil || !strings.Contains(err.Error(), "field policy not found") {
 		t.Fatalf("legacy policy section error = %v", err)
+	}
+	legacy = valid + "\nrejected_mail:\n  enabled: true\n"
+	if _, err := Load(writeConfig(t, legacy)); err == nil || !strings.Contains(err.Error(), "field rejected_mail not found") {
+		t.Fatalf("legacy rejected_mail section error = %v", err)
 	}
 }
 
@@ -249,28 +259,37 @@ func TestValidateRejectionHistory(t *testing.T) {
 	}
 }
 
-func TestValidateRejectedMail(t *testing.T) {
+func TestValidateSavedRejectionMessages(t *testing.T) {
+	defaultConfig := defaults()
+	if !defaultConfig.RejectionHistory.SaveMessages {
+		t.Fatal("saved rejection messages must be enabled by default")
+	}
 	cfg := validConfig()
-	cfg.RejectedMail.Enabled = true
+	cfg.RejectionHistory.SaveMessages = true
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("default rejected mail settings rejected: %v", err)
+		t.Fatalf("default saved-message settings rejected: %v", err)
 	}
 	tests := []struct {
 		name   string
 		change func(*Config)
 	}{
-		{name: "relative directory", change: func(c *Config) { c.RejectedMail.Directory = "rejected-mail" }},
-		{name: "zero retention", change: func(c *Config) { c.RejectedMail.Retention = 0 }},
-		{name: "byte limit below message limit", change: func(c *Config) { c.RejectedMail.MaxTotalBytes = c.Milter.MaxMessageSize - 1 }},
+		{name: "relative directory", change: func(c *Config) { c.RejectionHistory.MessageDirectory = "rejected-mail" }},
+		{name: "zero expiry", change: func(c *Config) { c.RejectionHistory.Expiry = 0 }},
+		{name: "byte limit below message limit", change: func(c *Config) { c.RejectionHistory.MessageMaxTotalBytes = c.Milter.MaxMessageSize - 1 }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			invalid := cfg
 			test.change(&invalid)
-			if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "rejected_mail") {
+			if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "rejection_history") {
 				t.Fatalf("validation error = %v", err)
 			}
 		})
+	}
+	cfg.RejectionHistory.Expiry = 0
+	cfg.RejectionHistory.SaveMessages = false
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("disabled rejection history and message saving rejected: %v", err)
 	}
 }
 

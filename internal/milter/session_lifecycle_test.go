@@ -22,6 +22,102 @@ type deadlineFailingConn struct {
 
 func (conn deadlineFailingConn) SetDeadline(time.Time) error { return conn.err }
 
+type blockingAnalyzer struct {
+	started  chan struct{}
+	release  chan struct{}
+	canceled chan struct{}
+}
+
+func (a *blockingAnalyzer) Analyze(ctx context.Context, _ ai.Input) (ai.Decision, error) {
+	close(a.started)
+	select {
+	case <-a.release:
+		return ai.Decision{Classification: "legitimate", Score: 1}, nil
+	case <-ctx.Done():
+		if a.canceled != nil {
+			close(a.canceled)
+		}
+		return ai.Decision{}, ctx.Err()
+	}
+}
+
+func TestSlowEndOfMessageSendsProgressBeforeFinalResponse(t *testing.T) {
+	analyzer := &blockingAnalyzer{started: make(chan struct{}), release: make(chan struct{})}
+	server, conn, done := testServer(t, analyzer)
+	server.progressInterval = 10 * time.Millisecond
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "192.0.2.1"),
+		envelopeFrame(commandMail, "sender@example.net"),
+		envelopeFrame(commandRecipient, "recipient@example.com"),
+		headerFrame("From", "sender@example.net"),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("message body")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-analyzer.started:
+	case <-time.After(time.Second):
+		t.Fatal("analysis did not start")
+	}
+	expectFrame(t, conn, string([]byte{responseProgress}))
+	close(analyzer.release)
+	for {
+		response, err := readFrame(conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(response) == 1 && response[0] == responseProgress {
+			continue
+		}
+		if len(response) != 1 || response[0] != responseAccept {
+			t.Fatalf("final response = %q, want accept", response)
+		}
+		break
+	}
+}
+
+func TestProgressWriteFailureCancelsAnalysis(t *testing.T) {
+	analyzer := &blockingAnalyzer{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}
+	server, conn, done := testServer(t, analyzer)
+	server.progressInterval = 10 * time.Millisecond
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "192.0.2.1"),
+		envelopeFrame(commandMail, "sender@example.net"),
+		envelopeFrame(commandRecipient, "recipient@example.com"),
+		headerFrame("From", "sender@example.net"),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("message body")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-analyzer.started:
+	case <-time.After(time.Second):
+		t.Fatal("analysis did not start")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-analyzer.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("analysis was not canceled after the progress response failed")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("session did not stop after the progress response failed")
+	}
+}
+
 func TestDeadlineFailureClosesSession(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()

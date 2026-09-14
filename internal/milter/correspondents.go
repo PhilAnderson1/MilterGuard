@@ -344,7 +344,7 @@ func (s *correspondentStore) match(ctx context.Context, correspondent string, re
 	return result
 }
 
-func (s *correspondentStore) listAllowlist(recipient string) []correspondentEntry {
+func (s *correspondentStore) listAllowlist(recipient string, activitySince time.Time) []correspondentEntry {
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -360,6 +360,10 @@ func (s *correspondentStore) listAllowlist(recipient string) []correspondentEntr
 		whitelist_type, legitimate_email_count FROM correspondents WHERE ` + s.qualifiedSQL() + s.notStaleSQL()
 	args := []any{s.cfg.LegitimateSenderMinMessages}
 	args = append(args, s.notStaleArgs(now)...)
+	if !activitySince.IsZero() {
+		query += " AND last_activity_at_ms >= ?"
+		args = append(args, unixMillis(activitySince))
+	}
 	if !allRecipients {
 		query += " AND local_address = ?"
 		args = append(args, recipient)

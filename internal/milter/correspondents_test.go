@@ -378,12 +378,15 @@ func TestListAllowlistIsScopedQualifiedAndOrdered(t *testing.T) {
 	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "candidate@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 1, LearnedAt: newer, LastActivityAt: newer})
 	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "newer@example.net", WhitelistType: whitelistManual, LearnedAt: newer, LastActivityAt: newer})
 	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "bob@example.com", Correspondent: "bob@example.net", WhitelistType: whitelistManual, LearnedAt: newer, LastActivityAt: newer})
-	alice := store.listAllowlist("alice@example.com")
+	alice := store.listAllowlist("alice@example.com", time.Time{})
 	if len(alice) != 2 || alice[0].Correspondent != "newer@example.net" || alice[1].Correspondent != "older@example.net" {
 		t.Fatalf("Alice allowlist = %#v", alice)
 	}
-	if all := store.listAllowlist("*"); len(all) != 3 {
+	if all := store.listAllowlist("*", time.Time{}); len(all) != 3 {
 		t.Fatalf("global allowlist = %#v", all)
+	}
+	if recent := store.listAllowlist("*", newer); len(recent) != 2 {
+		t.Fatalf("recent allowlist = %#v", recent)
 	}
 }
 
