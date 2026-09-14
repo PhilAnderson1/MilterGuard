@@ -7,23 +7,25 @@ import (
 )
 
 type Message struct {
-	Headers            map[string][]string
-	decodedHeaders     map[string][]string
-	headerOccurrences  map[string]int
-	Body               bytes.Buffer
-	Connection         ConnectionInfo
-	Correspondent      CorrespondentInfo
-	DomainRegistration DomainRegistrationInfo
-	TrustedAuthservIDs []string
-	Truncated          bool
-	BodyTruncated      bool
-	MaxBytes           int64
-	bodySize           int64
-	headerSize         int64
-	headerBytesByName  map[string]int64
-	archiveHeaders     bytes.Buffer
-	archiveHeaderBytes int64
-	archiveTruncated   bool
+	Headers                 map[string][]string
+	decodedHeaders          map[string][]string
+	headerOccurrences       map[string]int
+	Body                    bytes.Buffer
+	Connection              ConnectionInfo
+	AuthenticatedSubmission bool
+	Correspondent           CorrespondentInfo
+	DomainRegistration      DomainRegistrationInfo
+	TrustedAuthservIDs      []string
+	Truncated               bool
+	BodyTruncated           bool
+	MaxBytes                int64
+	bodySize                int64
+	headerSize              int64
+	headerBytesByName       map[string]int64
+	toHeaderSeen            bool
+	archiveHeaders          bytes.Buffer
+	archiveHeaderBytes      int64
+	archiveTruncated        bool
 }
 
 type ConnectionInfo struct {
@@ -134,6 +136,9 @@ func New(maxBytes int64) *Message {
 func (m *Message) AddHeader(name, value string) {
 	m.addArchiveHeader(name, value)
 	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "to" {
+		m.toHeaderSeen = true
+	}
 	if countedSecurityHeaders[name] {
 		m.headerOccurrences[name]++
 	}

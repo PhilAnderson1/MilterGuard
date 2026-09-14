@@ -1,7 +1,6 @@
 /bin/
 /.cache/
 /dist/
-/session.txt
 *.swp
 /local-testing/
 __pycache__/

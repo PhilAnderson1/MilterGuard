@@ -26,6 +26,11 @@ type authenticationResult struct {
 }
 
 func writeAuthenticationInformation(b *strings.Builder, msg *Message) {
+	if msg.AuthenticatedSubmission {
+		b.WriteString("\nAUTHENTICATION INFORMATION:\n")
+		b.WriteString("Authenticated SMTP submission: yes\n")
+		return
+	}
 	fromDomain := visibleFromDomain(msg.Header("From"))
 	results := normalizedAuthenticationResults(msg)
 

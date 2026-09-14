@@ -21,7 +21,7 @@ const (
 
 var promptHeaders = map[string]bool{
 	"date": true, "from": true,
-	"reply-to": true, "return-path": true, "subject": true, "to": true,
+	"reply-to": true, "return-path": true, "subject": true,
 }
 
 var plainHTTPURL = regexp.MustCompile(`(?i)https?://[^\s<>"']+`)
@@ -41,8 +41,11 @@ func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
 	}
 	sort.Strings(keys)
 	var b strings.Builder
-	writeConnectionInformation(&b, m.Connection)
+	if !m.AuthenticatedSubmission {
+		writeConnectionInformation(&b, m.Connection)
+	}
 	writeCorrespondentInformation(&b, m.Correspondent)
+	writeRecipientInformation(&b, m)
 	writeAuthenticationInformation(&b, m)
 	b.WriteString("\nSELECTED HEADERS:\n")
 	for _, key := range keys {

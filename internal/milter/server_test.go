@@ -951,6 +951,72 @@ func TestForwardConfirmedDomainAllowlistBypassesExistingIPBlock(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedSubmissionBypassesExistingIPBlock(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
+	server, conn, done := testServer(t, analyzer)
+	server.cfg.Filtering.ScanAuthenticated = true
+	server.cfg.IPReputation.BlockDuration = config.Duration(time.Hour)
+	server.cfg.IPReputation.MaxEntries = 100
+	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
+	addr := netip.MustParseAddr("192.0.2.25")
+	if !server.ipReputation.add(context.Background(), addr, 1, connectionDNSResult{}) {
+		t.Fatal("test IP was not initially blocked")
+	}
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', addr.String()))
+	if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn,
+		envelopeFrame(commandMail, "philip@invades.net"),
+		envelopeFrame(commandRecipient, "alice@example.com"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if got := analyzer.calls.Load(); got != 1 {
+		t.Fatalf("AI analysis calls = %d, want 1", got)
+	}
+	if _, retained := server.ipReputation.lookup(context.Background(), addr); !retained {
+		t.Fatal("authenticated bypass unexpectedly removed existing IP reputation")
+	}
+}
+
+func TestRejectedAuthenticatedSubmissionDoesNotCreateIPBlock(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}}
+	server, conn, done := testServer(t, analyzer)
+	server.cfg.Filtering.ScanAuthenticated = true
+	server.cfg.IPReputation.BlockDuration = config.Duration(time.Hour)
+	server.cfg.IPReputation.MaxEntries = 100
+	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
+	addr := netip.MustParseAddr("192.0.2.26")
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', addr.String()))
+	if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn,
+		envelopeFrame(commandMail, "philip@invades.net"),
+		envelopeFrame(commandRecipient, "alice@example.com"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
+	if _, blocked := server.ipReputation.lookup(context.Background(), addr); blocked {
+		t.Fatal("authenticated submission created IP reputation block")
+	}
+}
+
 func TestCommandResponseRequirements(t *testing.T) {
 	for _, cmd := range []byte{commandConnect, commandHelo, commandMail, commandRecipient, commandData, commandEndHeaders, commandUnknown} {
 		t.Run(string(cmd), func(t *testing.T) {
@@ -1158,7 +1224,7 @@ func TestExplicitEmptyAuthenticationMacroClearsAuthentication(t *testing.T) {
 }
 
 func TestAuthenticatedMessagesAreScannedWhenEnabled(t *testing.T) {
-	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
+	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 1)}
 	server, conn, _ := testServer(t, analyzer)
 	server.cfg.Filtering.ScanAuthenticated = true
 	defer conn.Close()
@@ -1174,8 +1240,21 @@ func TestAuthenticatedMessagesAreScannedWhenEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectFrame(t, conn, string([]byte{responseAccept}))
-	if got := analyzer.calls.Load(); got != 1 {
-		t.Fatalf("AI analysis calls = %d, want 1", got)
+	select {
+	case input := <-analyzer.inputs:
+		if !strings.Contains(input.Text, "Authenticated SMTP submission: yes") {
+			t.Fatalf("authenticated submission context missing from AI input:\n%s", input.Text)
+		}
+		if strings.Contains(input.Text, "CONNECTION INFORMATION:") {
+			t.Fatalf("authenticated submission includes client connection information:\n%s", input.Text)
+		}
+		if strings.Contains(input.Text, "DKIM: no trusted local result") ||
+			strings.Contains(input.Text, "SPF: no trusted local result") ||
+			strings.Contains(input.Text, "DMARC: no trusted local result") {
+			t.Fatalf("authenticated submission includes unavailable inbound authentication results:\n%s", input.Text)
+		}
+	default:
+		t.Fatal("AI analysis was not called")
 	}
 }
 

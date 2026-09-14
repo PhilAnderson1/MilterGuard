@@ -372,6 +372,8 @@ Authenticated outbound mail is not scanned by default. MilterGuard uses
 accepted outbound mail to learn which external addresses each local user
 corresponds with. These addresses are immediately whitelisted and can bypass
 future scanning when the configured authentication requirements are met.
+Authenticated submission client addresses are never blocked or otherwise
+modified by IP reputation, even when authenticated mail scanning is enabled.
 MilterGuard can also learn inbound senders that repeatedly receive a
 high-confidence legitimate classification and pass the configured authentication
 checks.

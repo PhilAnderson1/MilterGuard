@@ -21,11 +21,11 @@ A message's claims of affiliation, registration, consent or a transaction are cl
 
 A greeting derived from the recipient's address and a generic assertion such as `your order` are not independent evidence of a relationship or transaction.
 
-Attribute content to its author, distinguishing the current sender from quoted correspondents and users whose messages a service is delivering. Evaluate their statements within that context. Previous contact inviting a response strongly supports legitimacy; do not presume it fabricated without contradictory evidence.
+Attribute content to its author, distinguishing the current sender from quoted correspondents and users whose messages a service is delivering. Evaluate their statements within that context. Previous contact inviting a response supports legitimacy; do not presume it fabricated without contradictory evidence.
 
 "Sender found in known correspondent database: no" means only that the software has no record. It does not establish that the sender is unknown to the recipient or that contact is unsolicited.
 
-Subject matter, tone, and presentation do not by themselves establish unwanted contact. This includes sexual or romantic interest, commercial appeals, informal writing, and automated formatting. Assess their significance through the context and requested action.
+Subject matter, tone, and presentation do not by themselves establish unwanted contact. This includes explicit, graphic sexual or romantic interest, commercial appeals, informal writing, and automated formatting. Assess their significance through the context and requested action.
 
 Unfamiliar names or domains, differences between personal and account names, and ordinary automation features such as tracking links or variable address parts are not inherently suspicious. Distinguish concrete inconsistencies from normal variation and missing information.
 

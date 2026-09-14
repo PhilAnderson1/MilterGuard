@@ -218,7 +218,6 @@ DMARC: fail for visible From domain urgent-account-security.invalid
 SELECTED HEADERS:
 From: Bank Security <alert@urgent-account-security.invalid>
 Subject: Urgent: verify your bank password immediately
-To: customer@example.com
 
 BODY:
 Your bank account will be permanently closed today unless you confirm your password immediately. Enter your online banking username, password, and security code at http://steal-bank-passwords.invalid/verify.`

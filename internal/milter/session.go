@@ -290,6 +290,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if handled, keepConnection := ss.handleEmailCommand(ctx); handled {
 		return keepConnection
 	}
+	ss.message.AuthenticatedSubmission = ss.authentication.Authenticated
 	if ss.authentication.Authenticated && !ss.server.cfg.Filtering.ScanAuthenticated {
 		return ss.finishBypassedMessage(ctx, "authenticated_connection", true, false)
 	}
@@ -478,9 +479,11 @@ func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluati
 	}
 	if result.selected == actionReject {
 		ss.server.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, result.reasons, "ai")
-		ss.server.ipReputation.add(ctx, ss.peerIP, result.score, ss.connectionDNS)
+		if !ss.authentication.Authenticated {
+			ss.server.ipReputation.add(ctx, ss.peerIP, result.score, ss.connectionDNS)
+		}
 	}
-	if result.err == nil && result.classification == "legitimate" {
+	if !ss.authentication.Authenticated && result.err == nil && result.classification == "legitimate" {
 		ss.server.ipReputation.recordLegitimate(ctx, ss.peerIP)
 	}
 	if result.selected == actionAccept && ss.authentication.Authenticated {
@@ -674,7 +677,7 @@ func cleanSMTPIdentity(value string) string {
 func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 	ctx, cancel := context.WithTimeout(ctx, ss.server.cfg.Milter.Timeout.Value())
 	defer cancel()
-	if ss.server.cfg.Mode != "enforce" {
+	if ss.server.cfg.Mode != "enforce" || ss.authentication.Authenticated {
 		return false, true
 	}
 	if _, allowed := ss.server.ipReputation.allowed(ss.peerIP); allowed {

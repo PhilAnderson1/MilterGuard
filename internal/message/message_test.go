@@ -105,6 +105,95 @@ func TestPromptPreservesMalformedEncodedHeader(t *testing.T) {
 	}
 }
 
+func TestPromptOmitsRecipientHeader(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "sender@example.com")
+	m.AddHeader("To", "Phil <junkmail@invades.net>")
+	m.AddHeader("Subject", "test")
+	prompt := m.Prompt(100)
+	if strings.Contains(prompt, "To: Phil") || strings.Contains(prompt, "junkmail@invades.net") {
+		t.Fatalf("recipient header included in AI input:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "RECIPIENT INFORMATION:") {
+		t.Fatalf("ordinary recipient header produced derived recipient evidence:\n%s", prompt)
+	}
+}
+
+func TestPromptReportsMissingRecipientHeaderForInboundMail(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "sender@example.com")
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"RECIPIENT INFORMATION:\nVisible recipient addressing: no To header",
+		"Possible significance: may indicate BCC delivery, but is not proof that the email is unwanted",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("missing To header evidence omitted %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestPromptReportsEmptyRecipientGroupWithoutAddresses(t *testing.T) {
+	for _, value := range []string{
+		"undisclosed-recipients:;",
+		"  Newsletter   subscribers : ;  ",
+		`"Private recipients":;`,
+	} {
+		m := New(1000)
+		m.AddHeader("To", value)
+		prompt := m.Prompt(100)
+		if !strings.Contains(prompt, "Visible recipient addressing: no addresses disclosed using an empty To group") {
+			t.Errorf("empty group %q was not reported:\n%s", value, prompt)
+		}
+		groupIndex := strings.Index(prompt, "Visible recipient group:")
+		if groupIndex < 0 {
+			t.Errorf("empty group label %q was not reported:\n%s", value, prompt)
+		}
+		if strings.Contains(prompt, "Possible significance:") {
+			t.Errorf("empty group %q produced interpretive significance text:\n%s", value, prompt)
+		}
+		if strings.Contains(prompt, "\nTo:") {
+			t.Errorf("raw To header %q was included:\n%s", value, prompt)
+		}
+	}
+}
+
+func TestPromptDoesNotInferEmptyGroupFromAmbiguousRecipientHeaders(t *testing.T) {
+	values := []string{
+		"",
+		"undisclosed-recipients:; alice@example.com",
+		"Alice <alice@example.com>",
+		"malformed:value",
+	}
+	for _, value := range values {
+		m := New(1000)
+		m.AddHeader("To", value)
+		if prompt := m.Prompt(100); strings.Contains(prompt, "RECIPIENT INFORMATION:") {
+			t.Errorf("ambiguous recipient header %q produced derived evidence:\n%s", value, prompt)
+		}
+	}
+
+	m := New(1000)
+	m.AddHeader("To", "First group:;")
+	m.AddHeader("To", "Second group:;")
+	if prompt := m.Prompt(100); strings.Contains(prompt, "RECIPIENT INFORMATION:") {
+		t.Fatalf("multiple To fields produced derived recipient evidence:\n%s", prompt)
+	}
+}
+
+func TestPromptDoesNotReportRecipientStructureForAuthenticatedSubmission(t *testing.T) {
+	for _, to := range []string{"", "undisclosed-recipients:;"} {
+		m := New(1000)
+		m.AuthenticatedSubmission = true
+		if to != "" {
+			m.AddHeader("To", to)
+		}
+		if prompt := m.Prompt(100); strings.Contains(prompt, "RECIPIENT INFORMATION:") {
+			t.Errorf("authenticated submission with To %q produced recipient evidence:\n%s", to, prompt)
+		}
+	}
+}
+
 func TestMailboxAddressFallsBackToUnambiguousAngleAddress(t *testing.T) {
 	if got, ok := MailboxAddress(`Malformed [display <Sender@Example.com>`); !ok || got != "Sender@Example.com" {
 		t.Fatalf("fallback mailbox = %q, %v", got, ok)
@@ -333,6 +422,37 @@ func TestPromptOmitsAuthenticationEvidenceWhenNoTrustedResultsExist(t *testing.T
 	}
 	if !strings.Contains(prompt, "From: sender@example.com") {
 		t.Fatalf("ordinary selected header missing: %s", prompt)
+	}
+}
+
+func TestPromptDescribesAuthenticatedSubmissionWithoutInboundAuthenticationResults(t *testing.T) {
+	m := New(1000)
+	m.AuthenticatedSubmission = true
+	m.AddHeader("From", "Philip Anderson <phil.anderson@invades.net>")
+	m.AddHeader("Authentication-Results", "nl.invades.net; dkim=pass header.d=invades.net")
+	m.TrustedAuthservIDs = []string{"nl.invades.net"}
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"AUTHENTICATION INFORMATION:",
+		"Authenticated SMTP submission: yes",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("authenticated submission prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, unwanted := range []string{
+		"CONNECTION INFORMATION:",
+		"Remote IP:",
+		"Reverse DNS:",
+		"SMTP HELO/EHLO identity:",
+		"Visible From domain:",
+		"DKIM:",
+		"SPF:",
+		"DMARC:",
+	} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("authenticated submission prompt contains inbound evidence %q:\n%s", unwanted, prompt)
+		}
 	}
 }
 
