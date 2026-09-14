@@ -21,8 +21,8 @@ For initial installation and activation, follow the
 
 1. [Configure the AI service](#configure-the-ai-service)
 2. [Install and configure OpenDKIM and OpenDMARC (optional)](#install-and-configure-opendkim-and-opendmarc-optional)
-3. [Connect MilterGuard to Postfix](#connect-milterguard-to-postfix)
-4. [Start in monitor mode](#start-in-monitor-mode)
+3. [Connect Postfix to MilterGuard](#connect-postfix-to-milterguard)
+4. [Start MilterGuard in monitor mode](#start-milterguard-in-monitor-mode)
 5. [Enable enforcement](#enable-enforcement)
 6. [Basic virus protection](#basic-virus-protection)
 7. [Rejection history and saved messages](#rejection-history-and-saved-messages)
@@ -44,7 +44,7 @@ The recommended model has relatively modest hardware requirements and can
 perform well with a suitable GPU. See Running AI locally for setup guidance.
 
 To use OpenRouter instead, create an account and API key at
-https://openrouter.ai. Using the recommended model typically costs around
+https://openrouter.ai. Using the recommended AI model typically costs around
 US$0.25 per 1,000 scanned emails, although the actual cost varies with message
 length and provider pricing. The supplied configuration already contains the
 necessary OpenRouter settings; replace the placeholder `ai.api_key` with your
@@ -76,12 +76,13 @@ enabling rejection.
 
 MilterGuard works without OpenDKIM or OpenDMARC, but trusted DKIM, SPF, and
 DMARC results give the AI stronger evidence about sender identity and improve
-classification quality. Without trusted DKIM results, trusted-domain bypass,
-authenticated correspondent bypass, and automatic sender learning are less
-effective or unavailable.
+classification quality, so they are strongly recommended. Without trusted DKIM
+results, trusted-domain bypass, authenticated correspondent bypass, and
+automatic sender learning are less effective or unavailable.
 
-Your server may already use OpenDKIM to sign outbound email. If so, configure
-it to verify inbound signatures and add its results to `Authentication-Results`.
+Your server may already use OpenDKIM to sign outbound email. If so, make sure it
+is configured to verify inbound signatures and add its results to
+`Authentication-Results`.
 OpenDMARC can then evaluate DMARC and SPF and add those results for MilterGuard
 to use. Install the packages supplied by your operating system and configure
 each service to expose a Milter socket or local TCP listener to Postfix.
@@ -99,46 +100,17 @@ runs on another machine, add only that server's address (or a tightly scoped
 CIDR) and restrict the Milter port with a firewall. Unix listeners rely on their
 directory and socket permissions instead.
 
+## Connect Postfix to MilterGuard
+
+Add MilterGuard to the end of each applicable Milter list in
+`/etc/postfix/main.cf`. Postfix calls Milters in the configured order, allowing
+MilterGuard to use authentication results added by earlier filters.
+
 These filters must run in this order:
 
 ```text
 OpenDKIM → OpenDMARC → MilterGuard
 ```
-
-The authentication service identifier written to `Authentication-Results`
-must be included in MilterGuard's `correspondents.trusted_authserv_ids` setting.
-The supplied `$mta_hostname` value normally handles results identified with the
-Postfix hostname.
-
-Before relying on those results, configure Postfix to remove externally
-supplied `Authentication-Results` headers. Their authentication service
-identifier is not proof that they were created locally, so without this step a
-remote sender could forge evidence that MilterGuard trusts. Add the following
-rule to `/etc/postfix/header_checks`:
-
-```text
-/^Authentication-Results:/ IGNORE
-/^X-MilterGuard-(Classification|Score|Confidence|Action):/ IGNORE
-```
-
-Enable the table in `/etc/postfix/main.cf`, merging it with any existing
-`header_checks` configuration:
-
-```text
-header_checks = regexp:/etc/postfix/header_checks
-```
-
-Postfix removes the supplied authentication and MilterGuard result headers as
-it receives the message. OpenDKIM and OpenDMARC then add freshly calculated
-authentication results before MilterGuard runs, and MilterGuard may add its own
-result headers. Do not apply these removal rules through `milter_header_checks`,
-which operates on headers added by Milters.
-
-## Connect MilterGuard to Postfix
-
-Add MilterGuard to the end of each applicable Milter list in
-`/etc/postfix/main.cf`. Postfix calls Milters in the configured order, allowing
-MilterGuard to use authentication results added by earlier filters.
 
 With no authentication filters:
 
@@ -167,18 +139,51 @@ smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
 non_smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
 ```
 
+`smtpd_milters` processes mail received over SMTP. `non_smtpd_milters` processes
+locally submitted mail, including messages submitted through Postfix's
+`sendmail` command. Omit MilterGuard from `non_smtpd_milters` if that mail
+must not pass through it.
+
 Use the actual sockets or ports configured for your services. MilterGuard must
 remain last in the chain.
+
+`milter_default_action = accept` keeps mail flowing if a Milter is unavailable.
+Use `tempfail` instead if you prefer Postfix to defer delivery until every
+configured Milter is available again.
+
+The authentication service identifier written to `Authentication-Results`
+must be included in MilterGuard's `correspondents.trusted_authserv_ids` setting.
+The default `$mta_hostname` value normally handles results identified with the
+Postfix hostname.
+
+With OpenDKIM, OpenDMARC, or both installed on your server, configure Postfix
+to remove externally supplied `Authentication-Results` headers. Their
+authentication service identifier is not proof that they were created locally,
+so without this step a remote sender could forge evidence that MilterGuard
+trusts. Add the following rule to `/etc/postfix/header_checks`:
+
+```text
+/^Authentication-Results:/ IGNORE
+/^X-MilterGuard-(Classification|Score|Confidence|Action):/ IGNORE
+```
+
+Enable the table in `/etc/postfix/main.cf`, merging it with any existing
+`header_checks` configuration:
+
+```text
+header_checks = regexp:/etc/postfix/header_checks
+```
+
+Postfix removes any existing authentication and MilterGuard result headers as
+it receives the message. OpenDKIM and OpenDMARC then add freshly calculated
+authentication results before MilterGuard runs, and MilterGuard may add its own
+result headers. Do not apply these removal rules through `milter_header_checks`,
+which operates on headers added by Milters.
 
 MilterGuard also supplies the connecting IP, reported hostname, HELO/EHLO
 identity, reverse DNS, and forward-confirmation result to the AI as supporting
 evidence. DNS failures do not reject or defer mail, and lookup time is bounded
 by `milter.connection_dns_timeout`.
-
-`smtpd_milters` processes mail received over SMTP. `non_smtpd_milters` processes
-locally submitted mail, including messages submitted through Postfix's
-`sendmail` command. Omit MilterGuard from `non_smtpd_milters` if that mail
-must not pass through it.
 
 Postfix must supply the authenticated user's SASL identity so MilterGuard can
 recognize outbound mail, learn trusted correspondents, and authorize email
@@ -210,47 +215,6 @@ must be the last entry in each Milter list in which it is enabled. It is valid
 to omit MilterGuard from `non_smtpd_milters` when locally submitted mail does
 not need scanning.
 
-MilterGuard can process allowlist and reporting commands received by email.
-When ordinary authenticated users may use this feature and
-`email_commands.verify_sender_via_aliases` is `true`, MilterGuard uses
-`/etc/aliases` to verify that the authenticated envelope-sender address belongs
-to the SASL user. If ordinary users are allowed and alias verification is
-disabled, configure Postfix to enforce envelope-sender ownership. For a hash
-table, create
-`/etc/postfix/sender_login_maps` with one address and its permitted SASL login
-per line:
-
-```text
-phil.anderson@example.com philip
-alias@example.com         philip
-```
-
-Build the lookup table and add the ownership check to `main.cf`:
-
-```sh
-sudo postmap /etc/postfix/sender_login_maps
-```
-
-```text
-smtpd_sender_login_maps = hash:/etc/postfix/sender_login_maps
-smtpd_sender_restrictions = reject_authenticated_sender_login_mismatch
-```
-
-Merge the restriction into any existing `smtpd_sender_restrictions` instead of
-replacing them, and place it before a rule that broadly permits authenticated
-clients. Every envelope-sender address an authenticated user needs must appear
-in the map. Otherwise Postfix will reject that user when they send from the
-unlisted address. Without alias verification or Postfix sender-login
-enforcement, an authenticated user could impersonate another local address and
-manage its MilterGuard data.
-
-After changing `main.cf`, check and reload Postfix:
-
-```sh
-sudo postfix check
-sudo postfix reload
-```
-
 ### Optional early rejection with Spamhaus ZEN
 
 Spamhaus ZEN can reject mail from known abusive sending IP addresses before
@@ -266,7 +230,14 @@ and follow the current
 Do not query the public Spamhaus service through a public DNS resolver such as
 `1.1.1.1` or `8.8.8.8`; use a suitable local resolver or Spamhaus DQS.
 
-## Start in monitor mode
+After changing `main.cf`, check and reload Postfix:
+
+```sh
+sudo postfix check
+sudo postfix reload
+```
+
+## Start MilterGuard in monitor mode
 
 The default `monitor` mode analyses email and logs the action MilterGuard
 would recommend, but allows the message through. Leave it in this mode while you
@@ -439,18 +410,17 @@ automatically. Setting `rejection_history.expiry` to `0s` disables the history
 and requires `save_messages` to be disabled as well.
 
 Learned correspondents, rejection history, IP reputation, and cached domain
-registration data are stored in `/var/lib/milterguard` and survive service
-restarts. Back up this directory if you want to preserve the learned state when
-moving the service to another machine. Correspondent, IP reputation,
+registration data are stored in the SQLite database at
+`/var/lib/milterguard/milterguard.db`. To avoid a corrupt or incomplete backup,
+stop MilterGuard before copying the database file. Back it up if you want to
+preserve the learned state when moving the service to another machine.
+Correspondent, IP reputation,
 rejection-history, and domain-registration changes are committed to the SQLite
 database immediately. `persistence.cleanup_interval` controls periodic removal
 of expired and excess records and must be at least one minute; cleanup also runs
 at startup. The same background maintenance task also checkpoints SQLite's
 write-ahead log. Domain-registration expiry is still enforced during lookups,
 before periodic cleanup physically removes the old row.
-
-For a consistent backup, stop MilterGuard before copying its SQLite database,
-or use a SQLite-aware backup tool while the service is running.
 
 To add or remove correspondent whitelist entries directly from the command
 line, stop MilterGuard while editing its database:
@@ -504,11 +474,44 @@ Administrators can manage or inspect any recipient and use `*` to select
 everyone.
 
 When `allow_authenticated_users` is `true`, any authenticated user can manage
-and inspect their own allowlist and rejection history. MilterGuard can verify
-address ownership using `/etc/aliases` if `verify_sender_via_aliases` is set to
-`true`; otherwise Postfix must enforce it using `smtpd_sender_login_maps`.
-Without either check, an authenticated user could manage another user's
-allowlist and view their rejection history.
+and inspect their own allowlist and rejection history. When
+`email_commands.verify_sender_via_aliases` is `true`, MilterGuard uses
+`/etc/aliases` to verify that the authenticated envelope-sender address belongs
+to the SASL user. If alias verification is disabled, configure Postfix to
+enforce envelope-sender ownership. For a hash table, create
+`/etc/postfix/sender_login_maps` with one address and its permitted SASL login
+per line:
+
+```text
+phil.anderson@example.com philip
+alias@example.com         philip
+```
+
+Build the lookup table and add the ownership check to `/etc/postfix/main.cf`:
+
+```sh
+sudo postmap /etc/postfix/sender_login_maps
+```
+
+```text
+smtpd_sender_login_maps = hash:/etc/postfix/sender_login_maps
+smtpd_sender_restrictions = reject_authenticated_sender_login_mismatch
+```
+
+Merge the restriction into any existing `smtpd_sender_restrictions` instead of
+replacing them, and place it before a rule that broadly permits authenticated
+clients. Every envelope-sender address an authenticated user needs must appear
+in the map. Otherwise Postfix will reject that user when they send from the
+unlisted address. Without alias verification or Postfix sender-login
+enforcement, an authenticated user could impersonate another local address and
+manage its MilterGuard data.
+
+After changing these Postfix settings, check and reload Postfix:
+
+```sh
+sudo postfix check
+sudo postfix reload
+```
 
 To execute a command, send an email to the configured command address
 (`milterguard@example.com` in the example above) as its sole recipient, with
@@ -652,11 +655,10 @@ When `filtering.add_email_headers` is enabled, every accepted message receives
 `X-MilterGuard-Confidence: low` identifies unwanted classifications below
 `reject_score`, or legitimate classifications below
 `legitimate_low_confidence_score`. It can be used by a server-side or mail-client
-rule to place borderline messages in a Junk folder. Bypassed messages and
-analysis failures are marked as unavailable rather than being given an invented
-score. MilterGuard removes incoming headers with these names before adding its
-own values when Postfix offers Milter change-header support. The recommended
-Postfix `header_checks` rule also removes them at the SMTP boundary. Downstream
+rule to place borderline messages in a Junk folder. MilterGuard removes incoming
+headers with these names before adding its own values when Postfix offers Milter
+change-header support. The recommended Postfix `header_checks` rule also removes
+them at the SMTP boundary. Downstream
 filters should not trust these headers unless one of these protections is in
 place.
 
