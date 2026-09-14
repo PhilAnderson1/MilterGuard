@@ -229,7 +229,7 @@ func defaults() Config {
 			CleanupInterval: Duration(10 * time.Minute),
 		},
 		RejectionHistory: RejectionHistoryConfig{
-			Expiry: Duration(30 * 24 * time.Hour), MaxEntries: 10000, SaveMessages: true,
+			Expiry: Duration(30 * 24 * time.Hour), MaxEntries: 100000, SaveMessages: true,
 			MessageDirectory: "/var/lib/milterguard/rejected-mail", MessageMaxTotalBytes: 1 << 30,
 		},
 		Filtering: FilteringConfig{

@@ -1,6 +1,7 @@
 package message
 
 import (
+	"bytes"
 	"encoding/base64"
 	"net/url"
 	"strconv"
@@ -1272,6 +1273,60 @@ func TestVisionFallbackSelectsReferencedInlineImage(t *testing.T) {
 	}
 }
 
+func TestVisionFallbackSelectsStandaloneImageAttachment(t *testing.T) {
+	m := New(1 << 20)
+	m.AddHeader("Content-Type", `multipart/mixed; boundary="outer"`)
+	m.AddBody([]byte("--outer\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n\r\n" +
+		"--outer\r\nContent-Type: image/png; name=order.png\r\n" +
+		"Content-Disposition: attachment; filename=order.png\r\n" +
+		"Content-ID: <gmail-attachment-id>\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n" + onePixelPNG + "\r\n" +
+		"--outer--\r\n"))
+
+	analysis := m.BuildAnalysis(1000, VisionOptions{
+		Mode: "fallback", MinTextChars: 500, MaxImages: 2,
+		MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if len(analysis.Images) != 1 {
+		t.Fatalf("selected images = %d, want 1; prompt=%s", len(analysis.Images), analysis.Prompt)
+	}
+	if analysis.Images[0].MediaType != "image/png" {
+		t.Fatalf("media type = %q, want image/png", analysis.Images[0].MediaType)
+	}
+	if !strings.Contains(analysis.Prompt, "[attachment: order.png; type=image/png]") {
+		t.Fatalf("attachment evidence missing from prompt: %s", analysis.Prompt)
+	}
+	if !strings.Contains(analysis.Prompt, "INLINE EMAIL IMAGES: 1") {
+		t.Fatalf("vision disclosure missing from prompt: %s", analysis.Prompt)
+	}
+}
+
+func TestVisionPrefersReferencedImageOverStandaloneAttachment(t *testing.T) {
+	decoded, err := base64.StdEncoding.DecodeString(onePixelPNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := extractedContent{
+		ImageRefs: []string{"referenced"},
+		Images: []extractedImage{
+			{Data: decoded},
+			{ContentID: "referenced", Data: append([]byte(nil), decoded...)},
+		},
+	}
+	content.Images[1].Data[len(content.Images[1].Data)-1] ^= 1
+	images := selectVisionImages(content, VisionOptions{
+		Mode: "always", MaxImages: 1, MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if len(images) != 1 {
+		t.Fatalf("selected images = %d, want 1", len(images))
+	}
+	if !bytes.Equal(images[0].Data, content.Images[1].Data) {
+		t.Fatal("standalone attachment displaced referenced image")
+	}
+}
+
 func TestVisionFallbackIgnoresGeneratedLinkAndImageEvidenceForTextThreshold(t *testing.T) {
 	longDestination := "https://security.example/review?token=" + strings.Repeat("x", 400)
 	m := multipartRelatedMessage("Fallback", `<a href="`+longDestination+`"><img alt="Long generated image description" src="cid:notice"></a>`, "<notice>")
@@ -1351,14 +1406,14 @@ func TestAlternativeDoesNotTreatRelatedImageWithoutHTMLAsHTML(t *testing.T) {
 	}
 }
 
-func TestVisionFallbackIgnoresUnreferencedImage(t *testing.T) {
+func TestVisionFallbackSelectsUnreferencedEmbeddedImage(t *testing.T) {
 	m := imageOnlyMessage("cid:different-image", "<scam-image>")
 	analysis := m.BuildAnalysis(1000, VisionOptions{
 		Mode: "fallback", MinTextChars: 200, MaxImages: 2,
 		MaxBytes: 1 << 20, MaxPixels: 100,
 	})
-	if len(analysis.Images) != 0 {
-		t.Fatalf("selected unreferenced image: %#v", analysis.Images)
+	if len(analysis.Images) != 1 {
+		t.Fatalf("selected images = %d, want 1; prompt=%s", len(analysis.Images), analysis.Prompt)
 	}
 }
 

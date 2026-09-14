@@ -219,9 +219,10 @@ rejection_history:
   # save_messages to be false.
   expiry: 720h
 
-  # Retention target for rejection records. Periodic cleanup removes the oldest
-  # records above this number.
-  max_entries: 10000
+  # Safety ceiling for rejection records. Periodic cleanup removes expired
+  # records first, then the oldest records above this number. On a busy server,
+  # this limit may therefore shorten the configured retention period.
+  max_entries: 100000
 
   # Save copies of messages rejected after complete-message inspection.
   # IP reputation rejections occur before the message is received and cannot
