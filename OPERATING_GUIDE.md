@@ -261,6 +261,34 @@ When monitor-mode results are satisfactory, change the mode to `enforce` and
 restart MilterGuard. It will then reject unwanted messages that meet the
 configured confidence threshold and block prohibited executable attachments.
 
+### Deterministic rejections without AI analysis
+
+In `enforce` mode, MilterGuard can reject some messages without sending them to
+the AI endpoint:
+
+- An active IP reputation block rejects the SMTP transaction at `MAIL FROM`,
+  before MilterGuard receives the body. Because the complete message is not
+  available, this rejection cannot be added to rejection history or the saved
+  message archive. Administrators can list, add, and remove these blocks through
+  the [email command interface](#email-commands).
+- To prevent outsiders from impersonating your own domains, list domains for
+  which this server is the only legitimate mail source under
+  `filtering.authenticated_only_sender_domains`. MilterGuard then rejects
+  unauthenticated messages using those domains—or their subdomains—in the
+  visible `From:` address, and records and archives the rejection. Authenticated
+  SMTP submissions remain permitted. Do not list a domain if this is not its
+  only valid mail server, for example if your organisation operates multiple
+  mail servers or a legitimate third party sends email on its behalf.
+- The attachment policy can reject prohibited executable content, including
+  disguised executables and executables inside supported archives. It can also
+  reject encrypted or unscannable attachments when their configured actions are
+  `reject`. These decisions use local attachment inspection and are recorded
+  and archived.
+
+These checks run in that order before trusted-domain or correspondent bypasses
+and AI analysis. An empty `authenticated_only_sender_domains` list disables
+that policy.
+
 Alternatively, setting `mode: tag` accepts all mail while adding result
 headers. Successfully analysed mail includes its classification and score.
 Attachment policy and IP reputation do not reject mail in tag mode, and adaptive

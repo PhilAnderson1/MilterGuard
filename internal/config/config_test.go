@@ -31,6 +31,8 @@ filtering:
   reject_score: 0.8
   legitimate_low_confidence_score: 0.7
   add_email_headers: true
+  authenticated_only_sender_domains:
+    - example.com
 attachments:
   block_executables: false
 correspondents:
@@ -57,7 +59,7 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
+	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || !reflect.DeepEqual(cfg.Filtering.AuthenticatedOnlySenderDomains, []string{"example.com"}) || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
@@ -335,6 +337,22 @@ func TestValidateSenderDomainAllowlist(t *testing.T) {
 				t.Fatalf("validation error = %v, want %q", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestValidateAuthenticatedOnlySenderDomains(t *testing.T) {
+	cfg := validConfig()
+	cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"example.com", "MAIL.EXAMPLE.ORG."}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid authenticated-only sender domains rejected: %v", err)
+	}
+
+	for _, domain := range []string{"", "*.example.com", "127.0.0.1", "bad_domain.example"} {
+		cfg := validConfig()
+		cfg.Filtering.AuthenticatedOnlySenderDomains = []string{domain}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "authenticated_only_sender_domains") {
+			t.Errorf("invalid domain %q error = %v", domain, err)
+		}
 	}
 }
 

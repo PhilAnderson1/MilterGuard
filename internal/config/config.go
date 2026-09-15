@@ -125,6 +125,7 @@ type FilteringConfig struct {
 	AIErrorAction                    string   `yaml:"ai_error_action"`
 	RejectMessage                    string   `yaml:"reject_message"`
 	ScanAuthenticated                bool     `yaml:"scan_authenticated"`
+	AuthenticatedOnlySenderDomains   []string `yaml:"authenticated_only_sender_domains"`
 	SenderDomainAllowlistFile        string   `yaml:"sender_domain_allowlist"`
 	SenderDomainAllowlist            []string `yaml:"-"`
 	SenderDomainAllowlistRequireDKIM bool     `yaml:"sender_domain_allowlist_require_dkim"`
@@ -235,6 +236,7 @@ func defaults() Config {
 		Filtering: FilteringConfig{
 			RejectScore: .9, LegitimateLowConfidenceScore: .8, AddEmailHeaders: true,
 			AIErrorAction: "accept", RejectMessage: "Message rejected as suspected spam or fraud",
+			AuthenticatedOnlySenderDomains:   []string{},
 			SenderDomainAllowlistFile:        "/etc/milterguard/trusted-sender-domains.txt",
 			SenderDomainAllowlistRequireDKIM: true,
 		},
@@ -405,6 +407,11 @@ func (c Config) Validate() error {
 	}
 	if c.Filtering.AIErrorAction != "accept" && c.Filtering.AIErrorAction != "tempfail" {
 		return fmt.Errorf("filtering.ai_error_action must be accept or tempfail")
+	}
+	for _, domain := range c.Filtering.AuthenticatedOnlySenderDomains {
+		if !validDomainName(domain) {
+			return fmt.Errorf("invalid filtering.authenticated_only_sender_domains entry %q", domain)
+		}
 	}
 	if c.Filtering.SenderDomainAllowlistFile != "" && !filepath.IsAbs(c.Filtering.SenderDomainAllowlistFile) {
 		return fmt.Errorf("filtering.sender_domain_allowlist must be an absolute path")

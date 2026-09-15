@@ -113,6 +113,17 @@ filtering:
   # and AI scanning of outbound mail.
   scan_authenticated: false
 
+  # Visible From domains that may be used only by authenticated SMTP users. Use
+  # this when your server is the only legitimate source of mail for your domains.
+  # Entries are matched case-insensitively and also protect their subdomains.
+  # Do not list domains used by legitimate third-party sending services unless
+  # those messages are submitted through this server with SMTP authentication.
+  # An empty list disables this policy. To enable it, replace [] with:
+  # authenticated_only_sender_domains:
+  #   - mydomain1.com
+  #   - mydomain2.com
+  authenticated_only_sender_domains: []
+
   # File containing trusted visible From domains that bypass AI scanning.
   # List one exact domain per line; entries also match their subdomains.
   sender_domain_allowlist: /etc/milterguard/trusted-sender-domains.txt

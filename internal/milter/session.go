@@ -291,6 +291,9 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		return keepConnection
 	}
 	ss.message.AuthenticatedSubmission = ss.authentication.Authenticated
+	if handled, keepConnection := ss.applyAuthenticatedOnlySenderDomain(ctx); handled {
+		return keepConnection
+	}
 	if ss.authentication.Authenticated && !ss.server.cfg.Filtering.ScanAuthenticated {
 		return ss.finishBypassedMessage(ctx, "authenticated_connection", true, false)
 	}
