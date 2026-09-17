@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/mail"
@@ -16,7 +17,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const MTAHostnameAuthservID = "$mta_hostname"
+const (
+	MTAHostnameAuthservID = "$mta_hostname"
+	maxMilterMessageSize  = 100 << 20
+)
 
 type Duration time.Duration
 
@@ -174,7 +178,16 @@ func Load(path string) (Config, error) {
 	dec := yaml.NewDecoder(strings.NewReader(string(b)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
+		if errors.Is(err, io.EOF) {
+			return Config{}, fmt.Errorf("configuration file is empty")
+		}
 		return Config{}, err
+	}
+	var additionalDocument any
+	if err := dec.Decode(&additionalDocument); err == nil {
+		return Config{}, fmt.Errorf("configuration file must contain exactly one YAML document")
+	} else if !errors.Is(err, io.EOF) {
+		return Config{}, fmt.Errorf("invalid trailing YAML content: %w", err)
 	}
 	if c.AI.APIKey == "" && c.AI.APIKeyEnv != "" {
 		c.AI.APIKey = os.Getenv(c.AI.APIKeyEnv)
@@ -209,7 +222,7 @@ func defaults() Config {
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
 			Model: "qwen/qwen3.6-35b-a3b", DisableThinking: true,
 			PromptFile: "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
-			Retries: 1, MaxConcurrent: 8, MaxBodyChars: 50000,
+			Retries: 2, MaxConcurrent: 8, MaxBodyChars: 50000,
 			VisionMode: "fallback", VisionMinTextChars: 500,
 			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000,
 			SiteURL: "https://github.com/PhilAnderson1/MilterGuard", AppName: "MilterGuard",
@@ -271,8 +284,11 @@ func (c Config) Validate() error {
 	if c.Mode != "monitor" && c.Mode != "tag" && c.Mode != "enforce" {
 		return fmt.Errorf("mode must be monitor, tag, or enforce")
 	}
-	if c.Milter.Socket == "" || c.Milter.MaxMessageSize < 1 {
-		return fmt.Errorf("invalid milter settings")
+	if c.Milter.Socket == "" {
+		return fmt.Errorf("milter.socket must not be empty")
+	}
+	if c.Milter.MaxMessageSize < 1 || c.Milter.MaxMessageSize > maxMilterMessageSize {
+		return fmt.Errorf("milter.max_message_size must be between 1 and %d bytes", maxMilterMessageSize)
 	}
 	if c.Milter.Timeout.Value() <= 0 {
 		return fmt.Errorf("milter.timeout must be positive")

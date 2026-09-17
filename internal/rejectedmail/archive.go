@@ -168,7 +168,7 @@ func (a *Archive) saveAt(message []byte, recordID uint64, now time.Time) (string
 		name = now.Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(random[:]) + ".eml"
 	}
 	path := filepath.Join(directory, name)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
+	file, err := openArchiveFile(path, directory)
 	if err != nil {
 		if os.IsExist(err) {
 			return "", fmt.Errorf("rejected message archive file already exists: %s", path)
@@ -185,6 +185,20 @@ func (a *Archive) saveAt(message []byte, recordID uint64, now time.Time) (string
 		return "", err
 	}
 	return path, nil
+}
+
+func openArchiveFile(path, directory string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return file, err
+	}
+	// Capacity cleanup may remove an empty date directory after saveAt's
+	// initial MkdirAll but before file creation. Recreate that already-derived
+	// directory and retry once without weakening exclusive creation.
+	if err := os.MkdirAll(directory, 0750); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
 }
 
 func (a *Archive) removeExpiredDateTrees(cutoff time.Time) (int, error) {

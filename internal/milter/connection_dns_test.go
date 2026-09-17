@@ -86,6 +86,14 @@ func TestResolveConnectionDNSOutcomes(t *testing.T) {
 			wantStatus: message.ReverseDNSAbsent,
 		},
 		{
+			name: "PTR records contain no usable hostnames",
+			resolver: &connectionTestResolver{
+				ptr:     []string{"bad name.example.", "_service.example.", "bad\nname.example."},
+				forward: map[string][]net.IPAddr{}, forwardErr: map[string]error{},
+			},
+			wantStatus: message.ReverseDNSAbsent,
+		},
+		{
 			name:       "PTR failure",
 			resolver:   &connectionTestResolver{ptrErr: errors.New("resolver unavailable")},
 			wantStatus: message.ReverseDNSLookupFailed,

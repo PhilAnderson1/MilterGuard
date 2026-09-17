@@ -168,6 +168,50 @@ func TestProtectedDomainPolicyChecksEveryFromMailbox(t *testing.T) {
 	}
 }
 
+func TestProtectedDomainPolicyRecoversMailboxFromMalformedList(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+	server, conn, done := testServer(t, analyzer)
+	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "192.0.2.10"),
+		[]byte{commandMail},
+		headerFrame("From", "support@invades.net, (("),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
+	if got := analyzer.calls.Load(); got != 0 {
+		t.Fatalf("AI analysis calls = %d, want 0", got)
+	}
+}
+
+func TestMalformedFromListDoesNotTreatDisplayTextAsProtectedMailbox(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+	server, conn, done := testServer(t, analyzer)
+	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "192.0.2.10"),
+		[]byte{commandMail},
+		headerFrame("From", `"support@invades.net" <criminal@example.org>, ((`),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if got := analyzer.calls.Load(); got != 1 {
+		t.Fatalf("AI analysis calls = %d, want 1", got)
+	}
+}
+
 func TestProtectedSenderDomainMonitorModeTagsWithoutAI(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)

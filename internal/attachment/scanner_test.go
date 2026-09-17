@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 )
@@ -34,6 +35,39 @@ func TestDirectAttachmentBlockedByDecodedFilename(t *testing.T) {
 	}
 	if finding == nil || finding.Path != "Quarterly Report.PDF.EXE" || finding.Detection != "blocked extension .exe" {
 		t.Fatalf("finding = %#v", finding)
+	}
+}
+
+func TestNTFSStreamSuffixDoesNotHideBlockedExtension(t *testing.T) {
+	for _, filename := range []string{"invoice.exe::$DATA", "script.bat:stream"} {
+		t.Run(filename, func(t *testing.T) {
+			finding, err := testScanner().Scan(
+				"application/octet-stream", "", `attachment; filename="`+filename+`"`, []byte("harmless bytes"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finding == nil || !strings.Contains(finding.Detection, "blocked extension") {
+				t.Fatalf("finding = %#v", finding)
+			}
+		})
+	}
+}
+
+func TestNTFSStreamSuffixInsideArchiveDoesNotHideBlockedExtension(t *testing.T) {
+	archive := makeZIP(t, map[string][]byte{"script.bat:stream": []byte("harmless bytes")})
+	finding, err := testScanner().Scan("application/zip", "", `attachment; filename="files.zip"`, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Detection != "blocked extension .bat" {
+		t.Fatalf("finding = %#v", finding)
+	}
+}
+
+func TestCleanNamePreservesOrdinaryColonFilename(t *testing.T) {
+	if got, want := cleanName("report:final.pdf"), "report:final.pdf"; got != want {
+		t.Fatalf("cleanName() = %q, want %q", got, want)
 	}
 }
 
@@ -221,6 +255,27 @@ func TestMultipartScansAllAlternativesAndAttachments(t *testing.T) {
 	}
 }
 
+func TestMultipartFindingTakesPrecedenceOverEarlierPartError(t *testing.T) {
+	boundary := "malformed-part-before-executable"
+	body := fmt.Sprintf("--%s\r\nContent-Type: text/plain; charset=\"\r\n\r\nbroken\r\n--%s\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=payload.exe\r\n\r\npayload\r\n--%s--\r\n", boundary, boundary, boundary)
+	finding, err := testScanner().Scan(`multipart/mixed; boundary="`+boundary+`"`, "", "", []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Path != "message/payload.exe" || finding.Detection != "blocked extension .exe" {
+		t.Fatalf("finding = %#v", finding)
+	}
+}
+
+func TestMultipartReturnsEarlierPartErrorAfterScanningRemainingParts(t *testing.T) {
+	boundary := "malformed-part-before-safe-part"
+	body := fmt.Sprintf("--%s\r\nContent-Type: text/plain; charset=\"\r\n\r\nbroken\r\n--%s\r\nContent-Type: text/plain\r\n\r\nsafe\r\n--%s--\r\n", boundary, boundary, boundary)
+	finding, err := testScanner().Scan(`multipart/mixed; boundary="`+boundary+`"`, "", "", []byte(body))
+	if finding != nil || err == nil || !strings.Contains(err.Error(), "invalid Content-Type") {
+		t.Fatalf("finding = %#v, error = %v", finding, err)
+	}
+}
+
 func TestExecutableSignatureDetectedInTruncatedMultipart(t *testing.T) {
 	boundary := "truncated-multipart-boundary"
 	encoded := base64.StdEncoding.EncodeToString(append([]byte("MZ"), bytes.Repeat([]byte{0x42}, 100)...))
@@ -247,6 +302,21 @@ func TestExecutableDetectedInsideTruncatedAttachedEmail(t *testing.T) {
 		t.Fatal(err)
 	}
 	if finding == nil || finding.Path != "message/test.eml/p2s.txt" || finding.Detection != "DOS/Windows executable signature" {
+		t.Fatalf("finding = %#v", finding)
+	}
+}
+
+func TestMultipartDigestScansImplicitAttachedMessage(t *testing.T) {
+	attachedEmail := "From: sender@example.net\r\n" +
+		"Content-Type: application/octet-stream; name=invoice.exe\r\n" +
+		"Content-Disposition: attachment; filename=invoice.exe\r\n\r\n" +
+		"executable content"
+	body := "--digest\r\n\r\n" + attachedEmail + "\r\n--digest--\r\n"
+	finding, err := testScanner().Scan(`multipart/digest; boundary="digest"`, "", "", []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Path != "invoice.exe" || finding.Detection != "blocked extension .exe" {
 		t.Fatalf("finding = %#v", finding)
 	}
 }
@@ -281,6 +351,64 @@ func TestArchiveLimitsAreEnforced(t *testing.T) {
 	if finding != nil || err == nil || !strings.Contains(err.Error(), "file-count limit") {
 		t.Fatalf("finding = %#v, error = %v", finding, err)
 	}
+}
+
+func TestMIMEDepthLimitUsesOneConsistentBoundary(t *testing.T) {
+	scanner := testScanner()
+	finding, err := scanner.scanMIME("text/plain", "", "", []byte("safe"), "message", maxMIMEDepth-1, &scanState{})
+	if finding != nil || err != nil {
+		t.Fatalf("last permitted MIME depth: finding = %#v, error = %v", finding, err)
+	}
+	finding, err = scanner.scanMIME("text/plain", "", "", []byte("safe"), "message", maxMIMEDepth, &scanState{})
+	if finding != nil || err == nil || !strings.Contains(err.Error(), "MIME nesting limit") {
+		t.Fatalf("excessive MIME depth: finding = %#v, error = %v", finding, err)
+	}
+}
+
+func TestArchiveLimitProbeToleratesZeroLengthRead(t *testing.T) {
+	scanner := testScanner()
+	scanner.options.MaxAttachmentBytes = 4
+	reader := &zeroBeforeExtraReader{content: []byte("12345")}
+	data, err := scanner.readArchiveEntry(reader, &scanState{})
+	if string(data) != "1234" || err == nil || !strings.Contains(err.Error(), "entry size limit") {
+		t.Fatalf("data = %q, error = %v", data, err)
+	}
+}
+
+func TestTARChecksExecutableSignatureInPartialEntry(t *testing.T) {
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	if err := writer.WriteHeader(&tar.Header{Name: "invoice.txt", Mode: 0o600, Size: 10}); err != nil {
+		t.Fatal(err)
+	}
+	archive.WriteString("MZ")
+
+	finding, err := testScanner().scanTAR("files.tar", bytes.NewReader(archive.Bytes()), 1, &scanState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Path != "files.tar/invoice.txt" || finding.Detection != "DOS/Windows executable signature" {
+		t.Fatalf("finding = %#v", finding)
+	}
+}
+
+type zeroBeforeExtraReader struct {
+	content     []byte
+	offset      int
+	returnedNil bool
+}
+
+func (r *zeroBeforeExtraReader) Read(p []byte) (int, error) {
+	if r.offset == 4 && !r.returnedNil {
+		r.returnedNil = true
+		return 0, nil
+	}
+	if r.offset >= len(r.content) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.content[r.offset:])
+	r.offset += n
+	return n, nil
 }
 
 func TestPartialZIPUnderstatedSizesCannotBypassActualByteBudget(t *testing.T) {

@@ -19,9 +19,9 @@ func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 		return true, false
 	}
 	finding, scanErr := ss.server.attachments.Scan(
-		ss.message.Header("Content-Type"),
-		ss.message.Header("Content-Transfer-Encoding"),
-		ss.message.Header("Content-Disposition"),
+		ss.message.FirstHeader("Content-Type"),
+		ss.message.FirstHeader("Content-Transfer-Encoding"),
+		ss.message.FirstHeader("Content-Disposition"),
 		ss.message.BodyBytes(),
 	)
 	if finding != nil {

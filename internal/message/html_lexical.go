@@ -275,7 +275,8 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 		case name == "img" && !isClosing:
 			src := lexicalAttribute(rawTag, "src")
 			if len(src) > 4 && strings.EqualFold(src[:4], "cid:") {
-				contentID := normalizeContentID(src[4:])
+				rawContentID := src[4:]
+				contentID := normalizeContentID(rawContentID)
 				if contentID != "" {
 					alt := markdownLabel(lexicalAttribute(rawTag, "alt"))
 					if alt == "" {
@@ -286,7 +287,7 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 					text.WriteString("](cid:")
 					text.WriteString(markdownURL(contentID))
 					text.WriteString(") ")
-					imageRefs.Add(contentID)
+					imageRefs.Add(rawContentID)
 				}
 			} else if src, valid := lexicalResolvedHTTPURL(src, baseURL); valid {
 				alt := markdownLabel(lexicalAttribute(rawTag, "alt"))
@@ -482,6 +483,10 @@ func lexicalTemplateEnd(source, lower string, offset int) (int, bool) {
 			if depth == 0 {
 				return closing + 1, true
 			}
+		case name == "plaintext" && !isClosing && lexicalExactOpeningTag(rawTag, name):
+			// PLAINTEXT changes the tokenizer state through EOF. Apparent template
+			// closing tags after it are text, so this template never terminates.
+			return 0, false
 		case !isClosing && lexicalExactOpeningTag(rawTag, name) && lexicalRawTextElement(name):
 			_, rawEnd, found := lexicalElementEnd(source, lower, closing+1, name)
 			if !found {

@@ -26,8 +26,6 @@ var promptHeaders = map[string]bool{
 
 var plainHTTPURL = regexp.MustCompile(`(?i)https?://[^\s<>"']+`)
 
-var receivedSPFReceiverPattern = regexp.MustCompile(`(?i)(?:^|[;\s])receiver\s*=\s*(?:"([^"]+)"|([^\s;]+))`)
-
 func (m *Message) Prompt(maxChars int) string {
 	return m.BuildAnalysis(maxChars, VisionOptions{Mode: "off"}).Prompt
 }
@@ -82,7 +80,7 @@ func (m *Message) ProcessedBody(maxChars int) string {
 }
 
 func (m *Message) processedContent() extractedContent {
-	content := extractMIME(m.Header("Content-Type"), m.Header("Content-Transfer-Encoding"), "", m.BodyBytes(), 0)
+	content := extractMIME(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", m.BodyBytes(), 0)
 	if content.Text == content.VisibleText {
 		content.Text = stripInvisibleFormatting(content.Text)
 		content.VisibleText = content.Text
@@ -153,19 +151,139 @@ func trustedReceivedSPF(values, trustedAuthservIDs []string) []string {
 	trusted := normalizedAuthservIDs(trustedAuthservIDs)
 	results := make([]string, 0, len(values))
 	for _, value := range values {
-		match := receivedSPFReceiverPattern.FindStringSubmatch(value)
-		if len(match) == 0 {
-			continue
-		}
-		receiver := match[1]
-		if receiver == "" {
-			receiver = match[2]
-		}
-		if trusted[normalizeAuthservID(receiver)] {
+		if receiver, ok := receivedSPFReceiver(value); ok && trusted[normalizeAuthservID(receiver)] {
 			results = append(results, value)
 		}
 	}
 	return results
+}
+
+// receivedSPFReceiver extracts receiver= only from the parameter list of a
+// Received-SPF field. Text inside comments or quoted parameter values cannot
+// manufacture a trusted receiver parameter.
+func receivedSPFReceiver(value string) (string, bool) {
+	i := 0
+	skipSPFWhitespace := func() {
+		for i < len(value) && (value[i] == ' ' || value[i] == '\t') {
+			i++
+		}
+	}
+	skipSPFWhitespace()
+	// Skip the leading SPF result token.
+	start := i
+	for i < len(value) && isSPFTokenByte(value[i]) {
+		i++
+	}
+	if i == start {
+		return "", false
+	}
+
+	for {
+		for {
+			skipSPFWhitespace()
+			for i < len(value) && value[i] == ';' {
+				i++
+				skipSPFWhitespace()
+			}
+			if i >= len(value) || value[i] != '(' {
+				break
+			}
+			if !skipSPFComment(value, &i) {
+				return "", false
+			}
+		}
+		if i >= len(value) {
+			return "", false
+		}
+
+		keyStart := i
+		for i < len(value) && isSPFTokenByte(value[i]) {
+			i++
+		}
+		if i == keyStart {
+			return "", false
+		}
+		key := value[keyStart:i]
+		skipSPFWhitespace()
+		if i >= len(value) || value[i] != '=' {
+			return "", false
+		}
+		i++
+		skipSPFWhitespace()
+		parameter, ok := readSPFParameterValue(value, &i)
+		if !ok {
+			return "", false
+		}
+		if strings.EqualFold(key, "receiver") {
+			return parameter, true
+		}
+	}
+}
+
+func isSPFTokenByte(value byte) bool {
+	return value >= '!' && value <= '~' && !strings.ContainsRune(`()<>@,;:\[]="`, rune(value))
+}
+
+func skipSPFComment(value string, offset *int) bool {
+	depth := 0
+	escaped := false
+	for *offset < len(value) {
+		char := value[*offset]
+		*offset++
+		if escaped {
+			escaped = false
+			continue
+		}
+		if char == '\\' {
+			escaped = true
+			continue
+		}
+		switch char {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func readSPFParameterValue(value string, offset *int) (string, bool) {
+	if *offset >= len(value) {
+		return "", false
+	}
+	if value[*offset] != '"' {
+		start := *offset
+		for *offset < len(value) && value[*offset] != ' ' && value[*offset] != '\t' && value[*offset] != ';' && value[*offset] != '(' {
+			*offset++
+		}
+		return value[start:*offset], *offset > start
+	}
+
+	*offset++
+	var decoded strings.Builder
+	escaped := false
+	for *offset < len(value) {
+		char := value[*offset]
+		*offset++
+		if escaped {
+			decoded.WriteByte(char)
+			escaped = false
+			continue
+		}
+		if char == '\\' {
+			escaped = true
+			continue
+		}
+		if char == '"' {
+			return decoded.String(), true
+		}
+		decoded.WriteByte(char)
+	}
+	return "", false
 }
 
 func normalizedAuthservIDs(values []string) map[string]bool {

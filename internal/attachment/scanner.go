@@ -22,6 +22,8 @@ import (
 	"unicode/utf8"
 )
 
+// maxMIMEDepth bounds the number of MIME entities on a path, including the
+// top-level entity at depth zero.
 const maxMIMEDepth = 16
 
 type Options struct {
@@ -80,7 +82,7 @@ func (s *Scanner) Scan(contentType, transferEncoding, contentDisposition string,
 }
 
 func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition string, data []byte, location string, mimeDepth int, state *scanState) (*Finding, error) {
-	if mimeDepth > maxMIMEDepth {
+	if mimeDepth >= maxMIMEDepth {
 		return nil, &ScanError{Path: location, Err: errors.New("MIME nesting limit exceeded")}
 	}
 	mediaType, params, err := mime.ParseMediaType(contentType)
@@ -99,12 +101,16 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 			return nil, &ScanError{Path: location, Err: errors.New("multipart content has no boundary")}
 		}
 		reader := multipart.NewReader(bytes.NewReader(data), boundary)
+		var firstError error
 		for index := 1; ; index++ {
 			part, partErr := reader.NextPart()
 			if partErr == io.EOF {
-				return nil, nil
+				return nil, firstError
 			}
 			if partErr != nil {
+				if firstError != nil {
+					return nil, firstError
+				}
 				return nil, &ScanError{Path: location, Err: fmt.Errorf("cannot read MIME part: %w", partErr)}
 			}
 			// The complete message has already been bounded by milter.max_message_size.
@@ -112,15 +118,22 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 			// against the decoded attachment limit.
 			partData, readErr := io.ReadAll(part)
 			partLocation := fmt.Sprintf("%s/part-%d", location, index)
-			if filename := attachmentFilename(part.Header.Get("Content-Disposition"), part.Header.Get("Content-Type")); filename != "" {
+			partContentType := part.Header.Get("Content-Type")
+			if mediaType == "multipart/digest" && strings.TrimSpace(partContentType) == "" {
+				partContentType = "message/rfc822"
+			}
+			if filename := attachmentFilename(part.Header.Get("Content-Disposition"), partContentType); filename != "" {
 				partLocation = joinLocation(location, filename)
 			}
-			finding, scanErr := s.scanMIME(part.Header.Get("Content-Type"), part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-Disposition"), partData, partLocation, mimeDepth+1, state)
-			if finding != nil || scanErr != nil {
-				return finding, scanErr
+			finding, scanErr := s.scanMIME(partContentType, part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-Disposition"), partData, partLocation, mimeDepth+1, state)
+			if finding != nil {
+				return finding, nil
 			}
-			if readErr != nil {
-				return nil, &ScanError{Path: partLocation, Err: readErr}
+			if scanErr != nil && firstError == nil {
+				firstError = scanErr
+			}
+			if readErr != nil && firstError == nil {
+				firstError = &ScanError{Path: partLocation, Err: readErr}
 			}
 		}
 	}
@@ -377,6 +390,11 @@ func (s *Scanner) scanTAR(location string, reader io.Reader, archiveDepth int, s
 			return &Finding{Path: entryLocation, Detection: "blocked extension ." + extension}, nil
 		}
 		entryData, err := s.readArchiveEntry(tarReader, state)
+		if s.options.InspectSignatures {
+			if signature := executableSignature(entryData); signature != "" {
+				return &Finding{Path: entryLocation, Detection: signature}, nil
+			}
+		}
 		if err != nil {
 			return nil, &ScanError{Path: entryLocation, Err: err}
 		}
@@ -400,7 +418,7 @@ func (s *Scanner) readArchiveEntry(reader io.Reader, state *scanState) ([]byte, 
 		return data, err
 	}
 	var extra [1]byte
-	if count, extraErr := reader.Read(extra[:]); count > 0 {
+	if count, extraErr := io.ReadFull(reader, extra[:]); count > 0 {
 		if remaining <= s.options.MaxAttachmentBytes {
 			return data, errors.New("archive uncompressed-size limit exceeded")
 		}
@@ -430,7 +448,14 @@ func (s *Scanner) beginArchiveFile(declaredSize uint64, state *scanState) error 
 }
 
 func (s *Scanner) blockedExtension(filename string) string {
-	filename = strings.TrimRight(strings.ToLower(cleanName(filename)), ". ")
+	filename = strings.ToLower(cleanName(filename))
+	// On Windows, the first colon after the basename introduces an NTFS
+	// alternate data stream. Extension policy must apply to the base file, so
+	// names such as invoice.exe::$DATA cannot disguise an executable suffix.
+	if stream := strings.IndexByte(filename, ':'); stream >= 0 {
+		filename = filename[:stream]
+	}
+	filename = strings.TrimRight(filename, ". ")
 	parts := strings.Split(filename, ".")
 	for _, extension := range parts[1:] {
 		if _, blocked := s.blocked[extension]; blocked {

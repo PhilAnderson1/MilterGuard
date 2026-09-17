@@ -300,18 +300,16 @@ them to the AI endpoint:
   `filtering.authenticated_only_sender_domains`. MilterGuard then rejects
   unauthenticated messages using those domains—or their subdomains—in the
   visible `From:` address, records and archives the rejection, and adds a strike
-  against the sending IP. Authenticated SMTP submissions remain permitted. Do
-  not list a domain if this is not its only valid mail server, for example if
-  your organisation operates multiple mail servers or a legitimate third party
-  sends email on its behalf.
+  against the sending IP. Do not list a domain if this is not its only valid
+  mail server, for example if your organisation operates multiple mail servers
+  or a legitimate third party sends email on its behalf.
 - The attachment policy can reject prohibited executable content, including
   disguised executables and executables inside supported archives. It can also
   reject encrypted or unscannable attachments when their configured actions are
   `reject`. These decisions use local attachment inspection and are recorded
   and archived.
 
-These checks take place before AI analysis. An empty
-`authenticated_only_sender_domains` list disables that policy.
+The above checks take place before AI analysis.
 
 Alternatively, setting `mode: tag` accepts all mail while adding result
 headers. Successfully analysed mail includes its classification and score.
@@ -481,8 +479,7 @@ before periodic cleanup physically removes the old row.
 ### Command line
 
 MilterGuard provides an interactive administrator interface for managing
-allowlists, IP blocks, and rejection history. It works with the supplied
-configuration without requiring the email command feature:
+allowlists, IP blocks, and rejection history:
 
 ```sh
 sudo milterguard --command-mode

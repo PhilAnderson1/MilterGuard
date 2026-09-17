@@ -129,6 +129,30 @@ func TestSaveWithRecordIDUsesRecordIDAndDoesNotOverwrite(t *testing.T) {
 	}
 }
 
+func TestOpenArchiveFileRecreatesRemovedDateDirectory(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "2026", "09", "17")
+	path := filepath.Join(directory, "123.eml")
+
+	file, err := openArchiveFile(path, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0640 {
+		t.Fatalf("message mode = %o, want 640", info.Mode().Perm())
+	}
+	if _, err := openArchiveFile(path, directory); !os.IsExist(err) {
+		t.Fatalf("exclusive retry error = %v, want file-exists error", err)
+	}
+}
+
 func TestCapacityCleanupUsesModificationTime(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "2026", "09", "07")

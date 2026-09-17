@@ -200,22 +200,29 @@ func (s *domainRegistrationStore) cleanup() (int64, error) {
 	ctx := context.Background()
 	var deleted int64
 	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		var attemptDeleted int64
 		result, err := tx.ExecContext(ctx, `DELETE FROM domain_registrations WHERE expires_at_ms < ?`,
 			unixMillis(s.now().UTC().Add(-domainRegistrationExpiryGrace)))
 		if err != nil {
 			return err
 		}
-		if n, err := result.RowsAffected(); err == nil {
-			deleted += n
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
 		}
+		attemptDeleted += n
 		capacityDeleted, err := s.enforceCapacityTx(ctx, tx)
 		if err != nil {
 			return err
 		}
-		deleted += capacityDeleted
+		attemptDeleted += capacityDeleted
+		deleted = attemptDeleted
 		return nil
 	})
-	return deleted, err
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 
 func (s *domainRegistrationStore) size() int {

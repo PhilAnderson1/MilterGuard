@@ -475,22 +475,30 @@ func (s *correspondentStore) cleanup() (int64, error) {
 	ctx := context.Background()
 	var deleted int64
 	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		var attemptDeleted int64
 		if s.cfg.StaleAfter.Value() > 0 {
 			result, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE last_activity_at_ms < ?`,
 				unixMillis(s.now().UTC().Add(-s.cfg.StaleAfter.Value())))
 			if err != nil {
 				return err
 			}
-			deleted, _ = result.RowsAffected()
+			attemptDeleted, err = result.RowsAffected()
+			if err != nil {
+				return err
+			}
 		}
 		removed, err := s.enforceCapacityTx(ctx, tx)
 		if err != nil {
 			return err
 		}
-		deleted += removed
+		attemptDeleted += removed
+		deleted = attemptDeleted
 		return nil
 	})
-	return deleted, err
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 
 func (s *correspondentStore) size() int {

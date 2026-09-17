@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type Message struct {
@@ -88,6 +89,7 @@ const (
 	maxRetainedHeaderBytesPerName = 16 << 10
 	maxAuthenticationHeaderBytes  = 32 << 10
 	maxHeaderValueBytes           = 8 << 10
+	archiveTruncationHeader       = "X-MilterGuard-Archive-Truncated: yes\r\n"
 )
 
 var retainedHeaders = map[string]bool{
@@ -148,8 +150,13 @@ func (m *Message) AddHeader(name, value string) {
 		return
 	}
 	value = strings.TrimSpace(value)
+	value = strings.ToValidUTF8(value, "�")
 	if len(value) > maxHeaderValueBytes {
-		value = value[:maxHeaderValueBytes]
+		end := maxHeaderValueBytes
+		for end > 0 && !utf8.RuneStart(value[end]) {
+			end--
+		}
+		value = value[:end]
 		m.Truncated = true
 	}
 	entrySize := int64(len(name) + len(value) + 2)
@@ -221,6 +228,17 @@ func (m *Message) Header(name string) string {
 	return strings.Join(m.Headers[strings.ToLower(name)], ", ")
 }
 
+// FirstHeader returns the first retained field value. Structural MIME fields
+// cannot be comma-joined without changing their syntax, and Go's MIME parser
+// likewise uses the first occurrence for nested message parts.
+func (m *Message) FirstHeader(name string) string {
+	values := m.Headers[strings.ToLower(name)]
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
 // DecodedHeader returns a human-readable RFC 2047-decoded header while the
 // original value remains available through Header for protocol-sensitive use.
 func (m *Message) DecodedHeader(name string) string {
@@ -250,23 +268,27 @@ func (m *Message) BodyBytes() []byte { return m.Body.Bytes() }
 // headers and body supplied through the Milter protocol.
 func (m *Message) ArchiveBytes() []byte {
 	limit := m.MaxBytes
-	if limit < 0 {
-		limit = 0
+	if limit < 2 {
+		return nil
 	}
+	truncated := m.archiveTruncated || m.BodyTruncated
+	reserved := int64(2)
+	includeMarker := truncated && limit >= int64(len(archiveTruncationHeader))+reserved
+	if includeMarker {
+		reserved += int64(len(archiveTruncationHeader))
+	}
+	headers := completeArchiveHeaderPrefix(m.archiveHeaders.Bytes(), limit-reserved)
 	var output bytes.Buffer
-	estimated := m.archiveHeaderBytes + 2 + m.bodySize
-	if m.archiveTruncated || m.BodyTruncated {
-		estimated += int64(len("X-MilterGuard-Archive-Truncated: yes\r\n"))
-	}
+	estimated := int64(len(headers)) + reserved + m.bodySize
 	if estimated > limit {
 		estimated = limit
 	}
 	if estimated > 0 && estimated <= int64(int(^uint(0)>>1)) {
 		output.Grow(int(estimated))
 	}
-	_, _ = output.Write(m.archiveHeaders.Bytes())
-	if m.archiveTruncated || m.BodyTruncated {
-		_, _ = output.WriteString("X-MilterGuard-Archive-Truncated: yes\r\n")
+	_, _ = output.Write(headers)
+	if includeMarker {
+		_, _ = output.WriteString(archiveTruncationHeader)
 	}
 	_, _ = output.WriteString("\r\n")
 	remaining := limit - int64(output.Len())
@@ -281,6 +303,36 @@ func (m *Message) ArchiveBytes() []byte {
 	return output.Bytes()
 }
 
+// completeArchiveHeaderPrefix returns only complete RFC 5322 fields. Folded
+// continuation lines remain attached to their field, so the archive is never
+// cut in the middle of a header or continuation line.
+func completeArchiveHeaderPrefix(headers []byte, maxBytes int64) []byte {
+	if maxBytes <= 0 {
+		return nil
+	}
+	if int64(len(headers)) <= maxBytes {
+		return headers
+	}
+	lastComplete := 0
+	lineStart := 0
+	for lineStart < len(headers) {
+		lineLength := bytes.Index(headers[lineStart:], []byte("\r\n"))
+		if lineLength < 0 {
+			break
+		}
+		lineEnd := lineStart + lineLength + 2
+		continuationFollows := lineEnd < len(headers) && (headers[lineEnd] == ' ' || headers[lineEnd] == '\t')
+		if !continuationFollows {
+			if int64(lineEnd) > maxBytes {
+				break
+			}
+			lastComplete = lineEnd
+		}
+		lineStart = lineEnd
+	}
+	return headers[:lastComplete]
+}
+
 // CommandText returns decoded visible MIME text from a bounded prefix of an
 // authenticated command message. Callers separately constrain the accepted
 // top-level MIME types.
@@ -289,6 +341,6 @@ func (m *Message) CommandText(maxBytes int64) string {
 	if maxBytes >= 0 && int64(len(body)) > maxBytes {
 		body = body[:maxBytes]
 	}
-	content := extractMIME(m.Header("Content-Type"), m.Header("Content-Transfer-Encoding"), "", body, 0)
+	content := extractMIME(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", body, 0)
 	return stripInvisibleFormatting(content.VisibleText)
 }

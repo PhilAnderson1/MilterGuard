@@ -60,7 +60,7 @@ func normalizedAuthenticationResults(msg *Message) []authenticationResult {
 		if !found {
 			continue
 		}
-		for _, clause := range strings.Split(methods, ";") {
+		for _, clause := range splitAuthenticationClauses(methods) {
 			match := authenticationMethodPattern.FindStringSubmatch(clause)
 			if len(match) != 3 {
 				continue
@@ -97,6 +97,30 @@ func normalizedAuthenticationResults(msg *Message) []authenticationResult {
 		results = appendUniqueAuthenticationResult(results, result)
 	}
 	return results
+}
+
+// splitAuthenticationClauses separates Authentication-Results methods without
+// treating semicolons inside quoted property values as method delimiters.
+// Backslash-escaped characters inside a quoted string cannot close the quote.
+func splitAuthenticationClauses(value string) []string {
+	clauses := make([]string, 0, strings.Count(value, ";")+1)
+	start := 0
+	quoted := false
+	escaped := false
+	for index := 0; index < len(value); index++ {
+		switch char := value[index]; {
+		case quoted && escaped:
+			escaped = false
+		case quoted && char == '\\':
+			escaped = true
+		case char == '"':
+			quoted = !quoted
+		case char == ';' && !quoted:
+			clauses = append(clauses, value[start:index])
+			start = index + 1
+		}
+	}
+	return append(clauses, value[start:])
 }
 
 func writeAuthenticationResult(b *strings.Builder, result authenticationResult, fromDomain string) {

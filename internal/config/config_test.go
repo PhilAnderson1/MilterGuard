@@ -127,6 +127,50 @@ func TestValidateMilterTimeout(t *testing.T) {
 	}
 }
 
+func TestValidateMilterMaxMessageSize(t *testing.T) {
+	for _, test := range []struct {
+		value   int64
+		wantErr bool
+	}{
+		{value: 1},
+		{value: maxMilterMessageSize},
+		{value: 0, wantErr: true},
+		{value: -1, wantErr: true},
+		{value: maxMilterMessageSize + 1, wantErr: true},
+	} {
+		cfg := validConfig()
+		cfg.Milter.MaxMessageSize = test.value
+		err := cfg.Validate()
+		if test.wantErr && (err == nil || !strings.Contains(err.Error(), "milter.max_message_size")) {
+			t.Errorf("maximum message size %d error = %v", test.value, err)
+		}
+		if !test.wantErr && err != nil {
+			t.Errorf("maximum message size %d rejected: %v", test.value, err)
+		}
+	}
+}
+
+func TestLoadRejectsEmptyAndMultipleYAMLDocuments(t *testing.T) {
+	write := func(content string) string {
+		path := filepath.Join(t.TempDir(), "milterguard.yaml")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	for _, content := range []string{"", "  \n  \n", "# comment only\n"} {
+		if _, err := Load(write(content)); err == nil || !strings.Contains(err.Error(), "configuration file is empty") {
+			t.Errorf("empty configuration error = %v", err)
+		}
+	}
+
+	multiple := "ai:\n  api_key: test-key\n---\nmode: enforce\n"
+	if _, err := Load(write(multiple)); err == nil || !strings.Contains(err.Error(), "exactly one YAML document") {
+		t.Fatalf("multiple-document configuration error = %v", err)
+	}
+}
+
 func TestValidateMilterMaxConnections(t *testing.T) {
 	if got := defaults().Milter.MaxConnections; got != 256 {
 		t.Fatalf("default maximum Milter connections = %d", got)

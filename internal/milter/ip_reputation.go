@@ -681,45 +681,57 @@ func (s *ipReputationStore) cleanup() (int64, error) {
 	}
 	now := s.now().UTC()
 	var deleted int64
-	err := s.db.WithTx(context.Background(), nil, func(tx *sql.Tx) error {
+	ctx := context.Background()
+	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		var attemptDeleted int64
 		var result sql.Result
 		var e error
 		if s.repeatThreshold == 0 || s.repeatWindow <= 0 {
-			result, e = tx.Exec(`DELETE FROM ip_strikes`)
+			result, e = tx.ExecContext(ctx, `DELETE FROM ip_strikes`)
 		} else {
-			result, e = tx.Exec(`DELETE FROM ip_strikes WHERE struck_at_ms<=?`, unixMillis(now.Add(-s.repeatWindow)))
+			result, e = tx.ExecContext(ctx, `DELETE FROM ip_strikes WHERE struck_at_ms<=?`, unixMillis(now.Add(-s.repeatWindow)))
 		}
 		if e != nil {
 			return e
 		}
-		if n, e := result.RowsAffected(); e == nil {
-			deleted += n
-		}
-		result, e = tx.Exec(`DELETE FROM ip_reputation WHERE block_level='repeat' AND blocked_until_ms<=?`, unixMillis(now))
+		n, e := result.RowsAffected()
 		if e != nil {
 			return e
 		}
-		if n, e := result.RowsAffected(); e == nil {
-			deleted += n
-		}
-		if _, e := tx.Exec(`UPDATE ip_reputation SET block_level=NULL,blocked_until_ms=NULL WHERE block_level='short' AND blocked_until_ms<=?`, unixMillis(now)); e != nil {
-			return e
-		}
-		result, e = tx.Exec(`DELETE FROM ip_reputation WHERE block_level IS NULL AND NOT EXISTS(SELECT 1 FROM ip_strikes WHERE ip_strikes.ip_reputation_id=ip_reputation.id)`)
+		attemptDeleted += n
+		result, e = tx.ExecContext(ctx, `DELETE FROM ip_reputation WHERE block_level='repeat' AND blocked_until_ms<=?`, unixMillis(now))
 		if e != nil {
 			return e
 		}
-		if n, e := result.RowsAffected(); e == nil {
-			deleted += n
-		}
-		capacityDeleted, e := s.enforceCapacityTx(context.Background(), tx)
+		n, e = result.RowsAffected()
 		if e != nil {
 			return e
 		}
-		deleted += capacityDeleted
+		attemptDeleted += n
+		if _, e := tx.ExecContext(ctx, `UPDATE ip_reputation SET block_level=NULL,blocked_until_ms=NULL WHERE block_level='short' AND blocked_until_ms<=?`, unixMillis(now)); e != nil {
+			return e
+		}
+		result, e = tx.ExecContext(ctx, `DELETE FROM ip_reputation WHERE block_level IS NULL AND NOT EXISTS(SELECT 1 FROM ip_strikes WHERE ip_strikes.ip_reputation_id=ip_reputation.id)`)
+		if e != nil {
+			return e
+		}
+		n, e = result.RowsAffected()
+		if e != nil {
+			return e
+		}
+		attemptDeleted += n
+		capacityDeleted, e := s.enforceCapacityTx(ctx, tx)
+		if e != nil {
+			return e
+		}
+		attemptDeleted += capacityDeleted
+		deleted = attemptDeleted
 		return nil
 	})
-	return deleted, err
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 func (s *ipReputationStore) logDatabaseError(operation string, err error) {
 	if s != nil && s.log != nil && err != nil {

@@ -7,8 +7,11 @@ import (
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
+	"net/mail"
 	"net/url"
 	"strings"
+
+	"golang.org/x/net/html/charset"
 )
 
 type extractedContent struct {
@@ -33,6 +36,7 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 	if err != nil || mediaType == "" {
 		mediaType = "text/plain"
 	}
+	mediaType = strings.ToLower(mediaType)
 	decoded := decodeTransfer(encoding, data)
 	if strings.HasPrefix(mediaType, "multipart/") {
 		boundary := params["boundary"]
@@ -55,6 +59,9 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 			// discard evidence from otherwise retained messages.
 			body, _ := io.ReadAll(part)
 			partContentType := part.Header.Get("Content-Type")
+			if mediaType == "multipart/digest" && strings.TrimSpace(partContentType) == "" {
+				partContentType = "message/rfc822"
+			}
 			content := extractMIME(partContentType, part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-ID"), body, depth+1)
 			if !hasExtractedContent(content) {
 				continue
@@ -101,6 +108,9 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 		combined.VisibleText = strings.Join(visibleTextParts, "\n\n")
 		return combined
 	}
+	if mediaType == "message/rfc822" {
+		return extractAttachedMessage(decoded, depth)
+	}
 	if mediaType != "text/plain" && mediaType != "text/html" {
 		content := extractedContent{Text: "[attachment: " + sanitize(params["name"]) + "; type=" + mediaType + "]"}
 		if strings.HasPrefix(mediaType, "image/") {
@@ -108,7 +118,7 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 		}
 		return content
 	}
-	text := string(decoded)
+	text := decodeCharset(params["charset"], decoded)
 	if mediaType == "text/html" {
 		content := htmlToText(text)
 		content.HTML = true
@@ -117,12 +127,53 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 	return extractedContent{Text: text, VisibleText: text, Links: findHTTPURLs(text)}
 }
 
+func extractAttachedMessage(data []byte, depth int) extractedContent {
+	attached, err := mail.ReadMessage(bytes.NewReader(data))
+	if err != nil {
+		return extractedContent{Text: "[attached message could not be parsed]"}
+	}
+	body, err := io.ReadAll(attached.Body)
+	if err != nil {
+		return extractedContent{Text: "[attached message body could not be read]"}
+	}
+	return extractMIME(
+		attached.Header.Get("Content-Type"),
+		attached.Header.Get("Content-Transfer-Encoding"),
+		attached.Header.Get("Content-ID"),
+		body,
+		depth+1,
+	)
+}
+
+// decodeCharset converts MIME text bodies to UTF-8 after their transfer
+// encoding has been decoded. Unknown labels and malformed encoded text retain
+// the original content so that a bad charset declaration cannot erase the
+// message body.
+func decodeCharset(label string, data []byte) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return string(data)
+	}
+	reader, err := charset.NewReaderLabel(label, bytes.NewReader(data))
+	if err != nil {
+		return string(data)
+	}
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		return string(data)
+	}
+	return string(decoded)
+}
+
 func hasExtractedContent(content extractedContent) bool {
 	return strings.TrimSpace(content.Text) != "" || len(content.Links) > 0 || len(content.ImageRefs) > 0 || len(content.Images) > 0
 }
 
 func normalizeContentID(value string) string {
-	value = strings.TrimSpace(strings.Trim(value, "<>"))
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && value[0] == '<' && value[len(value)-1] == '>' {
+		value = strings.TrimSpace(value[1 : len(value)-1])
+	}
 	if decoded, err := url.PathUnescape(value); err == nil {
 		value = decoded
 	}
@@ -130,19 +181,28 @@ func normalizeContentID(value string) string {
 }
 
 func decodeTransfer(encoding string, data []byte) []byte {
-	var reader io.Reader = bytes.NewReader(data)
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":
-		reader = base64.NewDecoder(base64.StdEncoding, reader)
+		decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(data)))
+		if err == nil {
+			return decoded
+		}
+		// Some senders omit the final MIME padding. RawStdEncoding accepts that
+		// specific variation without ignoring arbitrary corrupt characters.
+		if unpadded, rawErr := io.ReadAll(base64.NewDecoder(base64.RawStdEncoding, bytes.NewReader(data))); rawErr == nil {
+			return unpadded
+		}
+		if len(decoded) > 0 {
+			return decoded
+		}
+		return data
 	case "quoted-printable":
-		reader = quotedprintable.NewReader(reader)
-	}
-	// Transfer decoding cannot expand base64 or quoted-printable input beyond
-	// the already bounded source message, so a second fixed-size limit would
-	// only create an undocumented truncation point.
-	decoded, err := io.ReadAll(reader)
-	if err != nil {
+		decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(data)))
+		if err == nil || len(decoded) > 0 {
+			return decoded
+		}
+		return data
+	default:
 		return data
 	}
-	return decoded
 }

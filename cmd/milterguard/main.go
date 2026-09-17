@@ -27,6 +27,10 @@ import (
 var version = "development"
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	configPath := flag.String("config", "/etc/milterguard/milterguard.yaml", "configuration file")
 	check := flag.Bool("check-config", false, "validate configuration and exit")
 	checkEndpoint := flag.Bool("check-endpoint", false, "test the configured AI endpoint and exit")
@@ -36,13 +40,15 @@ func main() {
 	flag.Parse()
 	if *showVersion {
 		fmt.Printf("MilterGuard %s\n", version)
-		return
+		return 0
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "configuration error:", err)
-		os.Exit(2)
+		return 2
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel()}))
 	if *commandMode {
@@ -55,11 +61,11 @@ func main() {
 	if *check || *checkEndpoint || *checkPort {
 		if *commandMode {
 			fmt.Fprintln(os.Stderr, "command mode cannot be combined with configuration, endpoint, or port checks")
-			os.Exit(2)
+			return 2
 		}
 		if len(flag.Args()) != 0 {
 			fmt.Fprintln(os.Stderr, "configuration, endpoint, and port checks cannot be combined with positional arguments")
-			os.Exit(2)
+			return 2
 		}
 		if *check {
 			fmt.Println("configuration is valid")
@@ -68,7 +74,7 @@ func main() {
 			available, err := checkMilterListenerAvailable(cfg.Milter.Socket, net.Listen)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, portCheckErrorMessage(cfg.Milter.Socket, *configPath, err))
-				os.Exit(1)
+				return 1
 			}
 			fmt.Println(available)
 		}
@@ -77,42 +83,42 @@ func main() {
 			decision, err := checkAIEndpoint(cfg, quietLogger)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, endpointCheckErrorMessage(err))
-				os.Exit(1)
+				return 1
 			}
 			if err := validateEndpointTestDecision(decision); err != nil {
 				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
+				return 1
 			}
 			fmt.Println("Endpoint OK")
 		}
-		return
+		return 0
 	}
 	if *commandMode {
 		if len(flag.Args()) != 0 {
 			fmt.Fprintln(os.Stderr, "command mode does not accept positional arguments")
-			os.Exit(2)
+			return 2
 		}
 		processor, closeProcessor, err := milter.OpenCommandProcessor(cfg, logger)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cannot open command database:", err)
-			os.Exit(1)
+			return 1
 		}
 		defer closeProcessor()
-		if err := runCommandMode(context.Background(), os.Stdin, os.Stdout, processor, inputIsTerminal(os.Stdin)); err != nil {
+		if err := runCommandMode(ctx, os.Stdin, os.Stdout, processor, inputIsTerminal(os.Stdin)); err != nil {
 			fmt.Fprintln(os.Stderr, "command mode failed:", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 	if len(flag.Args()) != 0 {
 		fmt.Fprintln(os.Stderr, "unexpected positional arguments")
-		os.Exit(2)
+		return 2
 	}
 
 	prompt, err := os.ReadFile(cfg.AI.PromptFile)
 	if err != nil {
 		logger.Error("cannot read detection prompt", "error", err)
-		os.Exit(2)
+		return 2
 	}
 	client := ai.NewClient(cfg.AI, string(prompt), logger)
 	server := milter.NewServer(cfg, client, logger)
@@ -123,23 +129,22 @@ func main() {
 			message = "cannot initialize internal email-command replies"
 		}
 		logger.Error(message, "error", err)
-		os.Exit(2)
+		return 2
 	}
 
 	ln, cleanup, err := listen(cfg.Milter.Socket)
 	if err != nil {
 		logger.Error("cannot create milter listener", "error", err)
-		os.Exit(1)
+		return 1
 	}
 	defer cleanup()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	logger.Info("MilterGuard started", "socket", cfg.Milter.Socket, "mode", cfg.Mode)
 	if err := server.Serve(ctx, ln); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("milter server stopped", "error", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 type interactiveCommandProcessor interface {

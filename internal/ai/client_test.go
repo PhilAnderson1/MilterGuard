@@ -260,6 +260,47 @@ func TestAnalyzeRetriesMalformedDecision(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRetriesTransientHTTPError(t *testing.T) {
+	var attempts atomic.Int32
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if attempts.Add(1) == 1 {
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("temporarily unavailable")),
+			}, nil
+		}
+		return decisionResponse(`{"classification":"legitimate","score":0.9,"reasons":[]}`), nil
+	})
+	client := retryTestClient(transport, 1)
+	decision, err := client.Analyze(context.Background(), Input{Text: "test"})
+	if err != nil || decision.Classification != "legitimate" {
+		t.Fatalf("retry did not recover: decision=%+v err=%v", decision, err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts.Load())
+	}
+}
+
+func TestAnalyzeStopsAfterTransientHTTPRetriesAreExhausted(t *testing.T) {
+	var attempts atomic.Int32
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("rate limited")),
+		}, nil
+	})
+	client := retryTestClient(transport, 2)
+	if _, err := client.Analyze(context.Background(), Input{Text: "test"}); err == nil {
+		t.Fatal("expected HTTP error after retries were exhausted")
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts.Load())
+	}
+}
+
 func TestAnalyzeDoesNotRetryHTTPError(t *testing.T) {
 	var attempts atomic.Int32
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -276,6 +317,60 @@ func TestAnalyzeDoesNotRetryHTTPError(t *testing.T) {
 	}
 	if attempts.Load() != 1 {
 		t.Fatalf("attempts = %d, want 1", attempts.Load())
+	}
+}
+
+func TestRetryableHTTPStatus(t *testing.T) {
+	tests := []struct {
+		status int
+		want   bool
+	}{
+		{http.StatusBadRequest, false},
+		{http.StatusUnauthorized, false},
+		{http.StatusPaymentRequired, false},
+		{http.StatusNotFound, false},
+		{http.StatusRequestTimeout, true},
+		{http.StatusTooEarly, true},
+		{http.StatusTooManyRequests, true},
+		{http.StatusInternalServerError, true},
+		{http.StatusServiceUnavailable, true},
+	}
+	for _, test := range tests {
+		if got := retryableHTTPStatus(test.status); got != test.want {
+			t.Errorf("retryableHTTPStatus(%d) = %v, want %v", test.status, got, test.want)
+		}
+	}
+}
+
+func TestRetryAfterDelay(t *testing.T) {
+	now := time.Date(2026, time.September, 17, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{"absent", "", 0},
+		{"invalid", "later", 0},
+		{"delay seconds", "5", 5 * time.Second},
+		{"negative delay", "-1", 0},
+		{"delay capped", "3600", maxEndpointRetryAfter},
+		{"HTTP date", now.Add(12 * time.Second).Format(http.TimeFormat), 12 * time.Second},
+		{"past HTTP date", now.Add(-time.Second).Format(http.TimeFormat), 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := retryAfterDelay(test.value, now); got != test.want {
+				t.Fatalf("retryAfterDelay(%q) = %v, want %v", test.value, got, test.want)
+			}
+		})
+	}
+}
+
+func TestWaitForRetryHonorsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitForRetry(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForRetry() error = %v, want context.Canceled", err)
 	}
 }
 

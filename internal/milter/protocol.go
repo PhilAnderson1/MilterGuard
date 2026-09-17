@@ -112,8 +112,17 @@ func replyCode(code, enhanced, text string) []byte {
 		return strings.ReplaceAll(value, "\n", " ")
 	}
 	reply := clean(code) + " " + clean(enhanced) + " " + clean(text)
-	reply = truncateUTF8(reply, maxSMTPReplyBytes)
 	reply = strings.ReplaceAll(reply, "%", "%%")
+	reply = truncateUTF8(reply, maxSMTPReplyBytes)
+	// A literal percent is escaped as a pair for libmilter/Postfix. If the byte
+	// limit cuts a run of pairs in half, remove the unmatched final percent.
+	trailingPercents := 0
+	for index := len(reply) - 1; index >= 0 && reply[index] == '%'; index-- {
+		trailingPercents++
+	}
+	if trailingPercents%2 != 0 {
+		reply = reply[:len(reply)-1]
+	}
 	return append([]byte{responseReply}, []byte(reply+"\x00")...)
 }
 

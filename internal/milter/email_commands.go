@@ -222,11 +222,14 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 }
 
 func commandMessageLines(m *message.Message, maxBytes int64) ([]string, error) {
+	// Any Content-Disposition occurrence disqualifies a command message. This
+	// is an existence check rather than MIME parsing, so retaining all values
+	// prevents a later duplicate from hiding an attachment declaration.
 	if strings.TrimSpace(m.Header("Content-Disposition")) != "" {
 		return nil, fmt.Errorf("attachments are not allowed")
 	}
 	mediaType := "text/plain"
-	if value := strings.TrimSpace(m.Header("Content-Type")); value != "" {
+	if value := strings.TrimSpace(m.FirstHeader("Content-Type")); value != "" {
 		var err error
 		mediaType, _, err = mime.ParseMediaType(value)
 		if err != nil {

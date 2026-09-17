@@ -3,6 +3,7 @@ package milter
 import (
 	"context"
 	"net/mail"
+	"strings"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
@@ -24,11 +25,7 @@ func authenticatedOnlyFromDomain(msg *message.Message, configured []string) stri
 	for _, value := range msg.Headers["from"] {
 		addresses, err := mail.ParseAddressList(value)
 		if err != nil {
-			address, ok := message.MailboxAddress(value)
-			if !ok {
-				continue
-			}
-			addresses = []*mail.Address{{Address: address}}
+			addresses = recoverFromAddresses(value)
 		}
 		for _, address := range addresses {
 			if domain := allowedSenderDomain(emailAddressDomain(address.Address), configured); domain != "" {
@@ -37,6 +34,30 @@ func authenticatedOnlyFromDomain(msg *message.Message, configured []string) stri
 		}
 	}
 	return ""
+}
+
+// recoverFromAddresses preserves individually usable mailboxes when malformed
+// junk causes net/mail to reject an otherwise useful address list. The normal
+// parser always runs first, so splitting cannot alter valid quoted display
+// names or comments. Each recovered fragment must still parse as a mailbox;
+// raw protected-domain text is never treated as an address.
+func recoverFromAddresses(value string) []*mail.Address {
+	fragments := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' })
+	addresses := make([]*mail.Address, 0, len(fragments))
+	for _, fragment := range fragments {
+		fragment = strings.TrimSpace(fragment)
+		if fragment == "" {
+			continue
+		}
+		if address, err := mail.ParseAddress(fragment); err == nil && address.Address != "" {
+			addresses = append(addresses, address)
+			continue
+		}
+		if mailbox, ok := message.MailboxAddress(fragment); ok {
+			addresses = append(addresses, &mail.Address{Address: mailbox})
+		}
+	}
+	return addresses
 }
 
 func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, domain string) bool {

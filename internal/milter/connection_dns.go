@@ -76,7 +76,7 @@ func resolveConnectionDNS(parent context.Context, resolver dnsResolver, addr net
 		}
 	}
 	if len(result.names) == 0 {
-		return connectionDNSResult{status: message.ReverseDNSLookupFailed}
+		return connectionDNSResult{status: message.ReverseDNSAbsent}
 	}
 	return result
 }

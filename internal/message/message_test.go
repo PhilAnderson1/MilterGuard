@@ -3,6 +3,8 @@ package message
 import (
 	"bytes"
 	"encoding/base64"
+	"io"
+	"net/mail"
 	"net/url"
 	"strconv"
 	"strings"
@@ -28,6 +30,113 @@ func TestPromptDecodesMultipart(t *testing.T) {
 	}
 	if strings.Contains(p, "Message-Id:") {
 		t.Fatalf("message ID leaked into selected headers: %s", p)
+	}
+}
+
+func TestTransferDecodingRecoversMalformedInput(t *testing.T) {
+	tests := []struct {
+		name     string
+		encoding string
+		input    string
+		want     string
+	}{
+		{"valid Base64", "base64", "aGVsbG8=", "hello"},
+		{"unpadded Base64", "base64", "aGVsbG8", "hello"},
+		{"Base64 valid prefix", "base64", "aGVsbG8=!!", "hello"},
+		{"completely invalid Base64", "base64", "!!!!", "!!!!"},
+		{"quoted-printable valid prefix", "quoted-printable", "hello\x00bad", "hello"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := string(decodeTransfer(test.encoding, []byte(test.input))); got != test.want {
+				t.Fatalf("decodeTransfer(%q, %q) = %q, want %q", test.encoding, test.input, got, test.want)
+			}
+		})
+	}
+}
+
+func TestStructuralMIMEHeadersUseFirstOccurrence(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/html; charset=UTF-8")
+	m.AddHeader("Content-Type", "text/plain")
+	m.AddHeader("Content-Transfer-Encoding", "quoted-printable")
+	m.AddHeader("Content-Transfer-Encoding", "base64")
+	m.AddBody([]byte(`<p>caf=C3=A9 <a href="https://example.invalid/">link</a></p>`))
+
+	if got, want := m.Header("Content-Type"), "text/html; charset=UTF-8, text/plain"; got != want {
+		t.Fatalf("joined Content-Type = %q, want %q", got, want)
+	}
+	if got, want := m.FirstHeader("Content-Type"), "text/html; charset=UTF-8"; got != want {
+		t.Fatalf("first Content-Type = %q, want %q", got, want)
+	}
+	if got, want := m.ProcessedBody(1000), `café [link](https://example.invalid/)`; got != want {
+		t.Fatalf("processed body = %q, want %q", got, want)
+	}
+}
+
+func TestMIMEExtractionDecodesDeclaredBodyCharset(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		want        string
+	}{
+		{
+			name:        "plain text",
+			contentType: `text/plain; charset=iso-8859-1`,
+			body:        "caf=E9",
+			want:        "café",
+		},
+		{
+			name:        "HTML",
+			contentType: `text/html; charset=iso-8859-1`,
+			body:        `<p>caf=E9 <a href="https://example.invalid/">link</a></p>`,
+			want:        `café [link](https://example.invalid/)`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			content := extractMIME(test.contentType, "quoted-printable", "", []byte(test.body), 0)
+			if !strings.Contains(content.Text, test.want) {
+				t.Fatalf("extracted text = %q, want it to contain %q", content.Text, test.want)
+			}
+		})
+	}
+}
+
+func TestMIMEExtractionRetainsBodyForUnknownCharset(t *testing.T) {
+	body := []byte("body with an unsupported charset label")
+	content := extractMIME(`text/plain; charset=x-not-a-real-charset`, "", "", body, 0)
+	if content.Text != string(body) {
+		t.Fatalf("extracted text = %q, want original body %q", content.Text, body)
+	}
+}
+
+func TestMIMEExtractionReadsAttachedMessage(t *testing.T) {
+	attached := "From: sender@example.net\r\n" +
+		"Content-Type: text/html; charset=UTF-8\r\n\r\n" +
+		`<p>Nested evidence <a href="https://evil.invalid/login">sign in</a></p>`
+	content := extractMIME("message/rfc822", "", "", []byte(attached), 0)
+	if want := `Nested evidence [sign in](https://evil.invalid/login)`; !strings.Contains(content.Text, want) {
+		t.Fatalf("attached-message text = %q, want it to contain %q", content.Text, want)
+	}
+}
+
+func TestMultipartDigestDefaultsPartsToAttachedMessages(t *testing.T) {
+	attached := "From: sender@example.net\r\n" +
+		"Content-Type: text/html; charset=UTF-8\r\n\r\n" +
+		`<p>Digest evidence <a href="https://evil.invalid/digest">open</a></p>`
+	body := "--digest\r\n\r\n" + attached + "\r\n--digest--\r\n"
+	content := extractMIME(`multipart/digest; boundary="digest"`, "", "", []byte(body), 0)
+	if want := `Digest evidence [open](https://evil.invalid/digest)`; !strings.Contains(content.Text, want) {
+		t.Fatalf("digest text = %q, want it to contain %q", content.Text, want)
+	}
+}
+
+func TestMalformedAttachedMessageProducesMarker(t *testing.T) {
+	content := extractMIME("message/rfc822", "", "", []byte("not a valid message"), 0)
+	if content.Text != "[attached message could not be parsed]" {
+		t.Fatalf("attached-message text = %q", content.Text)
 	}
 }
 
@@ -407,6 +516,33 @@ func TestPromptIncludesOnlyReceivedSPFFromTrustedReceiver(t *testing.T) {
 	}
 }
 
+func TestPromptIgnoresReceivedSPFReceiverInsideCommentOrQuotedValue(t *testing.T) {
+	tests := []string{
+		`pass (receiver=nl.invades.net) receiver=mx.google.com; client-ip=192.0.2.1`,
+		`pass reason="receiver=nl.invades.net"; receiver=mx.google.com; client-ip=192.0.2.1`,
+		`pass junk receiver=nl.invades.net; client-ip=192.0.2.1`,
+	}
+	for _, header := range tests {
+		m := New(1000)
+		m.TrustedAuthservIDs = []string{"nl.invades.net"}
+		m.AddHeader("Received-SPF", header)
+		prompt := m.Prompt(100)
+		if !strings.Contains(prompt, "SPF: no trusted local result") {
+			t.Fatalf("untrusted receiver accepted from %q:\n%s", header, prompt)
+		}
+	}
+}
+
+func TestPromptAcceptsQuotedReceivedSPFReceiverParameter(t *testing.T) {
+	m := New(1000)
+	m.TrustedAuthservIDs = []string{"nl.invades.net"}
+	m.AddHeader("Received-SPF", `pass (local result) client-ip=192.0.2.1; receiver="nl.invades.net"`)
+	prompt := m.Prompt(100)
+	if !strings.Contains(prompt, "SPF: pass for envelope-sender domain unavailable") {
+		t.Fatalf("trusted quoted receiver missing:\n%s", prompt)
+	}
+}
+
 func TestPromptOmitsAuthenticationEvidenceWhenNoTrustedResultsExist(t *testing.T) {
 	m := New(1000)
 	m.AddHeader("Authentication-Results", "mx.google.com; dkim=pass header.d=example.com")
@@ -491,6 +627,24 @@ func TestPromptNormalizesConflictingBrandAuthenticationEvidence(t *testing.T) {
 	}
 	if strings.Contains(prompt, "Authentication-Results:") {
 		t.Fatalf("raw authentication header leaked into prompt: %s", prompt)
+	}
+}
+
+func TestAuthenticationResultsSemicolonInsideQuotedReasonDoesNotSplitClause(t *testing.T) {
+	m := New(2000)
+	m.TrustedAuthservIDs = []string{"nl.invades.net"}
+	m.AddHeader("From", "Sender <sender@example.com>")
+	m.AddHeader("Authentication-Results", `nl.invades.net; dkim=pass reason="signature; verified" header.d=example.com; spf=pass reason="accepted\"; still valid" smtp.mailfrom=sender@example.com; dmarc=pass header.from=example.com`)
+
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"DKIM: pass for signing domain example.com (aligned with visible From domain: yes)",
+		"SPF: pass for envelope-sender domain example.com (aligned with visible From domain: yes)",
+		"DMARC: pass for visible From domain example.com (matches supplied visible From domain: yes)",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("quote-aware authentication result missing %q:\n%s", want, prompt)
+		}
 	}
 }
 
@@ -798,6 +952,13 @@ func TestHTMLTemplateScannerFindsMatchingOuterClose(t *testing.T) {
 				t.Fatalf("template extraction = text %q, links %v", got.Text, got.Links)
 			}
 		})
+	}
+}
+
+func TestHTMLPlaintextInsideTemplateConsumesRemainder(t *testing.T) {
+	got := htmlToText(`Before<template><plaintext></template><a href="https://hidden.example/">AI-only</a></template>After`)
+	if got.Text != "Before" || len(got.Links) != 0 {
+		t.Fatalf("template plaintext extraction = text %q, links %v", got.Text, got.Links)
 	}
 }
 
@@ -1287,6 +1448,26 @@ func TestVisionFallbackSelectsReferencedInlineImage(t *testing.T) {
 	}
 }
 
+func TestPercentEncodedCIDIsNormalizedOnceAndMatchesImage(t *testing.T) {
+	m := multipartRelatedMessage("Fallback", `<img src="cid:image%252Did" alt="Notice">`, "<image%252Did>")
+	analysis := m.BuildAnalysis(1000, VisionOptions{
+		Mode: "fallback", MinTextChars: 200, MaxImages: 2,
+		MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if len(analysis.Images) != 1 {
+		t.Fatalf("selected images = %d, want 1; prompt=%s", len(analysis.Images), analysis.Prompt)
+	}
+	if !strings.Contains(analysis.Prompt, `![Notice](cid:image%2did)`) {
+		t.Fatalf("normalized CID evidence missing from prompt: %s", analysis.Prompt)
+	}
+}
+
+func TestNormalizeContentIDRemovesOnlyOneAngleBracketPair(t *testing.T) {
+	if got, want := normalizeContentID("<<Image-ID>>"), "<image-id>"; got != want {
+		t.Fatalf("normalized content ID = %q, want %q", got, want)
+	}
+}
+
 func TestVisionFallbackSelectsStandaloneImageAttachment(t *testing.T) {
 	m := New(1 << 20)
 	m.AddHeader("Content-Type", `multipart/mixed; boundary="outer"`)
@@ -1529,6 +1710,68 @@ func TestHeaderFamiliesCannotSuppressSecurityHeaders(t *testing.T) {
 		if values := m.Headers[strings.ToLower(name)]; len(values) != 2 {
 			t.Errorf("%s retained values = %q, want both occurrences", name, values)
 		}
+	}
+}
+
+func TestTruncatedArchiveReservesCompleteMarkerAndRemainsParseable(t *testing.T) {
+	limit := int64(len(archiveTruncationHeader) + 2)
+	m := New(limit)
+	m.AddHeader("X", "value")
+	m.AddHeader("Long", strings.Repeat("x", 100))
+	m.AddBody([]byte("body"))
+
+	archive := m.ArchiveBytes()
+	if int64(len(archive)) > limit {
+		t.Fatalf("archive is %d bytes, limit is %d", len(archive), limit)
+	}
+	parsed, err := mail.ReadMessage(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("truncated archive is not syntactically valid: %v\n%q", err, archive)
+	}
+	if got := parsed.Header.Get("X-MilterGuard-Archive-Truncated"); got != "yes" {
+		t.Fatalf("archive truncation marker = %q, want yes", got)
+	}
+}
+
+func TestSmallTruncatedArchiveOmitsMarkerRatherThanCuttingHeader(t *testing.T) {
+	m := New(8)
+	m.AddHeader("Invalid Header", "value")
+	m.AddBody([]byte("body"))
+
+	archive := m.ArchiveBytes()
+	if len(archive) > 8 {
+		t.Fatalf("archive is %d bytes, limit is 8", len(archive))
+	}
+	parsed, err := mail.ReadMessage(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("small truncated archive is not syntactically valid: %v\n%q", err, archive)
+	}
+	body, err := io.ReadAll(parsed.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "body" {
+		t.Fatalf("archive body = %q, want body", body)
+	}
+}
+
+func TestRetainedHeaderTruncationPreservesUTF8(t *testing.T) {
+	m := New(1 << 20)
+	value := strings.Repeat("a", maxHeaderValueBytes-1) + "€"
+	m.AddHeader("Subject", value)
+
+	got := m.Header("Subject")
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated header is invalid UTF-8: %q", got)
+	}
+	if len(got) > maxHeaderValueBytes {
+		t.Fatalf("truncated header is %d bytes, limit is %d", len(got), maxHeaderValueBytes)
+	}
+	if got != strings.Repeat("a", maxHeaderValueBytes-1) {
+		t.Fatalf("truncated header ended at the wrong rune boundary: %q", got[len(got)-8:])
+	}
+	if !m.Truncated {
+		t.Fatal("message was not marked truncated")
 	}
 }
 

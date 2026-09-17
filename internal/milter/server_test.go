@@ -1860,12 +1860,30 @@ func TestReplyCodeWireFormat(t *testing.T) {
 func TestReplyCodeLimitsSMTPLineAndPreservesUTF8(t *testing.T) {
 	got := replyCode("550", "5.7.1", strings.Repeat("é", 600))
 	line := got[1 : len(got)-1]
+	if len(line) > maxSMTPReplyBytes {
+		t.Fatalf("Milter reply is %d bytes, limit is %d", len(line), maxSMTPReplyBytes)
+	}
 	smtpLine := strings.ReplaceAll(string(line), "%%", "%")
 	if len(smtpLine) > maxSMTPReplyBytes {
 		t.Fatalf("SMTP reply is %d bytes, limit is %d", len(smtpLine), maxSMTPReplyBytes)
 	}
 	if !utf8.ValidString(smtpLine) {
 		t.Fatal("SMTP reply was truncated inside a UTF-8 sequence")
+	}
+}
+
+func TestReplyCodePercentEscapingStaysWithinLimitAndComplete(t *testing.T) {
+	got := replyCode("550", "5.7.1", "x"+strings.Repeat("%", maxSMTPReplyBytes))
+	line := got[1 : len(got)-1]
+	if len(line) > maxSMTPReplyBytes {
+		t.Fatalf("Milter reply is %d bytes, limit is %d", len(line), maxSMTPReplyBytes)
+	}
+	percentRun := 0
+	for index := len(line) - 1; index >= 0 && line[index] == '%'; index-- {
+		percentRun++
+	}
+	if percentRun%2 != 0 {
+		t.Fatalf("reply ends with an incomplete percent escape: %q", line)
 	}
 }
 

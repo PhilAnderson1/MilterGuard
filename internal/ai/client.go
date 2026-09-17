@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
@@ -35,6 +38,7 @@ const (
 type EndpointError struct {
 	Kind       ErrorKind
 	StatusCode int
+	RetryAfter time.Duration
 	Err        error
 }
 
@@ -116,9 +120,13 @@ func (c *Client) Analyze(ctx context.Context, input Input) (Decision, error) {
 		if !retry || attempt == c.cfg.Retries || ctx.Err() != nil {
 			return Decision{}, err
 		}
+		delay := endpointRetryAfter(err)
 		c.log.WarnContext(ctx, "retrying AI endpoint request",
 			"attempt", attempt+1, "next_attempt", attempt+2,
-			"max_attempts", c.cfg.Retries+1, "error", err)
+			"max_attempts", c.cfg.Retries+1, "retry_after", delay.String(), "error", err)
+		if err := waitForRetry(ctx, delay); err != nil {
+			return Decision{}, err
+		}
 	}
 	return Decision{}, lastErr
 }
@@ -164,9 +172,10 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, 
 		if kind == ErrorCredentials {
 			httpErr = fmt.Errorf("AI endpoint rejected credentials with HTTP %d", resp.StatusCode)
 		}
-		return Decision{}, false, &EndpointError{
+		return Decision{}, retryableHTTPStatus(resp.StatusCode), &EndpointError{
 			Kind: kind, StatusCode: resp.StatusCode,
-			Err: httpErr,
+			RetryAfter: retryAfterDelay(resp.Header.Get("Retry-After"), time.Now()),
+			Err:        httpErr,
 		}
 	}
 	var envelope struct {
@@ -199,6 +208,63 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, 
 		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: err}
 	}
 	return d, false, nil
+}
+
+const maxEndpointRetryAfter = 30 * time.Second
+
+func retryableHTTPStatus(status int) bool {
+	return status == http.StatusRequestTimeout ||
+		status == http.StatusTooEarly ||
+		status == http.StatusTooManyRequests ||
+		status >= 500 && status <= 599
+}
+
+func retryAfterDelay(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	var delay time.Duration
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		if seconds > int64(maxEndpointRetryAfter/time.Second) {
+			return maxEndpointRetryAfter
+		}
+		delay = time.Duration(seconds) * time.Second
+	} else if retryAt, err := http.ParseTime(value); err == nil {
+		delay = retryAt.Sub(now)
+	}
+	if delay <= 0 {
+		return 0
+	}
+	if delay > maxEndpointRetryAfter {
+		return maxEndpointRetryAfter
+	}
+	return delay
+}
+
+func endpointRetryAfter(err error) time.Duration {
+	var endpointErr *EndpointError
+	if errors.As(err, &endpointErr) {
+		return endpointErr.RetryAfter
+	}
+	return 0
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 const maxResponseExcerptBytes = 2048
