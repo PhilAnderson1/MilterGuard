@@ -336,39 +336,6 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	}
 }
 
-func TestManualCorrespondentManagement(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "milterguard.db")
-	cfg := config.Config{
-		Persistence:    config.PersistenceConfig{DatabaseFile: path},
-		Correspondents: config.CorrespondentsConfig{UseAllowlist: true, Scope: "per_sender", LegitimateSenderMinMessages: 5, MaxEntries: 10},
-	}
-	created, err := AddManualCorrespondent(cfg, "News@Example.NET", "Owner@Example.COM")
-	if err != nil || !created {
-		t.Fatalf("manual add: created=%v err=%v", created, err)
-	}
-	created, err = AddManualCorrespondent(cfg, "news@example.net", "owner@example.com")
-	if err != nil || created {
-		t.Fatalf("manual update: created=%v err=%v", created, err)
-	}
-	database := testCorrespondentDatabase(t, path)
-	store := newCorrespondentStore(cfg.Correspondents, database, nil)
-	if !store.match(context.Background(), "news@example.net", []string{"owner@example.com"}).Known {
-		t.Fatal("manual entry is not immediately qualified")
-	}
-	_ = database.Close()
-	if _, err := AddManualCorrespondent(cfg, "news@example.net", "second@example.com"); err != nil {
-		t.Fatal(err)
-	}
-	removed, err := DeleteCorrespondents(cfg, "news@example.net", "owner@example.com")
-	if err != nil || removed != 1 {
-		t.Fatalf("exact delete: removed=%d err=%v", removed, err)
-	}
-	removed, err = DeleteCorrespondents(cfg, "news@example.net", "*")
-	if err != nil || removed != 1 {
-		t.Fatalf("wildcard delete: removed=%d err=%v", removed, err)
-	}
-}
-
 func TestListAllowlistIsScopedQualifiedAndOrdered(t *testing.T) {
 	cfg := config.CorrespondentsConfig{UseAllowlist: true, Scope: "per_sender", MaxEntries: 10, LegitimateSenderMinMessages: 3}
 	store := newTestCorrespondentStore(t, cfg, nil)

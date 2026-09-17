@@ -194,6 +194,12 @@ func TestAuthenticatedMailScanningDefaultsDisabled(t *testing.T) {
 	}
 }
 
+func TestConnectionLifecycleLoggingDefaultsDisabled(t *testing.T) {
+	if defaults().Logging.IncludeConnections {
+		t.Fatal("connection lifecycle logging must default to disabled")
+	}
+}
+
 func TestValidateOperationModes(t *testing.T) {
 	for _, mode := range []string{"monitor", "tag", "enforce"} {
 		cfg := validConfig()

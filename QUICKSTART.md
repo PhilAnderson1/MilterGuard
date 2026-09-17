@@ -52,22 +52,25 @@ configuration, security, testing, and maintenance information.
    sudo systemctl enable --now milterguard
    ```
 
-7. Add MilterGuard to the end of the Milter lists in
+7. Add MilterGuard to the end of `smtpd_milters` in
    `/etc/postfix/main.cf`. Use the appropriate example for your server:
 
    ```text
+   milter_content_timeout = 600s
+
    # MilterGuard only
    smtpd_milters = inet:127.0.0.1:8895
-   non_smtpd_milters = inet:127.0.0.1:8895
 
    # OpenDKIM, OpenDMARC and MilterGuard
    smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
-   non_smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
    ```
 
    If you use OpenDKIM without OpenDMARC, omit the port 8892 entry. Use the
    actual ports or sockets configured on your server, and keep MilterGuard
-   last.
+   last in `smtpd_milters`. If `non_smtpd_milters` is already configured, leave
+   its existing filters in place but do not add MilterGuard to it. MilterGuard
+   should process SMTP mail only; filtering locally submitted system mail can
+   cause legitimate notifications to be rejected.
 
 8. Configure Postfix to remove externally supplied authentication and
    MilterGuard result headers before the Milters run, preventing remote senders
@@ -75,6 +78,7 @@ configuration, security, testing, and maintenance information.
 
    ```text
    /^Authentication-Results:/ IGNORE
+   /^Received-SPF:/ IGNORE
    /^X-MilterGuard-(Classification|Score|Confidence|Action):/ IGNORE
    ```
 

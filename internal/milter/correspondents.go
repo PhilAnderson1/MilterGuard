@@ -368,7 +368,8 @@ func (s *correspondentStore) listAllowlist(recipient string, activitySince time.
 		query += " AND local_address = ?"
 		args = append(args, recipient)
 	}
-	query += " ORDER BY last_activity_at_ms DESC, local_address, correspondent"
+	query += " ORDER BY last_activity_at_ms DESC, local_address, correspondent LIMIT ?"
+	args = append(args, maxEmailCommandListRows+1)
 	rows, err := s.db.Query(context.Background(), query, args...)
 	if err != nil {
 		s.logDatabaseError("list correspondent allowlist", err)

@@ -142,9 +142,10 @@ type IPReputationConfig struct {
 	DomainAllowlist        []string `yaml:"domain_allowlist"`
 }
 type LoggingConfig struct {
-	Level          string `yaml:"level"`
-	IncludeSubject bool   `yaml:"include_subject"`
-	IncludeAIInput bool   `yaml:"include_ai_input"`
+	Level              string `yaml:"level"`
+	IncludeSubject     bool   `yaml:"include_subject"`
+	IncludeAIInput     bool   `yaml:"include_ai_input"`
+	IncludeConnections bool   `yaml:"include_connections"`
 }
 
 type CorrespondentsConfig struct {

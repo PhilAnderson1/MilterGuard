@@ -263,6 +263,41 @@ func (failingAnalyzer) Analyze(context.Context, ai.Input) (ai.Decision, error) {
 	return ai.Decision{}, errors.New("endpoint unavailable")
 }
 
+func TestPostDecisionUpdatesDoNotInheritExpiredAnalysisContext(t *testing.T) {
+	store, _ := newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{
+		Expiry: config.Duration(24 * time.Hour), MaxEntries: 10,
+	})
+	server := &Server{
+		cfg:              config.Config{Mode: "enforce"},
+		log:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		rejectionHistory: store,
+	}
+	msg := message.New(1024)
+	msg.AddHeader("Subject", "context test")
+	ss := &session{
+		server:             server,
+		message:            msg,
+		visibleSender:      "sender@example.net",
+		envelopeSender:     "bounce@example.net",
+		envelopeRecipients: []string{"recipient@example.com"},
+		authentication:     authenticationState{Authenticated: true},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ss.applyPostDecisionUpdates(ctx, evaluationResult{
+		selected: actionReject,
+		reasons:  []string{"test rejection"},
+	}, inboundEvidence{})
+
+	entries, err := store.list("recipient@example.com", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Subject != "context test" {
+		t.Fatalf("rejection history after expired analysis context = %#v", entries)
+	}
+}
+
 func testServer(t *testing.T, analyzer Analyzer) (*Server, net.Conn, <-chan struct{}) {
 	t.Helper()
 	serverConn, clientConn := net.Pipe()
@@ -1376,6 +1411,35 @@ func TestAbortedAuthenticatedMessageDoesNotLearnRecipients(t *testing.T) {
 	expectNoFrame(t, conn)
 	if match := server.correspondents.match(context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
 		t.Fatalf("aborted recipient was learned: %#v", match)
+	}
+}
+
+func TestEndOfBodyPayloadIsIncludedInAnalysis(t *testing.T) {
+	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 1)}
+	_, conn, done := testServer(t, analyzer)
+	defer func() {
+		_ = conn.Close()
+		<-done
+	}()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "sender@example.net"),
+		envelopeFrame(commandRecipient, "recipient@example.com"),
+		headerFrame("Content-Type", "text/plain; charset=UTF-8"),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("first body section ")...),
+	)
+	if err := writeFrame(conn, append([]byte{commandEndBody}, []byte("final body section")...)); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	input := <-analyzer.inputs
+	first := strings.Index(input.Text, "first body section")
+	final := strings.Index(input.Text, "final body section")
+	if first < 0 || final <= first {
+		t.Fatalf("AI input does not contain the complete ordered body:\n%s", input.Text)
 	}
 }
 

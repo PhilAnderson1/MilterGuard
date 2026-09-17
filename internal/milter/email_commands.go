@@ -13,9 +13,11 @@ import (
 	"net/netip"
 	"net/smtp"
 	"net/textproto"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
@@ -23,9 +25,17 @@ import (
 
 const internalMessageHeader = "X-MilterGuard-Internal"
 
-const maxCommandsPerMessage = 100
+const (
+	maxCommandsPerMessage      = 100
+	maxRejectionReplyBodyRunes = 50000
+	maxEmailCommandListRows    = 1000
+	maxEmailCommandReplyBytes  = 1 << 20
+)
 
-const maxRejectionReplyBodyRunes = 50000
+const (
+	commandListTruncatedNotice  = "Results were limited to 1,000 matching records.\n"
+	commandReplyTruncatedNotice = "\nCommand reply was truncated at 1 MiB.\n"
+)
 
 type commandPeriod string
 
@@ -50,9 +60,10 @@ type emailCommand struct {
 }
 
 type commandReplyAttachment struct {
-	Filename  string
-	MediaType string
-	Contents  []byte
+	Filename   string
+	MediaType  string
+	Contents   []byte
+	SourcePath string
 }
 
 type commandReplyContent struct {
@@ -149,7 +160,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	}
 	commands := make([]emailCommand, 0, len(lines))
 	for _, line := range lines {
-		command, help, parseErr := parseEmailCommand(line, replyTo, admin)
+		command, parseErr := ss.server.commands.parse(line, CommandActor{Administrator: admin, DefaultRecipient: replyTo})
 		if parseErr != nil {
 			if len(commands) == 0 {
 				return true, ss.completeInvalidEmailCommand(ctx, identity, replyTo, parseErr.Error())
@@ -158,9 +169,6 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 				commands = append(commands, emailCommand{kind: "parse_error", canonical: line, errorText: parseErr.Error()})
 			}
 			break
-		}
-		if help {
-			command = emailCommand{kind: "help", canonical: "HELP"}
 		}
 		commands = append(commands, command)
 		if len(commands) == maxCommandsPerMessage {
@@ -174,7 +182,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	parts := make([]commandResult, 0, len(commands))
 	canonicals := make([]string, 0, len(commands))
 	for _, command := range commands {
-		body, operationErr := ss.executeEmailCommand(command, admin)
+		body, operationErr := ss.server.commands.execute(command, CommandActor{Administrator: admin, DefaultRecipient: replyTo})
 		canonicals = append(canonicals, command.canonical)
 		if operationErr != nil {
 			ss.server.log.ErrorContext(ctx, "email command operation failed", "authenticated_identity", identity, "command", command.canonical, "error", operationErr)
@@ -188,12 +196,19 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 		var attachments []commandReplyAttachment
 		attached := make(map[string]bool)
 		for i, command := range commands {
-			result := parts[i]()
-			fmt.Fprintf(&body, "%s\n\n%s", command.canonical, result.Text)
-			if !strings.HasSuffix(result.Text, "\n") {
-				body.WriteByte('\n')
+			prefix := command.canonical + "\n\n"
+			if !appendBoundedCommandReply(&body, prefix) {
+				break
 			}
-			body.WriteByte('\n')
+			result := parts[i]()
+			text := result.Text
+			if !strings.HasSuffix(result.Text, "\n") {
+				text += "\n"
+			}
+			text += "\n"
+			if !appendBoundedCommandReply(&body, text) {
+				break
+			}
 			for _, attachment := range result.Attachments {
 				if !attached[attachment.Filename] {
 					attachments = append(attachments, attachment)
@@ -407,43 +422,55 @@ func listCommandPeriod(fields []string, index int) (commandPeriod, error) {
 	return period, nil
 }
 
-func (ss *session) executeEmailCommand(command emailCommand, admin bool) (commandResult, error) {
+func (p *CommandProcessor) executeCommand(command emailCommand, actor CommandActor) (commandResult, error) {
+	s := p.server
+	admin := actor.Administrator
 	cutoff := command.period.cutoff(time.Now().UTC())
 	switch command.kind {
 	case "parse_error":
 		return textCommandResult(func() string { return command.errorText + ".\n" }), nil
 	case "help":
-		return textCommandResult(func() string { return commandHelp(admin) }), nil
+		return textCommandResult(func() string { return commandHelp(admin, actor.DefaultRecipient) }), nil
 	case "rejections":
-		entries, err := ss.server.rejectionHistory.list(command.recipient, cutoff)
+		entries, err := s.rejectionHistory.list(command.recipient, cutoff)
+		if actor.NewestLast {
+			reverseSlice(entries)
+		}
 		return textCommandResult(func() string { return formatRejectionHistory(entries) }), err
 	case "rejection":
-		entry, found, err := ss.server.rejectionHistory.getByID(command.rejectionID, ss.envelopeSender, admin)
+		entry, found, err := s.rejectionHistory.getByID(command.rejectionID, actor.DefaultRecipient, admin)
 		if err != nil {
 			return nil, err
 		}
 		if !found {
 			return textCommandResult(func() string { return "Rejection record not found.\n" }), nil
 		}
-		return func() commandReplyContent { return ss.rejectionDetail(entry) }, nil
+		return func() commandReplyContent { return s.rejectionDetail(entry) }, nil
 	case "whitelist_list":
-		entries := ss.server.correspondents.listAllowlist(command.recipient, cutoff)
+		entries := s.correspondents.listAllowlist(command.recipient, cutoff)
+		if actor.NewestLast {
+			reverseSlice(entries)
+		}
 		return textCommandResult(func() string { return formatAllowlist(entries, includeAllowlistRecipient(admin, command.recipient)) }), nil
 	case "ip_list", "ip_list_lookup":
-		entries := ss.server.ipReputation.listActive(cutoff)
+		entries := s.ipReputation.listActive(cutoff)
+		entries, truncated := limitEmailCommandRows(entries)
+		if actor.NewestLast {
+			reverseSlice(entries)
+		}
 		lookup := command.kind == "ip_list_lookup"
 		return textCommandResult(func() string {
 			if lookup {
-				return formatActiveIPBlocks(ss.server.resolveActiveIPHostnames(context.Background(), entries), true)
+				return formatActiveIPBlocks(s.resolveActiveIPHostnames(context.Background(), entries), true, truncated)
 			}
-			return formatActiveIPBlocks(entries, false)
+			return formatActiveIPBlocks(entries, false, truncated)
 		}), nil
 	case "ip_add":
-		block, err := ss.server.ipReputation.manualAdd(command.ip)
+		block, err := s.ipReputation.manualAdd(command.ip)
 		outcome := fmt.Sprintf("blocked %s until %s", block.IP, block.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 		return textCommandResult(func() string { return outcome + ".\n" }), err
 	case "ip_delete":
-		removed, err := ss.server.ipReputation.manualDelete(command.ip)
+		removed, err := s.ipReputation.manualDelete(command.ip)
 		outcome := "IP address was not present"
 		if removed {
 			outcome = "IP reputation record deleted"
@@ -452,7 +479,7 @@ func (ss *session) executeEmailCommand(command emailCommand, admin bool) (comman
 	case "whitelist":
 		var outcome string
 		if command.verb == "ADD" {
-			created, err := ss.server.correspondents.addManual(command.sender, command.recipient)
+			created, err := s.correspondents.addManual(command.sender, command.recipient)
 			if created {
 				outcome = "allowlist entry added"
 			} else {
@@ -460,7 +487,7 @@ func (ss *session) executeEmailCommand(command emailCommand, admin bool) (comman
 			}
 			return textCommandResult(func() string { return outcome + ".\n" }), err
 		}
-		removed, err := ss.server.correspondents.deleteManual(command.sender, command.recipient)
+		removed, err := s.correspondents.deleteManual(command.sender, command.recipient)
 		outcome = fmt.Sprintf("removed %d allowlist entries", removed)
 		return textCommandResult(func() string { return outcome + ".\n" }), err
 	default:
@@ -468,38 +495,57 @@ func (ss *session) executeEmailCommand(command emailCommand, admin bool) (comman
 	}
 }
 
-func commandHelp(admin bool) string {
+func reverseSlice[T any](values []T) {
+	for left, right := 0, len(values)-1; left < right; left, right = left+1, right-1 {
+		values[left], values[right] = values[right], values[left]
+	}
+}
+
+func (ss *session) executeEmailCommand(command emailCommand, admin bool) (commandResult, error) {
+	return ss.server.commands.execute(command, CommandActor{Administrator: admin, DefaultRecipient: ss.envelopeSender})
+}
+
+func commandHelp(admin bool, defaultRecipient ...string) string {
+	terminalAdmin := admin && len(defaultRecipient) > 0 && defaultRecipient[0] == "*"
 	text := "Send one or more commands, one per line:\n\nWHITELIST ADD sender@example.com\nWHITELIST DELETE sender@example.com\nWHITELIST LIST [day|week|month|year|all]\nREJECTIONS [day|week|month|year|all]\nREJECTION id\nHELP\n\nListing commands default to the previous week. The local address is taken from your authenticated envelope sender.\n"
+	if terminalAdmin {
+		text = "Enter one command at a time:\n\nWHITELIST ADD sender@example.com recipient@example.com\nWHITELIST DELETE sender@example.com [recipient@example.com|*]\nWHITELIST LIST [recipient@example.com|*] [day|week|month|year|all]\nREJECTIONS [recipient@example.com|*] [day|week|month|year|all]\nREJECTION id\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\nHELP\nEXIT\n\nListing commands default to the previous week and all local recipients. WHITELIST ADD requires an explicit local recipient.\n"
+		return text
+	}
 	if admin {
 		text += "\nAdministrator commands:\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\n\nAdministrators may append a local recipient address before the period in WHITELIST LIST and REJECTIONS commands, and to modification commands. They may use * with WHITELIST DELETE, WHITELIST LIST, or REJECTIONS. For example:\n\nWHITELIST LIST * month\nREJECTIONS * year\n"
 	}
 	return text
 }
 
-func (ss *session) rejectionDetail(entry rejectionHistoryEntry) commandReplyContent {
+func (s *Server) rejectionDetail(entry rejectionHistoryEntry) commandReplyContent {
 	processedBody := "Saved message is not available."
 	var attachments []commandReplyAttachment
-	if ss.server.rejectedMail != nil {
-		contents, err := ss.server.rejectedMail.ReadWithRecordID(entry.ID, entry.RejectedAt, ss.server.cfg.Milter.MaxMessageSize)
+	if s.rejectedMail != nil {
+		contents, err := s.rejectedMail.ReadWithRecordID(entry.ID, entry.RejectedAt, s.cfg.Milter.MaxMessageSize)
 		switch {
 		case err == nil:
+			sourcePath := filepath.Join(s.cfg.RejectionHistory.MessageDirectory,
+				entry.RejectedAt.UTC().Format("2006"), entry.RejectedAt.UTC().Format("01"),
+				entry.RejectedAt.UTC().Format("02"), strconv.FormatUint(entry.ID, 10)+".eml")
 			attachments = append(attachments, commandReplyAttachment{
-				Filename:  fmt.Sprintf("rejection-%d.eml", entry.ID),
-				MediaType: "application/octet-stream",
-				Contents:  contents,
+				Filename:   fmt.Sprintf("rejection-%d.eml", entry.ID),
+				MediaType:  "application/octet-stream",
+				Contents:   contents,
+				SourcePath: sourcePath,
 			})
-			archived, parseErr := message.ParseArchived(contents, ss.server.cfg.Milter.MaxMessageSize)
+			archived, parseErr := message.ParseArchived(contents, s.cfg.Milter.MaxMessageSize)
 			if parseErr == nil {
 				processedBody = archived.ProcessedBody(maxRejectionReplyBodyRunes)
 				if strings.TrimSpace(processedBody) == "" {
 					processedBody = "No readable message text was found."
 				}
 			} else {
-				ss.server.log.Warn("cannot process saved rejected message", "rejection_id", entry.ID, "error", parseErr)
+				s.log.Warn("cannot process saved rejected message", "rejection_id", entry.ID, "error", parseErr)
 			}
 		case errors.Is(err, rejectedmail.ErrMessageNotFound):
 		default:
-			ss.server.log.Warn("cannot read saved rejected message", "rejection_id", entry.ID, "error", err)
+			s.log.Warn("cannot read saved rejected message", "rejection_id", entry.ID, "error", err)
 		}
 	}
 	return commandReplyContent{Text: formatRejectionDetail(entry, processedBody), Attachments: attachments}
@@ -523,13 +569,21 @@ func formatAllowlist(entries []correspondentEntry, includeRecipient bool) string
 	if len(entries) == 0 {
 		return "No whitelisted correspondent addresses were found.\n"
 	}
+	entries, truncated := limitEmailCommandRows(entries)
 	var body strings.Builder
 	for _, entry := range entries {
-		fmt.Fprintf(&body, "Sender: %s\n", entry.Correspondent)
+		var record strings.Builder
+		fmt.Fprintf(&record, "Sender: %s\n", entry.Correspondent)
 		if includeRecipient {
-			fmt.Fprintf(&body, "Recipient: %s\n", entry.LocalAddress)
+			fmt.Fprintf(&record, "Recipient: %s\n", entry.LocalAddress)
 		}
-		fmt.Fprintf(&body, "Added: %s\n\n", allowlistAddedDescription(entry.WhitelistType))
+		fmt.Fprintf(&record, "Added: %s\n\n", allowlistAddedDescription(entry.WhitelistType))
+		if !appendBoundedCommandReply(&body, record.String()) {
+			return body.String()
+		}
+	}
+	if truncated {
+		appendBoundedCommandReply(&body, commandListTruncatedNotice)
 	}
 	return body.String()
 }
@@ -551,21 +605,28 @@ func allowlistAddedDescription(whitelistType string) string {
 	}
 }
 
-func formatActiveIPBlocks(entries []activeIPBlock, includeHostname bool) string {
+func formatActiveIPBlocks(entries []activeIPBlock, includeHostname, truncated bool) string {
 	if len(entries) == 0 {
 		return "No active IP blocks were found.\n"
 	}
 	var body strings.Builder
 	for _, entry := range entries {
+		var record string
 		if includeHostname {
 			hostname := entry.Hostname
 			if hostname == "" {
 				hostname = "not found"
 			}
-			fmt.Fprintf(&body, "IP: %s (%s) Type: %s Expires: %s\n", entry.IP, hostname, entry.Level, entry.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+			record = fmt.Sprintf("IP: %s (%s) Type: %s Expires: %s\n", entry.IP, hostname, entry.Level, entry.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 		} else {
-			fmt.Fprintf(&body, "IP: %s Type: %s Expires: %s\n", entry.IP, entry.Level, entry.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+			record = fmt.Sprintf("IP: %s Type: %s Expires: %s\n", entry.IP, entry.Level, entry.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 		}
+		if !appendBoundedCommandReply(&body, record) {
+			return body.String()
+		}
+	}
+	if truncated {
+		appendBoundedCommandReply(&body, commandListTruncatedNotice)
 	}
 	return body.String()
 }
@@ -574,6 +635,7 @@ func formatRejectionHistory(entries []rejectionHistoryEntry) string {
 	if len(entries) == 0 {
 		return "No retained rejected-email records were found.\n"
 	}
+	entries, truncated := limitEmailCommandRows(entries)
 	var body strings.Builder
 	for _, entry := range entries {
 		subject := entry.Subject
@@ -584,9 +646,49 @@ func formatRejectionHistory(entries []rejectionHistoryEntry) string {
 		if reason == "" {
 			reason = "Unavailable (record predates reason logging)"
 		}
-		fmt.Fprintf(&body, "From: %s\nTo: %s\nSubject: %s\nDate: %s\nRejection ID: %d\nReason: %s\n\n", entry.Sender, strings.Join(entry.Recipients, ", "), subject, entry.RejectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), entry.ID, reason)
+		record := fmt.Sprintf("From: %s\nTo: %s\nSubject: %s\nDate: %s\nRejection ID: %d\nReason: %s\n\n", entry.Sender, strings.Join(entry.Recipients, ", "), subject, entry.RejectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), entry.ID, reason)
+		if !appendBoundedCommandReply(&body, record) {
+			return body.String()
+		}
+	}
+	if truncated {
+		appendBoundedCommandReply(&body, commandListTruncatedNotice)
 	}
 	return body.String()
+}
+
+func limitEmailCommandRows[T any](entries []T) ([]T, bool) {
+	if len(entries) <= maxEmailCommandListRows {
+		return entries, false
+	}
+	return entries[:maxEmailCommandListRows], true
+}
+
+func appendBoundedCommandReply(body *strings.Builder, text string) bool {
+	remaining := maxEmailCommandReplyBytes - body.Len()
+	if len(text) <= remaining {
+		body.WriteString(text)
+		return true
+	}
+	contentLimit := maxEmailCommandReplyBytes - len(commandReplyTruncatedNotice)
+	if body.Len() > contentLimit {
+		end := contentLimit
+		existing := body.String()
+		for end > 0 && !utf8.ValidString(existing[:end]) {
+			end--
+		}
+		preserved := strings.Clone(existing[:end])
+		body.Reset()
+		body.WriteString(preserved)
+	} else if available := contentLimit - body.Len(); available > 0 {
+		end := min(available, len(text))
+		for end > 0 && !utf8.ValidString(text[:end]) {
+			end--
+		}
+		body.WriteString(text[:end])
+	}
+	body.WriteString(commandReplyTruncatedNotice)
+	return false
 }
 
 func (ss *session) completeInvalidEmailCommand(ctx context.Context, identity, replyTo, reason string) bool {
@@ -671,6 +773,7 @@ func (ss *session) queueCommandReplyContentFunc(recipient, subject string, conte
 }
 
 func buildBoundedCommandReplyPayload(from, recipient, subject, date, token string, reply commandReplyContent, maxBytes int64) ([]byte, error) {
+	reply.Text = boundedCommandReplyText(reply.Text)
 	payload, err := buildCommandReplyPayload(from, recipient, subject, date, token, reply)
 	if err != nil || len(reply.Attachments) == 0 || maxBytes <= 0 || int64(len(payload)) <= maxBytes {
 		return payload, err
@@ -678,6 +781,15 @@ func buildBoundedCommandReplyPayload(from, recipient, subject, date, token strin
 	reply.Text += "\nOne or more original saved messages were too large to attach.\n"
 	reply.Attachments = nil
 	return buildCommandReplyPayload(from, recipient, subject, date, token, reply)
+}
+
+func boundedCommandReplyText(text string) string {
+	if len(text) <= maxEmailCommandReplyBytes {
+		return text
+	}
+	var bounded strings.Builder
+	appendBoundedCommandReply(&bounded, text)
+	return bounded.String()
 }
 
 func buildCommandReplyPayload(from, recipient, subject, date, token string, reply commandReplyContent) ([]byte, error) {

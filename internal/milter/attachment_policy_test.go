@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"testing"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
@@ -28,6 +29,11 @@ func enableTestAttachments(server *Server) {
 		BlockedExtensions: []string{"exe"}, InspectSignatures: true, InspectArchives: true,
 		MaxAttachmentBytes: 1 << 20, MaxArchiveDepth: 2, MaxArchiveFiles: 10, MaxArchiveUncompressedBytes: 2 << 20,
 	})
+}
+
+func expectAttachmentProgress(t *testing.T, conn net.Conn) {
+	t.Helper()
+	expectFrame(t, conn, string([]byte{responseProgress}))
 }
 
 func TestAttachmentScanWaitingForAttachmentSlotStopsWithContext(t *testing.T) {
@@ -87,6 +93,7 @@ func TestExecutableAttachmentRejectedBeforeAI(t *testing.T) {
 	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
 		t.Fatal(err)
 	}
+	expectAttachmentProgress(t, conn)
 	expectFrame(t, conn, "y550 5.7.1 executable attachment blocked\x00")
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)
@@ -113,6 +120,7 @@ func TestAttachmentsMonitorModeAddsHeadersWhenEnabled(t *testing.T) {
 	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
 		t.Fatal(err)
 	}
+	expectAttachmentProgress(t, conn)
 	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
 	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "unavailable")))
 	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-monitor-mode")))
@@ -140,6 +148,7 @@ func TestExecutableAttachmentRejectionIsArchived(t *testing.T) {
 	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
 		t.Fatal(err)
 	}
+	expectAttachmentProgress(t, conn)
 	expectFrame(t, conn, "y550 5.7.1 executable attachment blocked\x00")
 	if files := archivedMessages(t, root); len(files) != 1 {
 		t.Fatalf("archived files = %v", files)
@@ -165,6 +174,7 @@ func TestAttachmentsMonitorModeAcceptsWithoutAI(t *testing.T) {
 	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
 		t.Fatal(err)
 	}
+	expectAttachmentProgress(t, conn)
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)
@@ -190,6 +200,7 @@ func TestAttachmentsTagModeAcceptsAndAddsHeaders(t *testing.T) {
 	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
 		t.Fatal(err)
 	}
+	expectAttachmentProgress(t, conn)
 	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
 	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "unavailable")))
 	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-tag-mode")))
@@ -217,6 +228,7 @@ func TestSafeAttachmentContinuesToAI(t *testing.T) {
 	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
 		t.Fatal(err)
 	}
+	expectAttachmentProgress(t, conn)
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	if got := analyzer.calls.Load(); got != 1 {
 		t.Fatalf("AI analysis calls = %d, want 1", got)
@@ -242,6 +254,7 @@ func TestUnscannableAttachmentCanTempfail(t *testing.T) {
 	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
 		t.Fatal(err)
 	}
+	expectAttachmentProgress(t, conn)
 	expectFrame(t, conn, string([]byte{responseTempfail}))
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)

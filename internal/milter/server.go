@@ -27,7 +27,7 @@ import (
 const analysisResponseMargin = 5 * time.Second
 const defaultMilterProgressInterval = 30 * time.Second
 const rejectedMailCleanupInterval = 24 * time.Hour
-const milterIdleTimeout = 5 * time.Minute
+const postDecisionUpdateTimeout = 5 * time.Second
 const initialAcceptRetryDelay = 5 * time.Millisecond
 const maximumAcceptRetryDelay = time.Second
 
@@ -66,6 +66,7 @@ type Server struct {
 	internalToken      string
 	commandRecipient   string
 	replySlots         chan struct{}
+	commands           *CommandProcessor
 	database           *sqlstore.Store
 	progressInterval   time.Duration
 	wg                 sync.WaitGroup
@@ -98,6 +99,7 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 		progressInterval: defaultMilterProgressInterval,
 	}
 	server.allowedPeerIPs = peerPrefixes(cfg.Milter.AllowedPeerIPs)
+	server.commands = newCommandProcessor(server)
 	server.startupErr = errors.Join(tokenErr, databaseErr)
 	if cfg.RejectionHistory.SaveMessages && rejectionHistoryEnabled(cfg.RejectionHistory) {
 		server.rejectedMail = rejectedmail.New(rejectedmail.Options{
@@ -203,11 +205,34 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			_ = conn.Close()
 			continue
 		}
+		logConnection := s.cfg.Logging.IncludeConnections
+		started := time.Time{}
+		localAddress, remoteAddress := "", ""
+		if logConnection {
+			started = time.Now()
+			localAddress = conn.LocalAddr().String()
+			remoteAddress = conn.RemoteAddr().String()
+			s.log.Debug("Milter connection opened",
+				"local_addr", localAddress,
+				"remote_addr", remoteAddress,
+				"active_connections", len(s.sessionSlots),
+				"max_connections", s.cfg.Milter.MaxConnections)
+		}
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			defer func() { <-s.sessionSlots }()
-			defer conn.Close()
+			defer func() {
+				_ = conn.Close()
+				<-s.sessionSlots
+				if logConnection {
+					s.log.Debug("Milter connection closed",
+						"local_addr", localAddress,
+						"remote_addr", remoteAddress,
+						"duration_ms", time.Since(started).Milliseconds(),
+						"active_connections", len(s.sessionSlots),
+						"max_connections", s.cfg.Milter.MaxConnections)
+				}
+			}()
 			s.handle(ctx, conn)
 		}()
 	}

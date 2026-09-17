@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -14,12 +15,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/milter"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/mattn/go-isatty"
 )
 
 // version is replaced at build time with -ldflags "-X main.version=<version>".
@@ -30,9 +31,8 @@ func main() {
 	check := flag.Bool("check-config", false, "validate configuration and exit")
 	checkEndpoint := flag.Bool("check-endpoint", false, "test the configured AI endpoint and exit")
 	checkPort := flag.Bool("check-port", false, "check that the configured Milter listener is available and exit")
+	commandMode := flag.Bool("command-mode", false, "run an interactive administrative command session")
 	showVersion := flag.Bool("version", false, "print version and exit")
-	whitelistAdd := flag.String("whitelist-add", "", "manually whitelist sender for one recipient (service must be stopped)")
-	whitelistDelete := flag.String("whitelist-del", "", "delete sender whitelist entry; recipient may be * (service must be stopped)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Printf("MilterGuard %s\n", version)
@@ -45,12 +45,20 @@ func main() {
 		os.Exit(2)
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel()}))
-	for _, warning := range cfg.Warnings {
-		logger.Warn("configuration warning", "warning", warning)
+	if *commandMode {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	} else {
+		for _, warning := range cfg.Warnings {
+			logger.Warn("configuration warning", "warning", warning)
+		}
 	}
 	if *check || *checkEndpoint || *checkPort {
-		if *whitelistAdd != "" || *whitelistDelete != "" || len(flag.Args()) != 0 {
-			fmt.Fprintln(os.Stderr, "configuration, endpoint, and port checks cannot be combined with whitelist operations or positional arguments")
+		if *commandMode {
+			fmt.Fprintln(os.Stderr, "command mode cannot be combined with configuration, endpoint, or port checks")
+			os.Exit(2)
+		}
+		if len(flag.Args()) != 0 {
+			fmt.Fprintln(os.Stderr, "configuration, endpoint, and port checks cannot be combined with positional arguments")
 			os.Exit(2)
 		}
 		if *check {
@@ -79,39 +87,21 @@ func main() {
 		}
 		return
 	}
-	if *whitelistAdd != "" || *whitelistDelete != "" {
-		if *whitelistAdd != "" && *whitelistDelete != "" {
-			fmt.Fprintln(os.Stderr, "specify only one of --whitelist-add or --whitelist-del")
+	if *commandMode {
+		if len(flag.Args()) != 0 {
+			fmt.Fprintln(os.Stderr, "command mode does not accept positional arguments")
 			os.Exit(2)
 		}
-		if len(flag.Args()) != 1 {
-			fmt.Fprintln(os.Stderr, "whitelist operation requires sender and recipient arguments")
-			os.Exit(2)
-		}
-		if milterListenerActive(cfg.Milter.Socket) {
-			fmt.Fprintln(os.Stderr, "MilterGuard appears to be running; stop it before modifying the whitelist")
-			os.Exit(1)
-		}
-		recipient := flag.Args()[0]
-		if *whitelistAdd != "" {
-			created, err := milter.AddManualCorrespondent(cfg, *whitelistAdd, recipient)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "cannot add whitelist entry:", err)
-				os.Exit(1)
-			}
-			result := "updated"
-			if created {
-				result = "added"
-			}
-			fmt.Printf("whitelist entry %s: sender=%s recipient=%s\n", result, *whitelistAdd, recipient)
-			return
-		}
-		removed, err := milter.DeleteCorrespondents(cfg, *whitelistDelete, recipient)
+		processor, closeProcessor, err := milter.OpenCommandProcessor(cfg, logger)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "cannot delete whitelist entry:", err)
+			fmt.Fprintln(os.Stderr, "cannot open command database:", err)
 			os.Exit(1)
 		}
-		fmt.Printf("whitelist entries deleted: %d\n", removed)
+		defer closeProcessor()
+		if err := runCommandMode(context.Background(), os.Stdin, os.Stdout, processor, inputIsTerminal(os.Stdin)); err != nil {
+			fmt.Fprintln(os.Stderr, "command mode failed:", err)
+			os.Exit(1)
+		}
 		return
 	}
 	if len(flag.Args()) != 0 {
@@ -149,6 +139,66 @@ func main() {
 	if err := server.Serve(ctx, ln); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("milter server stopped", "error", err)
 		os.Exit(1)
+	}
+}
+
+type interactiveCommandProcessor interface {
+	ExecuteLine(context.Context, string, milter.CommandActor) (milter.CommandResponse, error)
+}
+
+func inputIsTerminal(input *os.File) bool {
+	fd := input.Fd()
+	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
+}
+
+func runCommandMode(ctx context.Context, input io.Reader, output io.Writer, processor interactiveCommandProcessor, interactive bool) error {
+	if interactive {
+		fmt.Fprintln(output, "MilterGuard command mode. Type HELP for commands; EXIT to quit.")
+	}
+	scanner := bufio.NewScanner(input)
+	scanner.Buffer(make([]byte, 4096), 1<<20)
+	actor := milter.CommandActor{Administrator: true, DefaultRecipient: "*", NewestLast: true}
+	for {
+		if interactive {
+			fmt.Fprint(output, "milterguard> ")
+		}
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return err
+			}
+			if interactive {
+				fmt.Fprintln(output)
+			}
+			return nil
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if strings.EqualFold(line, "EXIT") || strings.EqualFold(line, "QUIT") {
+			return nil
+		}
+		response, err := processor.ExecuteLine(ctx, line, actor)
+		if err != nil {
+			fmt.Fprintf(output, "Error: %v\n", err)
+			continue
+		}
+		if response.Text != "" {
+			fmt.Fprint(output, response.Text)
+			if !strings.HasSuffix(response.Text, "\n") {
+				fmt.Fprintln(output)
+			}
+		}
+		if len(response.Attachments) > 0 && response.Text != "" {
+			fmt.Fprintln(output)
+		}
+		for _, attachment := range response.Attachments {
+			if attachment.SourcePath != "" {
+				fmt.Fprintf(output, "Saved message: %s (%d bytes)\n", attachment.SourcePath, len(attachment.Contents))
+				continue
+			}
+			fmt.Fprintf(output, "Attachment available: %s (%d bytes; not written to the terminal)\n", attachment.Filename, len(attachment.Contents))
+		}
 	}
 }
 
@@ -285,29 +335,6 @@ func persistentStateStartupErrorMessage(err error) string {
 		return "incompatible SQLite database format"
 	}
 	return "persistent state cannot be read"
-}
-
-func milterListenerActive(address string) bool {
-	return milterListenerActiveUsing(address, net.DialTimeout)
-}
-
-func milterListenerActiveUsing(address string, dial func(string, string, time.Duration) (net.Conn, error)) bool {
-	network := ""
-	target := ""
-	switch {
-	case strings.HasPrefix(address, "unix:"):
-		network, target = "unix", strings.TrimPrefix(address, "unix:")
-	case strings.HasPrefix(address, "tcp:"):
-		network, target = "tcp", strings.TrimPrefix(address, "tcp:")
-	default:
-		return false
-	}
-	conn, err := dial(network, target, 250*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }
 
 func listen(address string) (net.Listener, func(), error) {

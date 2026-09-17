@@ -81,6 +81,52 @@ func TestSlowEndOfMessageSendsProgressBeforeFinalResponse(t *testing.T) {
 	}
 }
 
+func TestCompletedCommandRemainsUsableAcrossReadTimeouts(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+	server := NewServer(config.Config{
+		Mode:      "enforce",
+		Milter:    config.MilterConfig{Timeout: config.Duration(20 * time.Millisecond), MaxMessageSize: 1024},
+		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
+		Filtering: config.FilteringConfig{RejectScore: 0.9, AIErrorAction: "accept"},
+	}, analyzer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ss := newSession(server, serverConn)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer serverConn.Close()
+		ss.run(context.Background())
+	}()
+
+	negotiate(t, clientConn)
+	sendContinueFrames(t, clientConn,
+		connectFrame('4', "192.0.2.1"),
+		envelopeFrame(commandMail, "sender@example.net"),
+		envelopeFrame(commandRecipient, "recipient@example.com"),
+		headerFrame("From", "sender@example.net"),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("message body")...),
+	)
+	if err := writeFrame(clientConn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, clientConn, string([]byte{responseAccept}))
+	time.Sleep(75 * time.Millisecond)
+	if err := writeFrame(clientConn, []byte{commandHelo}); err != nil {
+		t.Fatalf("write command after completed processing: %v", err)
+	}
+	expectFrame(t, clientConn, string([]byte{responseContinue}))
+	if err := writeFrame(clientConn, []byte{commandQuit}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not exit after quit")
+	}
+}
+
 func TestProgressWriteFailureCancelsAnalysis(t *testing.T) {
 	analyzer := &blockingAnalyzer{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}
 	server, conn, done := testServer(t, analyzer)
@@ -263,7 +309,7 @@ func TestUnsupportedCommandClosesConnection(t *testing.T) {
 	}
 }
 
-func TestHandleKeepsConnectionBeforeFiveMinuteIdleTimeout(t *testing.T) {
+func TestIdleConnectionRemainsOpenAcrossReadTimeouts(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
 	server := &Server{cfg: config.Config{Milter: config.MilterConfig{Timeout: config.Duration(20 * time.Millisecond)}}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
@@ -291,27 +337,6 @@ func TestHandleKeepsConnectionBeforeFiveMinuteIdleTimeout(t *testing.T) {
 		t.Fatal("handler did not exit after quit")
 	}
 }
-
-func TestIdleConnectionClosesAfterFiveMinutes(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer clientConn.Close()
-	var logOutput bytes.Buffer
-	server := &Server{cfg: config.Config{Milter: config.MilterConfig{Timeout: config.Duration(time.Minute)}}, log: slog.New(slog.NewTextHandler(&logOutput, &slog.HandlerOptions{Level: slog.LevelDebug}))}
-	ss := newSession(server, serverConn)
-	ss.idleSince = time.Now().Add(-milterIdleTimeout)
-	if ss.handleReadError(context.Background(), 0, timeoutError{}) {
-		t.Fatal("expired idle connection was retained")
-	}
-	if !strings.Contains(logOutput.String(), `msg="closing idle Milter connection"`) {
-		t.Fatalf("idle close was not logged: %s", logOutput.String())
-	}
-}
-
-type timeoutError struct{}
-
-func (timeoutError) Error() string   { return "timeout" }
-func (timeoutError) Timeout() bool   { return true }
-func (timeoutError) Temporary() bool { return true }
 
 func TestContextCancellationClosesIdleConnectionImmediately(t *testing.T) {
 	serverConn, clientConn := net.Pipe()

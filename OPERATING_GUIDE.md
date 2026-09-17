@@ -27,7 +27,7 @@ For initial installation and activation, follow the
 6. [Basic virus protection](#basic-virus-protection)
 7. [Rejection history and saved messages](#rejection-history-and-saved-messages)
 8. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
-9. [Email commands](#email-commands)
+9. [Administration commands](#administration-commands)
 10. [Running AI locally](#running-ai-locally)
 11. [Routine operation](#routine-operation)
 12. [Replay saved email](#replay-saved-email)
@@ -102,9 +102,9 @@ directory and socket permissions instead.
 
 ## Connect Postfix to MilterGuard
 
-Add MilterGuard to the end of each applicable Milter list in
-`/etc/postfix/main.cf`. Postfix calls Milters in the configured order, allowing
-MilterGuard to use authentication results added by earlier filters.
+Add MilterGuard to the end of `smtpd_milters` in `/etc/postfix/main.cf`.
+Postfix calls Milters in the configured order, allowing MilterGuard to use
+authentication results added by earlier filters.
 
 These filters must run in this order:
 
@@ -117,8 +117,8 @@ With no authentication filters:
 ```text
 milter_default_action = accept
 milter_protocol = 6
+milter_content_timeout = 600s
 smtpd_milters = inet:127.0.0.1:8895
-non_smtpd_milters = inet:127.0.0.1:8895
 ```
 
 With OpenDKIM listening on port 8891:
@@ -126,8 +126,8 @@ With OpenDKIM listening on port 8891:
 ```text
 milter_default_action = accept
 milter_protocol = 6
+milter_content_timeout = 600s
 smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8895
-non_smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8895
 ```
 
 With OpenDKIM on port 8891 and OpenDMARC on port 8892:
@@ -135,14 +135,14 @@ With OpenDKIM on port 8891 and OpenDMARC on port 8892:
 ```text
 milter_default_action = accept
 milter_protocol = 6
+milter_content_timeout = 600s
 smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
-non_smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
 ```
 
-`smtpd_milters` processes mail received over SMTP. `non_smtpd_milters` processes
-locally submitted mail, including messages submitted through Postfix's
-`sendmail` command. Omit MilterGuard from `non_smtpd_milters` if that mail
-must not pass through it.
+If `non_smtpd_milters` is already configured on your server, leave its existing
+filters in place but do not add MilterGuard to it. MilterGuard should process
+SMTP mail only; filtering locally submitted system mail can cause legitimate
+notifications to be rejected.
 
 Use the actual sockets or ports configured for your services. MilterGuard must
 remain last in the chain.
@@ -151,19 +151,25 @@ remain last in the chain.
 Use `tempfail` instead if you prefer Postfix to defer delivery until every
 configured Milter is available again.
 
+`milter_content_timeout = 600s` gives bounded attachment inspection and AI
+analysis sufficient time to begin. MilterGuard sends progress responses during
+long AI operations so Postfix continues waiting.
+
 The authentication service identifier written to `Authentication-Results`
 must be included in MilterGuard's `correspondents.trusted_authserv_ids` setting.
 The default `$mta_hostname` value normally handles results identified with the
 Postfix hostname.
 
 With OpenDKIM, OpenDMARC, or both installed on your server, configure Postfix
-to remove externally supplied `Authentication-Results` headers. Their
-authentication service identifier is not proof that they were created locally,
-so without this step a remote sender could forge evidence that MilterGuard
-trusts. Add the following rule to `/etc/postfix/header_checks`:
+to remove externally supplied `Authentication-Results` and `Received-SPF`
+headers. Their authentication service or receiver identifier is not proof that
+they were created locally, so without this step a remote sender could forge
+evidence that MilterGuard trusts. Add the following rule to
+`/etc/postfix/header_checks`:
 
 ```text
 /^Authentication-Results:/ IGNORE
+/^Received-SPF:/ IGNORE
 /^X-MilterGuard-(Classification|Score|Confidence|Action):/ IGNORE
 ```
 
@@ -175,10 +181,11 @@ header_checks = regexp:/etc/postfix/header_checks
 ```
 
 Postfix removes any existing authentication and MilterGuard result headers as
-it receives the message. OpenDKIM and OpenDMARC then add freshly calculated
-authentication results before MilterGuard runs, and MilterGuard may add its own
-result headers. Do not apply these removal rules through `milter_header_checks`,
-which operates on headers added by Milters.
+it receives the message. OpenDKIM, OpenDMARC, and any locally configured SPF
+service can then add freshly calculated authentication results before
+MilterGuard runs, and MilterGuard may add its own result headers. Do not apply
+these removal rules through `milter_header_checks`, which operates on headers
+added by Milters.
 
 MilterGuard also supplies the connecting IP, reported hostname, HELO/EHLO
 identity, reverse DNS, and forward-confirmation result to the AI as supporting
@@ -195,7 +202,7 @@ MilterGuard can recognize SASL-authenticated mail. Check the effective values
 before changing them:
 
 ```sh
-postconf myhostname milter_protocol milter_mail_macros smtpd_milters non_smtpd_milters
+postconf myhostname milter_protocol milter_content_timeout milter_mail_macros smtpd_milters non_smtpd_milters
 ```
 
 For full MilterGuard functionality, the output should have these
@@ -204,16 +211,15 @@ characteristics:
 ```text
 myhostname = mail.example.com
 milter_protocol = 6
+milter_content_timeout = 600s
 milter_mail_macros = ... {auth_authen} ...
 smtpd_milters = ...authentication filters..., inet:127.0.0.1:8895
-non_smtpd_milters = ...authentication filters..., inet:127.0.0.1:8895
 ```
 
 The hostname and authentication-filter sockets will be specific to the mail
 server. `{auth_authen}` must appear in `milter_mail_macros`, and MilterGuard
-must be the last entry in each Milter list in which it is enabled. It is valid
-to omit MilterGuard from `non_smtpd_milters` when locally submitted mail does
-not need scanning.
+must be the last entry in `smtpd_milters`. If `non_smtpd_milters` is present in
+the `postconf` output, it must not contain MilterGuard.
 
 ### Optional early rejection with Spamhaus ZEN
 
@@ -470,28 +476,89 @@ at startup. The same background maintenance task also checkpoints SQLite's
 write-ahead log. Domain-registration expiry is still enforced during lookups,
 before periodic cleanup physically removes the old row.
 
-To add or remove correspondent whitelist entries directly from the command
-line, stop MilterGuard while editing its database:
+## Administration commands
+
+### Command line
+
+MilterGuard provides an interactive administrator interface for managing
+allowlists, IP blocks, and rejection history. It works with the supplied
+configuration without requiring the email command feature:
 
 ```sh
-sudo systemctl stop milterguard
-sudo milterguard --whitelist-add sender@example.com recipient@example.net
-sudo milterguard --whitelist-del sender@example.com recipient@example.net
-sudo milterguard --whitelist-del sender@example.com '*'
-sudo systemctl start milterguard
+sudo milterguard --command-mode
 ```
 
-The wildcard deletes that sender's entries for every local recipient.
+If MilterGuard uses a non-default configuration file, specify it explicitly:
 
-## Email commands
+```sh
+sudo milterguard --config /path/to/milterguard.yaml --command-mode
+```
 
-MilterGuard provides a local command email address for managing allowlists
-and reviewing rejected mail. Commands sent to this address are processed by
-MilterGuard, and the results are emailed back to the user.
+Command mode permits administrative operations on the live database, so the
+MilterGuard service does not need to be stopped.
+
+Available commands are:
+
+```text
+WHITELIST ADD sender@example.com recipient@example.com
+WHITELIST DELETE sender@example.com [recipient@example.com|*]
+WHITELIST LIST [recipient@example.com|*] [day|week|month|year|all]
+REJECTIONS [recipient@example.com|*] [day|week|month|year|all]
+REJECTION id
+IP LIST [day|week|month|year|all]
+IP LIST LOOKUP [day|week|month|year|all]
+IP ADD 192.0.2.1
+IP DELETE 192.0.2.1
+HELP
+EXIT
+```
+
+- `WHITELIST ADD`, `WHITELIST DELETE`, and `WHITELIST LIST` manage trusted
+  correspondent addresses.
+- `REJECTIONS` lists rejected messages, including their rejection IDs and
+  reasons.
+- `REJECTION <id>` displays the rejection information for the rejected email
+  with ID `<id>` and its decoded, cleaned plain-text body.
+- `IP LIST` shows active short and repeat-offender blocks. `IP LIST LOOKUP`
+  also performs reverse-DNS lookups and includes each hostname or `(not found)`.
+- `IP ADD` creates a manual block using the configured repeat-offender duration,
+  or the short duration when repeat-offender blocking is disabled. `IP DELETE`
+  removes the IP reputation record.
+- `HELP` displays the command summary. `EXIT`, `QUIT`, or Ctrl-D closes the
+  session.
+
+Listing commands default to all local recipients and the previous week.
+`day`, `week`, `month`, and `year` select activity since the corresponding
+point in the past; `all` removes that additional date filter while retaining
+configured expiry rules. Whitelist and active-IP listings use last activity;
+rejection history uses rejection time. Interactive lists are printed from
+oldest to newest so the latest entries appear immediately above the prompt.
+
+`REJECTION <id>` displays the rejection information and processed body. When
+the original saved message is available, command mode reports its full archive
+path and size. The processed body is regenerated with the current MIME and HTML
+path and size. The processed body displayed by this command is regenerated with
+the current MIME and HTML parser, so it may differ from the text originally
+supplied to the AI. Connection and authentication analysis is not reconstructed.
+
+For bulk additions or deletions to the contact or IP databases, commands can
+also be read from a file or pipeline:
+
+```sh
+sudo milterguard --command-mode < commands.txt
+```
+
+### Email commands
+
+The optional email command interface supports the same commands and sends the
+results back by email. For ordinary authenticated users, the local recipient
+address is inferred from the authenticated envelope sender, so it is omitted
+from `WHITELIST` and `REJECTIONS` commands. Administrators may specify another
+recipient or use `*`, and may use the IP commands.
 
 Enable and configure `email_commands` in
 `/etc/milterguard/milterguard.yaml`. Set `recipient` to the local command
-email address you want to use, for example:
+address, replacing `example.com` with a domain received by your server:
 
 ```yaml
 email_commands:
@@ -499,156 +566,64 @@ email_commands:
   recipient: milterguard@example.com
 ```
 
-Here, `example.com` must be replaced with a domain on which your server can
-receive email.
-
-Before enabling the mail command feature, add the following entry to
-`/etc/aliases`:
+Add the following entry to `/etc/aliases`, then run `newaliases`:
 
 ```text
 milterguard: /dev/null
 ```
 
-Then run:
+To enable an administrator, add their SASL login name to `administrators` in
+the `email_commands` configuration. Administrators can manage or inspect any
+local recipient and use `*` to select all recipients. Leave
+`allow_authenticated_users` set to `false` if only administrators should be
+able to issue commands.
 
-```sh
-newaliases
-```
-
-For administrator-only operation, leave `allow_authenticated_users` set to
-`false` and add the permitted SASL login names to the `administrators` list in
-the `email_commands` section of `/etc/milterguard/milterguard.yaml`.
-Administrators can manage or inspect any recipient and use `*` to select
-everyone.
-
-When `allow_authenticated_users` is `true`, any authenticated user can manage
-and inspect their own allowlist and rejection history. When
-`email_commands.verify_sender_via_aliases` is `true`, MilterGuard uses
-`/etc/aliases` to verify that the authenticated envelope-sender address belongs
-to the SASL user. If alias verification is disabled, configure Postfix to
-enforce envelope-sender ownership. For a hash table, create
-`/etc/postfix/sender_login_maps` with one address and its permitted SASL login
-per line:
+To also permit normal local users to access commands relevant to their email
+address only, set `allow_authenticated_users` to `true`. MilterGuard must
+verify that the envelope-sender address belongs
+to the authenticated SASL user. With `verify_sender_via_aliases` set to `true`,
+it performs this verification using `/etc/aliases`. If alias verification is
+disabled, you must configure Postfix to enforce sender ownership instead. For
+example, create `/etc/postfix/sender_login_maps` containing:
 
 ```text
 phil.anderson@example.com philip
 alias@example.com         philip
 ```
 
-Build the lookup table and add the ownership check to `/etc/postfix/main.cf`:
-
-```sh
-sudo postmap /etc/postfix/sender_login_maps
-```
+Then run `sudo postmap /etc/postfix/sender_login_maps` and merge these settings
+into `/etc/postfix/main.cf`:
 
 ```text
 smtpd_sender_login_maps = hash:/etc/postfix/sender_login_maps
 smtpd_sender_restrictions = reject_authenticated_sender_login_mismatch
 ```
 
-Merge the restriction into any existing `smtpd_sender_restrictions` instead of
-replacing them, and place it before a rule that broadly permits authenticated
-clients. Every envelope-sender address an authenticated user needs must appear
-in the map. Otherwise Postfix will reject that user when they send from the
-unlisted address. Without alias verification or Postfix sender-login
-enforcement, an authenticated user could impersonate another local address and
-manage its MilterGuard data.
-
-After changing these Postfix settings, check and reload Postfix:
+Place the restriction before any rule broadly permitting authenticated clients.
+Without alias verification or Postfix sender ownership enforcement, an
+authenticated user could impersonate another local address and manage its
+MilterGuard data. Check and reload Postfix after making changes:
 
 ```sh
 sudo postfix check
 sudo postfix reload
 ```
 
-To execute a command, send an email to the configured command address
-(`milterguard@example.com` in the example above) as its sole recipient, with
-one command on each line of the email body. Commands run in order, so a later
-listing reflects changes made by earlier commands in the same email. Processing
-stops at the first unrecognized line, allowing quoted replies and signatures to
-follow the commands. A command with invalid syntax reports an error and stops
-the batch. A single result email contains the output from every command run.
+Send the command email to the configured address as its sole recipient, with
+one command on each line. Commands run in order, and one reply contains all
+results. Processing stops at the first unrecognized line, allowing quoted text
+or a signature to follow. Listing results are newest-first and default to the
+previous week.
 
-Available commands:
+`REJECTION <id>` is restricted to messages addressed to the requesting user;
+administrators may retrieve any record. Its reply contains the rejection reason
+and processed body and, when available, attaches the original message as
+`rejection-<id>.eml`.
 
-```text
-WHITELIST ADD sender@example.com
-WHITELIST DELETE sender@example.com
-WHITELIST LIST [day|week|month|year|all]
-REJECTIONS [day|week|month|year|all]
-REJECTION id
-HELP
-```
-
-- `WHITELIST ADD` adds a sender to the allowlist for your verified local
-  address.
-- `WHITELIST DELETE` removes a sender from that allowlist.
-- `WHITELIST LIST` lists allowlisted senders active during the selected period.
-- `REJECTIONS` lists emails rejected for your address during the selected
-  period, including the rejection ID and reason.
-- `REJECTION <id>` returns an email containing the rejection reason and the
-  decoded, cleaned plain-text body. When available, the original message is
-  attached as `rejection-<id>.eml`.
-- `HELP` emails a command summary appropriate to your permissions.
-
-Adding `day`, `week`, `month`, `year`, or `all` to a listing command limits the
-date range of the data returned. If no period is supplied, the default is
-`week`.
-
-Administrators may specify a recipient:
-
-```text
-WHITELIST ADD sender@example.com recipient@example.com
-WHITELIST DELETE sender@example.com recipient@example.com
-WHITELIST LIST recipient@example.com [day|week|month|year|all]
-REJECTIONS recipient@example.com [day|week|month|year|all]
-```
-
-They may also use:
-
-```text
-WHITELIST DELETE sender@example.com *
-WHITELIST LIST * [day|week|month|year|all]
-REJECTIONS * [day|week|month|year|all]
-```
-
-Administrators can also manage the sending-IP block database:
-
-```text
-IP LIST [day|week|month|year|all]
-IP LIST LOOKUP [day|week|month|year|all]
-IP ADD 192.0.2.1
-IP DELETE 192.0.2.1
-```
-
-`IP LIST` returns only IP addresses with a currently active short or
-repeat-offender block. `IP LIST LOOKUP` also performs reverse-DNS lookups and
-includes the hostname or `(not found)` after each address. Manually added
-addresses use the configured repeat-offender block duration, or the short block
-duration when repeat-offender blocking is disabled.
-
-`day`, `week`, `month`, and `year` select activity since the corresponding
-point in the past; `all` removes the additional date filter while still
-respecting the configured retention and expiry rules. Whitelist and active-IP
-listings use their last-activity time, while rejection history uses the
-rejection time.
-
-`REJECTION <id>` returns an email containing the rejection reason and the
-decoded, cleaned plain-text body. When available, the original message is
-attached as `rejection-<id>.eml`. Use the rejection ID shown by `REJECTIONS`.
-Normal authenticated users may retrieve only records addressed to their own
-verified local address; administrators may retrieve any record. The processed
-body is regenerated using the current MIME and HTML parser, so it is not
-necessarily identical to the text supplied to the AI when the message was
-originally rejected. Connection and authentication analysis is not
-reconstructed.
-
-Command-result emails are submitted to the SMTP server configured by
-`email_commands.smtp_host`, which defaults to `127.0.0.1:25`. Change it when
-MilterGuard and the receiving MTA run on different machines. This connection
-does not use TLS or SMTP authentication, so a remote SMTP host should be used
-only over a trusted private network or a separately secured connection. Command
-replies can contain allowlist and rejection-history data.
+Replies are submitted through `email_commands.smtp_host`, which defaults to
+`127.0.0.1:25`. This connection does not use TLS or SMTP authentication, so use
+a remote SMTP host only over a trusted private network or separately secured
+connection. Replies can contain allowlist and rejection-history data.
 
 ## Running AI locally
 

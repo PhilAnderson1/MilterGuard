@@ -664,13 +664,13 @@ func TestActiveIPListAddsReverseDNSHostname(t *testing.T) {
 	if entries[1].Hostname != "" {
 		t.Fatalf("non-routable hostname = %q", entries[1].Hostname)
 	}
-	formatted := formatActiveIPBlocks(entries, true)
+	formatted := formatActiveIPBlocks(entries, true, false)
 	for _, want := range []string{"IP: 8.8.8.8 (dns.google)", "IP: 192.0.2.1 (not found)"} {
 		if !strings.Contains(formatted, want) {
 			t.Errorf("formatted list missing %q: %s", want, formatted)
 		}
 	}
-	withoutLookup := formatActiveIPBlocks(entries, false)
+	withoutLookup := formatActiveIPBlocks(entries, false, false)
 	if strings.Contains(withoutLookup, "dns.google") || strings.Contains(withoutLookup, "not found") {
 		t.Fatalf("ordinary IP list included DNS results: %s", withoutLookup)
 	}

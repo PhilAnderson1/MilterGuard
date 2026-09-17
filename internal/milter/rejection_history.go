@@ -155,7 +155,7 @@ func (s *rejectionHistoryStore) list(recipient string, requestedSince time.Time)
 		rows, err := s.db.Query(context.Background(), `SELECT r.id, r.sender, r.subject, r.rejected_at_ms, r.reason
 			FROM rejection_recipients rr JOIN rejections r ON r.id = rr.rejection_id
 			WHERE rr.recipient = ? AND r.rejected_at_ms >= ?
-			ORDER BY r.rejected_at_ms DESC, r.id DESC`, recipient, cutoff)
+			ORDER BY r.rejected_at_ms DESC, r.id DESC LIMIT ?`, recipient, cutoff, maxEmailCommandListRows+1)
 		if err != nil {
 			return nil, err
 		}
@@ -173,10 +173,14 @@ func (s *rejectionHistoryStore) list(recipient string, requestedSince time.Time)
 		return entries, rows.Err()
 	}
 
-	rows, err := s.db.Query(context.Background(), `SELECT r.id, r.sender, r.subject, r.rejected_at_ms, r.reason, rr.recipient
-		FROM rejections r JOIN rejection_recipients rr ON rr.rejection_id = r.id
-		WHERE r.rejected_at_ms >= ?
-		ORDER BY r.rejected_at_ms DESC, r.id DESC, rr.recipient ASC`, cutoff)
+	rows, err := s.db.Query(context.Background(), `WITH limited_rejections AS (
+			SELECT id, sender, subject, rejected_at_ms, reason FROM rejections
+			WHERE rejected_at_ms >= ?
+			ORDER BY rejected_at_ms DESC, id DESC LIMIT ?
+		)
+		SELECT r.id, r.sender, r.subject, r.rejected_at_ms, r.reason, rr.recipient
+		FROM limited_rejections r JOIN rejection_recipients rr ON rr.rejection_id = r.id
+		ORDER BY r.rejected_at_ms DESC, r.id DESC, rr.recipient ASC`, cutoff, maxEmailCommandListRows+1)
 	if err != nil {
 		return nil, err
 	}

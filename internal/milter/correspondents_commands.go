@@ -4,21 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-
-	"github.com/PhilAnderson1/MilterGuard/internal/config"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 )
-
-// AddManualCorrespondent adds an immediately qualified relationship. The
-// caller must ensure the running daemon is stopped while editing its database.
-func AddManualCorrespondent(cfg config.Config, sender, recipient string) (bool, error) {
-	store, database, err := openCorrespondentStoreForManagement(cfg)
-	if err != nil {
-		return false, err
-	}
-	defer database.Close()
-	return store.addManual(sender, recipient)
-}
 
 func (store *correspondentStore) addManual(sender, recipient string) (bool, error) {
 	sender = normalizeEmailAddress(sender)
@@ -30,7 +16,6 @@ func (store *correspondentStore) addManual(sender, recipient string) (bool, erro
 	created := false
 	ctx := context.Background()
 	err := store.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
-		created = false
 		var exists int
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM correspondents
 			WHERE local_address = ? AND correspondent = ?)`, recipient, sender).Scan(&exists); err != nil {
@@ -44,23 +29,9 @@ func (store *correspondentStore) addManual(sender, recipient string) (bool, erro
 			last_activity_at_ms = excluded.last_activity_at_ms,
 			whitelist_type = excluded.whitelist_type,
 			legitimate_email_count = 0`, recipient, sender, unixMillis(now), unixMillis(now), whitelistManual)
-		if err != nil {
-			return err
-		}
-		return nil
+		return err
 	})
 	return created, err
-}
-
-// DeleteCorrespondents deletes an exact relationship, or every relationship
-// for sender when recipient is "*". Explicit deletion applies to all types.
-func DeleteCorrespondents(cfg config.Config, sender, recipient string) (int, error) {
-	store, database, err := openCorrespondentStoreForManagement(cfg)
-	if err != nil {
-		return 0, err
-	}
-	defer database.Close()
-	return store.deleteManual(sender, recipient)
 }
 
 func (store *correspondentStore) deleteManual(sender, recipient string) (int, error) {
@@ -84,12 +55,4 @@ func (store *correspondentStore) deleteManual(sender, recipient string) (int, er
 	}
 	removed, err := result.RowsAffected()
 	return int(removed), err
-}
-
-func openCorrespondentStoreForManagement(cfg config.Config) (*correspondentStore, *sqlstore.Store, error) {
-	database, err := sqlstore.Open(context.Background(), cfg.Persistence.DatabaseFile, sqlstore.DefaultOptions())
-	if err != nil {
-		return nil, nil, err
-	}
-	return newCorrespondentStore(cfg.Correspondents, database, nil), database, nil
 }

@@ -423,19 +423,6 @@ func TestRDAPClientCachesBootstrapFailure(t *testing.T) {
 
 func TestRDAPClientRejectsUnsafeRedirectDestinations(t *testing.T) {
 	client := newRDAPClient(time.Second)
-	client.resolve = func(_ context.Context, hostname string) ([]net.IPAddr, error) {
-		addresses := map[string]string{
-			"public.example":     "8.8.8.8",
-			"private.example":    "10.0.0.1",
-			"loopback.example":   "127.0.0.1",
-			"link-local.example": "169.254.1.1",
-		}
-		address, found := addresses[hostname]
-		if !found {
-			return nil, errors.New("not found")
-		}
-		return []net.IPAddr{{IP: net.ParseIP(address)}}, nil
-	}
 	tests := []struct {
 		name    string
 		target  string
@@ -444,9 +431,6 @@ func TestRDAPClientRejectsUnsafeRedirectDestinations(t *testing.T) {
 		{name: "public HTTPS hostname", target: "https://public.example/domain/example.com", allowed: true},
 		{name: "plain HTTP", target: "http://public.example/domain/example.com"},
 		{name: "IP literal", target: "https://127.0.0.1/domain/example.com"},
-		{name: "private address", target: "https://private.example/domain/example.com"},
-		{name: "loopback address", target: "https://loopback.example/domain/example.com"},
-		{name: "link-local address", target: "https://link-local.example/domain/example.com"},
 		{name: "single-label hostname", target: "https://localhost/domain/example.com"},
 		{name: "userinfo", target: "https://user@public.example/domain/example.com"},
 	}
@@ -461,6 +445,66 @@ func TestRDAPClientRejectsUnsafeRedirectDestinations(t *testing.T) {
 				t.Fatalf("validateRedirect(%q) error = %v, allowed = %v", test.target, err, test.allowed)
 			}
 		})
+	}
+}
+
+func TestRDAPDialRejectsNonPublicAddresses(t *testing.T) {
+	tests := []struct {
+		name    string
+		address string
+	}{
+		{name: "private", address: "10.0.0.1"},
+		{name: "loopback", address: "127.0.0.1"},
+		{name: "link-local", address: "169.254.1.1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newRDAPClient(time.Second)
+			client.resolve = func(context.Context, string) ([]net.IPAddr, error) {
+				return []net.IPAddr{{IP: net.ParseIP(test.address)}}, nil
+			}
+			dialed := false
+			client.dial = func(context.Context, string, string) (net.Conn, error) {
+				dialed = true
+				return nil, errors.New("unexpected dial")
+			}
+			if _, err := client.dialContext(context.Background(), "tcp", "rdap.example:443"); err == nil {
+				t.Fatal("unsafe RDAP address was accepted")
+			}
+			if dialed {
+				t.Fatal("unsafe RDAP address was dialed")
+			}
+		})
+	}
+}
+
+func TestRDAPDialPinsValidatedAddress(t *testing.T) {
+	client := newRDAPClient(time.Second)
+	resolveCalls := 0
+	client.resolve = func(context.Context, string) ([]net.IPAddr, error) {
+		resolveCalls++
+		if resolveCalls == 1 {
+			return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, nil
+		}
+		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+	}
+	var dialed string
+	client.dial = func(_ context.Context, _, endpoint string) (net.Conn, error) {
+		dialed = endpoint
+		clientSide, serverSide := net.Pipe()
+		_ = serverSide.Close()
+		return clientSide, nil
+	}
+	conn, err := client.dialContext(context.Background(), "tcp", "rdap.example:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if resolveCalls != 1 {
+		t.Fatalf("DNS resolutions = %d, want 1", resolveCalls)
+	}
+	if dialed != "8.8.8.8:443" {
+		t.Fatalf("dialed endpoint = %q, want pinned public address", dialed)
 	}
 }
 

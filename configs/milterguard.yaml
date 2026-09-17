@@ -356,10 +356,10 @@ correspondents:
   # Set to 0s to record every qualifying activity.
   activity_update_interval: 24h
 
-  # Identifies Authentication-Results headers added by your own mail server, allowing
-  # MilterGuard to trust their DKIM results. $mta_hostname automatically uses
-  # your MTA hostname. Your MTA must remove forged inbound Authentication-Results
-  # headers claiming this hostname.
+  # Identifies Authentication-Results and Received-SPF headers added by your own
+  # mail server. $mta_hostname automatically uses your MTA hostname. Your MTA
+  # must remove forged inbound copies of both header types that claim this
+  # hostname before locally calculated authentication results are added.
   trusted_authserv_ids:
     - "$mta_hostname"
 
@@ -377,6 +377,9 @@ logging:
 
   # Include email subjects in successful decision logs.
   include_subject: true
+
+  # Log each Milter connection opening and closing at debug level.
+  include_connections: false
 
   # Log complete AI input for troubleshooting. This may expose sensitive email
   # content, so enable it only temporarily. Image data is never logged.

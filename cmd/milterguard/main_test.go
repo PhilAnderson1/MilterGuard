@@ -10,9 +10,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
+	"github.com/PhilAnderson1/MilterGuard/internal/milter"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 )
 
@@ -23,6 +23,61 @@ func TestPersistentStateStartupErrorMessage(t *testing.T) {
 	sqliteErr := fmt.Errorf("correspondents: %w", sqlstore.ErrIncompatibleDatabase)
 	if got := persistentStateStartupErrorMessage(sqliteErr); got != "incompatible SQLite database format" {
 		t.Fatalf("SQLite format error message = %q", got)
+	}
+}
+
+type scriptedCommandProcessor struct {
+	lines  []string
+	actors []milter.CommandActor
+}
+
+func (p *scriptedCommandProcessor) ExecuteLine(_ context.Context, line string, actor milter.CommandActor) (milter.CommandResponse, error) {
+	p.lines = append(p.lines, line)
+	p.actors = append(p.actors, actor)
+	if line == "BAD" {
+		return milter.CommandResponse{}, errors.New("bad command")
+	}
+	response := milter.CommandResponse{Text: "result for " + line + "\n"}
+	if line == "HELP" {
+		response.Attachments = []milter.CommandAttachment{{Filename: "rejection-1.eml", Contents: []byte("mail"), SourcePath: "/archive/2026/09/17/1.eml"}}
+	}
+	return response, nil
+}
+
+func TestRunCommandMode(t *testing.T) {
+	processor := &scriptedCommandProcessor{}
+	var output strings.Builder
+	err := runCommandMode(context.Background(), strings.NewReader("HELP\nBAD\nEXIT\nIGNORED\n"), &output, processor, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(processor.lines, ","), "HELP,BAD"; got != want {
+		t.Fatalf("executed lines = %q, want %q", got, want)
+	}
+	for _, actor := range processor.actors {
+		if !actor.Administrator || actor.DefaultRecipient != "*" || !actor.NewestLast {
+			t.Fatalf("command actor = %#v", actor)
+		}
+	}
+	if text := output.String(); !strings.Contains(text, "result for HELP") || !strings.Contains(text, "Error: bad command") ||
+		!strings.Contains(text, "result for HELP\n\nSaved message: /archive/2026/09/17/1.eml (4 bytes)") {
+		t.Fatalf("command output = %q", text)
+	}
+}
+
+func TestRunCommandModeRedirectedInputSuppressesPrompts(t *testing.T) {
+	processor := &scriptedCommandProcessor{}
+	var output strings.Builder
+	err := runCommandMode(context.Background(), strings.NewReader("HELP\n"), &output, processor, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if strings.Contains(text, "MilterGuard command mode") || strings.Contains(text, "milterguard>") {
+		t.Fatalf("redirected command output contains interactive text: %q", text)
+	}
+	if !strings.Contains(text, "result for HELP") {
+		t.Fatalf("redirected command output = %q", text)
 	}
 }
 
@@ -66,26 +121,6 @@ func TestUnixSocketPermissionFailureClosesAndRemovesSocket(t *testing.T) {
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("socket remains after permission failure: %v", err)
-	}
-}
-
-func TestMilterListenerActive(t *testing.T) {
-	server, client := net.Pipe()
-	defer server.Close()
-	dial := func(network, address string, timeout time.Duration) (net.Conn, error) {
-		if network != "tcp" || address != "127.0.0.1:8895" || timeout != 250*time.Millisecond {
-			t.Fatalf("dial called with network=%q address=%q timeout=%s", network, address, timeout)
-		}
-		return client, nil
-	}
-	if !milterListenerActiveUsing("tcp:127.0.0.1:8895", dial) {
-		t.Fatal("active listener was not detected")
-	}
-	unavailable := func(string, string, time.Duration) (net.Conn, error) {
-		return nil, errors.New("connection refused")
-	}
-	if milterListenerActiveUsing("tcp:127.0.0.1:8895", unavailable) {
-		t.Fatal("closed listener was reported active")
 	}
 }
 

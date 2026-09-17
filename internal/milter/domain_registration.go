@@ -264,6 +264,7 @@ func domainRegistrationEvidence(record domainRegistrationRecord) message.DomainR
 type rdapClient struct {
 	http              *http.Client
 	resolve           func(context.Context, string) ([]net.IPAddr, error)
+	dial              func(context.Context, string, string) (net.Conn, error)
 	now               func() time.Time
 	bootstrapURL      string
 	mu                sync.Mutex
@@ -274,12 +275,17 @@ type rdapClient struct {
 }
 
 func newRDAPClient(timeout time.Duration) *rdapClient {
+	dialer := &net.Dialer{}
 	rdap := &rdapClient{
 		resolve:      net.DefaultResolver.LookupIPAddr,
+		dial:         dialer.DialContext,
 		now:          time.Now,
 		bootstrapURL: ianaRDAPBootstrapURL,
 	}
-	rdap.http = &http.Client{Timeout: timeout}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = rdap.dialContext
+	rdap.http = &http.Client{Timeout: timeout, Transport: transport}
 	rdap.http.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 3 {
 			return errors.New("too many RDAP redirects")
@@ -289,7 +295,7 @@ func newRDAPClient(timeout time.Duration) *rdapClient {
 	return rdap
 }
 
-func (c *rdapClient) validateRedirect(ctx context.Context, destination *url.URL) error {
+func (c *rdapClient) validateRedirect(_ context.Context, destination *url.URL) error {
 	if destination == nil || destination.Scheme != "https" || destination.User != nil {
 		return errors.New("unsafe RDAP redirect destination")
 	}
@@ -297,20 +303,45 @@ func (c *rdapClient) validateRedirect(ctx context.Context, destination *url.URL)
 	if hostname == "" || !strings.Contains(hostname, ".") || net.ParseIP(hostname) != nil {
 		return errors.New("unsafe RDAP redirect hostname")
 	}
+	return nil
+}
+
+// dialContext resolves, validates, and dials an RDAP endpoint in one operation.
+// Dialing the selected address directly prevents a second DNS lookup from
+// rebinding an already validated public hostname to an internal service.
+func (c *rdapClient) dialContext(ctx context.Context, network, endpoint string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid RDAP endpoint %q: %w", endpoint, err)
+	}
+	hostname := safeDNSHostname(host)
+	if hostname == "" || !strings.Contains(hostname, ".") || net.ParseIP(hostname) != nil {
+		return nil, fmt.Errorf("unsafe RDAP endpoint hostname %q", host)
+	}
 	addresses, err := c.resolve(ctx, hostname)
 	if err != nil {
-		return fmt.Errorf("cannot validate RDAP redirect hostname %q: %w", hostname, err)
+		return nil, fmt.Errorf("cannot resolve RDAP endpoint hostname %q: %w", hostname, err)
 	}
 	if len(addresses) == 0 {
-		return fmt.Errorf("cannot validate RDAP redirect hostname %q: no addresses", hostname)
+		return nil, fmt.Errorf("cannot resolve RDAP endpoint hostname %q: no addresses", hostname)
 	}
+	validated := make([]netip.Addr, 0, len(addresses))
 	for _, resolved := range addresses {
 		address, ok := netip.AddrFromSlice(resolved.IP)
 		if !ok || !connectionAddressRoutable(address) {
-			return fmt.Errorf("unsafe RDAP redirect address for %q", hostname)
+			return nil, fmt.Errorf("unsafe RDAP endpoint address for %q", hostname)
 		}
+		validated = append(validated, address.Unmap())
 	}
-	return nil
+	var dialErrors []error
+	for _, address := range validated {
+		conn, err := c.dial(ctx, network, net.JoinHostPort(address.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		dialErrors = append(dialErrors, err)
+	}
+	return nil, fmt.Errorf("cannot connect to RDAP endpoint %q: %w", hostname, errors.Join(dialErrors...))
 }
 
 func (c *rdapClient) Lookup(ctx context.Context, domain string) (time.Time, time.Time, error) {

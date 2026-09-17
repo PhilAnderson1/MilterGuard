@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
@@ -184,6 +186,23 @@ func TestAllowlistFormattingIncludesRecipientsOnlyForAdministrators(t *testing.T
 	}
 	if got := formatAllowlist(entries, true); got != "Sender: news@example.net\nRecipient: phil@example.com\nAdded: learned from repeated legitimate inbound emails\n\n" {
 		t.Fatalf("administrator output = %q", got)
+	}
+}
+
+func TestEmailCommandListFormattingLimitsRows(t *testing.T) {
+	entries := make([]correspondentEntry, maxEmailCommandListRows+1)
+	for i := range entries {
+		entries[i] = correspondentEntry{
+			Correspondent: fmt.Sprintf("sender-%04d@example.net", i),
+			WhitelistType: whitelistManual,
+		}
+	}
+	formatted := formatAllowlist(entries, false)
+	if strings.Contains(formatted, "sender-1000@example.net") {
+		t.Fatal("allowlist output contains a record beyond the hard limit")
+	}
+	if !strings.Contains(formatted, commandListTruncatedNotice) {
+		t.Fatal("allowlist output does not report row truncation")
 	}
 }
 
@@ -385,6 +404,55 @@ func TestBoundedCommandReplyPayloadOmitsOversizedAttachment(t *testing.T) {
 	body, err := io.ReadAll(message.Body)
 	if err != nil || !strings.Contains(string(body), "too large to attach") {
 		t.Fatalf("fallback body = %q, err=%v", body, err)
+	}
+}
+
+func TestBoundedCommandReplyPayloadLimitsPlainText(t *testing.T) {
+	payload, err := buildBoundedCommandReplyPayload(
+		"milterguard@example.com", "local@example.com", "Results", "date", "token",
+		commandReplyContent{Text: strings.Repeat("x", maxEmailCommandReplyBytes+1024)}, 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(message.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > maxEmailCommandReplyBytes {
+		t.Fatalf("reply body length = %d, want at most %d", len(body), maxEmailCommandReplyBytes)
+	}
+	if !strings.Contains(string(body), strings.TrimSpace(commandReplyTruncatedNotice)) {
+		t.Fatal("bounded reply does not report truncation")
+	}
+}
+
+func TestBoundedCommandReplyTextPreservesUTF8(t *testing.T) {
+	text := strings.Repeat("é", maxEmailCommandReplyBytes)
+	bounded := boundedCommandReplyText(text)
+	if len(bounded) > maxEmailCommandReplyBytes {
+		t.Fatalf("bounded text length = %d", len(bounded))
+	}
+	if !utf8.ValidString(bounded) {
+		t.Fatal("bounded text is not valid UTF-8")
+	}
+}
+
+func TestBoundedCommandReplyAddsNoticeAfterExistingFullText(t *testing.T) {
+	var body strings.Builder
+	body.WriteString(strings.Repeat("x", maxEmailCommandReplyBytes))
+	if appendBoundedCommandReply(&body, "more") {
+		t.Fatal("append unexpectedly succeeded")
+	}
+	if body.Len() > maxEmailCommandReplyBytes {
+		t.Fatalf("reply length = %d", body.Len())
+	}
+	if !strings.HasSuffix(body.String(), commandReplyTruncatedNotice) {
+		t.Fatal("full reply was not shortened to include the truncation notice")
 	}
 }
 

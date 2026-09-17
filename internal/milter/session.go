@@ -52,11 +52,10 @@ type session struct {
 	connectionDNSPending        <-chan connectionDNSResult
 	message                     *message.Message
 	negotiatedActions           uint32
-	idleSince                   time.Time
 }
 
 func newSession(server *Server, conn net.Conn) *session {
-	ss := &session{server: server, conn: conn, reader: bufio.NewReader(conn), idleSince: time.Now()}
+	ss := &session{server: server, conn: conn, reader: bufio.NewReader(conn)}
 	ss.resetMessage(phaseNegotiation)
 	return ss
 }
@@ -67,11 +66,7 @@ func (ss *session) run(ctx context.Context) {
 	})
 	defer stopClose()
 	for {
-		now := time.Now()
-		deadline := now.Add(ss.server.cfg.Milter.Timeout.Value())
-		if idleDeadline := ss.idleSince.Add(milterIdleTimeout); idleDeadline.Before(deadline) {
-			deadline = idleDeadline
-		}
+		deadline := time.Now().Add(ss.server.cfg.Milter.Timeout.Value())
 		if err := ss.conn.SetDeadline(deadline); err != nil {
 			if ctx.Err() == nil {
 				ss.server.log.Warn("cannot set Milter connection deadline",
@@ -89,7 +84,6 @@ func (ss *session) run(ctx context.Context) {
 			}
 			return
 		}
-		ss.idleSince = time.Now()
 		if !ss.handleCommand(ctx, frame[0], frame[1:]) {
 			return
 		}
@@ -102,13 +96,6 @@ func (ss *session) handleReadError(ctx context.Context, bytesRead int, err error
 	}
 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		if bytesRead == 0 {
-			if time.Since(ss.idleSince) >= milterIdleTimeout {
-				ss.server.log.Debug("closing idle Milter connection",
-					"idle_timeout", milterIdleTimeout.String(),
-					"local_addr", ss.conn.LocalAddr().String(),
-					"remote_addr", ss.conn.RemoteAddr().String())
-				return false
-			}
 			return true
 		}
 		ss.server.log.Warn("milter connection timed out during frame", "bytes_read", bytesRead, "error", err)
@@ -223,6 +210,12 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		ss.message.AddBody(payload)
 		return ss.sendContinue(command)
 	case commandEndBody:
+		if ss.phase != phaseBody {
+			return ss.protocolError("unexpected milter end-of-body command")
+		}
+		if len(payload) > 0 {
+			ss.message.AddBody(payload)
+		}
 		return ss.finishMessage(ctx)
 	case commandQuit:
 		return false
@@ -282,6 +275,16 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if ss.phase != phaseBody {
 		return ss.protocolError("unexpected milter end-of-body command")
 	}
+	if err := ss.conn.SetDeadline(time.Now().Add(ss.server.analysisTimeout())); err != nil {
+		if ctx.Err() == nil {
+			ss.server.log.WarnContext(ctx, "cannot set Milter connection deadline",
+				"stage", "message processing",
+				"local_addr", ss.conn.LocalAddr().String(),
+				"remote_addr", ss.conn.RemoteAddr().String(),
+				"error", err)
+		}
+		return false
+	}
 	ss.visibleSender = normalizeEmailAddress(ss.message.Header("From"))
 	ss.visibleSenderDomain = emailAddressDomain(ss.visibleSender)
 	if ss.isInternalMessage() {
@@ -297,6 +300,12 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if ss.authentication.Authenticated && !ss.server.cfg.Filtering.ScanAuthenticated {
 		return ss.finishBypassedMessage(ctx, "authenticated_connection", true, false)
 	}
+	if ss.server.attachments != nil {
+		if err := writeFrame(ss.conn, []byte{responseProgress}); err != nil {
+			ss.server.log.WarnContext(ctx, "cannot send Milter progress response before attachment inspection", "error", err)
+			return false
+		}
+	}
 	if handled, keepConnection := ss.applyAttachments(ctx); handled {
 		return keepConnection
 	}
@@ -309,16 +318,6 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if inbound.bypassAI {
 		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.trustedDKIM,
 			ss.knownCorrespondentLogAttrs()...)
-	}
-	if err := ss.conn.SetDeadline(time.Now().Add(ss.server.analysisTimeout())); err != nil {
-		if ctx.Err() == nil {
-			ss.server.log.WarnContext(ctx, "cannot set Milter connection deadline",
-				"stage", "analysis",
-				"local_addr", ss.conn.LocalAddr().String(),
-				"remote_addr", ss.conn.RemoteAddr().String(),
-				"error", err)
-		}
-		return false
 	}
 	result, progressErr := ss.evaluateWithProgress(ctx, inbound)
 	if progressErr != nil {
@@ -477,6 +476,8 @@ func (ss *session) recipientSetComplete() bool {
 }
 
 func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluationResult, inbound inboundEvidence) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), postDecisionUpdateTimeout)
+	defer cancel()
 	if ss.server.cfg.Mode != "enforce" {
 		return
 	}

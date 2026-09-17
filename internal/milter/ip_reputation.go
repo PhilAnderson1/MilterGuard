@@ -655,7 +655,8 @@ func (s *ipReputationStore) listActive(activitySince time.Time) []activeIPBlock 
 		query += ` AND last_activity_at_ms>=?`
 		args = append(args, unixMillis(activitySince))
 	}
-	query += ` ORDER BY ip`
+	query += ` ORDER BY ip LIMIT ?`
+	args = append(args, maxEmailCommandListRows+1)
 	rows, err := s.db.Query(context.Background(), query, args...)
 	if err != nil {
 		s.logDatabaseError("list active sending IP blocks", err)
