@@ -86,6 +86,7 @@ func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, doma
 	ss.server.log.InfoContext(ctx, "authenticated-only sender domain policy decision", attrs...)
 	if selected == actionReject {
 		ss.server.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, authenticatedOnlySenderDomainSource)
+		ss.server.ipReputation.add(ctx, ss.peerIP, ss.awaitConnectionDNS(ctx))
 	}
 	ss.resetMessage(phaseConnection)
 	return true

@@ -261,33 +261,51 @@ When monitor-mode results are satisfactory, change the mode to `enforce` and
 restart MilterGuard. It will then reject unwanted messages that meet the
 configured confidence threshold and block prohibited executable attachments.
 
+### Deterministic acceptances without AI analysis
+
+MilterGuard accepts some trusted messages without sending them to the AI
+endpoint:
+
+- Authenticated SMTP submissions bypass AI analysis when
+  `filtering.scan_authenticated` is `false`, as it is in the supplied
+  configuration so that outbound emails can bypass scanning.
+- A sender in the contacts whitelist can be accepted without AI analysis when
+  the configured authentication requirements are met.
+- A visible `From:` domain in the trusted sender-domain allowlist can bypass AI
+  analysis when its configured authentication requirements—normally trusted,
+  aligned DKIM—are met.
+
+See [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
+for how MilterGuard learns and verifies correspondents and configures trusted
+sender domains.
+
 ### Deterministic rejections without AI analysis
 
-In `enforce` mode, MilterGuard can reject some messages without sending them to
-the AI endpoint:
+In `enforce` mode, MilterGuard can also reject some messages without sending
+them to the AI endpoint:
 
 - An active IP reputation block rejects the SMTP transaction at `MAIL FROM`,
   before MilterGuard receives the body. Because the complete message is not
   available, this rejection cannot be added to rejection history or the saved
-  message archive. Administrators can list, add, and remove these blocks through
-  the [email command interface](#email-commands).
+  message archive. Administrators can list, add, and remove these IP blocks
+  through the [email command interface](#email-commands).
 - To prevent outsiders from impersonating your own domains, list domains for
   which this server is the only legitimate mail source under
   `filtering.authenticated_only_sender_domains`. MilterGuard then rejects
   unauthenticated messages using those domains—or their subdomains—in the
-  visible `From:` address, and records and archives the rejection. Authenticated
-  SMTP submissions remain permitted. Do not list a domain if this is not its
-  only valid mail server, for example if your organisation operates multiple
-  mail servers or a legitimate third party sends email on its behalf.
+  visible `From:` address, records and archives the rejection, and adds a strike
+  against the sending IP. Authenticated SMTP submissions remain permitted. Do
+  not list a domain if this is not its only valid mail server, for example if
+  your organisation operates multiple mail servers or a legitimate third party
+  sends email on its behalf.
 - The attachment policy can reject prohibited executable content, including
   disguised executables and executables inside supported archives. It can also
   reject encrypted or unscannable attachments when their configured actions are
   `reject`. These decisions use local attachment inspection and are recorded
   and archived.
 
-These checks run in that order before trusted-domain or correspondent bypasses
-and AI analysis. An empty `authenticated_only_sender_domains` list disables
-that policy.
+These checks take place before AI analysis. An empty
+`authenticated_only_sender_domains` list disables that policy.
 
 Alternatively, setting `mode: tag` accepts all mail while adding result
 headers. Successfully analysed mail includes its classification and score.

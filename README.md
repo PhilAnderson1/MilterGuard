@@ -10,7 +10,7 @@ with any MTA that supports the Sendmail Milter protocol.
 
 ## Why MilterGuard?
 
-- Uses semantic analysis to detect unwanted email by meaning, not just keywords or signatures.
+- Uses multilingual semantic analysis to detect unwanted email by meaning and intent, not just keywords or signatures.
 - Performs forensic AI analysis of message headers, body content, and hyperlink destinations.
 - Reads text embedded in images to detect scams that evade conventional text-based filters.
 - Blocks executable attachments, including files disguised or concealed inside compressed archives.

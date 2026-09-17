@@ -10,6 +10,7 @@ type Message struct {
 	Headers                 map[string][]string
 	decodedHeaders          map[string][]string
 	headerOccurrences       map[string]int
+	analysisTime            time.Time
 	Body                    bytes.Buffer
 	Connection              ConnectionInfo
 	AuthenticatedSubmission bool
@@ -130,6 +131,7 @@ func New(maxBytes int64) *Message {
 		decodedHeaders:    make(map[string][]string),
 		headerOccurrences: make(map[string]int),
 		headerBytesByName: make(map[string]int64),
+		analysisTime:      time.Now().UTC(),
 		MaxBytes:          maxBytes,
 	}
 }

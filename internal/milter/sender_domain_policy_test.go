@@ -12,6 +12,8 @@ func TestUnauthenticatedProtectedSenderDomainRejectedBeforeAI(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 	server, conn, done := testServer(t, analyzer)
 	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	server.cfg.IPReputation = config.IPReputationConfig{BlockDuration: config.Duration(time.Hour), MaxEntries: 100}
+	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -28,6 +30,39 @@ func TestUnauthenticatedProtectedSenderDomainRejectedBeforeAI(t *testing.T) {
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)
 	}
+	if err := writeFrame(conn, []byte{commandMail}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
+}
+
+func TestProtectedSenderDomainRejectionHonorsIPAllowlist(t *testing.T) {
+	analyzer := &countingAnalyzer{}
+	server, conn, done := testServer(t, analyzer)
+	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	server.cfg.IPReputation = config.IPReputationConfig{
+		BlockDuration: config.Duration(time.Hour), MaxEntries: 100,
+		IPAllowlist: []string{"192.0.2.0/24"},
+	}
+	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "192.0.2.10"),
+		[]byte{commandMail},
+		headerFrame("From", "Support <support@invades.net>"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
+
+	if err := writeFrame(conn, []byte{commandMail}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseContinue}))
 }
 
 func TestProtectedSenderDomainRejectionIsRecordedAndArchived(t *testing.T) {

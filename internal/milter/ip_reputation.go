@@ -179,7 +179,7 @@ func (s *ipReputationStore) allowed(addr netip.Addr) (netip.Prefix, bool) {
 	return netip.Prefix{}, false
 }
 
-func (s *ipReputationStore) add(ctx context.Context, addr netip.Addr, score float64, dns connectionDNSResult) bool {
+func (s *ipReputationStore) add(ctx context.Context, addr netip.Addr, dns connectionDNSResult) bool {
 	if !s.enabled() || !addr.IsValid() {
 		return false
 	}
@@ -259,7 +259,7 @@ func (s *ipReputationStore) add(ctx context.Context, addr netip.Addr, score floa
 		s.logDatabaseError("add sending IP strike", err)
 		return false
 	}
-	s.debug("sending IP reputation updated", "remote_ip", addr.String(), "score", score, "block_level", record.BlockLevel, "strike_count", strikeCount, "block_expires_at", record.BlockedUntil)
+	s.debug("sending IP reputation updated", "remote_ip", addr.String(), "block_level", record.BlockLevel, "strike_count", strikeCount, "block_expires_at", record.BlockedUntil)
 	return record.BlockLevel != ""
 }
 

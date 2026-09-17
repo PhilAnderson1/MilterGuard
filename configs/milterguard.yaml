@@ -99,10 +99,10 @@ ai:
   app_name: MilterGuard
 
 filtering:
-  # Reject unwanted classifications at or above this confidence score (0-1).
+  # Reject unwanted classifications at or above this confidence score (0.5-1).
   reject_score: 0.9
 
-  # Mark legitimate classifications below this score as low confidence (0-1).
+  # Mark legitimate classifications below this score as low confidence (0.5-1).
   legitimate_low_confidence_score: 0.8
 
   # Add classification, confidence, score, and action headers to accepted email.
@@ -187,15 +187,15 @@ attachments:
   reject_message: Message rejected because it contains a prohibited executable attachment
 
 email_commands:
-  # Process commands sent by authenticated users. Disabled by default. Replace
+  # Process email commands, disabled by default. Replace
   # example.com with your mail domain, then add this fallback to /etc/aliases:
   # milterguard: /dev/null
   enabled: false
   recipient: milterguard@example.com
 
-  # SASL login identities with permission to manage any local address and use
-  # wildcard deletion. Values are matched case-insensitively. [] means no
-  # administrators. To add administrators, replace it with:
+  # SASL login identities of administrators with permission to manage any
+  # local mailbox. Values are matched case-insensitively. [] means no
+  # administrators. To add administrators, replace it with the following:
   # administrators:
   #   - admin_login
   #   - another_admin

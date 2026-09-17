@@ -430,12 +430,14 @@ func TestPromptDescribesAuthenticatedSubmissionWithoutInboundAuthenticationResul
 	m := New(1000)
 	m.AuthenticatedSubmission = true
 	m.AddHeader("From", "Philip Anderson <phil.anderson@invades.net>")
+	m.AddHeader("Subject", "Meeting tomorrow")
 	m.AddHeader("Authentication-Results", "nl.invades.net; dkim=pass header.d=invades.net")
 	m.TrustedAuthservIDs = []string{"nl.invades.net"}
 	prompt := m.Prompt(100)
 	for _, want := range []string{
 		"AUTHENTICATION INFORMATION:",
 		"Authenticated SMTP submission: yes",
+		"Subject: Meeting tomorrow",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("authenticated submission prompt missing %q:\n%s", want, prompt)
@@ -450,10 +452,22 @@ func TestPromptDescribesAuthenticatedSubmissionWithoutInboundAuthenticationResul
 		"DKIM:",
 		"SPF:",
 		"DMARC:",
+		"From: Philip Anderson",
 	} {
 		if strings.Contains(prompt, unwanted) {
 			t.Fatalf("authenticated submission prompt contains inbound evidence %q:\n%s", unwanted, prompt)
 		}
+	}
+}
+
+func TestPromptStartsWithCapturedAnalysisTime(t *testing.T) {
+	m := New(1000)
+	m.analysisTime = time.Date(2026, time.September, 16, 14, 32, 5, 0, time.FixedZone("test", 2*60*60))
+	m.AddHeader("Subject", "test")
+
+	const want = "ANALYSIS TIME:\nServer time: 2026-09-16 12:32:05 UTC\n\n"
+	if prompt := m.Prompt(100); !strings.HasPrefix(prompt, want) {
+		t.Fatalf("prompt does not start with captured analysis time:\n%s", prompt)
 	}
 }
 

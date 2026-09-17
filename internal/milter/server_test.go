@@ -917,7 +917,7 @@ func TestForwardConfirmedDomainAllowlistBypassesExistingIPBlock(t *testing.T) {
 	server.cfg.IPReputation.DomainAllowlist = []string{"google.com"}
 	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
 	addr := netip.MustParseAddr("8.8.8.8")
-	if !server.ipReputation.add(context.Background(), addr, 1, connectionDNSResult{status: message.ReverseDNSLookupFailed}) {
+	if !server.ipReputation.add(context.Background(), addr, connectionDNSResult{status: message.ReverseDNSLookupFailed}) {
 		t.Fatal("test IP was not initially blocked")
 	}
 	resolver := &connectionTestResolver{
@@ -959,7 +959,7 @@ func TestAuthenticatedSubmissionBypassesExistingIPBlock(t *testing.T) {
 	server.cfg.IPReputation.MaxEntries = 100
 	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
 	addr := netip.MustParseAddr("192.0.2.25")
-	if !server.ipReputation.add(context.Background(), addr, 1, connectionDNSResult{}) {
+	if !server.ipReputation.add(context.Background(), addr, connectionDNSResult{}) {
 		t.Fatal("test IP was not initially blocked")
 	}
 	defer func() { _ = conn.Close(); <-done }()
@@ -1648,7 +1648,7 @@ func TestNonEnforceModesDoNotLearnFromAIResultsOrDecayIPReputation(t *testing.T)
 			}
 			server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
 			addr := netip.MustParseAddr("192.0.2.90")
-			server.ipReputation.add(context.Background(), addr, 1, connectionDNSResult{})
+			server.ipReputation.add(context.Background(), addr, connectionDNSResult{})
 
 			negotiate(t, conn)
 			sendContinueFrames(t, conn,

@@ -35,12 +35,14 @@ func (m *Message) Prompt(maxChars int) string {
 func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
 	keys := make([]string, 0, len(m.Headers))
 	for key := range m.Headers {
-		if promptHeaders[key] {
+		if promptHeaders[key] && !(m.AuthenticatedSubmission && key == "from") {
 			keys = append(keys, key)
 		}
 	}
 	sort.Strings(keys)
 	var b strings.Builder
+	b.WriteString("ANALYSIS TIME:\n")
+	fmt.Fprintf(&b, "Server time: %s\n\n", m.analysisTime.UTC().Format("2006-01-02 15:04:05 UTC"))
 	if !m.AuthenticatedSubmission {
 		writeConnectionInformation(&b, m.Connection)
 	}

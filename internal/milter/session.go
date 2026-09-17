@@ -483,7 +483,7 @@ func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluati
 	if result.selected == actionReject {
 		ss.server.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, result.reasons, "ai")
 		if !ss.authentication.Authenticated {
-			ss.server.ipReputation.add(ctx, ss.peerIP, result.score, ss.connectionDNS)
+			ss.server.ipReputation.add(ctx, ss.peerIP, ss.connectionDNS)
 		}
 	}
 	if !ss.authentication.Authenticated && result.err == nil && result.classification == "legitimate" {
