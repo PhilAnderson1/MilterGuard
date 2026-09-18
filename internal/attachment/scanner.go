@@ -20,6 +20,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // maxMIMEDepth bounds the number of MIME entities on a path, including the
@@ -488,11 +490,13 @@ func decodeFilename(value string) string {
 }
 
 func cleanName(value string) string {
+	value = strings.ToValidUTF8(value, "�")
+	value = norm.NFKC.String(value)
 	value = strings.ReplaceAll(value, "\\", "/")
 	value = path.Base(value)
-	value = strings.ToValidUTF8(value, "�")
 	value = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) || r == '\u034f' ||
+			(r >= '\ufe00' && r <= '\ufe0f') || (r >= '\U000e0100' && r <= '\U000e01ef') {
 			return -1
 		}
 		return r

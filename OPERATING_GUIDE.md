@@ -155,6 +155,15 @@ configured Milter is available again.
 analysis sufficient time to begin. MilterGuard sends progress responses during
 long AI operations so Postfix continues waiting.
 
+`milter.max_connections` bounds the number of messages MilterGuard can hold at
+once, including messages waiting for an available AI analysis slot. The supplied
+value of `64` provides headroom above the hosted-service default of
+`ai.max_concurrent: 8` while limiting aggregate memory use. Memory-constrained
+systems may use a lower value, but should retain enough headroom above AI
+concurrency for normal mail bursts. Increasing `ai.max_concurrent` is useful
+only when the configured AI service can process the additional requests
+efficiently; locally hosted AI commonly needs a lower value instead.
+
 The authentication service identifier written to `Authentication-Results`
 must be included in MilterGuard's `correspondents.trusted_authserv_ids` setting.
 The default `$mta_hostname` value normally handles results identified with the
@@ -618,9 +627,14 @@ and processed body and, when available, attaches the original message as
 `rejection-<id>.eml`.
 
 Replies are submitted through `email_commands.smtp_host`, which defaults to
-`127.0.0.1:25`. This connection does not use TLS or SMTP authentication, so use
-a remote SMTP host only over a trusted private network or separately secured
-connection. Replies can contain allowlist and rejection-history data.
+`127.0.0.1:25`. `email_commands.smtp_tls` controls transport encryption:
+`off` never attempts STARTTLS, `opportunistic` uses STARTTLS when a non-loopback
+server advertises it, and `required` refuses to send unless STARTTLS with a
+valid server certificate can be established. An advertised STARTTLS service
+that fails negotiation or certificate verification is never downgraded to
+plaintext. Replies can contain allowlist and rejection-history data, so use
+`required` with remote SMTP servers where possible. SMTP authentication is not
+currently supported.
 
 ## Running AI locally
 

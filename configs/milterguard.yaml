@@ -22,8 +22,11 @@ milter:
   # 2m, or 1m30s.
   timeout: 1m
 
-  # Maximum number of simultaneous Milter connections; positive integer.
-  max_connections: 256
+  # Maximum number of simultaneous Milter connections; positive integer. Each
+  # connection may retain a complete message while waiting for an AI slot, so
+  # lower this on memory-constrained systems while keeping adequate headroom
+  # above ai.max_concurrent for normal delivery bursts.
+  max_connections: 64
 
   # Real network addresses permitted to connect to the TCP Milter listener.
   # Keep the loopback defaults when Postfix and MilterGuard run locally. Add
@@ -218,6 +221,11 @@ email_commands:
   send_replies: true
   # SMTP server used to send command results. Include the port.
   smtp_host: 127.0.0.1:25
+
+  # SMTP transport encryption: off, opportunistic, or required. Opportunistic
+  # uses STARTTLS when a non-loopback server advertises it; required refuses to
+  # send unless STARTTLS with a valid server certificate can be established.
+  smtp_tls: opportunistic
 
   # Maximum raw body prefix inspected for up to 100 commands. Content beyond
   # this limit, such as quoted reply history, is ignored. Plain-text and HTML

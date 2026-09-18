@@ -78,6 +78,7 @@ type EmailCommandsConfig struct {
 	Administrators          []string `yaml:"administrators"`
 	SendReplies             bool     `yaml:"send_replies"`
 	SMTPHost                string   `yaml:"smtp_host"`
+	SMTPTLS                 string   `yaml:"smtp_tls"`
 	MaxMessageBytes         int64    `yaml:"max_message_bytes"`
 }
 
@@ -215,7 +216,7 @@ func defaults() Config {
 		Mode: "monitor",
 		Milter: MilterConfig{
 			Socket: "tcp:127.0.0.1:8895", Timeout: Duration(time.Minute),
-			ConnectionDNSTimeout: Duration(5 * time.Second), MaxMessageSize: 10 << 20, MaxConnections: 256,
+			ConnectionDNSTimeout: Duration(5 * time.Second), MaxMessageSize: 10 << 20, MaxConnections: 64,
 			AllowedPeerIPs: []string{"127.0.0.0/8", "::1/128"},
 		},
 		AI: AIConfig{
@@ -237,7 +238,7 @@ func defaults() Config {
 		},
 		EmailCommands: EmailCommandsConfig{
 			Recipient: "milterguard@example.com", VerifySenderViaAliases: true, SendReplies: true,
-			SMTPHost: "127.0.0.1:25", MaxMessageBytes: 65536, AliasesFile: "/etc/aliases", Administrators: []string{},
+			SMTPHost: "127.0.0.1:25", SMTPTLS: "opportunistic", MaxMessageBytes: 65536, AliasesFile: "/etc/aliases", Administrators: []string{},
 		},
 		Persistence: PersistenceConfig{
 			DatabaseFile:    "/var/lib/milterguard/milterguard.db",
@@ -374,6 +375,9 @@ func (c Config) Validate() error {
 	commands := c.EmailCommands
 	if commands.MaxMessageBytes < 1 || commands.MaxMessageBytes > 64<<10 {
 		return fmt.Errorf("email_commands.max_message_bytes must be between 1 and 65536")
+	}
+	if commands.SMTPTLS != "off" && commands.SMTPTLS != "opportunistic" && commands.SMTPTLS != "required" {
+		return fmt.Errorf("email_commands.smtp_tls must be off, opportunistic, or required")
 	}
 	if commands.Enabled {
 		if !validEmailAddress(commands.Recipient) {

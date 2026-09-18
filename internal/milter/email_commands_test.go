@@ -43,6 +43,48 @@ func commandTestServer(t *testing.T, allowUsers bool, administrators []string) (
 	return server, analyzer, clientConn, done
 }
 
+func TestSMTPTLSDecision(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       string
+		host       string
+		advertised bool
+		wantTLS    bool
+		wantError  bool
+	}{
+		{name: "required advertised", mode: "required", host: "mail.example.com", advertised: true, wantTLS: true},
+		{name: "required unavailable", mode: "required", host: "mail.example.com", wantError: true},
+		{name: "opportunistic remote", mode: "opportunistic", host: "mail.example.com", advertised: true, wantTLS: true},
+		{name: "opportunistic loopback", mode: "opportunistic", host: "127.0.0.1", advertised: true},
+		{name: "opportunistic unavailable", mode: "opportunistic", host: "mail.example.com"},
+		{name: "off", mode: "off", host: "mail.example.com", advertised: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := smtpTLSDecision(test.mode, test.host, test.advertised)
+			if (err != nil) != test.wantError {
+				t.Fatalf("error = %v, wantError %v", err, test.wantError)
+			}
+			if got != test.wantTLS {
+				t.Fatalf("use TLS = %v, want %v", got, test.wantTLS)
+			}
+		})
+	}
+}
+
+func TestSMTPHostIsLoopback(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "::1", "localhost", "LOCALHOST."} {
+		if !smtpHostIsLoopback(host) {
+			t.Errorf("%q was not recognized as loopback", host)
+		}
+	}
+	for _, host := range []string{"192.0.2.1", "mail.example.com"} {
+		if smtpHostIsLoopback(host) {
+			t.Errorf("%q was incorrectly recognized as loopback", host)
+		}
+	}
+}
+
 func submitCommand(t *testing.T, conn net.Conn, identity, from string, recipients []string, body string) []byte {
 	t.Helper()
 	negotiate(t, conn)

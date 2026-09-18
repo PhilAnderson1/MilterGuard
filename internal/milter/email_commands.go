@@ -3,6 +3,7 @@ package milter
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -764,7 +765,7 @@ func (ss *session) queueCommandReplyContentFunc(recipient, subject string, conte
 		reply := content()
 		payload, err := buildBoundedCommandReplyPayload(from, recipient, subject, date, token, reply, ss.server.cfg.Milter.MaxMessageSize)
 		if err == nil {
-			err = submitSMTP(cfg.SMTPHost, recipient, payload)
+			err = submitSMTP(cfg.SMTPHost, cfg.SMTPTLS, recipient, payload)
 		}
 		if err != nil {
 			log.Error("cannot send email command confirmation", "recipient", recipient, "smtp_host", cfg.SMTPHost, "error", err)
@@ -851,7 +852,7 @@ func writeMIMEBase64(writer io.Writer, contents []byte) error {
 	return err
 }
 
-func submitSMTP(address, recipient string, payload []byte) error {
+func submitSMTP(address, tlsMode, recipient string, payload []byte) error {
 	conn, err := net.DialTimeout("tcp", address, 15*time.Second)
 	if err != nil {
 		return err
@@ -869,6 +870,16 @@ func submitSMTP(address, recipient string, payload []byte) error {
 		return err
 	}
 	defer client.Close()
+	startTLS, _ := client.Extension("STARTTLS")
+	useTLS, err := smtpTLSDecision(tlsMode, host, startTLS)
+	if err != nil {
+		return err
+	}
+	if useTLS {
+		if err := client.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
+			return fmt.Errorf("start SMTP TLS: %w", err)
+		}
+	}
 	if err := client.Mail(""); err != nil {
 		return err
 	}
@@ -887,4 +898,19 @@ func submitSMTP(address, recipient string, payload []byte) error {
 		return err
 	}
 	return client.Quit()
+}
+
+func smtpTLSDecision(mode, host string, advertised bool) (bool, error) {
+	if mode == "required" && !advertised {
+		return false, errors.New("SMTP server does not advertise STARTTLS")
+	}
+	return advertised && (mode == "required" || (mode == "opportunistic" && !smtpHostIsLoopback(host))), nil
+}
+
+func smtpHostIsLoopback(host string) bool {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return true
+	}
+	address := net.ParseIP(host)
+	return address != nil && address.IsLoopback()
 }

@@ -172,7 +172,7 @@ func TestLoadRejectsEmptyAndMultipleYAMLDocuments(t *testing.T) {
 }
 
 func TestValidateMilterMaxConnections(t *testing.T) {
-	if got := defaults().Milter.MaxConnections; got != 256 {
+	if got := defaults().Milter.MaxConnections; got != 64 {
 		t.Fatalf("default maximum Milter connections = %d", got)
 	}
 	for _, maximum := range []int{0, -1} {
@@ -294,6 +294,24 @@ func TestValidateEmailCommands(t *testing.T) {
 	cfg.Correspondents.UseAllowlist = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "email_commands.smtp_host") {
 		t.Fatalf("invalid SMTP host error = %v", err)
+	}
+}
+
+func TestValidateEmailCommandTLSMode(t *testing.T) {
+	if got := defaults().EmailCommands.SMTPTLS; got != "opportunistic" {
+		t.Fatalf("default SMTP TLS mode = %q, want opportunistic", got)
+	}
+	for _, mode := range []string{"off", "opportunistic", "required"} {
+		cfg := validConfig()
+		cfg.EmailCommands.SMTPTLS = mode
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("SMTP TLS mode %q rejected: %v", mode, err)
+		}
+	}
+	cfg := validConfig()
+	cfg.EmailCommands.SMTPTLS = "optional"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "email_commands.smtp_tls") {
+		t.Fatalf("invalid SMTP TLS mode error = %v", err)
 	}
 }
 

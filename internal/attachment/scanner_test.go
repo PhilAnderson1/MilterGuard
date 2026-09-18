@@ -65,6 +65,45 @@ func TestNTFSStreamSuffixInsideArchiveDoesNotHideBlockedExtension(t *testing.T) 
 	}
 }
 
+func TestUnicodeIgnorablesAndCompatibilityCharactersDoNotHideBlockedExtension(t *testing.T) {
+	for _, filename := range []string{
+		"invoice.js\u200d",
+		"invoice.\u202ejs",
+		"invoice.js\ufe0f",
+		"invoice.j\u034fs",
+		"invoice.ｊｓ",
+	} {
+		t.Run(filename, func(t *testing.T) {
+			finding, err := testScanner().Scan(
+				"application/octet-stream", "", `attachment; filename="`+filename+`"`, []byte("harmless bytes"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finding == nil || finding.Detection != "blocked extension .js" {
+				t.Fatalf("finding = %#v", finding)
+			}
+		})
+	}
+}
+
+func TestUnicodeIgnorableInsideArchiveDoesNotHideBlockedExtension(t *testing.T) {
+	archive := makeZIP(t, map[string][]byte{"invoice.js\u200d": []byte("harmless bytes")})
+	finding, err := testScanner().Scan("application/zip", "", `attachment; filename="files.zip"`, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Path != "files.zip/invoice.js" || finding.Detection != "blocked extension .js" {
+		t.Fatalf("finding = %#v", finding)
+	}
+}
+
+func TestCleanNameRetainsOrdinaryInternationalCharacters(t *testing.T) {
+	if got, want := cleanName("ご案内.pdf"), "ご案内.pdf"; got != want {
+		t.Fatalf("cleanName() = %q, want %q", got, want)
+	}
+}
+
 func TestCleanNamePreservesOrdinaryColonFilename(t *testing.T) {
 	if got, want := cleanName("report:final.pdf"), "report:final.pdf"; got != want {
 		t.Fatalf("cleanName() = %q, want %q", got, want)
