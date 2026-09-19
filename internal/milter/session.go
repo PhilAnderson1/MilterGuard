@@ -342,15 +342,17 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 
 func (ss *session) evaluateWithProgress(ctx context.Context, inbound inboundEvidence) (evaluationResult, error) {
 	started := time.Now()
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	defer cancelWorker()
 	results := make(chan evaluationResult, 1)
 	go func() {
 		defer func() {
 			if panicValue := recover(); panicValue != nil {
-				ss.server.logRecoveredWorkerPanic(ctx, "message analysis", panicValue)
+				ss.server.logRecoveredWorkerPanic(workerCtx, "message analysis", panicValue)
 				results <- ss.server.analysisFailure(fmt.Errorf("message analysis panic: %v", panicValue), started)
 			}
 		}()
-		results <- ss.evaluateMessage(ctx, inbound)
+		results <- ss.evaluateMessage(workerCtx, inbound)
 	}()
 
 	interval := ss.server.progressInterval
@@ -363,8 +365,14 @@ func (ss *session) evaluateWithProgress(ctx context.Context, inbound inboundEvid
 		select {
 		case result := <-results:
 			return result, nil
+		case <-ctx.Done():
+			cancelWorker()
+			<-results
+			return evaluationResult{}, ctx.Err()
 		case <-ticker.C:
 			if err := writeFrame(ss.conn, []byte{responseProgress}); err != nil {
+				cancelWorker()
+				<-results
 				return evaluationResult{}, err
 			}
 		}

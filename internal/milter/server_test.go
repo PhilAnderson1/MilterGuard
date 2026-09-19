@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -126,6 +127,33 @@ func (listener *scriptedListener) Accept() (net.Conn, error) {
 func (*scriptedListener) Close() error   { return nil }
 func (*scriptedListener) Addr() net.Addr { return &net.TCPAddr{} }
 
+type tcpAddressConn struct{ net.Conn }
+
+func (tcpAddressConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8895}
+}
+
+func (tcpAddressConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 25000}
+}
+
+type connectionThenErrorListener struct {
+	conn net.Conn
+	err  error
+}
+
+func (listener *connectionThenErrorListener) Accept() (net.Conn, error) {
+	if listener.conn != nil {
+		conn := listener.conn
+		listener.conn = nil
+		return conn, nil
+	}
+	return nil, listener.err
+}
+
+func (*connectionThenErrorListener) Close() error   { return nil }
+func (*connectionThenErrorListener) Addr() net.Addr { return &net.TCPAddr{} }
+
 func TestAcceptConnectionRetriesTemporaryErrors(t *testing.T) {
 	serverSide, clientSide := net.Pipe()
 	defer clientSide.Close()
@@ -152,6 +180,72 @@ func TestAcceptConnectionReturnsPermanentError(t *testing.T) {
 	}
 	if listener.accepts != 1 {
 		t.Fatalf("accept attempts = %d, want 1", listener.accepts)
+	}
+}
+
+func TestServeCancelsIdleSessionsAfterPermanentAcceptError(t *testing.T) {
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+	permanent := errors.New("listener failed permanently")
+	listener := &connectionThenErrorListener{conn: tcpAddressConn{serverSide}, err: permanent}
+	server := NewServer(config.Config{
+		Milter: config.MilterConfig{
+			Timeout:        config.Duration(time.Hour),
+			MaxConnections: 1,
+			AllowedPeerIPs: []string{"127.0.0.0/8"},
+		},
+		AI: config.AIConfig{MaxConcurrent: 1},
+	}, fixedAnalyzer{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// The scripted listener returns its connection once, followed by a permanent
+	// accept failure. The accepted session remains idle until Serve cancels it.
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(context.Background(), listener) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, permanent) {
+			t.Fatalf("Serve error = %v, want %v", err, permanent)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve remained blocked waiting for an idle session")
+	}
+
+	if _, err := clientSide.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("idle session was not closed: %v", err)
+	}
+}
+
+func TestServerCloseIsConcurrentAndIdempotent(t *testing.T) {
+	server := NewServer(config.Config{
+		AI: config.AIConfig{MaxConcurrent: 1},
+		Persistence: config.PersistenceConfig{
+			DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db"),
+		},
+		RejectionHistory: config.RejectionHistoryConfig{Expiry: config.Duration(time.Hour), MaxEntries: 10},
+	}, fixedAnalyzer{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := server.StartupError(); err != nil {
+		t.Fatal(err)
+	}
+
+	const callers = 8
+	errorsSeen := make(chan error, callers)
+	var callersDone sync.WaitGroup
+	callersDone.Add(callers)
+	for range callers {
+		go func() {
+			defer callersDone.Done()
+			errorsSeen <- server.Close()
+		}()
+	}
+	callersDone.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatalf("concurrent Close returned %v", err)
+		}
+	}
+	if err := server.Close(); err != nil {
+		t.Fatalf("repeated Close returned %v", err)
 	}
 }
 
@@ -289,7 +383,7 @@ func TestPostDecisionUpdatesDoNotInheritExpiredAnalysisContext(t *testing.T) {
 		reasons:  []string{"test rejection"},
 	}, inboundEvidence{})
 
-	entries, err := store.list("recipient@example.com", time.Time{})
+	entries, err := store.list(context.Background(), "recipient@example.com", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +464,7 @@ func TestRejectionCommandRetrievesProcessedArchivedMessage(t *testing.T) {
 	msg.AddHeader("Content-Type", "text/html; charset=UTF-8")
 	msg.AddBody([]byte(`<p>Review <a href="https://example.net/account">account</a></p>`))
 	server.recordRejection(context.Background(), msg, "sender@example.net", "", []string{"owner@example.com"}, []string{"test reason"}, "ai")
-	entries, err := server.rejectionHistory.list("owner@example.com", time.Time{})
+	entries, err := server.rejectionHistory.list(context.Background(), "owner@example.com", time.Time{})
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("rejection history = %#v, %v", entries, err)
 	}
@@ -475,7 +569,7 @@ func TestRejectedMessageArchiveUsesRejectionRecordIDs(t *testing.T) {
 
 	server.recordRejection(context.Background(), msg, "sender@example.net", "bounce@example.net", []string{"one@example.com", "two@example.com"}, []string{"unwanted"}, "ai")
 
-	entries, err := server.rejectionHistory.list("*", time.Time{})
+	entries, err := server.rejectionHistory.list(context.Background(), "*", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1829,12 +1923,12 @@ func TestAnalysisTimeoutUsesAITimeoutWithResponseMargin(t *testing.T) {
 	}
 }
 
-func TestAnalysisTimeoutIncludesRetryAttempts(t *testing.T) {
+func TestAnalysisTimeoutIncludesRetryAttemptsAndWaits(t *testing.T) {
 	s := &Server{cfg: config.Config{
 		Milter: config.MilterConfig{Timeout: config.Duration(30 * time.Second)},
 		AI:     config.AIConfig{Timeout: config.Duration(60 * time.Second), Retries: 2},
 	}}
-	if got, want := s.analysisTimeout(), 185*time.Second; got != want {
+	if got, want := s.analysisTimeout(), 245*time.Second; got != want {
 		t.Fatalf("analysis timeout = %v, want %v", got, want)
 	}
 }

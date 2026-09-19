@@ -344,15 +344,15 @@ func (s *correspondentStore) match(ctx context.Context, correspondent string, re
 	return result
 }
 
-func (s *correspondentStore) listAllowlist(recipient string, activitySince time.Time) []correspondentEntry {
+func (s *correspondentStore) listAllowlist(ctx context.Context, recipient string, activitySince time.Time) ([]correspondentEntry, error) {
 	if s == nil || s.db == nil {
-		return nil
+		return nil, nil
 	}
 	allRecipients := recipient == "*"
 	if !allRecipients {
 		recipient = normalizeEmailAddress(recipient)
 		if recipient == "" {
-			return nil
+			return nil, nil
 		}
 	}
 	now := s.now().UTC()
@@ -370,10 +370,10 @@ func (s *correspondentStore) listAllowlist(recipient string, activitySince time.
 	}
 	query += " ORDER BY last_activity_at_ms DESC, local_address, correspondent LIMIT ?"
 	args = append(args, maxEmailCommandListRows+1)
-	rows, err := s.db.Query(context.Background(), query, args...)
+	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
 		s.logDatabaseError("list correspondent allowlist", err)
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	var result []correspondentEntry
@@ -381,15 +381,15 @@ func (s *correspondentStore) listAllowlist(recipient string, activitySince time.
 		entry, err := scanCorrespondent(rows)
 		if err != nil {
 			s.logDatabaseError("read correspondent allowlist", err)
-			return nil
+			return nil, err
 		}
 		result = append(result, entry)
 	}
 	if err := rows.Err(); err != nil {
 		s.logDatabaseError("read correspondent allowlist", err)
-		return nil
+		return nil, err
 	}
-	return result
+	return result, nil
 }
 
 func (s *correspondentStore) qualified(entry correspondentEntry) bool {
@@ -468,11 +468,10 @@ func (s *correspondentStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) 
 	return removed + remainingRemoved, err
 }
 
-func (s *correspondentStore) cleanup() (int64, error) {
+func (s *correspondentStore) cleanup(ctx context.Context) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, nil
 	}
-	ctx := context.Background()
 	var deleted int64
 	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		var attemptDeleted int64
@@ -501,12 +500,12 @@ func (s *correspondentStore) cleanup() (int64, error) {
 	return deleted, nil
 }
 
-func (s *correspondentStore) size() int {
+func (s *correspondentStore) size(ctx context.Context) int {
 	if s == nil || s.db == nil {
 		return 0
 	}
 	var count int
-	if err := s.db.QueryRow(context.Background(), `SELECT count(*) FROM correspondents`).Scan(&count); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM correspondents`).Scan(&count); err != nil {
 		s.logDatabaseError("count correspondents", err)
 	}
 	return count

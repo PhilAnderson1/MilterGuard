@@ -276,6 +276,15 @@ When monitor-mode results are satisfactory, change the mode to `enforce` and
 restart MilterGuard. It will then reject unwanted messages that meet the
 configured confidence threshold and block prohibited executable attachments.
 
+The supplied configuration sets `filtering.ai_error_action: accept`. If AI
+analysis fails, MilterGuard therefore delivers the message without an AI
+classification rather than delaying legitimate mail during an endpoint outage.
+When `filtering.add_email_headers` is enabled, the accepted message is marked
+with `X-MilterGuard-Classification: unavailable` and
+`X-MilterGuard-Action: accepted-ai-error`. Set
+`filtering.ai_error_action: tempfail` instead if the sending server should
+retain the message and retry after the AI service becomes available.
+
 ### Deterministic acceptances without AI analysis
 
 MilterGuard accepts some trusted messages without sending them to the AI
@@ -380,10 +389,6 @@ incoming `X-MilterGuard-*` headers as described earlier in this guide.
 Continue reviewing decisions after enabling enforcement. AI classification is
 not perfectly deterministic, and changes made by an AI provider can alter a
 model's behaviour even when the configured model name remains unchanged.
-
-The supplied configuration accepts mail if AI analysis fails. This avoids mail
-loss when the endpoint is unavailable. If you prefer the sending server to try
-again later, change the configured AI failure action to `tempfail`.
 
 ## Basic virus protection
 
@@ -682,6 +687,10 @@ changes. Check the journal for rejected mail, endpoint errors, attachment-policy
 decisions, and changes in classification quality. After changing the prompt,
 model, confidence threshold, or filtering policy, repeat the saved-message tests
 before restarting production.
+
+Invalid API credentials and insufficient API credit are logged as distinct
+error-level events with `endpoint_error_kind` and `endpoint_status_code` fields,
+making them suitable for journal monitoring and alerts.
 
 When `filtering.add_email_headers` is enabled, every accepted message receives
 `X-MilterGuard-Classification`, `X-MilterGuard-Score`,

@@ -111,6 +111,10 @@ filtering with:
 sudo systemctl restart milterguard
 ```
 
+The supplied configuration accepts messages if AI analysis fails. To defer
+those messages until the sending server retries, set
+`filtering.ai_error_action: tempfail` before enabling enforcement.
+
 See the [Operating Guide](OPERATING_GUIDE.md) for detailed configuration,
 testing, security, and maintenance information.
 

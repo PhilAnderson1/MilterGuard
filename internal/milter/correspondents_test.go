@@ -103,7 +103,7 @@ func TestCorrespondentCleanupEvictsLeastUsefulAtCapacity(t *testing.T) {
 	if len(store.snapshot()) != 3 {
 		t.Fatal("capacity was enforced before periodic cleanup")
 	}
-	if _, err := store.cleanup(); err != nil {
+	if _, err := store.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !store.match(context.Background(), "trusted@example.net", nil).Known {
@@ -133,7 +133,7 @@ func TestCorrespondentCleanupEvictsOldestQualifiedAtCapacity(t *testing.T) {
 	if err := store.learn(context.Background(), "owner@example.com", []string{"third@example.net"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.cleanup(); err != nil {
+	if _, err := store.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !store.match(context.Background(), "first@example.net", nil).Known || store.match(context.Background(), "second@example.net", nil).Known || !store.match(context.Background(), "third@example.net", nil).Known {
@@ -158,7 +158,7 @@ func TestCorrespondentStoreIgnoresAndCleansStaleRelationships(t *testing.T) {
 	if err := store.learn(context.Background(), "owner@example.com", []string{"bob@example.net"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.cleanup(); err != nil {
+	if _, err := store.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(store.snapshot()) != 1 {
@@ -174,7 +174,7 @@ func TestCorrespondentCleanupRemovesOnlyStaleRelationships(t *testing.T) {
 	store.now = func() time.Time { return now }
 	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "local@example.com", Correspondent: "stale@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-48 * time.Hour), LastActivityAt: now.Add(-25 * time.Hour)})
 	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "local@example.com", Correspondent: "current@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-48 * time.Hour), LastActivityAt: now.Add(-23 * time.Hour)})
-	if deleted, err := store.cleanup(); err != nil {
+	if deleted, err := store.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	} else if deleted != 1 {
 		t.Fatalf("deleted records = %d, want 1", deleted)
@@ -345,14 +345,17 @@ func TestListAllowlistIsScopedQualifiedAndOrdered(t *testing.T) {
 	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "candidate@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 1, LearnedAt: newer, LastActivityAt: newer})
 	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "newer@example.net", WhitelistType: whitelistManual, LearnedAt: newer, LastActivityAt: newer})
 	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "bob@example.com", Correspondent: "bob@example.net", WhitelistType: whitelistManual, LearnedAt: newer, LastActivityAt: newer})
-	alice := store.listAllowlist("alice@example.com", time.Time{})
+	alice, err := store.listAllowlist(context.Background(), "alice@example.com", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(alice) != 2 || alice[0].Correspondent != "newer@example.net" || alice[1].Correspondent != "older@example.net" {
 		t.Fatalf("Alice allowlist = %#v", alice)
 	}
-	if all := store.listAllowlist("*", time.Time{}); len(all) != 3 {
+	if all, err := store.listAllowlist(context.Background(), "*", time.Time{}); err != nil || len(all) != 3 {
 		t.Fatalf("global allowlist = %#v", all)
 	}
-	if recent := store.listAllowlist("*", newer); len(recent) != 2 {
+	if recent, err := store.listAllowlist(context.Background(), "*", newer); err != nil || len(recent) != 2 {
 		t.Fatalf("recent allowlist = %#v", recent)
 	}
 }

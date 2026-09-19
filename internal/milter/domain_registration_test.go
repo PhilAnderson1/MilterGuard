@@ -26,6 +26,15 @@ type fakeDomainRegistrationLookup struct {
 	calls      atomic.Int32
 }
 
+func TestDomainRegistrationCleanupHonorsCanceledContext(t *testing.T) {
+	store := newTestDomainRegistrationStore(t, time.Now().UTC(), &fakeDomainRegistrationLookup{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.cleanup(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cleanup error = %v, want context cancellation", err)
+	}
+}
+
 type blockingDomainRegistrationLookup struct {
 	registered time.Time
 	expires    time.Time
@@ -175,7 +184,7 @@ func TestDomainRegistrationCleanupRemovesRecordsTwoWeeksPastExpiry(t *testing.T)
 	} {
 		putTestDomainRegistration(t, store, record)
 	}
-	if deleted, err := store.cleanup(); err != nil {
+	if deleted, err := store.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	} else if deleted != 1 {
 		t.Fatalf("deleted records = %d, want 1", deleted)
@@ -249,10 +258,10 @@ func TestDomainRegistrationCapacityKeepsLatestExpirations(t *testing.T) {
 	for i, domain := range []string{"soon.example", "middle.example", "late.example"} {
 		putTestDomainRegistration(t, store, domainRegistrationRecord{Domain: domain, RegisteredAt: now.Add(-24 * time.Hour), ExpiresAt: now.Add(time.Duration(i+1) * 24 * time.Hour)})
 	}
-	if store.size() != 3 {
+	if store.size(context.Background()) != 3 {
 		t.Fatal("capacity was enforced before periodic cleanup")
 	}
-	if deleted, err := store.cleanup(); err != nil {
+	if deleted, err := store.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	} else if deleted != 1 {
 		t.Fatalf("capacity cleanup deleted %d records, want 1", deleted)

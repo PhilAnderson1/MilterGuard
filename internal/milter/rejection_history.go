@@ -135,7 +135,7 @@ func rejectionSingleLine(value string, maxRunes int) string {
 	return string([]rune(value)[:maxRunes]) + "…"
 }
 
-func (s *rejectionHistoryStore) list(recipient string, requestedSince time.Time) ([]rejectionHistoryEntry, error) {
+func (s *rejectionHistoryStore) list(ctx context.Context, recipient string, requestedSince time.Time) ([]rejectionHistoryEntry, error) {
 	if s == nil || s.db == nil || !rejectionHistoryEnabled(s.cfg) {
 		return nil, nil
 	}
@@ -152,7 +152,7 @@ func (s *rejectionHistoryStore) list(recipient string, requestedSince time.Time)
 	}
 	cutoff := unixMillis(retentionSince)
 	if !allRecipients {
-		rows, err := s.db.Query(context.Background(), `SELECT r.id, r.sender, r.subject, r.rejected_at_ms, r.reason
+		rows, err := s.db.Query(ctx, `SELECT r.id, r.sender, r.subject, r.rejected_at_ms, r.reason
 			FROM rejection_recipients rr JOIN rejections r ON r.id = rr.rejection_id
 			WHERE rr.recipient = ? AND r.rejected_at_ms >= ?
 			ORDER BY r.rejected_at_ms DESC, r.id DESC LIMIT ?`, recipient, cutoff, maxEmailCommandListRows+1)
@@ -173,7 +173,7 @@ func (s *rejectionHistoryStore) list(recipient string, requestedSince time.Time)
 		return entries, rows.Err()
 	}
 
-	rows, err := s.db.Query(context.Background(), `WITH limited_rejections AS (
+	rows, err := s.db.Query(ctx, `WITH limited_rejections AS (
 			SELECT id, sender, subject, rejected_at_ms, reason FROM rejections
 			WHERE rejected_at_ms >= ?
 			ORDER BY rejected_at_ms DESC, id DESC LIMIT ?
@@ -201,7 +201,7 @@ func (s *rejectionHistoryStore) list(recipient string, requestedSince time.Time)
 	return entries, rows.Err()
 }
 
-func (s *rejectionHistoryStore) getByID(id uint64, recipient string, administrator bool) (rejectionHistoryEntry, bool, error) {
+func (s *rejectionHistoryStore) getByID(ctx context.Context, id uint64, recipient string, administrator bool) (rejectionHistoryEntry, bool, error) {
 	if s == nil || s.db == nil || !rejectionHistoryEnabled(s.cfg) || id == 0 {
 		return rejectionHistoryEntry{}, false, nil
 	}
@@ -219,7 +219,7 @@ func (s *rejectionHistoryStore) getByID(id uint64, recipient string, administrat
 		args = append(args, recipient)
 	}
 	query += ` ORDER BY rr.recipient`
-	rows, err := s.db.Query(context.Background(), query, args...)
+	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
 		return rejectionHistoryEntry{}, false, err
 	}
@@ -257,11 +257,10 @@ func (s *rejectionHistoryStore) enforceCapacityTx(ctx context.Context, tx *sql.T
 	return result.RowsAffected()
 }
 
-func (s *rejectionHistoryStore) cleanup() (int64, error) {
+func (s *rejectionHistoryStore) cleanup(ctx context.Context) (int64, error) {
 	if s == nil || s.db == nil || !rejectionHistoryEnabled(s.cfg) {
 		return 0, nil
 	}
-	ctx := context.Background()
 	var deleted int64
 	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		var attemptDeleted int64
@@ -290,12 +289,12 @@ func (s *rejectionHistoryStore) cleanup() (int64, error) {
 	return deleted, nil
 }
 
-func (s *rejectionHistoryStore) size() int {
+func (s *rejectionHistoryStore) size(ctx context.Context) int {
 	if s == nil || s.db == nil {
 		return 0
 	}
 	var count int
-	if err := s.db.QueryRow(context.Background(), `SELECT COUNT(*) FROM rejections`).Scan(&count); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rejections`).Scan(&count); err != nil {
 		return 0
 	}
 	return count

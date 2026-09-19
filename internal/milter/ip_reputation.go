@@ -276,37 +276,43 @@ func (s *ipReputationStore) recordLegitimate(ctx context.Context, addr netip.Add
 	if !hasStrike {
 		return
 	}
-	var record rejectedIPRecord
-	strikeCount := 0
-	removed, strikeRemoved := false, false
+	type legitimateResult struct {
+		record        rejectedIPRecord
+		strikeCount   int
+		removed       bool
+		strikeRemoved bool
+	}
+	var outcome legitimateResult
 	err = s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		attempt := legitimateResult{}
+		defer func() { outcome = attempt }()
 		var found bool
 		var err error
-		record, found, err = s.getTx(ctx, tx, addr.String())
+		attempt.record, found, err = s.getTx(ctx, tx, addr.String())
 		if err != nil || !found {
 			return err
 		}
-		if err := s.pruneStrikesTx(ctx, tx, int64(record.ID), now); err != nil {
+		if err := s.pruneStrikesTx(ctx, tx, int64(attempt.record.ID), now); err != nil {
 			return err
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM ip_strikes WHERE ip_reputation_id=?`, record.ID).Scan(&strikeCount); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM ip_strikes WHERE ip_reputation_id=?`, attempt.record.ID).Scan(&attempt.strikeCount); err != nil {
 			return err
 		}
-		active := record.BlockLevel != "" && record.BlockedUntil.After(now)
-		if strikeCount == 0 {
+		active := attempt.record.BlockLevel != "" && attempt.record.BlockedUntil.After(now)
+		if attempt.strikeCount == 0 {
 			if !active {
-				_, err = tx.ExecContext(ctx, `DELETE FROM ip_reputation WHERE id=?`, record.ID)
-				removed = err == nil
+				_, err = tx.ExecContext(ctx, `DELETE FROM ip_reputation WHERE id=?`, attempt.record.ID)
+				attempt.removed = err == nil
 				return err
 			}
-			record.LegitimateCount = 0
-			_, err = tx.ExecContext(ctx, `UPDATE ip_reputation SET legitimate_count=0 WHERE id=?`, record.ID)
+			attempt.record.LegitimateCount = 0
+			_, err = tx.ExecContext(ctx, `UPDATE ip_reputation SET legitimate_count=0 WHERE id=?`, attempt.record.ID)
 			return err
 		}
-		record.LegitimateCount++
-		record.LastActivityAt = now
-		if record.LegitimateCount >= s.legitimatePerStrike {
-			result, err := tx.ExecContext(ctx, `DELETE FROM ip_strikes WHERE id=(SELECT id FROM ip_strikes WHERE ip_reputation_id=? ORDER BY struck_at_ms,id LIMIT 1)`, record.ID)
+		attempt.record.LegitimateCount++
+		attempt.record.LastActivityAt = now
+		if attempt.record.LegitimateCount >= s.legitimatePerStrike {
+			result, err := tx.ExecContext(ctx, `DELETE FROM ip_strikes WHERE id=(SELECT id FROM ip_strikes WHERE ip_reputation_id=? ORDER BY struck_at_ms,id LIMIT 1)`, attempt.record.ID)
 			if err != nil {
 				return err
 			}
@@ -314,29 +320,29 @@ func (s *ipReputationStore) recordLegitimate(ctx context.Context, addr netip.Add
 			if err != nil {
 				return err
 			}
-			strikeRemoved = count > 0
-			if strikeRemoved {
-				strikeCount--
+			attempt.strikeRemoved = count > 0
+			if attempt.strikeRemoved {
+				attempt.strikeCount--
 			}
-			record.LegitimateCount = 0
+			attempt.record.LegitimateCount = 0
 		}
-		if strikeCount == 0 && !active {
-			_, err = tx.ExecContext(ctx, `DELETE FROM ip_reputation WHERE id=?`, record.ID)
-			removed = err == nil
+		if attempt.strikeCount == 0 && !active {
+			_, err = tx.ExecContext(ctx, `DELETE FROM ip_reputation WHERE id=?`, attempt.record.ID)
+			attempt.removed = err == nil
 			return err
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE ip_reputation SET legitimate_count=?,last_activity_at_ms=? WHERE id=?`, record.LegitimateCount, unixMillis(now), record.ID)
+		_, err = tx.ExecContext(ctx, `UPDATE ip_reputation SET legitimate_count=?,last_activity_at_ms=? WHERE id=?`, attempt.record.LegitimateCount, unixMillis(now), attempt.record.ID)
 		return err
 	})
 	if err != nil {
 		s.logDatabaseError("record legitimate sending IP evidence", err)
 		return
 	}
-	if removed {
+	if outcome.removed {
 		s.debug("sending IP removed from rejection reputation", "remote_ip", addr.String(), "reason", "no_strikes")
 		return
 	}
-	s.debug("sending IP legitimate evidence recorded", "remote_ip", addr.String(), "legitimate_count", record.LegitimateCount, "strike_removed", strikeRemoved, "strike_count", strikeCount, "block_level", record.BlockLevel)
+	s.debug("sending IP legitimate evidence recorded", "remote_ip", addr.String(), "legitimate_count", outcome.record.LegitimateCount, "strike_removed", outcome.strikeRemoved, "strike_count", outcome.strikeCount, "block_level", outcome.record.BlockLevel)
 }
 
 func (s *ipReputationStore) hasCurrentStrike(ctx context.Context, ip string, now time.Time) (bool, error) {
@@ -541,12 +547,12 @@ func (s *ipReputationStore) debug(msg string, attrs ...any) {
 		s.log.Debug(msg, attrs...)
 	}
 }
-func (s *ipReputationStore) size() int {
+func (s *ipReputationStore) size(ctx context.Context) int {
 	if s == nil || s.db == nil {
 		return 0
 	}
 	var n int
-	if err := s.db.QueryRow(context.Background(), `SELECT count(*) FROM ip_reputation`).Scan(&n); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM ip_reputation`).Scan(&n); err != nil {
 		s.logDatabaseError("count sending IP records", err)
 	}
 	return n
@@ -601,7 +607,7 @@ func (s *ipReputationStore) snapshot() map[netip.Addr]rejectedIPRecord {
 	return result
 }
 
-func (s *ipReputationStore) manualAdd(addr netip.Addr) (activeIPBlock, error) {
+func (s *ipReputationStore) manualAdd(ctx context.Context, addr netip.Addr) (activeIPBlock, error) {
 	if !s.enabled() || !addr.IsValid() {
 		return activeIPBlock{}, fmt.Errorf("IP reputation blocking is disabled or the address is invalid")
 	}
@@ -618,7 +624,7 @@ func (s *ipReputationStore) manualAdd(addr netip.Addr) (activeIPBlock, error) {
 		return activeIPBlock{}, fmt.Errorf("no IP block duration is configured")
 	}
 	expires := now.Add(duration)
-	err := s.db.WithTx(context.Background(), nil, func(tx *sql.Tx) error {
+	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`INSERT INTO ip_reputation(ip,block_level,blocked_until_ms,legitimate_count,last_activity_at_ms) VALUES(?,?,?,0,?) ON CONFLICT(ip) DO UPDATE SET block_level=excluded.block_level,blocked_until_ms=excluded.blocked_until_ms,legitimate_count=0,last_activity_at_ms=excluded.last_activity_at_ms`, addr.String(), level, unixMillis(expires), unixMillis(now)); err != nil {
 			return err
 		}
@@ -630,12 +636,12 @@ func (s *ipReputationStore) manualAdd(addr netip.Addr) (activeIPBlock, error) {
 	s.debug("sending IP manually blocked", "remote_ip", addr.String(), "block_level", level, "block_expires_at", expires)
 	return activeIPBlock{IP: addr.String(), Level: level, ExpiresAt: expires}, nil
 }
-func (s *ipReputationStore) manualDelete(addr netip.Addr) (bool, error) {
+func (s *ipReputationStore) manualDelete(ctx context.Context, addr netip.Addr) (bool, error) {
 	if s == nil || s.db == nil || !addr.IsValid() {
 		return false, fmt.Errorf("invalid IP address")
 	}
 	addr = canonicalIP(addr)
-	result, err := s.db.Exec(context.Background(), `DELETE FROM ip_reputation WHERE ip=?`, addr.String())
+	result, err := s.db.Exec(ctx, `DELETE FROM ip_reputation WHERE ip=?`, addr.String())
 	if err != nil {
 		return false, err
 	}
@@ -645,9 +651,9 @@ func (s *ipReputationStore) manualDelete(addr netip.Addr) (bool, error) {
 	}
 	return n > 0, nil
 }
-func (s *ipReputationStore) listActive(activitySince time.Time) []activeIPBlock {
+func (s *ipReputationStore) listActive(ctx context.Context, activitySince time.Time) ([]activeIPBlock, error) {
 	if !s.enabled() {
-		return nil
+		return nil, nil
 	}
 	query := `SELECT ip,block_level,blocked_until_ms FROM ip_reputation WHERE block_level IS NOT NULL AND blocked_until_ms>?`
 	args := []any{unixMillis(s.now().UTC())}
@@ -657,31 +663,33 @@ func (s *ipReputationStore) listActive(activitySince time.Time) []activeIPBlock 
 	}
 	query += ` ORDER BY ip LIMIT ?`
 	args = append(args, maxEmailCommandListRows+1)
-	rows, err := s.db.Query(context.Background(), query, args...)
+	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
 		s.logDatabaseError("list active sending IP blocks", err)
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	var out []activeIPBlock
 	for rows.Next() {
 		var v activeIPBlock
 		var ms int64
-		if rows.Scan(&v.IP, &v.Level, &ms) != nil {
-			return nil
+		if err := rows.Scan(&v.IP, &v.Level, &ms); err != nil {
+			return nil, fmt.Errorf("read active sending IP block: %w", err)
 		}
 		v.ExpiresAt = timeFromMillis(ms)
 		out = append(out, v)
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
-func (s *ipReputationStore) cleanup() (int64, error) {
+func (s *ipReputationStore) cleanup(ctx context.Context) (int64, error) {
 	if !s.enabled() {
 		return 0, nil
 	}
 	now := s.now().UTC()
 	var deleted int64
-	ctx := context.Background()
 	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		var attemptDeleted int64
 		var result sql.Result

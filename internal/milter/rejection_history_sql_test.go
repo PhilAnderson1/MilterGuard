@@ -26,7 +26,7 @@ func newTestRejectionHistoryStore(t *testing.T, cfg config.RejectionHistoryConfi
 
 func rejectionEntries(t *testing.T, store *rejectionHistoryStore, recipient string) []rejectionHistoryEntry {
 	t.Helper()
-	entries, err := store.list(recipient, time.Time{})
+	entries, err := store.list(context.Background(), recipient, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestRejectionHistoryListAppliesRequestedCutoff(t *testing.T) {
 	if err := store.add(context.Background(), "new@example.net", "", "New", []string{"local@example.com"}, []string{"unwanted"}); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := store.list("local@example.com", now.Add(-7*24*time.Hour))
+	entries, err := store.list(context.Background(), "local@example.com", now.Add(-7*24*time.Hour))
 	if err != nil || len(entries) != 1 || entries[0].Sender != "new@example.net" {
 		t.Fatalf("recent history = %#v, %v", entries, err)
 	}
@@ -97,22 +97,22 @@ func TestRejectionHistoryGetByIDEnforcesRecipientAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, found, err := store.getByID(id, "ALICE@example.com", false)
+	entry, found, err := store.getByID(context.Background(), id, "ALICE@example.com", false)
 	if err != nil || !found || !slices.Equal(entry.Recipients, []string{"alice@example.com"}) {
 		t.Fatalf("owner lookup = %#v, found=%v, err=%v", entry, found, err)
 	}
-	if _, found, err := store.getByID(id, "other@example.com", false); err != nil || found {
+	if _, found, err := store.getByID(context.Background(), id, "other@example.com", false); err != nil || found {
 		t.Fatalf("unauthorized lookup: found=%v err=%v", found, err)
 	}
-	entry, found, err = store.getByID(id, "", true)
+	entry, found, err = store.getByID(context.Background(), id, "", true)
 	if err != nil || !found || !slices.Equal(entry.Recipients, []string{"alice@example.com", "bob@example.com"}) {
 		t.Fatalf("administrator lookup = %#v, found=%v, err=%v", entry, found, err)
 	}
 	store.now = func() time.Time { return now.Add(24*time.Hour + time.Millisecond) }
-	if _, found, err := store.getByID(id, "alice@example.com", false); err != nil || found {
+	if _, found, err := store.getByID(context.Background(), id, "alice@example.com", false); err != nil || found {
 		t.Fatalf("expired lookup: found=%v err=%v", found, err)
 	}
-	if _, found, err := store.getByID(id+1, "alice@example.com", false); err != nil || found {
+	if _, found, err := store.getByID(context.Background(), id+1, "alice@example.com", false); err != nil || found {
 		t.Fatalf("missing lookup: found=%v err=%v", found, err)
 	}
 }
@@ -130,7 +130,7 @@ func TestRejectionHistoryExpiryAndCapacityCascadeRecipients(t *testing.T) {
 	if got := rejectionEntries(t, store, "alice@example.com"); len(got) != 3 {
 		t.Fatalf("history was bounded before periodic cleanup: %#v", got)
 	}
-	if deleted, err := store.cleanup(); err != nil {
+	if deleted, err := store.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	} else if deleted != 1 {
 		t.Fatalf("capacity cleanup deleted %d records, want 1", deleted)
@@ -147,7 +147,7 @@ func TestRejectionHistoryExpiryAndCapacityCascadeRecipients(t *testing.T) {
 	if got := rejectionEntries(t, store, "*"); len(got) != 0 {
 		t.Fatalf("expired history visible = %#v", got)
 	}
-	if deleted, err := store.cleanup(); err != nil {
+	if deleted, err := store.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	} else if deleted != 2 {
 		t.Fatalf("deleted records = %d, want 2", deleted)
@@ -244,7 +244,7 @@ func TestRejectionHistoryRollsBackParentWhenRecipientInsertFails(t *testing.T) {
 	if err := store.add(context.Background(), "sender@example.net", "", "test", []string{"ok@example.com", "fail@example.com"}, nil); err == nil {
 		t.Fatal("recipient insertion failure was ignored")
 	}
-	if got := store.size(); got != 0 {
+	if got := store.size(context.Background()); got != 0 {
 		t.Fatalf("partially committed rejection count = %d", got)
 	}
 }
@@ -281,7 +281,7 @@ func TestRejectionHistoryListReportsDatabaseFailure(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.list("local@example.com", time.Time{}); err == nil {
+	if _, err := store.list(context.Background(), "local@example.com", time.Time{}); err == nil {
 		t.Fatal("closed database was reported as empty history")
 	}
 }

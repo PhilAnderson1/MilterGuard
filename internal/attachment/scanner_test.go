@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -20,6 +21,39 @@ func testScanner() *Scanner {
 		BlockedExtensions: []string{"exe", "bat", "js"}, InspectSignatures: true, InspectArchives: true,
 		MaxAttachmentBytes: 1 << 20, MaxArchiveDepth: 2, MaxArchiveFiles: 10, MaxArchiveUncompressedBytes: 2 << 20,
 	})
+}
+
+func TestScanContextStopsWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	finding, err := testScanner().ScanContext(ctx,
+		"application/octet-stream", "", `attachment; filename="document.txt"`, []byte("content"))
+	if finding != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled scan = finding %#v, error %v", finding, err)
+	}
+}
+
+type cancelAfterRead struct {
+	reader io.Reader
+	cancel context.CancelFunc
+}
+
+func (reader *cancelAfterRead) Read(buffer []byte) (int, error) {
+	count, err := reader.reader.Read(buffer)
+	reader.cancel()
+	return count, err
+}
+
+func TestArchiveReadStopsAfterContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	state := &scanState{ctx: ctx}
+	scanner := testScanner()
+	_, err := scanner.readArchiveEntry(&cancelAfterRead{
+		reader: bytes.NewReader(bytes.Repeat([]byte("x"), 1024)), cancel: cancel,
+	}, state)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("archive cancellation error = %v, want context.Canceled", err)
+	}
 }
 
 func TestDirectAttachmentBlockedByDecodedFilename(t *testing.T) {

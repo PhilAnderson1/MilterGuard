@@ -366,6 +366,45 @@ func TestRetryAfterDelay(t *testing.T) {
 	}
 }
 
+func TestEndpointRetryDelay(t *testing.T) {
+	transportErr := errors.New("connection reset")
+	for _, test := range []struct {
+		retry int
+		min   time.Duration
+		max   time.Duration
+	}{
+		{retry: 1, min: 125 * time.Millisecond, max: 250 * time.Millisecond},
+		{retry: 2, min: 250 * time.Millisecond, max: 500 * time.Millisecond},
+		{retry: 10, min: 2500 * time.Millisecond, max: 5 * time.Second},
+	} {
+		for range 20 {
+			delay := endpointRetryDelay(transportErr, test.retry)
+			if delay < test.min || delay > test.max {
+				t.Fatalf("retry %d delay = %s, want %s through %s", test.retry, delay, test.min, test.max)
+			}
+		}
+	}
+
+	want := 3 * time.Second
+	err := &EndpointError{Kind: ErrorHTTP, RetryAfter: want, Err: errors.New("rate limited")}
+	if got := endpointRetryDelay(err, 1); got != want {
+		t.Fatalf("server Retry-After delay = %s, want %s", got, want)
+	}
+}
+
+func TestMaximumAnalysisDurationIncludesAttemptsAndRetryWaits(t *testing.T) {
+	if got, want := MaximumAnalysisDuration(config.AIConfig{
+		Timeout: config.Duration(45 * time.Second), Retries: 2,
+	}), 195*time.Second; got != want {
+		t.Fatalf("default analysis duration = %s, want %s", got, want)
+	}
+	if got, want := MaximumAnalysisDuration(config.AIConfig{
+		Timeout: config.Duration(45 * time.Second), Retries: 0,
+	}), 45*time.Second; got != want {
+		t.Fatalf("no-retry analysis duration = %s, want %s", got, want)
+	}
+}
+
 func TestWaitForRetryHonorsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -429,6 +468,7 @@ func retryTestClient(transport http.RoundTripper, retries int) *Client {
 		Model: "model", Timeout: config.Duration(time.Second), Retries: retries,
 	}, "classify", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	client.http.Transport = transport
+	client.retryDelay = func(error, int) time.Duration { return 0 }
 	return client
 }
 

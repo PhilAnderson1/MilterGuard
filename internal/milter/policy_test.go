@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -106,5 +107,46 @@ func TestLogOutcomeRecordsResponseDelivery(t *testing.T) {
 		if !strings.Contains(logLine, wanted) {
 			t.Errorf("log output does not contain %s: %s", wanted, logLine)
 		}
+	}
+}
+
+func TestLogOutcomeIdentifiesPermanentEndpointFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		kind       ai.ErrorKind
+		statusCode int
+		message    string
+		kindName   string
+	}{
+		{name: "credentials", kind: ai.ErrorCredentials, statusCode: 401, message: "AI endpoint credentials rejected", kindName: "credentials"},
+		{name: "credit", kind: ai.ErrorPaymentRequired, statusCode: 402, message: "AI endpoint credit unavailable", kindName: "insufficient_credit"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			server := &Server{
+				cfg: config.Config{Mode: "enforce"},
+				log: slog.New(slog.NewJSONHandler(&output, nil)),
+			}
+			msg := message.New(1024)
+			msg.AddHeader("Message-ID", "<test@example.invalid>")
+			server.logOutcome(context.Background(), msg, evaluationResult{
+				selected: actionAccept,
+				err: &ai.EndpointError{
+					Kind: test.kind, StatusCode: test.statusCode,
+					Err: errors.New("endpoint failure"),
+				},
+			}, true, nil)
+			logLine := output.String()
+			for _, wanted := range []string{
+				`"msg":"` + test.message + `"`,
+				`"endpoint_error_kind":"` + test.kindName + `"`,
+				`"endpoint_status_code":` + fmt.Sprint(test.statusCode),
+			} {
+				if !strings.Contains(logLine, wanted) {
+					t.Errorf("log output does not contain %s: %s", wanted, logLine)
+				}
+			}
+		})
 	}
 }

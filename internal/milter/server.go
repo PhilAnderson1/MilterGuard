@@ -24,6 +24,11 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 )
 
+const (
+	maintenanceDatabaseTimeout = 60 * time.Second
+	commandDatabaseTimeout     = 15 * time.Second
+)
+
 const analysisResponseMargin = 5 * time.Second
 const defaultMilterProgressInterval = 30 * time.Second
 const rejectedMailCleanupInterval = 24 * time.Hour
@@ -70,6 +75,8 @@ type Server struct {
 	database           *sqlstore.Store
 	progressInterval   time.Duration
 	wg                 sync.WaitGroup
+	closeOnce          sync.Once
+	closeErr           error
 	startupErr         error
 }
 
@@ -82,7 +89,9 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	var database *sqlstore.Store
 	var databaseErr error
 	if correspondentFeaturesEnabled(cfg.Correspondents) || ipReputationFeaturesEnabled(cfg.IPReputation) || rejectionHistoryEnabled(cfg.RejectionHistory) || cfg.DomainRegistration.Enabled {
-		database, databaseErr = sqlstore.Open(context.Background(), cfg.Persistence.DatabaseFile, sqlstore.DefaultOptions())
+		ctx, cancel := context.WithTimeout(context.Background(), maintenanceDatabaseTimeout)
+		database, databaseErr = sqlstore.Open(ctx, cfg.Persistence.DatabaseFile, sqlstore.DefaultOptions())
+		cancel()
 	}
 	server := &Server{
 		cfg: cfg, analyzer: analyzer, log: log,
@@ -128,18 +137,25 @@ func attachmentConcurrency(maxConnections int) int {
 	return maxConnections
 }
 
-// Close releases persistent database resources. It is safe to call more than
-// once after the server has stopped accepting sessions.
+// Close releases persistent database resources. It may be called concurrently
+// or more than once, but only after Serve has returned and command processing
+// has stopped.
 func (s *Server) Close() error {
-	if s == nil || s.database == nil {
+	if s == nil {
 		return nil
 	}
-	if _, err := s.database.CheckpointPassive(context.Background()); err != nil && s.log != nil {
-		s.log.Warn("final SQLite WAL checkpoint failed", "error", err)
-	}
-	err := s.database.Close()
-	s.database = nil
-	return err
+	s.closeOnce.Do(func() {
+		if s.database == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), commandDatabaseTimeout)
+		defer cancel()
+		if _, err := s.database.CheckpointPassive(ctx); err != nil && s.log != nil {
+			s.log.Warn("final SQLite WAL checkpoint failed", "error", err)
+		}
+		s.closeErr = s.database.Close()
+	})
+	return s.closeErr
 }
 
 func generateInternalToken(random io.Reader) (string, error) {
@@ -157,12 +173,14 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	if s.startupErr != nil {
 		return s.startupErr
 	}
-	if err := s.cleanupPersistentStores("startup"); err != nil {
+	sessionCtx, cancelSessions := context.WithCancel(ctx)
+	defer cancelSessions()
+	if err := s.cleanupPersistentStores(sessionCtx, "startup"); err != nil {
 		return err
 	}
-	s.startRejectedMailCleanup(ctx)
+	s.startRejectedMailCleanup(sessionCtx)
 	if cleanupInterval := s.cfg.Persistence.CleanupInterval.Value(); cleanupInterval > 0 {
-		maintenanceCtx, stopMaintenance := context.WithCancel(ctx)
+		maintenanceCtx, stopMaintenance := context.WithCancel(sessionCtx)
 		maintenanceDone := make(chan struct{})
 		go func() {
 			defer close(maintenanceDone)
@@ -172,7 +190,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 				select {
 				case <-ticker.C:
 					s.runMaintenance("persistence cleanup", func() {
-						if err := s.cleanupPersistentStores("timer"); err != nil {
+						if err := s.cleanupPersistentStores(maintenanceCtx, "timer"); err != nil {
 							s.log.Warn("SQLite cleanup failed", "error", err)
 						}
 					})
@@ -186,10 +204,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			<-maintenanceDone
 		}()
 	}
-	go func() { <-ctx.Done(); _ = ln.Close() }()
+	go func() { <-sessionCtx.Done(); _ = ln.Close() }()
 	for {
-		conn, err := s.acceptConnection(ctx, ln)
+		conn, err := s.acceptConnection(sessionCtx, ln)
 		if err != nil {
+			cancelSessions()
 			s.wg.Wait()
 			return err
 		}
@@ -233,35 +252,37 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 						"max_connections", s.cfg.Milter.MaxConnections)
 				}
 			}()
-			s.handle(ctx, conn)
+			s.handle(sessionCtx, conn)
 		}()
 	}
 }
 
-func (s *Server) cleanupPersistentStores(trigger string) error {
-	ipDeleted, ipErr := s.ipReputation.cleanup()
-	contactsDeleted, contactsErr := s.correspondents.cleanup()
-	rejectionsDeleted, rejectionsErr := s.rejectionHistory.cleanup()
-	domainsDeleted, domainsErr := s.domainRegistration.cleanup()
+func (s *Server) cleanupPersistentStores(parent context.Context, trigger string) error {
+	ctx, cancel := context.WithTimeout(parent, maintenanceDatabaseTimeout)
+	defer cancel()
+	ipDeleted, ipErr := s.ipReputation.cleanup(ctx)
+	contactsDeleted, contactsErr := s.correspondents.cleanup(ctx)
+	rejectionsDeleted, rejectionsErr := s.rejectionHistory.cleanup(ctx)
+	domainsDeleted, domainsErr := s.domainRegistration.cleanup(ctx)
 	checkpoint, checkpointErr := sqlstore.CheckpointResult{}, error(nil)
 	if s.database != nil {
-		checkpoint, checkpointErr = s.database.CheckpointPassive(context.Background())
+		checkpoint, checkpointErr = s.database.CheckpointPassive(ctx)
 		if checkpointErr != nil && s.log != nil {
 			s.log.Warn("SQLite WAL checkpoint failed", "trigger", trigger, "error", checkpointErr)
 		}
 	}
 
-	if s.log != nil && s.log.Enabled(context.Background(), slog.LevelDebug) {
+	if s.log != nil && s.log.Enabled(ctx, slog.LevelDebug) {
 		s.log.Debug("SQLite cleanup completed",
 			"trigger", trigger,
 			"ip_deleted", ipDeleted,
-			"ip_records", s.ipReputation.size(),
+			"ip_records", s.ipReputation.size(ctx),
 			"contacts_deleted", contactsDeleted,
-			"contacts_records", s.correspondents.size(),
+			"contacts_records", s.correspondents.size(ctx),
 			"rejections_deleted", rejectionsDeleted,
-			"rejections_records", s.rejectionHistory.size(),
+			"rejections_records", s.rejectionHistory.size(ctx),
 			"domains_deleted", domainsDeleted,
-			"domains_records", s.domainRegistration.size(),
+			"domains_records", s.domainRegistration.size(ctx),
 			"wal_busy", checkpoint.Busy,
 			"wal_frames", checkpoint.LogFrames,
 			"wal_checkpointed_frames", checkpoint.CheckpointedFrames)
@@ -454,7 +475,7 @@ func (s *Server) logRecoveredWorkerPanic(ctx context.Context, worker string, pan
 }
 
 func (s *Server) analysisTimeout() time.Duration {
-	timeout := s.cfg.AI.Timeout.Value()*time.Duration(s.cfg.AI.Retries+1) + analysisResponseMargin
+	timeout := ai.MaximumAnalysisDuration(s.cfg.AI) + analysisResponseMargin
 	if s.cfg.DomainRegistration.Enabled {
 		timeout += s.cfg.DomainRegistration.Timeout.Value()
 	}
@@ -466,7 +487,7 @@ func (s *Server) analysisTimeout() time.Duration {
 
 func (s *Server) evaluate(parent context.Context, msg *message.Message) evaluationResult {
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(parent, s.cfg.AI.Timeout.Value()*time.Duration(s.cfg.AI.Retries+1))
+	ctx, cancel := context.WithTimeout(parent, ai.MaximumAnalysisDuration(s.cfg.AI))
 	defer cancel()
 
 	select {
@@ -558,6 +579,7 @@ func (s *Server) encodeAction(selected action) []byte {
 
 func (s *Server) logOutcome(ctx context.Context, msg *message.Message, result evaluationResult, sent bool, responseErr error) {
 	if result.err != nil {
+		logMessage := "message analysis failed"
 		attrs := []any{
 			"message_id", msg.Header("Message-ID"), "mode", s.cfg.Mode,
 			"actual_action", result.selected.String(), "error", result.err,
@@ -567,7 +589,20 @@ func (s *Server) logOutcome(ctx context.Context, msg *message.Message, result ev
 		if responseErr != nil {
 			attrs = append(attrs, "response_error", responseErr)
 		}
-		s.log.Log(ctx, slog.LevelError, "message analysis failed", attrs...)
+		var endpointErr *ai.EndpointError
+		if errors.As(result.err, &endpointErr) {
+			attrs = append(attrs, "endpoint_error_kind", endpointErr.Kind.String())
+			if endpointErr.StatusCode > 0 {
+				attrs = append(attrs, "endpoint_status_code", endpointErr.StatusCode)
+			}
+			switch endpointErr.Kind {
+			case ai.ErrorCredentials:
+				logMessage = "AI endpoint credentials rejected"
+			case ai.ErrorPaymentRequired:
+				logMessage = "AI endpoint credit unavailable"
+			}
+		}
+		s.log.Log(ctx, slog.LevelError, logMessage, attrs...)
 		return
 	}
 

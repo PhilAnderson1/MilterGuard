@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-func (store *correspondentStore) addManual(sender, recipient string) (bool, error) {
+func (store *correspondentStore) addManual(ctx context.Context, sender, recipient string) (bool, error) {
 	sender = normalizeEmailAddress(sender)
 	recipient = normalizeEmailAddress(recipient)
 	if sender == "" || recipient == "" {
@@ -14,7 +14,6 @@ func (store *correspondentStore) addManual(sender, recipient string) (bool, erro
 	}
 	now := store.now().UTC()
 	created := false
-	ctx := context.Background()
 	err := store.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		var exists int
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM correspondents
@@ -34,7 +33,7 @@ func (store *correspondentStore) addManual(sender, recipient string) (bool, erro
 	return created, err
 }
 
-func (store *correspondentStore) deleteManual(sender, recipient string) (int, error) {
+func (store *correspondentStore) deleteManual(ctx context.Context, sender, recipient string) (int, error) {
 	sender = normalizeEmailAddress(sender)
 	if sender == "" {
 		return 0, fmt.Errorf("sender must be a valid email address")
@@ -49,7 +48,7 @@ func (store *correspondentStore) deleteManual(sender, recipient string) (int, er
 		query += " AND local_address = ?"
 		args = append(args, recipient)
 	}
-	result, err := store.db.Exec(context.Background(), query, args...)
+	result, err := store.db.Exec(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}

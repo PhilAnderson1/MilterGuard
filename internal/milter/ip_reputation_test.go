@@ -108,10 +108,10 @@ func TestRejectedIPCleanupEvictsOldestShortBlock(t *testing.T) {
 	cache.add(context.Background(), second, connectionDNSResult{})
 	now = now.Add(time.Minute)
 	cache.add(context.Background(), third, connectionDNSResult{})
-	if cache.size() != 3 {
+	if cache.size(context.Background()) != 3 {
 		t.Fatal("capacity was enforced before periodic cleanup")
 	}
-	if _, err := cache.cleanup(); err != nil {
+	if _, err := cache.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := cache.lookup(context.Background(), first); ok {
@@ -511,7 +511,7 @@ func TestIPReputationCleanupRemovesExpiredSQLState(t *testing.T) {
 	addr := netip.MustParseAddr("192.0.2.100")
 	store.add(context.Background(), addr, connectionDNSResult{})
 	now = now.Add(2 * time.Hour)
-	if deleted, err := store.cleanup(); err != nil {
+	if deleted, err := store.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	} else if deleted != 2 {
 		t.Fatalf("deleted records = %d, want 2", deleted)
@@ -627,27 +627,31 @@ func TestManualIPManagementListsOnlyActiveBlocks(t *testing.T) {
 	cache := newTestIPReputationStore(t, policy, nil)
 	cache.now = func() time.Time { return now }
 	manual := netip.MustParseAddr("192.0.2.80")
-	block, err := cache.manualAdd(manual)
+	block, err := cache.manualAdd(context.Background(), manual)
 	if err != nil || block.Level != rejectedIPBlockRepeat || !block.ExpiresAt.Equal(now.Add(24*time.Hour)) {
 		t.Fatalf("manual block = %+v, %v", block, err)
 	}
 	cache.add(context.Background(), netip.MustParseAddr("192.0.2.81"), connectionDNSResult{})
-	if got := cache.listActive(time.Time{}); len(got) != 2 {
+	if got, err := cache.listActive(context.Background(), time.Time{}); err != nil || len(got) != 2 {
 		t.Fatalf("active blocks = %#v", got)
 	}
-	if got := cache.listActive(now.Add(time.Second)); len(got) != 0 {
+	if got, err := cache.listActive(context.Background(), now.Add(time.Second)); err != nil || len(got) != 0 {
 		t.Fatalf("old active blocks passed activity cutoff: %#v", got)
 	}
 	now = now.Add(2 * time.Minute)
-	got := cache.listActive(time.Time{})
+	got, err := cache.listActive(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 1 || got[0].IP != manual.String() {
 		t.Fatalf("expired short block was listed: %#v", got)
 	}
-	removed, err := cache.manualDelete(manual)
-	if err != nil || !removed || len(cache.listActive(time.Time{})) != 0 {
+	removed, err := cache.manualDelete(context.Background(), manual)
+	remaining, listErr := cache.listActive(context.Background(), time.Time{})
+	if err != nil || listErr != nil || !removed || len(remaining) != 0 {
 		t.Fatalf("manual delete = %v, %v", removed, err)
 	}
-	if len(cache.listActive(time.Time{})) != 0 {
+	if remaining, err := cache.listActive(context.Background(), time.Time{}); err != nil || len(remaining) != 0 {
 		t.Fatal("manual deletion was not persisted")
 	}
 }

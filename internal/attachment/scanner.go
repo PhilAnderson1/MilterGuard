@@ -7,6 +7,7 @@ import (
 	"compress/bzip2"
 	"compress/flate"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -66,6 +67,7 @@ type Scanner struct {
 type scanState struct {
 	archiveFiles int
 	archiveBytes int64
+	ctx          context.Context
 }
 
 func New(options Options) *Scanner {
@@ -80,10 +82,34 @@ func New(options Options) *Scanner {
 }
 
 func (s *Scanner) Scan(contentType, transferEncoding, contentDisposition string, body []byte) (*Finding, error) {
-	return s.scanMIME(contentType, transferEncoding, contentDisposition, body, "message", 0, &scanState{})
+	return s.ScanContext(context.Background(), contentType, transferEncoding, contentDisposition, body)
+}
+
+// ScanContext inspects a message while observing cancellation between MIME and
+// archive entries and during potentially long decode/decompression reads.
+func (s *Scanner) ScanContext(ctx context.Context, contentType, transferEncoding, contentDisposition string, body []byte) (*Finding, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.scanMIME(contentType, transferEncoding, contentDisposition, body, "message", 0, &scanState{ctx: ctx})
+}
+
+func (state *scanState) check(location string) error {
+	if state.ctx == nil {
+		return nil
+	}
+	select {
+	case <-state.ctx.Done():
+		return &ScanError{Path: cleanLocation(location), Err: state.ctx.Err()}
+	default:
+		return nil
+	}
 }
 
 func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition string, data []byte, location string, mimeDepth int, state *scanState) (*Finding, error) {
+	if err := state.check(location); err != nil {
+		return nil, err
+	}
 	if mimeDepth >= maxMIMEDepth {
 		return nil, &ScanError{Path: location, Err: errors.New("MIME nesting limit exceeded")}
 	}
@@ -105,6 +131,9 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 		reader := multipart.NewReader(bytes.NewReader(data), boundary)
 		var firstError error
 		for index := 1; ; index++ {
+			if err := state.check(location); err != nil {
+				return nil, err
+			}
 			part, partErr := reader.NextPart()
 			if partErr == io.EOF {
 				return nil, firstError
@@ -118,7 +147,7 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 			// The complete message has already been bounded by milter.max_message_size.
 			// Keep encoded multipart data intact here so base64 overhead does not count
 			// against the decoded attachment limit.
-			partData, readErr := io.ReadAll(part)
+			partData, readErr := io.ReadAll(contextReader{ctx: state.ctx, reader: part})
 			partLocation := fmt.Sprintf("%s/part-%d", location, index)
 			partContentType := part.Header.Get("Content-Type")
 			if mediaType == "multipart/digest" && strings.TrimSpace(partContentType) == "" {
@@ -147,7 +176,7 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 			return &Finding{Path: cleanLocation(location), Detection: "blocked extension ." + extension}, nil
 		}
 	}
-	decoded, err := decodeTransfer(transferEncoding, data, s.options.MaxAttachmentBytes)
+	decoded, err := decodeTransfer(state.ctx, transferEncoding, data, s.options.MaxAttachmentBytes)
 	if err != nil {
 		if s.options.InspectSignatures {
 			if signature := executableSignature(decoded); signature != "" {
@@ -176,6 +205,9 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 }
 
 func (s *Scanner) scanRFC822(data []byte, location string, mimeDepth int, state *scanState) (*Finding, error) {
+	if err := state.check(location); err != nil {
+		return nil, err
+	}
 	if mimeDepth >= maxMIMEDepth {
 		return nil, &ScanError{Path: location, Err: errors.New("attached-message nesting limit exceeded")}
 	}
@@ -183,7 +215,7 @@ func (s *Scanner) scanRFC822(data []byte, location string, mimeDepth int, state 
 	if err != nil {
 		return nil, &ScanError{Path: location, Err: fmt.Errorf("invalid attached email: %w", err)}
 	}
-	body, err := io.ReadAll(attached.Body)
+	body, err := io.ReadAll(contextReader{ctx: state.ctx, reader: attached.Body})
 	if err != nil {
 		return nil, &ScanError{Path: location, Err: fmt.Errorf("cannot read attached email: %w", err)}
 	}
@@ -199,6 +231,9 @@ func (s *Scanner) scanRFC822(data []byte, location string, mimeDepth int, state 
 }
 
 func (s *Scanner) scanFile(location, filename, mediaType string, data []byte, archiveDepth int, state *scanState) (*Finding, error) {
+	if err := state.check(location); err != nil {
+		return nil, err
+	}
 	if extension := s.blockedExtension(filename); extension != "" {
 		return &Finding{Path: cleanLocation(location), Detection: "blocked extension ." + extension}, nil
 	}
@@ -260,6 +295,9 @@ func (s *Scanner) scanFile(location, filename, mediaType string, data []byte, ar
 }
 
 func (s *Scanner) scanZIP(location string, data []byte, archiveDepth int, state *scanState) (*Finding, error) {
+	if err := state.check(location); err != nil {
+		return nil, err
+	}
 	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		if finding, partialErr := s.scanPartialZIP(location, data, archiveDepth, state); finding != nil || partialErr != nil {
@@ -268,6 +306,9 @@ func (s *Scanner) scanZIP(location string, data []byte, archiveDepth int, state 
 		return nil, &ScanError{Path: cleanLocation(location), Err: fmt.Errorf("invalid ZIP archive: %w", err)}
 	}
 	for _, file := range reader.File {
+		if err := state.check(location); err != nil {
+			return nil, err
+		}
 		if file.FileInfo().IsDir() {
 			continue
 		}
@@ -304,12 +345,18 @@ func (s *Scanner) scanZIP(location string, data []byte, archiveDepth int, state 
 }
 
 func (s *Scanner) scanPartialZIP(location string, data []byte, archiveDepth int, state *scanState) (*Finding, error) {
+	if err := state.check(location); err != nil {
+		return nil, err
+	}
 	const localHeaderBytes = 30
 	if len(data) < localHeaderBytes || binary.LittleEndian.Uint32(data[:4]) != 0x04034b50 {
 		return nil, nil
 	}
 	offset := 0
 	for offset+localHeaderBytes <= len(data) && binary.LittleEndian.Uint32(data[offset:offset+4]) == 0x04034b50 {
+		if err := state.check(location); err != nil {
+			return nil, err
+		}
 		flags := binary.LittleEndian.Uint16(data[offset+6 : offset+8])
 		method := binary.LittleEndian.Uint16(data[offset+8 : offset+10])
 		compressedSize := uint64(binary.LittleEndian.Uint32(data[offset+18 : offset+22]))
@@ -371,6 +418,9 @@ func (s *Scanner) scanPartialZIP(location string, data []byte, archiveDepth int,
 func (s *Scanner) scanTAR(location string, reader io.Reader, archiveDepth int, state *scanState) (*Finding, error) {
 	tarReader := tar.NewReader(reader)
 	for {
+		if err := state.check(location); err != nil {
+			return nil, err
+		}
 		header, err := tarReader.Next()
 		if err == io.EOF {
 			return nil, nil
@@ -408,6 +458,10 @@ func (s *Scanner) scanTAR(location string, reader io.Reader, archiveDepth int, s
 }
 
 func (s *Scanner) readArchiveEntry(reader io.Reader, state *scanState) ([]byte, error) {
+	if err := state.check("archive entry"); err != nil {
+		return nil, err
+	}
+	reader = contextReader{ctx: state.ctx, reader: reader}
 	remaining := s.options.MaxArchiveUncompressedBytes - state.archiveBytes
 	if remaining <= 0 {
 		return nil, errors.New("archive uncompressed-size limit exceeded")
@@ -627,7 +681,7 @@ func scriptInterpreter(data []byte) string {
 	return ""
 }
 
-func decodeTransfer(encoding string, data []byte, limit int64) ([]byte, error) {
+func decodeTransfer(ctx context.Context, encoding string, data []byte, limit int64) ([]byte, error) {
 	var reader io.Reader = bytes.NewReader(data)
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":
@@ -638,7 +692,31 @@ func decodeTransfer(encoding string, data []byte, limit int64) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unsupported content-transfer-encoding %q", encoding)
 	}
-	return readLimited(reader, limit)
+	return readLimited(contextReader{ctx: ctx, reader: reader}, limit)
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader contextReader) Read(buffer []byte) (int, error) {
+	if reader.ctx != nil {
+		select {
+		case <-reader.ctx.Done():
+			return 0, reader.ctx.Err()
+		default:
+		}
+	}
+	count, err := reader.reader.Read(buffer)
+	if reader.ctx != nil {
+		select {
+		case <-reader.ctx.Done():
+			return count, reader.ctx.Err()
+		default:
+		}
+	}
+	return count, err
 }
 
 func readLimited(reader io.Reader, limit int64) ([]byte, error) {

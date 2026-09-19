@@ -77,8 +77,8 @@ func normalizeCommandRecipient(value string) string {
 	return normalizeEmailAddress(value)
 }
 
-func (p *CommandProcessor) execute(command emailCommand, actor CommandActor) (commandResult, error) {
-	return p.executeCommand(command, actor)
+func (p *CommandProcessor) execute(ctx context.Context, command emailCommand, actor CommandActor) (commandResult, error) {
+	return p.executeCommand(ctx, command, actor)
 }
 
 // ExecuteLine parses and executes one command immediately.
@@ -87,7 +87,7 @@ func (p *CommandProcessor) ExecuteLine(ctx context.Context, line string, actor C
 	if err != nil {
 		return CommandResponse{}, err
 	}
-	result, err := p.execute(command, actor)
+	result, err := p.execute(ctx, command, actor)
 	if err != nil {
 		return CommandResponse{Canonical: command.canonical}, err
 	}

@@ -2,6 +2,7 @@ package milter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -123,5 +124,20 @@ func TestCommandProcessorsCanWriteSameLiveDatabase(t *testing.T) {
 		if !strings.Contains(response.Text, fmt.Sprintf("sender%d@example.net", index)) {
 			t.Fatalf("concurrent entry %d is missing", index)
 		}
+	}
+}
+
+func TestCommandProcessorHonorsCanceledContext(t *testing.T) {
+	cfg := commandProcessorTestConfig(filepath.Join(t.TempDir(), "milterguard.db"))
+	processor, closeProcessor, err := OpenCommandProcessor(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeProcessor()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = processor.ExecuteLine(ctx, "WHITELIST LIST * all", CommandActor{Administrator: true, DefaultRecipient: "*"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", err)
 	}
 }

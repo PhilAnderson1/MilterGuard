@@ -193,11 +193,10 @@ func (s *domainRegistrationStore) enforceCapacityTx(ctx context.Context, tx *sql
 	return result.RowsAffected()
 }
 
-func (s *domainRegistrationStore) cleanup() (int64, error) {
+func (s *domainRegistrationStore) cleanup(ctx context.Context) (int64, error) {
 	if s == nil || s.db == nil || s.lookup == nil {
 		return 0, nil
 	}
-	ctx := context.Background()
 	var deleted int64
 	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		var attemptDeleted int64
@@ -225,12 +224,12 @@ func (s *domainRegistrationStore) cleanup() (int64, error) {
 	return deleted, nil
 }
 
-func (s *domainRegistrationStore) size() int {
+func (s *domainRegistrationStore) size(ctx context.Context) int {
 	if s == nil || s.db == nil {
 		return 0
 	}
 	var count int
-	if err := s.db.QueryRow(context.Background(), `SELECT COUNT(*) FROM domain_registrations`).Scan(&count); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM domain_registrations`).Scan(&count); err != nil {
 		return 0
 	}
 	return count

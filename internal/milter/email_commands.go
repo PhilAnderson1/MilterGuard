@@ -183,7 +183,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	parts := make([]commandResult, 0, len(commands))
 	canonicals := make([]string, 0, len(commands))
 	for _, command := range commands {
-		body, operationErr := ss.server.commands.execute(command, CommandActor{Administrator: admin, DefaultRecipient: replyTo})
+		body, operationErr := ss.server.commands.execute(ctx, command, CommandActor{Administrator: admin, DefaultRecipient: replyTo})
 		canonicals = append(canonicals, command.canonical)
 		if operationErr != nil {
 			ss.server.log.ErrorContext(ctx, "email command operation failed", "authenticated_identity", identity, "command", command.canonical, "error", operationErr)
@@ -426,7 +426,9 @@ func listCommandPeriod(fields []string, index int) (commandPeriod, error) {
 	return period, nil
 }
 
-func (p *CommandProcessor) executeCommand(command emailCommand, actor CommandActor) (commandResult, error) {
+func (p *CommandProcessor) executeCommand(parent context.Context, command emailCommand, actor CommandActor) (commandResult, error) {
+	ctx, cancel := context.WithTimeout(parent, commandDatabaseTimeout)
+	defer cancel()
 	s := p.server
 	admin := actor.Administrator
 	cutoff := command.period.cutoff(time.Now().UTC())
@@ -436,13 +438,13 @@ func (p *CommandProcessor) executeCommand(command emailCommand, actor CommandAct
 	case "help":
 		return textCommandResult(func() string { return commandHelp(admin, actor.DefaultRecipient) }), nil
 	case "rejections":
-		entries, err := s.rejectionHistory.list(command.recipient, cutoff)
+		entries, err := s.rejectionHistory.list(ctx, command.recipient, cutoff)
 		if actor.NewestLast {
 			reverseSlice(entries)
 		}
 		return textCommandResult(func() string { return formatRejectionHistory(entries) }), err
 	case "rejection":
-		entry, found, err := s.rejectionHistory.getByID(command.rejectionID, actor.DefaultRecipient, admin)
+		entry, found, err := s.rejectionHistory.getByID(ctx, command.rejectionID, actor.DefaultRecipient, admin)
 		if err != nil {
 			return nil, err
 		}
@@ -451,30 +453,36 @@ func (p *CommandProcessor) executeCommand(command emailCommand, actor CommandAct
 		}
 		return func() commandReplyContent { return s.rejectionDetail(entry) }, nil
 	case "whitelist_list":
-		entries := s.correspondents.listAllowlist(command.recipient, cutoff)
+		entries, err := s.correspondents.listAllowlist(ctx, command.recipient, cutoff)
+		if err != nil {
+			return nil, err
+		}
 		if actor.NewestLast {
 			reverseSlice(entries)
 		}
 		return textCommandResult(func() string { return formatAllowlist(entries, includeAllowlistRecipient(admin, command.recipient)) }), nil
 	case "ip_list", "ip_list_lookup":
-		entries := s.ipReputation.listActive(cutoff)
+		entries, err := s.ipReputation.listActive(ctx, cutoff)
+		if err != nil {
+			return nil, err
+		}
 		entries, truncated := limitEmailCommandRows(entries)
 		if actor.NewestLast {
 			reverseSlice(entries)
 		}
 		lookup := command.kind == "ip_list_lookup"
+		if lookup {
+			entries = s.resolveActiveIPHostnames(ctx, entries)
+		}
 		return textCommandResult(func() string {
-			if lookup {
-				return formatActiveIPBlocks(s.resolveActiveIPHostnames(context.Background(), entries), true, truncated)
-			}
-			return formatActiveIPBlocks(entries, false, truncated)
+			return formatActiveIPBlocks(entries, lookup, truncated)
 		}), nil
 	case "ip_add":
-		block, err := s.ipReputation.manualAdd(command.ip)
+		block, err := s.ipReputation.manualAdd(ctx, command.ip)
 		outcome := fmt.Sprintf("blocked %s until %s", block.IP, block.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 		return textCommandResult(func() string { return outcome + ".\n" }), err
 	case "ip_delete":
-		removed, err := s.ipReputation.manualDelete(command.ip)
+		removed, err := s.ipReputation.manualDelete(ctx, command.ip)
 		outcome := "IP address was not present"
 		if removed {
 			outcome = "IP reputation record deleted"
@@ -483,7 +491,7 @@ func (p *CommandProcessor) executeCommand(command emailCommand, actor CommandAct
 	case "whitelist":
 		var outcome string
 		if command.verb == "ADD" {
-			created, err := s.correspondents.addManual(command.sender, command.recipient)
+			created, err := s.correspondents.addManual(ctx, command.sender, command.recipient)
 			if created {
 				outcome = "allowlist entry added"
 			} else {
@@ -491,7 +499,7 @@ func (p *CommandProcessor) executeCommand(command emailCommand, actor CommandAct
 			}
 			return textCommandResult(func() string { return outcome + ".\n" }), err
 		}
-		removed, err := s.correspondents.deleteManual(command.sender, command.recipient)
+		removed, err := s.correspondents.deleteManual(ctx, command.sender, command.recipient)
 		outcome = fmt.Sprintf("removed %d allowlist entries", removed)
 		return textCommandResult(func() string { return outcome + ".\n" }), err
 	default:
@@ -506,7 +514,7 @@ func reverseSlice[T any](values []T) {
 }
 
 func (ss *session) executeEmailCommand(command emailCommand, admin bool) (commandResult, error) {
-	return ss.server.commands.execute(command, CommandActor{Administrator: admin, DefaultRecipient: ss.envelopeSender})
+	return ss.server.commands.execute(context.Background(), command, CommandActor{Administrator: admin, DefaultRecipient: ss.envelopeSender})
 }
 
 func commandHelp(admin bool, defaultRecipient ...string) string {

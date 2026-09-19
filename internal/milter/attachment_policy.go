@@ -18,7 +18,8 @@ func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 	case <-ctx.Done():
 		return true, false
 	}
-	finding, scanErr := ss.server.attachments.Scan(
+	finding, scanErr := ss.server.attachments.ScanContext(
+		ctx,
 		ss.message.FirstHeader("Content-Type"),
 		ss.message.FirstHeader("Content-Transfer-Encoding"),
 		ss.message.FirstHeader("Content-Disposition"),

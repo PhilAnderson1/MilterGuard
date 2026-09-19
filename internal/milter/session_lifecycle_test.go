@@ -23,9 +23,11 @@ type deadlineFailingConn struct {
 func (conn deadlineFailingConn) SetDeadline(time.Time) error { return conn.err }
 
 type blockingAnalyzer struct {
-	started  chan struct{}
-	release  chan struct{}
-	canceled chan struct{}
+	started       chan struct{}
+	release       chan struct{}
+	canceled      chan struct{}
+	cancelRelease chan struct{}
+	finished      chan struct{}
 }
 
 func (a *blockingAnalyzer) Analyze(ctx context.Context, _ ai.Input) (ai.Decision, error) {
@@ -36,6 +38,12 @@ func (a *blockingAnalyzer) Analyze(ctx context.Context, _ ai.Input) (ai.Decision
 	case <-ctx.Done():
 		if a.canceled != nil {
 			close(a.canceled)
+		}
+		if a.cancelRelease != nil {
+			<-a.cancelRelease
+		}
+		if a.finished != nil {
+			close(a.finished)
 		}
 		return ai.Decision{}, ctx.Err()
 	}
@@ -128,7 +136,10 @@ func TestCompletedCommandRemainsUsableAcrossReadTimeouts(t *testing.T) {
 }
 
 func TestProgressWriteFailureCancelsAnalysis(t *testing.T) {
-	analyzer := &blockingAnalyzer{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}
+	analyzer := &blockingAnalyzer{
+		started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{}),
+		cancelRelease: make(chan struct{}), finished: make(chan struct{}),
+	}
 	server, conn, done := testServer(t, analyzer)
 	server.progressInterval = 10 * time.Millisecond
 
@@ -156,6 +167,17 @@ func TestProgressWriteFailureCancelsAnalysis(t *testing.T) {
 	case <-analyzer.canceled:
 	case <-time.After(time.Second):
 		t.Fatal("analysis was not canceled after the progress response failed")
+	}
+	select {
+	case <-done:
+		t.Fatal("session exited before its analysis worker finished")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(analyzer.cancelRelease)
+	select {
+	case <-analyzer.finished:
+	case <-time.After(time.Second):
+		t.Fatal("analysis worker did not finish after cancellation cleanup")
 	}
 	select {
 	case <-done:
