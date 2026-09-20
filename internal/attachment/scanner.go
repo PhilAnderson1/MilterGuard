@@ -70,6 +70,7 @@ type scanState struct {
 	ctx          context.Context
 }
 
+// New constructs a scanner from normalized attachment policy limits.
 func New(options Options) *Scanner {
 	blocked := make(map[string]struct{}, len(options.BlockedExtensions))
 	for _, extension := range options.BlockedExtensions {
@@ -87,6 +88,8 @@ func (s *Scanner) Scan(contentType, transferEncoding, contentDisposition string,
 
 // ScanContext inspects a message while observing cancellation between MIME and
 // archive entries and during potentially long decode/decompression reads.
+// ScanContext examines one MIME body and recursively inspects supported
+// archives within the configured depth, file-count, and expanded-size limits.
 func (s *Scanner) ScanContext(ctx context.Context, contentType, transferEncoding, contentDisposition string, body []byte) (*Finding, error) {
 	if ctx == nil {
 		ctx = context.Background()

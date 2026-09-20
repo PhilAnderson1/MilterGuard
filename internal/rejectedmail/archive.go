@@ -1,5 +1,3 @@
-// Package rejectedmail stores bounded copies of rejected messages and removes
-// them according to age and capacity limits.
 package rejectedmail
 
 import (
@@ -39,12 +37,16 @@ type storedFile struct {
 	modifiedAt time.Time
 }
 
+// New describes an archive rooted at one configured directory. Directories are
+// created lazily when the first rejected message is saved.
 func New(opts Options, log *slog.Logger) *Archive {
 	return &Archive{opts: opts, log: log, now: time.Now}
 }
 
 // Cleanup removes expired date trees, measures the remaining archive, and
 // removes the oldest individual messages only when the byte limit is exceeded.
+// Cleanup removes expired date directories, then deletes oldest files only if
+// the archive remains above its target maximum size.
 func (a *Archive) Cleanup() error {
 	if err := os.MkdirAll(a.opts.Directory, 0750); err != nil {
 		return err
@@ -96,6 +98,8 @@ func (a *Archive) SaveWithRecordID(message []byte, recordID uint64) (string, err
 
 // SaveWithRecordIDAt saves a message using the rejection record's timestamp so
 // later retrieval can derive the exact date directory from the database row.
+// SaveWithRecordIDAt writes one original message beneath its UTC date path and
+// uses the rejection record ID as the filename when available.
 func (a *Archive) SaveWithRecordIDAt(message []byte, recordID uint64, rejectedAt time.Time) (string, error) {
 	if recordID == 0 {
 		return "", fmt.Errorf("rejection record ID must be greater than zero")

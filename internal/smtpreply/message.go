@@ -1,5 +1,3 @@
-// Package smtpreply builds and submits automatic command-reply messages.
-// It deliberately contains no command authorization or Milter policy.
 package smtpreply
 
 import (
@@ -35,6 +33,8 @@ type Message struct {
 }
 
 // Build renders a complete RFC-style message using CRLF line endings.
+// Build formats a plain-text or multipart command reply with automatic-response
+// suppression headers and deterministic MIME framing.
 func Build(message Message) ([]byte, error) {
 	var payload bytes.Buffer
 	for _, header := range []Header{

@@ -61,6 +61,9 @@ type messageContext struct {
 	recipientsComplete  bool
 }
 
+// applyPostDecisionUpdates records adaptive trust and reputation evidence only
+// after a completed enforce-mode decision. Analysis failures never count as
+// legitimate evidence.
 func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, current messageContext, result evaluationResult, inbound inboundEvidence) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), postDecisionUpdateTimeout)
 	defer cancel()

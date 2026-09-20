@@ -1,5 +1,3 @@
-// Package rdap securely discovers and queries RDAP services for domain
-// registration and expiration dates.
 package rdap
 
 import (
@@ -41,6 +39,8 @@ type Client struct {
 
 // New constructs an RDAP client whose complete HTTP operations are bounded by
 // timeout.
+// New creates a concurrent-safe RDAP client with proxy use disabled and all
+// requests bounded by timeout.
 func New(timeout time.Duration) *Client {
 	dialer := &net.Dialer{}
 	client := &Client{
@@ -112,6 +112,8 @@ func (c *Client) dialContext(ctx context.Context, network, endpoint string) (net
 }
 
 // Lookup returns the registration and expiration dates for domain.
+// Lookup discovers the authoritative RDAP services for domain and returns its
+// registration and expiration events.
 func (c *Client) Lookup(ctx context.Context, domain string) (time.Time, time.Time, error) {
 	services, err := c.rdapServices(ctx)
 	if err != nil {

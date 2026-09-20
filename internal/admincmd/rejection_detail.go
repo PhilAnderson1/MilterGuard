@@ -11,6 +11,8 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
+// rejectionDetail reads the archived original on demand and regenerates its
+// cleaned body with the current message parser before attaching the `.eml`.
 func (p *Processor) rejectionDetail(entry stores.Rejection) Response {
 	processedBody := "Saved message is not available."
 	var attachments []Attachment

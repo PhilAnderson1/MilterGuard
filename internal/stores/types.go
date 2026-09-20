@@ -1,5 +1,3 @@
-// Package stores defines SQL-independent repository contracts and values for
-// MilterGuard's persistent state.
 package stores
 
 import (

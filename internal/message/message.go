@@ -127,6 +127,7 @@ var countedSecurityHeaders = map[string]bool{
 	"x-milterguard-score":          true,
 }
 
+// New creates empty bounded message state for one SMTP transaction.
 func New(maxBytes int64) *Message {
 	return &Message{
 		Headers:           make(map[string][]string),
@@ -137,6 +138,9 @@ func New(maxBytes int64) *Message {
 		MaxBytes:          maxBytes,
 	}
 }
+
+// AddHeader records one supplied header while enforcing aggregate retention
+// limits and decoding selected identity headers once for later consumers.
 func (m *Message) AddHeader(name, value string) {
 	m.addArchiveHeader(name, value)
 	name = strings.ToLower(strings.TrimSpace(name))
@@ -209,6 +213,9 @@ func (m *Message) addArchiveHeader(name, value string) {
 	m.archiveHeaderBytes += int64(len(line))
 	_, _ = m.archiveHeaders.WriteString(line)
 }
+
+// AddBody appends a body chunk up to the configured message limit while still
+// tracking the full byte count for truncation decisions.
 func (m *Message) AddBody(p []byte) {
 	remaining := m.MaxBytes - m.archiveHeaderBytes - m.bodySize
 	if remaining <= 0 {
@@ -266,6 +273,8 @@ func (m *Message) BodyBytes() []byte { return m.Body.Bytes() }
 
 // ArchiveBytes returns a bounded RFC 5322/MIME message reconstructed from the
 // headers and body supplied through the Milter protocol.
+// ArchiveBytes reconstructs a syntactically valid bounded RFC message from the
+// retained original headers and body for rejected-message storage.
 func (m *Message) ArchiveBytes() []byte {
 	limit := m.MaxBytes
 	if limit < 2 {

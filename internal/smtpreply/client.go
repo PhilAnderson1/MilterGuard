@@ -28,6 +28,8 @@ type Client struct {
 	dial    func(context.Context, string, string) (net.Conn, error)
 }
 
+// New constructs a concurrent-safe SMTP reply client with immutable delivery
+// options and no persistent connection state.
 func New(options Options) *Client {
 	if options.Timeout <= 0 {
 		options.Timeout = defaultTimeout
@@ -35,6 +37,8 @@ func New(options Options) *Client {
 	return &Client{options: options, dial: (&net.Dialer{}).DialContext}
 }
 
+// Send builds message and submits one SMTP transaction using an empty envelope
+// sender, applying the configured opportunistic or required STARTTLS policy.
 func (c *Client) Send(parent context.Context, message Message) error {
 	payload, err := Build(message)
 	if err != nil {

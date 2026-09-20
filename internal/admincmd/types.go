@@ -1,5 +1,3 @@
-// Package admincmd implements MilterGuard administration commands independently
-// of the email and terminal transports that carry them.
 package admincmd
 
 import (
@@ -74,6 +72,8 @@ type Processor struct {
 	log             *slog.Logger
 }
 
+// New constructs a transport-independent command processor from repository,
+// archive, and optional hostname-resolution dependencies.
 func New(deps Dependencies) *Processor {
 	if deps.Now == nil {
 		deps.Now = time.Now

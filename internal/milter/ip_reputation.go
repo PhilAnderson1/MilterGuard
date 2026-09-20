@@ -41,6 +41,8 @@ type ipReputationStore struct {
 	log             *slog.Logger
 }
 
+// newIPReputationStore adds configured IP and reverse-DNS exclusions around
+// the persistent strike and block repository.
 func newIPReputationStore(cfg config.IPReputationConfig, repository stores.IPReputationRepository, log *slog.Logger) *ipReputationStore {
 	policy := &ipReputationStore{repository: repository, enabledFeature: ipReputationFeaturesEnabled(cfg), log: log}
 	for _, entry := range cfg.IPAllowlist {
@@ -87,6 +89,8 @@ func (s *ipReputationStore) allowed(addr netip.Addr) (netip.Prefix, bool) {
 	return netip.Prefix{}, false
 }
 
+// add records one AI or deterministic sender-domain rejection unless the
+// address or its confirmed reverse-DNS domain is excluded from reputation.
 func (s *ipReputationStore) add(ctx context.Context, addr netip.Addr, dns connectionDNSResult) bool {
 	if !s.enabled() || !addr.IsValid() {
 		return false

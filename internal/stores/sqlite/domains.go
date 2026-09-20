@@ -17,6 +17,8 @@ type domainRepository struct {
 	now     func() time.Time
 }
 
+// NewDomains binds cached domain-registration reads, upserts, and maintenance
+// to the shared SQLite database.
 func NewDomains(db *sqlitedb.Store, options DomainOptions) stores.DomainRegistrationCache {
 	return &domainRepository{db: db, options: options, now: clock(options.Now)}
 }
@@ -75,6 +77,8 @@ func (r *domainRepository) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (i
 	return result.RowsAffected()
 }
 
+// Cleanup removes records beyond the expiration grace period and trims the
+// earliest-expiring remainder to the configured capacity.
 func (r *domainRepository) Cleanup(ctx context.Context) (int64, error) {
 	if r == nil || r.db == nil {
 		return 0, nil

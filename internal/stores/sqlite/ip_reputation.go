@@ -40,6 +40,8 @@ type ipReputationRepository struct {
 	log                          *slog.Logger
 }
 
+// NewIPReputation binds strike, block, listing, and maintenance operations to
+// the shared SQLite database.
 func NewIPReputation(db *sqlitedb.Store, options IPReputationOptions, log *slog.Logger) stores.PersistentIPReputationRepository {
 	return &ipReputationRepository{db: db, shortDuration: options.BlockDuration, repeatThreshold: options.RepeatThreshold,
 		repeatWindow: options.RepeatWindow, repeatDuration: options.RepeatBlockDuration,
@@ -454,6 +456,9 @@ func (r *ipReputationRepository) ListActiveBlocks(ctx context.Context, list stor
 	}
 	return stores.IPBlockPage{Entries: out, Truncated: truncated}, nil
 }
+
+// Cleanup removes inactive strike-less rows, prunes old strikes, clears expired
+// blocks where appropriate, and enforces repository capacity.
 func (r *ipReputationRepository) Cleanup(ctx context.Context) (int64, error) {
 	if !r.enabled() {
 		return 0, nil

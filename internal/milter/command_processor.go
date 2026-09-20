@@ -19,6 +19,8 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
+// commandProcessor binds administration logic to repositories, archive access,
+// and optional reverse-DNS enrichment shared by terminal and email commands.
 func commandProcessor(cfg config.Config, correspondents stores.CorrespondentAdminRepository,
 	rejections stores.RejectionRepository, ipReputation stores.IPReputationRepository,
 	archive *rejectedmail.Archive, resolver dnsResolver, log *slog.Logger) *admincmd.Processor {

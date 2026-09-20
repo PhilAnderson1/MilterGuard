@@ -63,6 +63,9 @@ func newSession(deps *sessionDependencies, conn net.Conn) *session {
 	return ss
 }
 
+// run owns one Milter connection until EOF, cancellation, or a protocol or
+// transport failure. Message state is reset between transactions on the same
+// connection.
 func (ss *session) run(ctx context.Context) {
 	stopClose := context.AfterFunc(ctx, func() {
 		_ = ss.conn.Close()
@@ -92,6 +95,8 @@ func (ss *session) run(ctx context.Context) {
 		}
 	}
 }
+
+// Protocol command handling
 
 func (ss *session) handleReadError(ctx context.Context, bytesRead int, err error) bool {
 	if ctx.Err() != nil {
@@ -272,6 +277,11 @@ func (ss *session) addHeader(payload []byte) bool {
 	return ss.sendContinue(commandHeader)
 }
 
+// End-of-message policy evaluation
+
+// finishMessage runs policies that need the complete message, obtains an AI
+// result when necessary, sends the final Milter response, and schedules the
+// resulting reputation and correspondent updates.
 func (ss *session) finishMessage(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, ss.deps.analysis.analysisTimeout())
 	defer cancel()
@@ -343,6 +353,8 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	return true
 }
 
+// evaluateWithProgress runs potentially slow message analysis in a worker and
+// sends periodic progress frames so the MTA does not time out the transaction.
 func (ss *session) evaluateWithProgress(ctx context.Context, inbound inboundEvidence) (evaluationResult, error) {
 	started := time.Now()
 	workerCtx, cancelWorker := context.WithCancel(ctx)
@@ -382,6 +394,8 @@ func (ss *session) evaluateWithProgress(ctx context.Context, inbound inboundEvid
 	}
 }
 
+// evaluateMessage adds lazily obtained domain and connection evidence before
+// handing the completed message to the analysis service.
 func (ss *session) evaluateMessage(ctx context.Context, inbound inboundEvidence) evaluationResult {
 	if inbound.authenticatedDomain != "" {
 		info, err := ss.deps.policy.domainRegistration.evidence(ctx, inbound.authenticatedDomain)
@@ -440,6 +454,10 @@ type inboundEvidence struct {
 	authenticatedDomain string
 }
 
+// Authentication, correspondent, and connection evidence
+
+// prepareInboundEvidence derives trusted authentication and correspondent
+// facts and decides whether deterministic sender trust can bypass AI analysis.
 func (ss *session) prepareInboundEvidence(ctx context.Context) inboundEvidence {
 	evidence := inboundEvidence{recipientsComplete: ss.recipientSetComplete()}
 	if ss.authentication.Authenticated {
@@ -488,6 +506,8 @@ func (ss *session) recipientSetComplete() bool {
 	}
 	return true
 }
+
+// Post-decision state updates
 
 func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluationResult, inbound inboundEvidence) {
 	ss.deps.policy.applyPostDecisionUpdates(ctx, ss.messageContext(inbound.recipientsComplete), result, inbound)
@@ -711,6 +731,8 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 	ss.deps.log.InfoContext(ctx, "message rejected by sending IP reputation", attrs...)
 	return true, true
 }
+
+// Milter response writing and session reset
 
 func (ss *session) resetMessage(phase protocolPhase) {
 	ss.message = message.New(ss.deps.protocol.maxMessageSize)

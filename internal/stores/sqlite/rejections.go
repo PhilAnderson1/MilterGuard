@@ -28,6 +28,8 @@ type rejectionRepository struct {
 	log     *slog.Logger
 }
 
+// NewRejections binds rejection recording, scoped history queries, and cleanup
+// to the shared SQLite database.
 func NewRejections(db *sqlitedb.Store, options RejectionOptions, log *slog.Logger) stores.RejectionHistoryRepository {
 	return &rejectionRepository{options: options, db: db, now: clock(options.Now), log: log}
 }
@@ -255,6 +257,8 @@ func (r *rejectionRepository) enforceCapacityTx(ctx context.Context, tx *sql.Tx)
 	return result.RowsAffected()
 }
 
+// Cleanup removes expired rejection events and then trims the oldest remaining
+// records to the configured capacity.
 func (r *rejectionRepository) Cleanup(ctx context.Context) (int64, error) {
 	if !r.enabled() {
 		return 0, nil

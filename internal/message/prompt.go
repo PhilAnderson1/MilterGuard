@@ -30,6 +30,8 @@ func (m *Message) Prompt(maxChars int) string {
 	return m.BuildAnalysis(maxChars, VisionOptions{Mode: "off"}).Prompt
 }
 
+// BuildAnalysis produces the bounded text and optional decoded inline images
+// supplied to the AI client after MIME and HTML processing.
 func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
 	keys := make([]string, 0, len(m.Headers))
 	for key := range m.Headers {
@@ -72,6 +74,8 @@ func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
 
 // ProcessedBody returns the decoded and normalized body representation used in
 // the BODY section of AI analysis, bounded at valid UTF-8 rune boundaries.
+// ProcessedBody returns the cleaned representation shared by AI analysis and
+// administration retrieval of an archived rejected message.
 func (m *Message) ProcessedBody(maxChars int) string {
 	if maxChars < 1 {
 		return ""

@@ -1,5 +1,3 @@
-// Package sqlitedb owns MilterGuard's SQLite connection, schema lifecycle,
-// transaction handling, and transient-lock retry policy.
 package sqlitedb
 
 import (
@@ -38,6 +36,8 @@ type Options struct {
 	MaxOpen     int
 }
 
+// DefaultOptions returns the connection, busy-retry, and pool settings used by
+// normal service and standalone command mode.
 func DefaultOptions() Options {
 	return Options{
 		// modernc SQLite checks context cancellation after a busy-handler wait.
@@ -74,6 +74,8 @@ type Row struct {
 	args  []any
 }
 
+// Open creates or opens the database, applies connection protections and all
+// pending embedded migrations, and refuses incompatible existing state.
 func Open(ctx context.Context, path string, options Options) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("SQLite database path is empty")
@@ -196,6 +198,7 @@ func migration(version int) (string, string, error) {
 	return names[0], string(content), err
 }
 
+// Exec executes a statement with bounded retries for transient SQLite locking.
 func (s *Store) Exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	var result sql.Result
 	err := s.retry(ctx, func() error {
@@ -206,6 +209,8 @@ func (s *Store) Exec(ctx context.Context, query string, args ...any) (sql.Result
 	return result, err
 }
 
+// Query starts a row-producing statement with bounded lock retries. The caller
+// owns and must close the returned rows.
 func (s *Store) Query(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	var rows *sql.Rows
 	err := s.retry(ctx, func() error {
@@ -216,6 +221,8 @@ func (s *Store) Query(ctx context.Context, query string, args ...any) (*sql.Rows
 	return rows, err
 }
 
+// QueryRow defers execution until Scan so lock failures can use the same retry
+// policy as Exec and Query.
 func (s *Store) QueryRow(ctx context.Context, query string, args ...any) *Row {
 	return &Row{store: s, ctx: ctx, query: query, args: args}
 }
@@ -231,6 +238,7 @@ func (s *Store) CheckpointPassive(ctx context.Context) (CheckpointResult, error)
 	return result, err
 }
 
+// Scan executes the deferred single-row query with bounded busy retries.
 func (r *Row) Scan(dest ...any) error {
 	return r.store.retry(r.ctx, func() error {
 		return r.store.db.QueryRowContext(r.ctx, r.query, r.args...).Scan(dest...)
@@ -282,6 +290,8 @@ func isBusy(err error) bool {
 	return code == lib.SQLITE_BUSY || code == lib.SQLITE_LOCKED
 }
 
+// Close releases the process's SQLite connection pool. The owning server or
+// standalone command-mode lifecycle calls it after database work has stopped.
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil

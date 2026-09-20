@@ -34,6 +34,8 @@ func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 	return true, ss.finishAttachmentDecision(ctx, result.proposed, result.path, result.detection, result.err)
 }
 
+// evaluate runs the attachment scanner under its concurrency limit and maps
+// findings or incomplete inspection to the configured deterministic action.
 func (s *attachmentPolicyService) evaluate(ctx context.Context, msg *message.Message) attachmentPolicyResult {
 	if s == nil || s.scanner == nil {
 		return attachmentPolicyResult{}
@@ -72,6 +74,8 @@ func (s *attachmentPolicyService) evaluate(ctx context.Context, msg *message.Mes
 	}
 }
 
+// finishAttachmentDecision applies operating mode, writes any accepted-message
+// headers, records deterministic rejections, and sends the Milter response.
 func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action, path, detection string, scanErr error) bool {
 	selected := proposed
 	if ss.deps.attachments.mode != "enforce" {

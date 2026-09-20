@@ -22,6 +22,8 @@ type connectionDNSResult struct {
 	names  []message.ReverseDNSName
 }
 
+// resolveConnectionDNS obtains bounded PTR names and confirms each against the
+// connecting address. Filtering and IP exclusions consume the resulting facts.
 func resolveConnectionDNS(parent context.Context, resolver dnsResolver, addr netip.Addr, timeout time.Duration) connectionDNSResult {
 	if resolver == nil || timeout <= 0 || !netsafety.AddressRoutable(addr) {
 		return connectionDNSResult{status: message.ReverseDNSNotApplicable}

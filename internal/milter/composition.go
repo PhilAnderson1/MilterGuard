@@ -27,6 +27,9 @@ type runtimeComponents struct {
 	err         error
 }
 
+// buildRuntime constructs the shared services used by Milter sessions and the
+// maintenance loop. It is the normal-service composition boundary: concrete
+// repositories and network clients are created here and injected downstream.
 func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtimeComponents {
 	internalToken := ""
 	var tokenErr error

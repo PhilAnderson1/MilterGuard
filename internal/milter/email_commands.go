@@ -40,6 +40,10 @@ func (ss *session) isInternalMessage() bool {
 		(!ss.peerIP.IsValid() || ss.peerIP.IsLoopback() || !netsafety.AddressRoutable(ss.peerIP))
 }
 
+// handleEmailCommand recognizes the configured command recipient, authorizes
+// the authenticated sender, executes each command line, and queues one reply.
+// Its booleans report whether it handled the message and whether the Milter
+// connection may remain open.
 func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	cfg := ss.deps.commands.cfg
 	if !cfg.Enabled {
@@ -261,6 +265,8 @@ func (s *emailCommandService) queueReply(recipient, subject, body string) bool {
 	})
 }
 
+// queueReplyContentFunc reserves a bounded reply slot and defers expensive
+// response rendering and SMTP submission to a panic-contained worker.
 func (s *emailCommandService) queueReplyContentFunc(recipient, subject string, content func() commandReplyContent) bool {
 	if !s.cfg.SendReplies {
 		return false

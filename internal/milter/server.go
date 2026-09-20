@@ -64,6 +64,8 @@ type Server struct {
 	maintenance        *maintenanceService
 }
 
+// NewServer assembles a Milter server without opening its listener. Callers
+// must check StartupError before serving and call Close after Serve returns.
 func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	runtime := buildRuntime(cfg, analyzer, log)
 	return &Server{
@@ -98,6 +100,8 @@ func (s *Server) Close() error {
 // StartupError reports persistent state that could not be loaded safely.
 func (s *Server) StartupError() error { return s.startupErr }
 
+// Serve performs startup maintenance, runs periodic cleanup, accepts bounded
+// Milter connections, and waits for active sessions before returning.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	if s.startupErr != nil {
 		return s.startupErr
@@ -186,6 +190,8 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
+// cleanupPersistentStores removes expired or excess repository records and
+// passively checkpoints the WAL. Startup and the maintenance timer call it.
 func (s *maintenanceService) cleanupPersistentStores(parent context.Context, trigger string) error {
 	ctx, cancel := context.WithTimeout(parent, maintenanceDatabaseTimeout)
 	defer cancel()
@@ -348,6 +354,8 @@ func (s *maintenanceService) startRejectedMailCleanup(ctx context.Context) {
 	}()
 }
 
+// runRejectedMailCleanup applies archive retention and target-size limits. It
+// is intentionally independent of SQLite rejection-history cleanup.
 func (s *maintenanceService) runRejectedMailCleanup() {
 	s.runMaintenance("rejected-mail cleanup", func() {
 		if err := s.archive.Cleanup(); err != nil {
@@ -356,6 +364,8 @@ func (s *maintenanceService) runRejectedMailCleanup() {
 	})
 }
 
+// runMaintenance contains panics from a background maintenance operation so a
+// cleanup defect cannot terminate the mail-filtering service.
 func (s *maintenanceService) runMaintenance(name string, operation func()) {
 	defer func() {
 		if panicValue := recover(); panicValue != nil {
@@ -365,6 +375,8 @@ func (s *maintenanceService) runMaintenance(name string, operation func()) {
 	operation()
 }
 
+// recordRejection persists one rejection event and all affected recipients,
+// then saves the original message under that record ID when archiving is on.
 func (s *messagePolicyService) recordRejection(ctx context.Context, msg *message.Message, visibleSender, envelopeSender string, recipients, reasons []string, source string) {
 	if msg == nil {
 		return
@@ -438,6 +450,8 @@ func (s *analysisService) analysisTimeout() time.Duration {
 	return timeout
 }
 
+// evaluate submits a prepared message to the analyzer and applies configured
+// mode and confidence thresholds to produce the final Milter action.
 func (s *analysisService) evaluate(parent context.Context, msg *message.Message) evaluationResult {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(parent, ai.MaximumAnalysisDuration(s.ai))

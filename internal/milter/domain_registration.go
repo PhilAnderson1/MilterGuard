@@ -60,6 +60,9 @@ func registrableDomain(domain string) string {
 	return normalizeDomain(registrable)
 }
 
+// evidence returns current cached registration evidence or coalesces a bounded
+// RDAP refresh for the registrable domain. Failed lookups are suppressed for a
+// short interval without replacing an existing cached record.
 func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (message.DomainRegistrationInfo, error) {
 	domain = registrableDomain(domain)
 	if s == nil || s.repository == nil || s.lookup == nil || domain == "" {
@@ -150,6 +153,8 @@ func (s *domainRegistrationStore) Count(ctx context.Context) (int, error) {
 	return s.maintenance.Count(ctx)
 }
 
+// lookupSafely contains a panic from the injected network lookup at the policy
+// boundary so one RDAP defect cannot terminate a Milter session.
 func (s *domainRegistrationStore) lookupSafely(ctx context.Context, domain string) (registeredAt, expiresAt time.Time, err error) {
 	defer func() {
 		if panicValue := recover(); panicValue != nil {

@@ -23,6 +23,8 @@ type correspondentRepository struct {
 	log     *slog.Logger
 }
 
+// NewCorrespondents binds correspondent policy and administration operations
+// to the shared SQLite database.
 func NewCorrespondents(db *sqlitedb.Store, options CorrespondentOptions, log *slog.Logger) stores.CorrespondentRepository {
 	return &correspondentRepository{options: options, db: db, now: clock(options.Now), log: log}
 }
@@ -447,6 +449,8 @@ func (r *correspondentRepository) enforceCapacityTx(ctx context.Context, tx *sql
 	return removed + remainingRemoved, err
 }
 
+// Cleanup removes stale records first and then trims the least recently active
+// records until the configured capacity is satisfied.
 func (r *correspondentRepository) Cleanup(ctx context.Context) (int64, error) {
 	if r == nil || r.db == nil {
 		return 0, nil

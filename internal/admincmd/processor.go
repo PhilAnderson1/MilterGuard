@@ -12,6 +12,9 @@ func textResponse(canonical string, render func() string) DeferredResponse {
 	return func() Response { return Response{Canonical: canonical, Text: render()} }
 }
 
+// Execute performs the database portion of a parsed command and returns a
+// deferred renderer. Deferral keeps archived-message parsing off the Milter
+// end-of-message path used by email commands.
 func (p *Processor) Execute(parent context.Context, command Command, actor Actor) (DeferredResponse, error) {
 	ctx, cancel := context.WithTimeout(parent, p.databaseTimeout)
 	defer cancel()
@@ -98,6 +101,8 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 	}
 }
 
+// ExecuteLine parses, executes, and immediately renders one command. Terminal
+// command mode uses it when no asynchronous response transport is involved.
 func (p *Processor) ExecuteLine(ctx context.Context, line string, actor Actor) (Response, error) {
 	command, err := p.Parse(strings.TrimSpace(line), actor)
 	if err != nil {

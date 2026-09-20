@@ -170,6 +170,8 @@ type CorrespondentsConfig struct {
 	ActivityUpdateInterval       Duration `yaml:"activity_update_interval"`
 }
 
+// Load applies defaults, strictly decodes one YAML file, and validates the
+// complete configuration before returning it to the executable.
 func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -281,6 +283,8 @@ func defaults() Config {
 	}
 }
 
+// Validate rejects unsafe, contradictory, or incomplete settings that cannot
+// be handled reliably at runtime.
 func (c Config) Validate() error {
 	if c.Mode != "monitor" && c.Mode != "tag" && c.Mode != "enforce" {
 		return fmt.Errorf("mode must be monitor, tag, or enforce")

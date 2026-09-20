@@ -9,6 +9,8 @@ import (
 
 // ParseArchived parses a bounded RFC 5322 message into the same Message type
 // used by live Milter processing.
+// ParseArchived reconstructs normal Message state from a saved RFC message so
+// retrieval commands use the same processing pipeline as live mail.
 func ParseArchived(raw []byte, maxBytes int64) (*Message, error) {
 	if maxBytes < 1 || int64(len(raw)) > maxBytes {
 		return nil, fmt.Errorf("archived message exceeds configured size limit")

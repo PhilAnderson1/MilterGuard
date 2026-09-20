@@ -1,5 +1,3 @@
-// Package netsafety provides shared normalization and public-address checks for
-// network destinations received from DNS or other untrusted inputs.
 package netsafety
 
 import (

@@ -1,5 +1,3 @@
-// Package mailauth parses authentication evidence added by trusted local mail
-// services. It deliberately does not verify DKIM, SPF, or DMARC itself.
 package mailauth
 
 import (
