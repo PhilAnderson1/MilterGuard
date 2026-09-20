@@ -2,6 +2,7 @@ package rejectedmail
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,20 +105,19 @@ func TestCleanupEnforcesTotalByteLimit(t *testing.T) {
 	}
 }
 
-func TestSaveWithRecordIDUsesRecordIDAndDoesNotOverwrite(t *testing.T) {
+func TestSaveWithRecordIDAtUsesRecordIDAndDoesNotOverwrite(t *testing.T) {
 	root := t.TempDir()
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 	archive := New(Options{Directory: root, Retention: 24 * time.Hour, MaxTotalBytes: 100}, nil)
-	archive.now = func() time.Time { return now }
 
-	path, err := archive.SaveWithRecordID([]byte("first"), 123)
+	path, err := archive.SaveWithRecordIDAt([]byte("first"), 123, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := filepath.Join(root, "2026", "09", "07", "123.eml"); path != want {
 		t.Fatalf("path = %q, want %q", path, want)
 	}
-	if _, err := archive.SaveWithRecordID([]byte("replacement"), 123); err == nil {
+	if _, err := archive.SaveWithRecordIDAt([]byte("replacement"), 123, now); err == nil {
 		t.Fatal("expected duplicate record ID to be refused")
 	}
 	contents, err := os.ReadFile(path)
@@ -177,7 +177,7 @@ func TestCapacityCleanupUsesModificationTime(t *testing.T) {
 
 	archive := New(Options{Directory: root, Retention: 30 * 24 * time.Hour, MaxTotalBytes: int64(len(newPath) + len("newest"))}, nil)
 	archive.now = func() time.Time { return newTime.Add(time.Hour) }
-	if _, err := archive.SaveWithRecordID([]byte("newest"), 11); err != nil {
+	if _, err := archive.SaveWithRecordIDAt([]byte("newest"), 11, newTime.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := archive.Cleanup(); err != nil {
@@ -198,11 +198,12 @@ func TestReadWithRecordIDUsesStoredDateAndBounds(t *testing.T) {
 	if _, err := archive.SaveWithRecordIDAt([]byte("message"), 123, when); err != nil {
 		t.Fatal(err)
 	}
-	contents, err := archive.ReadWithRecordID(123, when, 1024)
-	if err != nil || string(contents) != "message" {
-		t.Fatalf("read = %q, %v", contents, err)
+	stored, err := archive.ReadWithRecordID(123, when, 1024)
+	wantPath := filepath.Join(root, "2026", "09", "07", "123.eml")
+	if err != nil || string(stored.Contents) != "message" || stored.Path != wantPath {
+		t.Fatalf("read = %#v, %v", stored, err)
 	}
-	if _, err := archive.ReadWithRecordID(123, when.Add(24*time.Hour), 1024); !errors.Is(err, ErrMessageNotFound) {
+	if _, err := archive.ReadWithRecordID(123, when.Add(24*time.Hour), 1024); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("wrong-date read error = %v", err)
 	}
 	if _, err := archive.ReadWithRecordID(123, when, 3); err == nil || !strings.Contains(err.Error(), "exceeds read limit") {

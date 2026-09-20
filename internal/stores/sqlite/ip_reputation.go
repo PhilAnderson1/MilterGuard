@@ -124,7 +124,7 @@ func (r *ipReputationRepository) RecordRejection(ctx context.Context, addr netip
 		return nil
 	})
 	if err != nil {
-		return stores.IPBlock{}, err
+		return stores.IPBlock{}, fmt.Errorf("record sending IP rejection: %w", err)
 	}
 	block := stores.IPBlock{Address: addr, Level: stores.IPBlockLevel(record.BlockLevel), ExpiresAt: record.BlockedUntil, StrikeCount: strikeCount}
 	return block, nil
@@ -234,7 +234,7 @@ func (r *ipReputationRepository) ActiveBlock(ctx context.Context, addr netip.Add
 	now := r.now().UTC()
 	block, found, err := r.readActiveBlock(ctx, addr.String(), now)
 	if err != nil {
-		return stores.IPBlock{}, false, err
+		return stores.IPBlock{}, false, fmt.Errorf("look up active sending IP block: %w", err)
 	}
 	if !found || block.Level != stores.IPBlockLevelRepeat || !r.repeatRefreshOnAttempt {
 		return block, found, nil
@@ -303,7 +303,7 @@ func (r *ipReputationRepository) getTx(ctx context.Context, tx *sql.Tx, ip strin
 	var level sql.NullString
 	var blocked sql.NullInt64
 	err := tx.QueryRowContext(ctx, `SELECT id,ip,block_level,blocked_until_ms,legitimate_count,last_activity_at_ms FROM ip_reputation WHERE ip=?`, ip).Scan(&id, &record.IP, &level, &blocked, &record.LegitimateCount, &activity)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return record, false, nil
 	}
 	if err != nil {
@@ -388,13 +388,13 @@ func (r *ipReputationRepository) AddManualBlock(ctx context.Context, addr netip.
 	}
 	expires := now.Add(duration)
 	err := r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`INSERT INTO ip_reputation(ip,block_level,blocked_until_ms,legitimate_count,last_activity_at_ms) VALUES(?,?,?,0,?) ON CONFLICT(ip) DO UPDATE SET block_level=excluded.block_level,blocked_until_ms=excluded.blocked_until_ms,legitimate_count=0,last_activity_at_ms=excluded.last_activity_at_ms`, addr.String(), level, unixMillis(expires), unixMillis(now)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ip_reputation(ip,block_level,blocked_until_ms,legitimate_count,last_activity_at_ms) VALUES(?,?,?,0,?) ON CONFLICT(ip) DO UPDATE SET block_level=excluded.block_level,blocked_until_ms=excluded.blocked_until_ms,legitimate_count=0,last_activity_at_ms=excluded.last_activity_at_ms`, addr.String(), level, unixMillis(expires), unixMillis(now)); err != nil {
 			return err
 		}
 		return nil
 	})
 	if err != nil {
-		return stores.IPBlock{}, err
+		return stores.IPBlock{}, fmt.Errorf("add manual sending IP block: %w", err)
 	}
 	r.debug("sending IP manually blocked", "remote_ip", addr.String(), "block_level", level, "block_expires_at", expires)
 	return stores.IPBlock{Address: addr, Level: stores.IPBlockLevel(level), ExpiresAt: expires}, nil
@@ -406,9 +406,12 @@ func (r *ipReputationRepository) Delete(ctx context.Context, addr netip.Addr) (b
 	addr = netsafety.CanonicalIP(addr)
 	result, err := r.db.Exec(ctx, `DELETE FROM ip_reputation WHERE ip=?`, addr.String())
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("delete sending IP block: %w", err)
 	}
-	n, _ := result.RowsAffected()
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("count deleted sending IP blocks: %w", err)
+	}
 	if n > 0 {
 		r.debug("sending IP manually removed from rejection reputation", "remote_ip", addr.String())
 	}
@@ -449,7 +452,7 @@ func (r *ipReputationRepository) ListActiveBlocks(ctx context.Context, list stor
 		out = append(out, v)
 	}
 	if err := rows.Err(); err != nil {
-		return stores.IPBlockPage{}, err
+		return stores.IPBlockPage{}, fmt.Errorf("read active sending IP blocks: %w", err)
 	}
 	truncated := len(out) > list.Limit
 	if truncated {
@@ -513,7 +516,7 @@ func (r *ipReputationRepository) Cleanup(ctx context.Context) (int64, error) {
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("clean sending IP reputation: %w", err)
 	}
 	return deleted, nil
 }

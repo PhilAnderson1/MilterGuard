@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
@@ -226,7 +227,7 @@ func TestBoundedCommandReplyPayloadOmitsOversizedAttachment(t *testing.T) {
 func TestBoundedCommandReplyPayloadLimitsPlainText(t *testing.T) {
 	reply, err := buildBoundedCommandReplyMessage(
 		"milterguard@example.com", "local@example.com", "Results", "date", "token",
-		commandReplyContent{Text: strings.Repeat("x", maxEmailCommandReplyBytes+1024)}, 0,
+		commandReplyContent{Text: strings.Repeat("x", admincmd.MaxResponseBytes+1024)}, 0,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -243,18 +244,18 @@ func TestBoundedCommandReplyPayloadLimitsPlainText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(body) > maxEmailCommandReplyBytes {
-		t.Fatalf("reply body length = %d, want at most %d", len(body), maxEmailCommandReplyBytes)
+	if len(body) > admincmd.MaxResponseBytes {
+		t.Fatalf("reply body length = %d, want at most %d", len(body), admincmd.MaxResponseBytes)
 	}
-	if !strings.Contains(string(body), strings.TrimSpace(commandReplyTruncatedNotice)) {
+	if !strings.Contains(string(body), "Command reply was truncated at 1 MiB.") {
 		t.Fatal("bounded reply does not report truncation")
 	}
 }
 
 func TestBoundedCommandReplyTextPreservesUTF8(t *testing.T) {
-	text := strings.Repeat("é", maxEmailCommandReplyBytes)
+	text := strings.Repeat("é", admincmd.MaxResponseBytes)
 	bounded := boundedCommandReplyText(text)
-	if len(bounded) > maxEmailCommandReplyBytes {
+	if len(bounded) > admincmd.MaxResponseBytes {
 		t.Fatalf("bounded text length = %d", len(bounded))
 	}
 	if !utf8.ValidString(bounded) {
@@ -264,14 +265,14 @@ func TestBoundedCommandReplyTextPreservesUTF8(t *testing.T) {
 
 func TestBoundedCommandReplyAddsNoticeAfterExistingFullText(t *testing.T) {
 	var body strings.Builder
-	body.WriteString(strings.Repeat("x", maxEmailCommandReplyBytes))
-	if appendBoundedCommandReply(&body, "more") {
+	body.WriteString(strings.Repeat("x", admincmd.MaxResponseBytes))
+	if admincmd.AppendBoundedResponse(&body, "more") {
 		t.Fatal("append unexpectedly succeeded")
 	}
-	if body.Len() > maxEmailCommandReplyBytes {
+	if body.Len() > admincmd.MaxResponseBytes {
 		t.Fatalf("reply length = %d", body.Len())
 	}
-	if !strings.HasSuffix(body.String(), commandReplyTruncatedNotice) {
+	if !strings.HasSuffix(body.String(), "\nCommand reply was truncated at 1 MiB.\n") {
 		t.Fatal("full reply was not shortened to include the truncation notice")
 	}
 }

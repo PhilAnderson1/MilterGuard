@@ -39,12 +39,12 @@ func formatAllowlist(entries []stores.Correspondent, includeRecipient, truncated
 			fmt.Fprintf(&record, "Recipient: %s\n", entry.LocalAddress)
 		}
 		fmt.Fprintf(&record, "Added: %s\n\n", allowlistAddedDescription(entry.WhitelistType))
-		if !appendBounded(&body, record.String()) {
+		if !AppendBoundedResponse(&body, record.String()) {
 			return body.String()
 		}
 	}
 	if truncated {
-		appendBounded(&body, listTruncatedNotice)
+		AppendBoundedResponse(&body, listTruncatedNotice)
 	}
 	return body.String()
 }
@@ -78,12 +78,12 @@ func formatActiveIPBlocks(entries []stores.IPBlock, includeHostname, truncated b
 		} else {
 			record = fmt.Sprintf("IP: %s Type: %s Expires: %s\n", entry.Address, entry.Level, entry.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 		}
-		if !appendBounded(&body, record) {
+		if !AppendBoundedResponse(&body, record) {
 			return body.String()
 		}
 	}
 	if truncated {
-		appendBounded(&body, listTruncatedNotice)
+		AppendBoundedResponse(&body, listTruncatedNotice)
 	}
 	return body.String()
 }
@@ -105,12 +105,12 @@ func formatRejectionHistory(entries []stores.Rejection, truncated bool) string {
 			reason = "Unavailable (record predates reason logging)"
 		}
 		record := fmt.Sprintf("From: %s\nTo: %s\nSubject: %s\nDate: %s\nRejection ID: %d\nReason: %s\n\n", entry.Sender, strings.Join(entry.Recipients, ", "), subject, entry.RejectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), entry.ID, reason)
-		if !appendBounded(&body, record) {
+		if !AppendBoundedResponse(&body, record) {
 			return body.String()
 		}
 	}
 	if truncated {
-		appendBounded(&body, listTruncatedNotice)
+		AppendBoundedResponse(&body, listTruncatedNotice)
 	}
 	return body.String()
 }
@@ -134,7 +134,10 @@ func limitRows[T any](entries []T) ([]T, bool) {
 	return entries[:MaxListRows], true
 }
 
-func appendBounded(body *strings.Builder, text string) bool {
+// AppendBoundedResponse appends text without allowing a command response to
+// exceed MaxResponseBytes. If truncation is necessary it preserves valid UTF-8,
+// appends a notice, and returns false.
+func AppendBoundedResponse(body *strings.Builder, text string) bool {
 	remaining := MaxResponseBytes - body.Len()
 	if len(text) <= remaining {
 		body.WriteString(text)

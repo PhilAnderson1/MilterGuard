@@ -2,6 +2,7 @@ package admincmd
 
 import (
 	"context"
+	"io/fs"
 	"strings"
 	"testing"
 	"time"
@@ -33,9 +34,9 @@ type messageSourceStub struct {
 	err      error
 }
 
-func (s *messageSourceStub) ReadWithRecordID(uint64, time.Time, int64) ([]byte, error) {
+func (s *messageSourceStub) ReadWithRecordID(uint64, time.Time, int64) (ArchivedMessage, error) {
 	s.reads++
-	return s.contents, s.err
+	return ArchivedMessage{Contents: s.contents, Path: "/archive/2026/09/20/7.eml"}, s.err
 }
 
 func TestExecuteBuildsScopedQueries(t *testing.T) {
@@ -60,7 +61,7 @@ func TestRejectionArchiveReadIsDeferred(t *testing.T) {
 	entry := stores.Rejection{ID: 7, Sender: "sender@example.net", Recipients: []string{"user@example.com"}, RejectedAt: time.Now()}
 	repository := &rejectionRepositoryStub{entry: entry}
 	source := &messageSourceStub{contents: []byte("From: sender@example.net\r\nContent-Type: text/plain\r\n\r\nBody text\r\n")}
-	p := New(Dependencies{Rejections: repository, MessageSource: source, ArchiveRoot: "/archive", MaxMessageSize: 1 << 20})
+	p := New(Dependencies{Rejections: repository, MessageSource: source, MaxMessageSize: 1 << 20})
 	command, err := p.Parse("REJECTION 7", Actor{DefaultRecipient: "user@example.com"})
 	if err != nil {
 		t.Fatal(err)
@@ -73,14 +74,14 @@ func TestRejectionArchiveReadIsDeferred(t *testing.T) {
 		t.Fatal("archive was read on command execution hot path")
 	}
 	response := deferred()
-	if source.reads != 1 || !strings.Contains(response.Text, "Body text") || len(response.Attachments) != 1 {
+	if source.reads != 1 || !strings.Contains(response.Text, "Body text") || len(response.Attachments) != 1 || response.Attachments[0].SourcePath != "/archive/2026/09/20/7.eml" {
 		t.Fatalf("response=%#v reads=%d", response, source.reads)
 	}
 }
 
 func TestMissingArchiveIsNotAnError(t *testing.T) {
 	repository := &rejectionRepositoryStub{entry: stores.Rejection{ID: 8, Recipients: []string{"user@example.com"}}}
-	source := &messageSourceStub{err: ErrMessageNotFound}
+	source := &messageSourceStub{err: fs.ErrNotExist}
 	p := New(Dependencies{Rejections: repository, MessageSource: source})
 	response, err := p.ExecuteLine(context.Background(), "REJECTION 8", Actor{DefaultRecipient: "user@example.com"})
 	if err != nil {

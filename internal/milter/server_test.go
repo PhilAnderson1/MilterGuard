@@ -465,10 +465,11 @@ func TestServerUsesUnifiedRejectionHistoryArchiveSettings(t *testing.T) {
 	if server.sessions.policy.archive == nil {
 		t.Fatal("unified rejection-history settings did not enable the message archive")
 	}
-	if _, err := server.sessions.policy.archive.SaveWithRecordID([]byte("test"), 7); err != nil {
+	now := time.Now().UTC()
+	if _, err := server.sessions.policy.archive.SaveWithRecordIDAt([]byte("test"), 7, now); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(root, time.Now().UTC().Format("2006"), time.Now().UTC().Format("01"), time.Now().UTC().Format("02"), "7.eml")
+	path := filepath.Join(root, now.Format("2006"), now.Format("01"), now.Format("02"), "7.eml")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("archive does not use configured message directory: %v", err)
 	}

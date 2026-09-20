@@ -374,8 +374,11 @@ func TestCorrespondentInboundBatchPreservesRelationshipRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := store.snapshot()
-	if candidate := records["candidate@example.com\x00sender@example.net"]; candidate.LegitimateEmailCount != 3 || !store.qualified(candidate) {
+	if candidate := records["candidate@example.com\x00sender@example.net"]; candidate.LegitimateEmailCount != 3 {
 		t.Fatalf("existing candidate was not promoted: %+v", candidate)
+	}
+	if !store.match(context.Background(), "sender@example.net", []string{"candidate@example.com"}).Known {
+		t.Fatal("promoted candidate was not matched by the production qualification query")
 	}
 	if manual := records["manual@example.com\x00sender@example.net"]; manual.WhitelistType != whitelistManual {
 		t.Fatalf("manual relationship changed unexpectedly: %+v", manual)
@@ -407,8 +410,11 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	}
 	record("legitimate", 1, true)
 	key := "owner@example.com\x00news@example.net"
-	if entry := store.snapshot()[key]; entry.LegitimateEmailCount != 1 || store.qualified(entry) {
+	if entry := store.snapshot()[key]; entry.LegitimateEmailCount != 1 {
 		t.Fatalf("first candidate = %#v", entry)
+	}
+	if store.match(context.Background(), "news@example.net", []string{"owner@example.com"}).Known {
+		t.Fatal("unqualified first candidate was matched by the production qualification query")
 	}
 	record("legitimate", .9, true)
 	record("unwanted", .89, true)

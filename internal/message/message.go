@@ -263,18 +263,14 @@ func (m *Message) decodedHeaderValues(name string) []string {
 	return m.Headers[name]
 }
 
-// RetainedBytes reports the bounded raw header and body bytes kept by the Milter.
-func (m *Message) RetainedBytes() int64 { return m.archiveHeaderBytes + m.bodySize }
-
 // BodyBytes returns the retained message body without copying it. Callers must
 // treat the returned bytes as read-only and must not retain them after Message
 // processing completes.
 func (m *Message) BodyBytes() []byte { return m.Body.Bytes() }
 
-// ArchiveBytes returns a bounded RFC 5322/MIME message reconstructed from the
-// headers and body supplied through the Milter protocol.
-// ArchiveBytes reconstructs a syntactically valid bounded RFC message from the
-// retained original headers and body for rejected-message storage.
+// ArchiveBytes returns a syntactically valid bounded RFC 5322/MIME message
+// reconstructed from the retained headers and body for rejected-message
+// storage.
 func (m *Message) ArchiveBytes() []byte {
 	limit := m.MaxBytes
 	if limit < 2 {

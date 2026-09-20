@@ -240,10 +240,8 @@ const maxEndpointRetryAfter = 30 * time.Second
 const initialEndpointRetryBackoff = 250 * time.Millisecond
 const maxEndpointRetryBackoff = 5 * time.Second
 
-// MaximumAnalysisDuration reserves enough time for every configured request
-// attempt and the largest Retry-After delay accepted between attempts.
-// MaximumAnalysisDuration returns the worst-case configured duration of all
-// endpoint attempts and retry delays for one message.
+// MaximumAnalysisDuration returns the worst-case duration of all configured
+// endpoint attempts and accepted Retry-After delays for one message.
 func MaximumAnalysisDuration(cfg config.AIConfig) time.Duration {
 	retries := max(cfg.Retries, 0)
 	return cfg.Timeout.Value()*time.Duration(retries+1) + maxEndpointRetryAfter*time.Duration(retries)

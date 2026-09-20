@@ -47,14 +47,6 @@ type NewRejection struct {
 	RejectedAt     time.Time
 }
 
-// Clone returns an input value whose slices do not share backing storage with
-// the original. Repositories must likewise not retain caller-owned slices.
-func (r NewRejection) Clone() NewRejection {
-	r.Recipients = append([]string(nil), r.Recipients...)
-	r.Reasons = append([]string(nil), r.Reasons...)
-	return r
-}
-
 type InboundClassification struct {
 	Correspondent      string
 	Recipients         []string
@@ -63,10 +55,4 @@ type InboundClassification struct {
 	Score              float64
 	UnwantedMinScore   float64
 	DKIMAligned        bool
-}
-
-// Clone returns an input value whose Recipients slice is independently owned.
-func (c InboundClassification) Clone() InboundClassification {
-	c.Recipients = append([]string(nil), c.Recipients...)
-	return c
 }

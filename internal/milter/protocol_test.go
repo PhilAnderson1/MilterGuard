@@ -3,9 +3,15 @@ package milter
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"strings"
 	"testing"
 )
+
+func readFrame(reader io.Reader) ([]byte, error) {
+	frame, _, err := readFrameProgress(reader)
+	return frame, err
+}
 
 func TestReadFrameRejectsOversizedDeclarationBeforeReadingPayload(t *testing.T) {
 	var header [4]byte

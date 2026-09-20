@@ -32,9 +32,8 @@ type Message struct {
 	Attachments []Attachment
 }
 
-// Build renders a complete RFC-style message using CRLF line endings.
-// Build formats a plain-text or multipart command reply with automatic-response
-// suppression headers and deterministic MIME framing.
+// Build renders a plain-text or multipart command reply with CRLF line endings,
+// automatic-response suppression headers, and deterministic MIME framing.
 func Build(message Message) ([]byte, error) {
 	var payload bytes.Buffer
 	for _, header := range []Header{

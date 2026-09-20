@@ -62,29 +62,18 @@ func recoverFromAddresses(value string) []*mail.Address {
 }
 
 func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, domain string) bool {
-	selected := actionReject
-	if ss.deps.policy.mode != "enforce" {
-		selected = actionAccept
-	}
+	selected := selectActionForMode(actionReject, ss.deps.policy.mode)
 
 	var err error
 	if selected == actionAccept {
 		if ss.deps.policy.filtering.AddEmailHeaders || ss.deps.policy.mode == "tag" {
-			actionName := "accepted-monitor-mode"
-			if ss.deps.policy.mode == "tag" {
-				actionName = "accepted-tag-mode"
-			}
-			err = ss.writeTagHeaders("unwanted", nil, actionName)
+			err = ss.writeTagHeaders("unwanted", nil, acceptedModeLabel(ss.deps.policy.mode))
 		} else {
 			err = ss.writeAcceptedResultHeaders(nil)
 		}
 	}
 	if err == nil {
-		response := []byte{responseAccept}
-		if selected == actionReject {
-			response = replyCode("550", "5.7.1", ss.deps.policy.filtering.RejectMessage)
-		}
-		err = writeFrame(ss.conn, response)
+		err = writeFrame(ss.conn, responseForAction(selected, ss.deps.policy.filtering.RejectMessage))
 	}
 
 	reason := "Visible From domain " + domain + " may only be used by authenticated SMTP submissions"

@@ -36,7 +36,10 @@ func (r *correspondentRepository) AddManual(ctx context.Context, sender, recipie
 			legitimate_email_count = 0`, recipient, sender, unixMillis(now), unixMillis(now), stores.CorrespondentKindManual)
 		return err
 	})
-	return created, err
+	if err != nil {
+		return false, fmt.Errorf("add manual correspondent: %w", err)
+	}
+	return created, nil
 }
 
 func (r *correspondentRepository) DeleteManual(ctx context.Context, sender string, scope stores.RecipientScope) (int, error) {
@@ -62,8 +65,11 @@ func (r *correspondentRepository) DeleteManual(ctx context.Context, sender strin
 	}
 	result, err := r.db.Exec(ctx, query, args...)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("delete manual correspondent: %w", err)
 	}
 	removed, err := result.RowsAffected()
-	return int(removed), err
+	if err != nil {
+		return 0, fmt.Errorf("count deleted manual correspondents: %w", err)
+	}
+	return int(removed), nil
 }

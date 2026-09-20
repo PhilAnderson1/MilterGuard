@@ -106,11 +106,7 @@ func (s *analysisService) applyPolicy(decision ai.Decision) (action, action) {
 	if decision.Classification == "unwanted" && decision.Score >= s.filtering.RejectScore {
 		proposed = actionReject
 	}
-	selected := proposed
-	if s.mode != "enforce" {
-		selected = actionAccept
-	}
-	return proposed, selected
+	return proposed, selectActionForMode(proposed, s.mode)
 }
 
 func (s *analysisService) analysisFailure(err error, started time.Time) evaluationResult {
@@ -119,17 +115,6 @@ func (s *analysisService) analysisFailure(err error, started time.Time) evaluati
 		selected = actionTempfail
 	}
 	return evaluationResult{proposed: selected, selected: selected, err: err, latency: time.Since(started)}
-}
-
-func (s *analysisService) encodeAction(selected action) []byte {
-	switch selected {
-	case actionReject:
-		return replyCode("550", "5.7.1", s.filtering.RejectMessage)
-	case actionTempfail:
-		return []byte{responseTempfail}
-	default:
-		return []byte{responseAccept}
-	}
 }
 
 func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, result evaluationResult, sent bool, responseErr error) {

@@ -6,7 +6,6 @@ import (
 	"mime"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
@@ -17,22 +16,11 @@ import (
 
 const internalMessageHeader = "X-MilterGuard-Internal"
 
-const (
-	maxCommandsPerMessage     = 100
-	maxEmailCommandReplyBytes = 1 << 20
-)
-
-const (
-	commandReplyTruncatedNotice = "\nCommand reply was truncated at 1 MiB.\n"
-)
+const maxCommandsPerMessage = 100
 
 type commandReplyContent struct {
 	Text        string
 	Attachments []smtpreply.Attachment
-}
-
-func (ss *session) isCommandRecipient(recipient string) bool {
-	return ss.deps.commands.cfg.Enabled && mailaddr.Normalize(recipient) == ss.deps.commands.recipient
 }
 
 func (ss *session) isInternalMessage() bool {
@@ -134,7 +122,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 		attached := make(map[string]bool)
 		for i, command := range commands {
 			prefix := command.Canonical() + "\n\n"
-			if !appendBoundedCommandReply(&body, prefix) {
+			if !admincmd.AppendBoundedResponse(&body, prefix) {
 				break
 			}
 			result := parts[i]()
@@ -143,7 +131,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 				text += "\n"
 			}
 			text += "\n"
-			if !appendBoundedCommandReply(&body, text) {
+			if !admincmd.AppendBoundedResponse(&body, text) {
 				break
 			}
 			for _, attachment := range result.Attachments {
@@ -192,33 +180,6 @@ func commandMessageLines(m *message.Message, maxBytes int64) ([]string, error) {
 		return nil, fmt.Errorf("command body is empty")
 	}
 	return lines, nil
-}
-
-func appendBoundedCommandReply(body *strings.Builder, text string) bool {
-	remaining := maxEmailCommandReplyBytes - body.Len()
-	if len(text) <= remaining {
-		body.WriteString(text)
-		return true
-	}
-	contentLimit := maxEmailCommandReplyBytes - len(commandReplyTruncatedNotice)
-	if body.Len() > contentLimit {
-		end := contentLimit
-		existing := body.String()
-		for end > 0 && !utf8.ValidString(existing[:end]) {
-			end--
-		}
-		preserved := strings.Clone(existing[:end])
-		body.Reset()
-		body.WriteString(preserved)
-	} else if available := contentLimit - body.Len(); available > 0 {
-		end := min(available, len(text))
-		for end > 0 && !utf8.ValidString(text[:end]) {
-			end--
-		}
-		body.WriteString(text[:end])
-	}
-	body.WriteString(commandReplyTruncatedNotice)
-	return false
 }
 
 func (ss *session) completeInvalidEmailCommand(ctx context.Context, identity, replyTo, reason string) bool {
@@ -317,11 +278,11 @@ func buildBoundedCommandReplyMessage(from, recipient, subject, date, token strin
 }
 
 func boundedCommandReplyText(text string) string {
-	if len(text) <= maxEmailCommandReplyBytes {
+	if len(text) <= admincmd.MaxResponseBytes {
 		return text
 	}
 	var bounded strings.Builder
-	appendBoundedCommandReply(&bounded, text)
+	admincmd.AppendBoundedResponse(&bounded, text)
 	return bounded.String()
 }
 

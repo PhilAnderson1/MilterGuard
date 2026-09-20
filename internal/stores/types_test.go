@@ -2,7 +2,6 @@ package stores
 
 import (
 	"testing"
-	"time"
 )
 
 func TestRecipientScopeValidation(t *testing.T) {
@@ -21,36 +20,6 @@ func TestRecipientScopeValidation(t *testing.T) {
 				t.Fatalf("Validate() error = %v, valid=%v", got, test.valid)
 			}
 		})
-	}
-}
-
-func TestSliceBearingValuesCloneCallerOwnedData(t *testing.T) {
-	rejectionInput := NewRejection{Recipients: []string{"one@example.com"}, Reasons: []string{"reason"}}
-	clonedInput := rejectionInput.Clone()
-	clonedInput.Recipients[0], clonedInput.Reasons[0] = "changed@example.com", "changed"
-	if rejectionInput.Recipients[0] != "one@example.com" || rejectionInput.Reasons[0] != "reason" {
-		t.Fatal("NewRejection.Clone retained caller-owned slice storage")
-	}
-
-	rejection := Rejection{Recipients: []string{"one@example.com"}}
-	clonedRejection := rejection.Clone()
-	clonedRejection.Recipients[0] = "changed@example.com"
-	if rejection.Recipients[0] != "one@example.com" {
-		t.Fatal("Rejection.Clone retained caller-owned slice storage")
-	}
-
-	reputation := IPReputationRecord{Strikes: []time.Time{time.Unix(1, 0)}}
-	clonedReputation := reputation.Clone()
-	clonedReputation.Strikes[0] = time.Unix(2, 0)
-	if reputation.Strikes[0].Unix() != 1 {
-		t.Fatal("IPReputationRecord.Clone retained caller-owned slice storage")
-	}
-
-	classification := InboundClassification{Recipients: []string{"one@example.com"}}
-	clonedClassification := classification.Clone()
-	clonedClassification.Recipients[0] = "changed@example.com"
-	if classification.Recipients[0] != "one@example.com" {
-		t.Fatal("InboundClassification.Clone retained caller-owned slice storage")
 	}
 }
 

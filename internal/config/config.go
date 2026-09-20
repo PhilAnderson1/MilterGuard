@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"gopkg.in/yaml.v3"
 )
 
@@ -588,22 +589,12 @@ func validAttachmentAction(value string) bool {
 }
 
 func validDomainName(value string) bool {
-	value = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
-	if value == "" || len(value) > 253 {
+	value = netsafety.DNSHostname(value)
+	if value == "" {
 		return false
 	}
 	if _, err := netip.ParseAddr(value); err == nil {
 		return false
-	}
-	for _, label := range strings.Split(value, ".") {
-		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-		for _, char := range label {
-			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
-				return false
-			}
-		}
 	}
 	return true
 }

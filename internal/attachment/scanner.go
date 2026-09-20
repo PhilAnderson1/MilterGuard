@@ -684,6 +684,10 @@ func scriptInterpreter(data []byte) string {
 	return ""
 }
 
+// decodeTransfer is deliberately strict: partial decoded bytes are returned
+// with an error so signatures can still be detected without claiming that an
+// incomplete attachment was fully inspected. Message text extraction uses a
+// separate recovery-oriented decoder to preserve readable evidence.
 func decodeTransfer(ctx context.Context, encoding string, data []byte, limit int64) ([]byte, error) {
 	var reader io.Reader = bytes.NewReader(data)
 	switch strings.ToLower(strings.TrimSpace(encoding)) {

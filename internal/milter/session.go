@@ -343,7 +343,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		err = ss.writeAcceptedResultHeaders(&result)
 	}
 	if err == nil {
-		err = writeFrame(ss.conn, ss.deps.analysis.encodeAction(result.selected))
+		err = writeFrame(ss.conn, responseForAction(result.selected, ss.deps.analysis.filtering.RejectMessage))
 	}
 	ss.deps.analysis.logOutcome(ctx, ss.message, result, err == nil, err)
 	if err != nil {
@@ -574,7 +574,7 @@ func validMTAHostname(value string) string {
 func (ss *session) finishBypassedMessage(ctx context.Context, source string, learn, touchInbound bool, extraAttrs ...any) bool {
 	err := ss.writeAcceptedBypassHeaders()
 	if err == nil {
-		err = writeFrame(ss.conn, ss.deps.analysis.encodeAction(actionAccept))
+		err = writeFrame(ss.conn, responseForAction(actionAccept, ss.deps.analysis.filtering.RejectMessage))
 	}
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
@@ -634,16 +634,6 @@ func (ss *session) startConnectionDNS(ctx context.Context) {
 	go func() {
 		pending <- ss.deps.dns.resolveSafely(ctx, addr)
 	}()
-}
-
-func (s *connectionDNSService) resolveSafely(ctx context.Context, addr netip.Addr) (result connectionDNSResult) {
-	result = connectionDNSResult{status: message.ReverseDNSLookupFailed}
-	defer func() {
-		if panicValue := recover(); panicValue != nil {
-			logRecoveredWorkerPanic(s.log, ctx, "connection DNS lookup", panicValue, "remote_ip", addr.String())
-		}
-	}()
-	return resolveConnectionDNS(ctx, s.resolver, addr, s.timeout)
 }
 
 func (ss *session) connectionInformation(ctx context.Context) message.ConnectionInfo {
@@ -711,7 +701,7 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 	if !ok {
 		return false, true
 	}
-	err := writeFrame(ss.conn, ss.deps.analysis.encodeAction(actionReject))
+	err := writeFrame(ss.conn, responseForAction(actionReject, ss.deps.analysis.filtering.RejectMessage))
 	attrs := []any{
 		"remote_ip", ss.peerIP.String(),
 		"mode", ss.deps.protocol.mode,

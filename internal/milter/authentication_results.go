@@ -19,10 +19,7 @@ func trustedSenderAuthentication(msg *message.Message, trustedAuthservIDs []stri
 	if fromDomain == "" {
 		return evidence
 	}
-	results := mailauth.Parse(mailauth.Input{
-		AuthenticationResults: msg.Headers["authentication-results"],
-		TrustedAuthservIDs:    trustedAuthservIDs,
-	})
+	results := msg.AuthenticationResults(trustedAuthservIDs)
 	for _, result := range results {
 		if result.Outcome != "pass" || !mailauth.DomainAligned(result.Domain, fromDomain) {
 			continue

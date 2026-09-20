@@ -37,10 +37,8 @@ type Client struct {
 	bootstrapRetryAt  time.Time
 }
 
-// New constructs an RDAP client whose complete HTTP operations are bounded by
-// timeout.
-// New creates a concurrent-safe RDAP client with proxy use disabled and all
-// requests bounded by timeout.
+// New creates a concurrency-safe RDAP client with proxy use disabled and each
+// complete HTTP operation bounded by timeout.
 func New(timeout time.Duration) *Client {
 	dialer := &net.Dialer{}
 	client := &Client{
@@ -111,7 +109,6 @@ func (c *Client) dialContext(ctx context.Context, network, endpoint string) (net
 	return nil, fmt.Errorf("cannot connect to RDAP endpoint %q: %w", hostname, errors.Join(dialErrors...))
 }
 
-// Lookup returns the registration and expiration dates for domain.
 // Lookup discovers the authoritative RDAP services for domain and returns its
 // registration and expiration events.
 func (c *Client) Lookup(ctx context.Context, domain string) (time.Time, time.Time, error) {

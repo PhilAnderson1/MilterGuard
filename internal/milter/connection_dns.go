@@ -22,6 +22,16 @@ type connectionDNSResult struct {
 	names  []message.ReverseDNSName
 }
 
+func (s *connectionDNSService) resolveSafely(ctx context.Context, addr netip.Addr) (result connectionDNSResult) {
+	result = connectionDNSResult{status: message.ReverseDNSLookupFailed}
+	defer func() {
+		if panicValue := recover(); panicValue != nil {
+			logRecoveredWorkerPanic(s.log, ctx, "connection DNS lookup", panicValue, "remote_ip", addr.String())
+		}
+	}()
+	return resolveConnectionDNS(ctx, s.resolver, addr, s.timeout)
+}
+
 // resolveConnectionDNS obtains bounded PTR names and confirms each against the
 // connecting address. Filtering and IP exclusions consume the resulting facts.
 func resolveConnectionDNS(parent context.Context, resolver dnsResolver, addr netip.Addr, timeout time.Duration) connectionDNSResult {

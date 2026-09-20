@@ -30,10 +30,8 @@ func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 		}
 	} else {
 		action := "accepted"
-		if ss.deps.protocol.mode == "tag" {
-			action = "accepted-tag-mode"
-		} else if result.proposed == actionReject {
-			action = "accepted-monitor-mode"
+		if ss.deps.protocol.mode == "tag" || result.proposed == actionReject {
+			action = acceptedModeLabel(ss.deps.protocol.mode)
 		} else if result.classification == "unwanted" {
 			action = "accepted-below-threshold"
 		}

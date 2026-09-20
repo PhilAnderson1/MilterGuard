@@ -244,11 +244,6 @@ func parseConnectIP(payload []byte) (netip.Addr, bool) {
 	return netsafety.CanonicalIP(addr), true
 }
 
-func readFrame(reader io.Reader) ([]byte, error) {
-	frame, _, err := readFrameProgress(reader)
-	return frame, err
-}
-
 func readFrameProgress(reader io.Reader) ([]byte, int, error) {
 	var header [4]byte
 	headerBytes, err := io.ReadFull(reader, header[:])

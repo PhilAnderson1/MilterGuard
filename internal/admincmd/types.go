@@ -2,7 +2,6 @@ package admincmd
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 
@@ -14,8 +13,6 @@ const (
 	MaxRejectionBodyRunes = 50000
 	MaxResponseBytes      = 1 << 20
 )
-
-var ErrMessageNotFound = errors.New("saved rejected message not found")
 
 type Actor struct {
 	Administrator    bool
@@ -38,8 +35,13 @@ type Response struct {
 
 type DeferredResponse func() Response
 
+type ArchivedMessage struct {
+	Contents []byte
+	Path     string
+}
+
 type RejectionMessageSource interface {
-	ReadWithRecordID(uint64, time.Time, int64) ([]byte, error)
+	ReadWithRecordID(uint64, time.Time, int64) (ArchivedMessage, error)
 }
 
 type IPHostnameResolver interface {
@@ -52,7 +54,6 @@ type Dependencies struct {
 	IPReputation    stores.IPReputationRepository
 	MessageSource   RejectionMessageSource
 	IPResolver      IPHostnameResolver
-	ArchiveRoot     string
 	MaxMessageSize  int64
 	DatabaseTimeout time.Duration
 	Now             func() time.Time
@@ -65,7 +66,6 @@ type Processor struct {
 	ipReputation    stores.IPReputationRepository
 	messageSource   RejectionMessageSource
 	ipResolver      IPHostnameResolver
-	archiveRoot     string
 	maxMessageSize  int64
 	databaseTimeout time.Duration
 	now             func() time.Time
@@ -84,7 +84,7 @@ func New(deps Dependencies) *Processor {
 	return &Processor{
 		correspondents: deps.Correspondents, rejections: deps.Rejections,
 		ipReputation: deps.IPReputation, messageSource: deps.MessageSource,
-		ipResolver: deps.IPResolver, archiveRoot: deps.ArchiveRoot,
+		ipResolver:     deps.IPResolver,
 		maxMessageSize: deps.MaxMessageSize, databaseTimeout: deps.DatabaseTimeout,
 		now: deps.Now, log: deps.Logger,
 	}

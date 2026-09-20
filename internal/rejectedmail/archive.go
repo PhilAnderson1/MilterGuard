@@ -17,8 +17,6 @@ import (
 	"time"
 )
 
-var ErrMessageNotFound = errors.New("saved rejected message not found")
-
 type Options struct {
 	Directory     string
 	Retention     time.Duration
@@ -29,6 +27,13 @@ type Archive struct {
 	opts Options
 	log  *slog.Logger
 	now  func() time.Time
+}
+
+// StoredMessage contains an archived message and its authoritative filesystem
+// path. Callers must not reconstruct the archive's date-based layout.
+type StoredMessage struct {
+	Contents []byte
+	Path     string
 }
 
 type storedFile struct {
@@ -43,10 +48,8 @@ func New(opts Options, log *slog.Logger) *Archive {
 	return &Archive{opts: opts, log: log, now: time.Now}
 }
 
-// Cleanup removes expired date trees, measures the remaining archive, and
-// removes the oldest individual messages only when the byte limit is exceeded.
-// Cleanup removes expired date directories, then deletes oldest files only if
-// the archive remains above its target maximum size.
+// Cleanup removes expired date directories, then deletes the oldest remaining
+// messages only when the archive exceeds its target maximum size.
 func (a *Archive) Cleanup() error {
 	if err := os.MkdirAll(a.opts.Directory, 0750); err != nil {
 		return err
@@ -91,15 +94,9 @@ func (a *Archive) Save(message []byte) (string, error) {
 	return a.save(message, 0)
 }
 
-// SaveWithRecordID saves a message using its rejection-history record ID.
-func (a *Archive) SaveWithRecordID(message []byte, recordID uint64) (string, error) {
-	return a.SaveWithRecordIDAt(message, recordID, a.now().UTC())
-}
-
-// SaveWithRecordIDAt saves a message using the rejection record's timestamp so
-// later retrieval can derive the exact date directory from the database row.
-// SaveWithRecordIDAt writes one original message beneath its UTC date path and
-// uses the rejection record ID as the filename when available.
+// SaveWithRecordIDAt writes a message beneath the rejection record's UTC date
+// path using its ID as the filename, allowing retrieval to derive the exact
+// location from the database row.
 func (a *Archive) SaveWithRecordIDAt(message []byte, recordID uint64, rejectedAt time.Time) (string, error) {
 	if recordID == 0 {
 		return "", fmt.Errorf("rejection record ID must be greater than zero")
@@ -112,41 +109,41 @@ func (a *Archive) SaveWithRecordIDAt(message []byte, recordID uint64, rejectedAt
 
 // ReadWithRecordID reads the exact message associated with a rejection record.
 // Its path components are derived exclusively from typed database values.
-func (a *Archive) ReadWithRecordID(recordID uint64, rejectedAt time.Time, maxBytes int64) ([]byte, error) {
+func (a *Archive) ReadWithRecordID(recordID uint64, rejectedAt time.Time, maxBytes int64) (StoredMessage, error) {
 	if a == nil || recordID == 0 || rejectedAt.IsZero() {
-		return nil, ErrMessageNotFound
+		return StoredMessage{}, fs.ErrNotExist
 	}
 	if maxBytes < 1 {
-		return nil, fmt.Errorf("saved message read limit must be positive")
+		return StoredMessage{}, fmt.Errorf("saved message read limit must be positive")
 	}
 	rejectedAt = rejectedAt.UTC()
 	path := filepath.Join(a.opts.Directory, rejectedAt.Format("2006"), rejectedAt.Format("01"), rejectedAt.Format("02"), strconv.FormatUint(recordID, 10)+".eml")
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, ErrMessageNotFound
+			return StoredMessage{}, fs.ErrNotExist
 		}
-		return nil, err
+		return StoredMessage{}, err
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return nil, err
+		return StoredMessage{}, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("saved message is not a regular file")
+		return StoredMessage{}, fmt.Errorf("saved message is not a regular file")
 	}
 	if info.Size() > maxBytes {
-		return nil, fmt.Errorf("saved message exceeds read limit")
+		return StoredMessage{}, fmt.Errorf("saved message exceeds read limit")
 	}
 	contents, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
-		return nil, err
+		return StoredMessage{}, err
 	}
 	if int64(len(contents)) > maxBytes {
-		return nil, fmt.Errorf("saved message exceeds read limit")
+		return StoredMessage{}, fmt.Errorf("saved message exceeds read limit")
 	}
-	return contents, nil
+	return StoredMessage{Contents: contents, Path: path}, nil
 }
 
 func (a *Archive) save(message []byte, recordID uint64) (string, error) {

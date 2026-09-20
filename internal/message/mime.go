@@ -180,6 +180,10 @@ func normalizeContentID(value string) string {
 	return strings.ToLower(value)
 }
 
+// decodeTransfer is deliberately recovery-oriented: message extraction keeps
+// readable evidence from malformed encodings and accepts omitted Base64
+// padding. Attachment inspection uses a separate strict decoder so incomplete
+// data cannot be reported as successfully scanned.
 func decodeTransfer(encoding string, data []byte) []byte {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":

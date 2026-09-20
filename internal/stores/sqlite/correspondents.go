@@ -92,7 +92,7 @@ func (r *correspondentRepository) LearnAuthenticated(ctx context.Context, localA
 		return err
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("learn authenticated correspondents: %w", err)
 	}
 	if r.log != nil {
 		r.log.Debug("correspondent allowlist updated", "new_entries", added)
@@ -126,7 +126,10 @@ func (r *correspondentRepository) TouchInbound(ctx context.Context, corresponden
 		}
 	}
 	_, err := r.db.Exec(ctx, query, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("update inbound correspondent activity: %w", err)
+	}
+	return nil
 }
 
 // recordInboundClassification expects the canonical correspondent address
@@ -156,7 +159,7 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 		}
 		result, err := r.db.Exec(ctx, query, args...)
 		if err != nil {
-			return err
+			return fmt.Errorf("remove inbound-learned correspondents: %w", err)
 		}
 		removed, _ := result.RowsAffected()
 		if removed > 0 && r.log != nil {
@@ -260,8 +263,11 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 		}
 		return nil
 	})
-	if err != nil || r.log == nil {
-		return err
+	if err != nil {
+		return fmt.Errorf("record inbound correspondent classification: %w", err)
+	}
+	if r.log == nil {
+		return nil
 	}
 	sort.Slice(events, func(i, j int) bool { return events[i].recipient < events[j].recipient })
 	for _, event := range events {
@@ -375,11 +381,6 @@ func (r *correspondentRepository) ListCorrespondents(ctx context.Context, list s
 	return stores.CorrespondentPage{Entries: result, Truncated: truncated}, nil
 }
 
-func (r *correspondentRepository) qualified(entry stores.Correspondent) bool {
-	return entry.WhitelistType == stores.CorrespondentKindAuthenticatedOutbound || entry.WhitelistType == stores.CorrespondentKindManual ||
-		(entry.WhitelistType == stores.CorrespondentKindRepeatedLegitimateInbound && entry.LegitimateEmailCount >= r.options.LegitimateSenderMinMessages)
-}
-
 func (r *correspondentRepository) qualifiedSQL() string {
 	return `(whitelist_type IN ('authenticated_outbound', 'manual') OR
 		(whitelist_type = 'repeated_legitimate_inbound' AND legitimate_email_count >= ?))`
@@ -478,7 +479,7 @@ func (r *correspondentRepository) Cleanup(ctx context.Context) (int64, error) {
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("clean correspondents: %w", err)
 	}
 	return deleted, nil
 }

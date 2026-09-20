@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -28,7 +29,6 @@ func commandProcessor(cfg config.Config, correspondents stores.CorrespondentAdmi
 		Correspondents: correspondents, Rejections: rejections, IPReputation: ipReputation,
 		MessageSource: commandArchiveSource{archive}, IPResolver: &commandIPResolver{resolver: resolver,
 			timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
-		ArchiveRoot:    cfg.RejectionHistory.MessageDirectory,
 		MaxMessageSize: cfg.Milter.MaxMessageSize, DatabaseTimeout: commandDatabaseTimeout,
 		Logger: log,
 	})
@@ -36,15 +36,12 @@ func commandProcessor(cfg config.Config, correspondents stores.CorrespondentAdmi
 
 type commandArchiveSource struct{ archive *rejectedmail.Archive }
 
-func (s commandArchiveSource) ReadWithRecordID(id uint64, rejectedAt time.Time, maxBytes int64) ([]byte, error) {
+func (s commandArchiveSource) ReadWithRecordID(id uint64, rejectedAt time.Time, maxBytes int64) (admincmd.ArchivedMessage, error) {
 	if s.archive == nil {
-		return nil, admincmd.ErrMessageNotFound
+		return admincmd.ArchivedMessage{}, fs.ErrNotExist
 	}
-	contents, err := s.archive.ReadWithRecordID(id, rejectedAt, maxBytes)
-	if errors.Is(err, rejectedmail.ErrMessageNotFound) {
-		return nil, admincmd.ErrMessageNotFound
-	}
-	return contents, err
+	stored, err := s.archive.ReadWithRecordID(id, rejectedAt, maxBytes)
+	return admincmd.ArchivedMessage{Contents: stored.Contents, Path: stored.Path}, err
 }
 
 // OpenCommandProcessor opens only the persistence, archive and DNS capabilities

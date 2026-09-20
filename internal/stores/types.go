@@ -46,34 +46,12 @@ type Rejection struct {
 	Reason     string
 }
 
-// Clone returns a snapshot whose Recipients slice is owned by the caller.
-func (r Rejection) Clone() Rejection {
-	r.Recipients = append([]string(nil), r.Recipients...)
-	return r
-}
-
 type IPBlock struct {
 	Address     netip.Addr
 	Hostname    string
 	Level       IPBlockLevel
 	ExpiresAt   time.Time
 	StrikeCount int
-}
-
-type IPReputationRecord struct {
-	ID              uint64
-	Address         netip.Addr
-	Strikes         []time.Time
-	BlockLevel      IPBlockLevel
-	BlockedUntil    time.Time
-	LegitimateCount int
-	LastActivityAt  time.Time
-}
-
-// Clone returns a snapshot whose Strikes slice is owned by the caller.
-func (r IPReputationRecord) Clone() IPReputationRecord {
-	r.Strikes = append([]time.Time(nil), r.Strikes...)
-	return r
 }
 
 type DomainRegistration struct {

@@ -3,6 +3,8 @@ package mailaddr
 import (
 	"net/mail"
 	"strings"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 )
 
 // Mailbox parses a single mailbox. If a malformed display name makes the
@@ -43,27 +45,9 @@ func Normalize(value string) string {
 	}
 	parts := strings.SplitN(address, "@", 2)
 	local := strings.ToLower(strings.TrimSpace(parts[0]))
-	domain := strictHostname(parts[1])
+	domain := netsafety.DNSHostname(parts[1])
 	if local == "" || domain == "" || len(local)+len(domain)+1 > 254 {
 		return ""
 	}
 	return local + "@" + domain
-}
-
-func strictHostname(value string) string {
-	value = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
-	if value == "" || len(value) > 253 {
-		return ""
-	}
-	for _, label := range strings.Split(value, ".") {
-		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return ""
-		}
-		for _, char := range label {
-			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
-				return ""
-			}
-		}
-	}
-	return value
 }

@@ -77,17 +77,8 @@ func (s *attachmentPolicyService) evaluate(ctx context.Context, msg *message.Mes
 // finishAttachmentDecision applies operating mode, writes any accepted-message
 // headers, records deterministic rejections, and sends the Milter response.
 func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action, path, detection string, scanErr error) bool {
-	selected := proposed
-	if ss.deps.attachments.mode != "enforce" {
-		selected = actionAccept
-	}
-	response := []byte{responseAccept}
-	switch selected {
-	case actionReject:
-		response = replyCode("550", "5.7.1", ss.deps.attachments.cfg.RejectMessage)
-	case actionTempfail:
-		response = []byte{responseTempfail}
-	}
+	selected := selectActionForMode(proposed, ss.deps.attachments.mode)
+	response := responseForAction(selected, ss.deps.attachments.cfg.RejectMessage)
 	var err error
 	if selected == actionAccept {
 		if proposed != actionAccept && (ss.deps.attachments.filtering.AddEmailHeaders || ss.deps.attachments.mode == "tag") {
@@ -95,11 +86,7 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 			if scanErr != nil {
 				classification = "unavailable"
 			}
-			action := "accepted-monitor-mode"
-			if ss.deps.attachments.mode == "tag" {
-				action = "accepted-tag-mode"
-			}
-			err = ss.writeTagHeaders(classification, nil, action)
+			err = ss.writeTagHeaders(classification, nil, acceptedModeLabel(ss.deps.attachments.mode))
 		} else {
 			err = ss.writeAcceptedResultHeaders(nil)
 		}

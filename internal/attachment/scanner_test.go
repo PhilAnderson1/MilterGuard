@@ -212,6 +212,18 @@ func TestExecutableSignatureDetectedInTruncatedBase64(t *testing.T) {
 	}
 }
 
+func TestUnpaddedSafeBase64IsReportedAsIncompleteInspection(t *testing.T) {
+	encoded := strings.TrimRight(base64.StdEncoding.EncodeToString([]byte("safe")), "=")
+	finding, err := testScanner().Scan("application/octet-stream", "base64", `attachment; filename="invoice.txt"`, []byte(encoded))
+	var scanErr *ScanError
+	if finding != nil || !errors.As(err, &scanErr) {
+		t.Fatalf("finding = %#v, error = %#v; want an incomplete-inspection error", finding, err)
+	}
+	if scanErr.Path != "invoice.txt" {
+		t.Fatalf("error path = %q, want invoice.txt", scanErr.Path)
+	}
+}
+
 func TestZIPEntryBlockedWithoutExtraction(t *testing.T) {
 	archive := makeZIP(t, map[string][]byte{"../../payload.BAT": []byte("echo bad")})
 	finding, err := testScanner().Scan("application/zip", "", `attachment; filename="documents.zip"`, archive)

@@ -15,6 +15,8 @@ import (
 
 const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
+func retainedBytes(m *Message) int64 { return m.archiveHeaderBytes + m.bodySize }
+
 func TestPromptDecodesMultipart(t *testing.T) {
 	m := New(10000)
 	m.AddHeader("Subject", "Test")
@@ -449,7 +451,7 @@ func TestHeadersAndBodyShareMessageBudgetWithoutSuppressingBody(t *testing.T) {
 	if !strings.Contains(prompt, body) {
 		t.Fatalf("header padding suppressed the body: %s", prompt)
 	}
-	if got := m.RetainedBytes(); got > m.MaxBytes {
+	if got := retainedBytes(m); got > m.MaxBytes {
 		t.Fatalf("retained bytes = %d, want at most %d", got, m.MaxBytes)
 	}
 }
@@ -465,7 +467,7 @@ func TestBodyIsTruncatedToRemainingCombinedMessageBudget(t *testing.T) {
 	if !m.BodyTruncated || !m.Truncated {
 		t.Fatal("message exceeding the combined header and body budget was not marked truncated")
 	}
-	if got := m.RetainedBytes(); got != m.MaxBytes {
+	if got := retainedBytes(m); got != m.MaxBytes {
 		t.Fatalf("retained bytes = %d, want %d", got, m.MaxBytes)
 	}
 }

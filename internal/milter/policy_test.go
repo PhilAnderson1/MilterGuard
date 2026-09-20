@@ -72,7 +72,6 @@ func TestApplyPolicy(t *testing.T) {
 }
 
 func TestEncodeAction(t *testing.T) {
-	service := &analysisService{filtering: config.FilteringConfig{RejectMessage: "blocked"}}
 	tests := []struct {
 		action action
 		want   string
@@ -82,8 +81,8 @@ func TestEncodeAction(t *testing.T) {
 		{actionTempfail, "t"},
 	}
 	for _, test := range tests {
-		if got := string(service.encodeAction(test.action)); got != test.want {
-			t.Errorf("encodeAction(%s) = %q, want %q", test.action, got, test.want)
+		if got := string(responseForAction(test.action, "blocked")); got != test.want {
+			t.Errorf("responseForAction(%s) = %q, want %q", test.action, got, test.want)
 		}
 	}
 }
