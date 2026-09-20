@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
-	"github.com/PhilAnderson1/MilterGuard/internal/milter"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 )
 
@@ -28,18 +28,18 @@ func TestPersistentStateStartupErrorMessage(t *testing.T) {
 
 type scriptedCommandProcessor struct {
 	lines  []string
-	actors []milter.CommandActor
+	actors []admincmd.Actor
 }
 
-func (p *scriptedCommandProcessor) ExecuteLine(_ context.Context, line string, actor milter.CommandActor) (milter.CommandResponse, error) {
+func (p *scriptedCommandProcessor) ExecuteLine(_ context.Context, line string, actor admincmd.Actor) (admincmd.Response, error) {
 	p.lines = append(p.lines, line)
 	p.actors = append(p.actors, actor)
 	if line == "BAD" {
-		return milter.CommandResponse{}, errors.New("bad command")
+		return admincmd.Response{}, errors.New("bad command")
 	}
-	response := milter.CommandResponse{Text: "result for " + line + "\n"}
+	response := admincmd.Response{Text: "result for " + line + "\n"}
 	if line == "HELP" {
-		response.Attachments = []milter.CommandAttachment{{Filename: "rejection-1.eml", Contents: []byte("mail"), SourcePath: "/archive/2026/09/17/1.eml"}}
+		response.Attachments = []admincmd.Attachment{{Filename: "rejection-1.eml", Contents: []byte("mail"), SourcePath: "/archive/2026/09/17/1.eml"}}
 	}
 	return response, nil
 }

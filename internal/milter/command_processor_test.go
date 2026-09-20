@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
 
@@ -36,7 +37,7 @@ func TestCommandProcessorUsesAdministratorDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeProcessor()
-	actor := CommandActor{Administrator: true, DefaultRecipient: "*"}
+	actor := admincmd.Actor{Administrator: true, DefaultRecipient: "*"}
 
 	if _, err := processor.ExecuteLine(context.Background(), "WHITELIST ADD news@example.net", actor); err == nil {
 		t.Fatal("WHITELIST ADD without an explicit recipient succeeded")
@@ -58,7 +59,7 @@ func TestCommandProcessorListOrderFollowsActorPreference(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeProcessor()
-	admin := CommandActor{Administrator: true, DefaultRecipient: "*"}
+	admin := admincmd.Actor{Administrator: true, DefaultRecipient: "*"}
 	for _, sender := range []string{"older@example.net", "newer@example.net"} {
 		if _, err := processor.ExecuteLine(context.Background(), "WHITELIST ADD "+sender+" owner@example.com", admin); err != nil {
 			t.Fatal(err)
@@ -96,8 +97,8 @@ func TestCommandProcessorsCanWriteSameLiveDatabase(t *testing.T) {
 	}
 	defer closeSecond()
 
-	actor := CommandActor{Administrator: true, DefaultRecipient: "*"}
-	processors := []*CommandProcessor{first, second}
+	actor := admincmd.Actor{Administrator: true, DefaultRecipient: "*"}
+	processors := []*admincmd.Processor{first, second}
 	var wg sync.WaitGroup
 	errs := make(chan error, 20)
 	for index := range 20 {
@@ -136,7 +137,7 @@ func TestCommandProcessorHonorsCanceledContext(t *testing.T) {
 	defer closeProcessor()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = processor.ExecuteLine(ctx, "WHITELIST LIST * all", CommandActor{Administrator: true, DefaultRecipient: "*"})
+	_, err = processor.ExecuteLine(ctx, "WHITELIST LIST * all", admincmd.Actor{Administrator: true, DefaultRecipient: "*"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context cancellation", err)
 	}

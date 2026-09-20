@@ -2,112 +2,141 @@ package milter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
+	"net"
+	"net/netip"
+	"runtime/debug"
+	"sync"
+	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
-// CommandActor describes the authority and default local address of a command
-// caller. Email commands use the authenticated envelope sender; interactive
-// command mode uses administrator authority and a wildcard default.
-type CommandActor struct {
-	Administrator    bool
-	DefaultRecipient string
-	NewestLast       bool
+func commandProcessor(cfg config.Config, correspondents stores.CorrespondentAdminRepository,
+	rejections stores.RejectionRepository, ipReputation stores.IPReputationRepository,
+	archive *rejectedmail.Archive, resolver dnsResolver, log *slog.Logger) *admincmd.Processor {
+	return admincmd.New(admincmd.Dependencies{
+		Correspondents: correspondents, Rejections: rejections, IPReputation: ipReputation,
+		MessageSource: commandArchiveSource{archive}, IPResolver: &commandIPResolver{resolver: resolver,
+			timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
+		ArchiveRoot:    cfg.RejectionHistory.MessageDirectory,
+		MaxMessageSize: cfg.Milter.MaxMessageSize, DatabaseTimeout: commandDatabaseTimeout,
+		Logger: log,
+	})
 }
 
-// CommandAttachment is binary output associated with a command result.
-type CommandAttachment struct {
-	Filename   string
-	MediaType  string
-	Contents   []byte
-	SourcePath string
-}
+type commandArchiveSource struct{ archive *rejectedmail.Archive }
 
-// CommandResponse is independent of email or terminal transport.
-type CommandResponse struct {
-	Canonical   string
-	Text        string
-	Attachments []CommandAttachment
-}
-
-// CommandProcessor is the shared parser and executor used by email and
-// interactive administration commands.
-type CommandProcessor struct {
-	server         *Server
-	correspondents stores.CorrespondentAdminRepository
-	rejections     stores.RejectionRepository
-	ipReputation   stores.IPReputationRepository
-}
-
-func newCommandProcessor(server *Server) *CommandProcessor {
-	if server == nil {
-		return &CommandProcessor{}
+func (s commandArchiveSource) ReadWithRecordID(id uint64, rejectedAt time.Time, maxBytes int64) ([]byte, error) {
+	if s.archive == nil {
+		return nil, admincmd.ErrMessageNotFound
 	}
-	return &CommandProcessor{server: server, correspondents: server.correspondents,
-		rejections: server.rejectionHistory, ipReputation: server.ipReputation}
+	contents, err := s.archive.ReadWithRecordID(id, rejectedAt, maxBytes)
+	if errors.Is(err, rejectedmail.ErrMessageNotFound) {
+		return nil, admincmd.ErrMessageNotFound
+	}
+	return contents, err
 }
 
-// OpenCommandProcessor opens the configured persistent state without starting
-// a Milter listener. The returned close function releases the SQLite handle.
-func OpenCommandProcessor(cfg config.Config, log *slog.Logger) (*CommandProcessor, func() error, error) {
-	commandCfg := cfg
-	commandCfg.EmailCommands.SendReplies = false
-	server := NewServer(commandCfg, nil, log)
-	if err := server.StartupError(); err != nil {
-		_ = server.Close()
+// OpenCommandProcessor opens only the persistence, archive and DNS capabilities
+// required by standalone command mode. It does not construct a Milter server.
+func OpenCommandProcessor(cfg config.Config, log *slog.Logger) (*admincmd.Processor, func() error, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), maintenanceDatabaseTimeout)
+	database, err := sqlstore.Open(ctx, cfg.Persistence.DatabaseFile, sqlstore.DefaultOptions())
+	cancel()
+	if err != nil {
 		return nil, nil, err
 	}
-	return server.commands, server.Close, nil
+	var closeOnce sync.Once
+	var closeErr error
+	closeProcessor := func() error {
+		closeOnce.Do(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), commandDatabaseTimeout)
+			defer cancel()
+			_, checkpointErr := database.CheckpointPassive(ctx)
+			closeErr = errors.Join(checkpointErr, database.Close())
+		})
+		return closeErr
+	}
+	correspondents := newCorrespondentRepository(cfg.Correspondents, database, time.Now, log)
+	rejections := newRejectionRepository(cfg.RejectionHistory, database, time.Now, log)
+	ipRepository := newIPRepository(cfg.IPReputation, database, time.Now, log)
+	ipPolicy := newIPReputationStore(cfg.IPReputation, ipRepository, log)
+	var archive *rejectedmail.Archive
+	if cfg.RejectionHistory.SaveMessages && rejectionHistoryEnabled(cfg.RejectionHistory) {
+		archive = rejectedmail.New(rejectedmail.Options{
+			Directory: cfg.RejectionHistory.MessageDirectory, Retention: cfg.RejectionHistory.Expiry.Value(),
+			MaxTotalBytes: cfg.RejectionHistory.MessageMaxTotalBytes,
+		}, log)
+	}
+	return commandProcessor(cfg, correspondents, rejections, ipPolicy, archive, net.DefaultResolver, log), closeProcessor, nil
 }
 
-func (p *CommandProcessor) parse(line string, actor CommandActor) (emailCommand, error) {
-	if p == nil || p.server == nil {
-		return emailCommand{}, fmt.Errorf("command processor is unavailable")
-	}
-	command, help, err := parseEmailCommand(line, normalizeCommandRecipient(actor.DefaultRecipient), actor.Administrator)
-	if err != nil {
-		return emailCommand{}, err
-	}
-	if help {
-		command = emailCommand{kind: "help", canonical: "HELP"}
-	}
-	return command, nil
+type commandIPResolver struct {
+	resolver dnsResolver
+	timeout  time.Duration
+	log      *slog.Logger
 }
 
-func normalizeCommandRecipient(value string) string {
-	if strings.TrimSpace(value) == "*" {
-		return "*"
+func (r *commandIPResolver) ResolveActiveIPHostnames(parent context.Context, entries []stores.IPBlock) []stores.IPBlock {
+	if r == nil || len(entries) == 0 || r.resolver == nil || r.timeout <= 0 {
+		return entries
 	}
-	return normalizeEmailAddress(value)
+	indices := make(chan int)
+	var wait sync.WaitGroup
+	for range min(8, len(entries)) {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for index := range indices {
+				addr := entries[index].Address
+				if !addr.IsValid() || !connectionAddressRoutable(addr) {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(parent, r.timeout)
+				names, err := r.reverseLookup(ctx, addr)
+				cancel()
+				if err != nil {
+					continue
+				}
+				for _, candidate := range names {
+					if hostname := safeDNSHostname(candidate); hostname != "" {
+						entries[index].Hostname = hostname
+						break
+					}
+				}
+			}
+		}()
+	}
+	for index := range entries {
+		select {
+		case indices <- index:
+		case <-parent.Done():
+			close(indices)
+			wait.Wait()
+			return entries
+		}
+	}
+	close(indices)
+	wait.Wait()
+	return entries
 }
 
-func (p *CommandProcessor) execute(ctx context.Context, command emailCommand, actor CommandActor) (commandResult, error) {
-	return p.executeCommand(ctx, command, actor)
-}
-
-// ExecuteLine parses and executes one command immediately.
-func (p *CommandProcessor) ExecuteLine(ctx context.Context, line string, actor CommandActor) (CommandResponse, error) {
-	command, err := p.parse(strings.TrimSpace(line), actor)
-	if err != nil {
-		return CommandResponse{}, err
-	}
-	result, err := p.execute(ctx, command, actor)
-	if err != nil {
-		return CommandResponse{Canonical: command.canonical}, err
-	}
-	select {
-	case <-ctx.Done():
-		return CommandResponse{Canonical: command.canonical}, ctx.Err()
-	default:
-	}
-	content := result()
-	attachments := make([]CommandAttachment, len(content.Attachments))
-	for index, attachment := range content.Attachments {
-		attachments[index] = CommandAttachment(attachment)
-	}
-	return CommandResponse{Canonical: command.canonical, Text: content.Text, Attachments: attachments}, nil
+func (r *commandIPResolver) reverseLookup(ctx context.Context, addr netip.Addr) (names []string, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if r.log != nil {
+				r.log.ErrorContext(ctx, "worker panic recovered", "worker", "IP command reverse-DNS lookup",
+					"remote_ip", addr.String(), "panic", recovered, "stack", string(debug.Stack()))
+			}
+			err = fmt.Errorf("reverse-DNS lookup panicked")
+		}
+	}()
+	return r.resolver.LookupAddr(ctx, addr.String())
 }

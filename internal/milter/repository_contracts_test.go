@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
@@ -50,24 +51,20 @@ func (r *recordingRejectionRepository) RejectionByID(_ context.Context, _ uint64
 
 func TestCommandProcessorBuildsRecipientScopedRepositoryQueries(t *testing.T) {
 	repository := &recordingRejectionRepository{}
-	processor := &CommandProcessor{server: &Server{}, rejections: repository}
-	actor := CommandActor{DefaultRecipient: "user@example.com"}
+	processor := admincmd.New(admincmd.Dependencies{Rejections: repository})
+	actor := admincmd.Actor{DefaultRecipient: "user@example.com"}
 
-	if _, err := processor.executeCommand(context.Background(), emailCommand{
-		kind: "rejections", recipient: "user@example.com", period: periodWeek,
-	}, actor); err != nil {
+	if _, err := processor.ExecuteLine(context.Background(), "REJECTIONS", actor); err != nil {
 		t.Fatal(err)
 	}
 	if repository.listQuery.Recipients.All || repository.listQuery.Recipients.Address != "user@example.com" {
 		t.Fatalf("list scope = %+v", repository.listQuery.Recipients)
 	}
-	if repository.listQuery.Limit != maxEmailCommandListRows {
-		t.Fatalf("list limit = %d, want %d", repository.listQuery.Limit, maxEmailCommandListRows)
+	if repository.listQuery.Limit != admincmd.MaxListRows {
+		t.Fatalf("list limit = %d, want %d", repository.listQuery.Limit, admincmd.MaxListRows)
 	}
 
-	if _, err := processor.executeCommand(context.Background(), emailCommand{
-		kind: "rejection", rejectionID: 42,
-	}, actor); err != nil {
+	if _, err := processor.ExecuteLine(context.Background(), "REJECTION 42", actor); err != nil {
 		t.Fatal(err)
 	}
 	if repository.getScope.All || repository.getScope.Address != "user@example.com" {
@@ -77,9 +74,9 @@ func TestCommandProcessorBuildsRecipientScopedRepositoryQueries(t *testing.T) {
 
 func TestCommandProcessorUsesUnrestrictedRejectionScopeOnlyForAdministrator(t *testing.T) {
 	repository := &recordingRejectionRepository{}
-	processor := &CommandProcessor{server: &Server{}, rejections: repository}
-	if _, err := processor.executeCommand(context.Background(), emailCommand{kind: "rejection", rejectionID: 42},
-		CommandActor{Administrator: true, DefaultRecipient: "admin@example.com"}); err != nil {
+	processor := admincmd.New(admincmd.Dependencies{Rejections: repository})
+	if _, err := processor.ExecuteLine(context.Background(), "REJECTION 42",
+		admincmd.Actor{Administrator: true, DefaultRecipient: "admin@example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	if !repository.getScope.All || repository.getScope.Address != "" {

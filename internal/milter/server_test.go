@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
@@ -468,13 +469,13 @@ func TestRejectionCommandRetrievesProcessedArchivedMessage(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("rejection history = %#v", entries)
 	}
-	command := emailCommand{kind: "rejection", canonical: fmt.Sprintf("REJECTION %d", entries[0].ID), rejectionID: entries[0].ID}
-	owner := &session{server: server, envelopeSender: "owner@example.com"}
-	body, err := owner.executeEmailCommand(command, false)
+	command := fmt.Sprintf("REJECTION %d", entries[0].ID)
+	body, err := server.commands.ExecuteLine(context.Background(), command,
+		admincmd.Actor{DefaultRecipient: "owner@example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := body()
+	result := body
 	for _, want := range []string{"Archived subject", "test reason", `[account](https://example.net/account)`} {
 		if !strings.Contains(result.Text, want) {
 			t.Errorf("retrieved message missing %q: %s", want, result.Text)
@@ -488,14 +489,15 @@ func TestRejectionCommandRetrievesProcessedArchivedMessage(t *testing.T) {
 	if err := os.Remove(archivePath); err != nil {
 		t.Fatal(err)
 	}
-	body, err = owner.executeEmailCommand(command, false)
-	missing := body()
+	body, err = server.commands.ExecuteLine(context.Background(), command,
+		admincmd.Actor{DefaultRecipient: "owner@example.com"})
+	missing := body
 	if err != nil || !strings.Contains(missing.Text, "Saved message is not available") || len(missing.Attachments) != 0 {
 		t.Fatalf("missing archive result = %#v, %v", missing, err)
 	}
-	other := &session{server: server, envelopeSender: "other@example.com"}
-	body, err = other.executeEmailCommand(command, false)
-	unauthorized := body()
+	body, err = server.commands.ExecuteLine(context.Background(), command,
+		admincmd.Actor{DefaultRecipient: "other@example.com"})
+	unauthorized := body
 	if err != nil || unauthorized.Text != "Rejection record not found.\n" || len(unauthorized.Attachments) != 0 {
 		t.Fatalf("unauthorized result = %#v, %v", unauthorized, err)
 	}

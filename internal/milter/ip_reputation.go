@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/netip"
 	"strings"
-	"sync"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
@@ -31,60 +30,6 @@ func canonicalIPPrefix(prefix netip.Prefix) (netip.Prefix, bool) {
 		addr = addr.WithZone("")
 	}
 	return netip.PrefixFrom(addr, bits).Masked(), true
-}
-
-func (s *Server) resolveActiveIPHostnames(parent context.Context, entries []stores.IPBlock) []stores.IPBlock {
-	if len(entries) == 0 || s.resolver == nil || s.cfg.Milter.ConnectionDNSTimeout.Value() <= 0 {
-		return entries
-	}
-	indices := make(chan int)
-	var wait sync.WaitGroup
-	for range min(8, len(entries)) {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			for index := range indices {
-				addr := entries[index].Address
-				if !addr.IsValid() || !connectionAddressRoutable(addr) {
-					continue
-				}
-				ctx, cancel := context.WithTimeout(parent, s.cfg.Milter.ConnectionDNSTimeout.Value())
-				names, err := s.reverseLookupSafely(ctx, addr)
-				cancel()
-				if err != nil {
-					continue
-				}
-				for _, candidate := range names {
-					if hostname := safeDNSHostname(candidate); hostname != "" {
-						entries[index].Hostname = hostname
-						break
-					}
-				}
-			}
-		}()
-	}
-	for index := range entries {
-		select {
-		case indices <- index:
-		case <-parent.Done():
-			close(indices)
-			wait.Wait()
-			return entries
-		}
-	}
-	close(indices)
-	wait.Wait()
-	return entries
-}
-
-func (s *Server) reverseLookupSafely(ctx context.Context, addr netip.Addr) (names []string, err error) {
-	defer func() {
-		if panicValue := recover(); panicValue != nil {
-			s.logRecoveredWorkerPanic(ctx, "IP command reverse-DNS lookup", panicValue, "remote_ip", addr.String())
-			err = fmt.Errorf("reverse-DNS lookup panicked")
-		}
-	}()
-	return s.resolver.LookupAddr(ctx, addr.String())
 }
 
 // ipReputationStore applies Milter policy around the persistent repository.

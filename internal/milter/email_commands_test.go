@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -21,7 +20,6 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 func commandTestServer(t *testing.T, allowUsers bool, administrators []string) (*Server, *countingAnalyzer, net.Conn, <-chan struct{}) {
@@ -184,194 +182,6 @@ func TestMixedRecipientCommandIsRejectedWithoutExecution(t *testing.T) {
 	}
 }
 
-func TestWildcardDeletionIsAdministratorOnly(t *testing.T) {
-	if _, _, err := parseEmailCommand("WHITELIST DELETE news@example.net *", "phil@example.com", false); err == nil {
-		t.Fatal("ordinary user could use wildcard")
-	}
-	command, _, err := parseEmailCommand("WHITELIST DELETE news@example.net *", "phil@example.com", true)
-	if err != nil || command.recipient != "*" {
-		t.Fatalf("administrator wildcard = %#v, %v", command, err)
-	}
-}
-
-func TestRejectionHistoryCommandAuthorization(t *testing.T) {
-	command, _, err := parseEmailCommand("REJECTIONS", "phil@example.com", false)
-	if err != nil || command.kind != "rejections" || command.recipient != "phil@example.com" {
-		t.Fatalf("own history command = %#v, %v", command, err)
-	}
-	if _, _, err := parseEmailCommand("REJECTIONS *", "phil@example.com", false); err == nil {
-		t.Fatal("ordinary user could list all rejection history")
-	}
-	command, _, err = parseEmailCommand("REJECTIONS *", "phil@example.com", true)
-	if err != nil || command.recipient != "*" {
-		t.Fatalf("administrator history command = %#v, %v", command, err)
-	}
-}
-
-func TestAllowlistListCommandAuthorization(t *testing.T) {
-	command, _, err := parseEmailCommand("WHITELIST LIST", "phil@example.com", false)
-	if err != nil || command.kind != "whitelist_list" || command.recipient != "phil@example.com" {
-		t.Fatalf("own allowlist command = %#v, %v", command, err)
-	}
-	if _, _, err := parseEmailCommand("WHITELIST LIST other@example.com", "phil@example.com", false); err == nil {
-		t.Fatal("ordinary user could list another recipient's allowlist")
-	}
-	command, _, err = parseEmailCommand("WHITELIST LIST *", "phil@example.com", true)
-	if err != nil || command.recipient != "*" {
-		t.Fatalf("administrator allowlist command = %#v, %v", command, err)
-	}
-}
-
-func TestAllowlistFormattingIncludesRecipientsOnlyForAdministrators(t *testing.T) {
-	entries := []correspondentEntry{{Correspondent: "news@example.net", LocalAddress: "phil@example.com", WhitelistType: whitelistRepeatedLegitimate}}
-	if got := formatAllowlist(entries, false, false); got != "Sender: news@example.net\nAdded: learned from repeated legitimate inbound emails\n\n" {
-		t.Fatalf("ordinary-user output = %q", got)
-	}
-	if got := formatAllowlist(entries, true, false); got != "Sender: news@example.net\nRecipient: phil@example.com\nAdded: learned from repeated legitimate inbound emails\n\n" {
-		t.Fatalf("administrator output = %q", got)
-	}
-}
-
-func TestEmailCommandListFormattingLimitsRows(t *testing.T) {
-	entries := make([]correspondentEntry, maxEmailCommandListRows+1)
-	for i := range entries {
-		entries[i] = correspondentEntry{
-			Correspondent: fmt.Sprintf("sender-%04d@example.net", i),
-			WhitelistType: whitelistManual,
-		}
-	}
-	formatted := formatAllowlist(entries, false, false)
-	if strings.Contains(formatted, "sender-1000@example.net") {
-		t.Fatal("allowlist output contains a record beyond the hard limit")
-	}
-	if !strings.Contains(formatted, commandListTruncatedNotice) {
-		t.Fatal("allowlist output does not report row truncation")
-	}
-}
-
-func TestAllowlistListIncludesRecipientOnlyForAdministratorWildcard(t *testing.T) {
-	tests := []struct {
-		name      string
-		admin     bool
-		recipient string
-		want      bool
-	}{
-		{name: "ordinary user", admin: false, recipient: "phil@example.com", want: false},
-		{name: "administrator specific recipient", admin: true, recipient: "phil@example.com", want: false},
-		{name: "administrator wildcard", admin: true, recipient: "*", want: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got := includeAllowlistRecipient(test.admin, test.recipient)
-			if got != test.want {
-				t.Fatalf("include recipient = %v, want %v", got, test.want)
-			}
-		})
-	}
-}
-
-func TestAllowlistAddedDescriptions(t *testing.T) {
-	tests := map[stores.CorrespondentKind]string{
-		whitelistManual:                "manually",
-		whitelistAuthenticatedOutbound: "learned from authenticated outbound email",
-		whitelistRepeatedLegitimate:    "learned from repeated legitimate inbound emails",
-		"invalid":                      "unknown",
-	}
-	for whitelistType, want := range tests {
-		if got := allowlistAddedDescription(whitelistType); got != want {
-			t.Errorf("allowlistAddedDescription(%q) = %q, want %q", whitelistType, got, want)
-		}
-	}
-}
-
-func TestAdministratorHelpShowsWildcardPeriodOrder(t *testing.T) {
-	help := commandHelp(true)
-	for _, example := range []string{"WHITELIST LIST * month", "REJECTIONS * year"} {
-		if !strings.Contains(help, example) {
-			t.Errorf("administrator help does not contain %q", example)
-		}
-	}
-	if strings.Contains(commandHelp(false), "WHITELIST LIST * month") {
-		t.Fatal("ordinary-user help contains administrator wildcard example")
-	}
-}
-
-func TestIPCommandsAreAdministratorOnly(t *testing.T) {
-	for _, text := range []string{"IP LIST", "IP LIST LOOKUP", "IP ADD 192.0.2.10", "IP DELETE 2001:db8::1"} {
-		if _, _, err := parseEmailCommand(text, "phil@example.com", false); err == nil {
-			t.Fatalf("ordinary user could issue %q", text)
-		}
-	}
-	command, _, err := parseEmailCommand("IP ADD ::ffff:192.0.2.10", "phil@example.com", true)
-	if err != nil || command.kind != "ip_add" || command.ip.String() != "192.0.2.10" {
-		t.Fatalf("administrator IP command = %#v, %v", command, err)
-	}
-	command, _, err = parseEmailCommand("IP LIST LOOKUP", "phil@example.com", true)
-	if err != nil || command.kind != "ip_list_lookup" {
-		t.Fatalf("administrator lookup command = %#v, %v", command, err)
-	}
-	if _, _, err := parseEmailCommand("IP ADD not-an-ip", "phil@example.com", true); err == nil {
-		t.Fatal("invalid IP address accepted")
-	}
-}
-
-func TestListingCommandPeriods(t *testing.T) {
-	tests := []struct {
-		text      string
-		admin     bool
-		kind      string
-		period    commandPeriod
-		recipient string
-	}{
-		{text: "WHITELIST LIST", kind: "whitelist_list", period: periodWeek, recipient: "phil@example.com"},
-		{text: "WHITELIST LIST month", kind: "whitelist_list", period: periodMonth, recipient: "phil@example.com"},
-		{text: "WHITELIST LIST * all", admin: true, kind: "whitelist_list", period: periodAll, recipient: "*"},
-		{text: "REJECTIONS day", kind: "rejections", period: periodDay, recipient: "phil@example.com"},
-		{text: "REJECTIONS other@example.com year", admin: true, kind: "rejections", period: periodYear, recipient: "other@example.com"},
-		{text: "IP LIST week", admin: true, kind: "ip_list", period: periodWeek},
-		{text: "IP LIST LOOKUP month", admin: true, kind: "ip_list_lookup", period: periodMonth},
-	}
-	for _, test := range tests {
-		command, _, err := parseEmailCommand(test.text, "phil@example.com", test.admin)
-		if err != nil || command.kind != test.kind || command.period != test.period || command.recipient != test.recipient {
-			t.Errorf("parse %q = %#v, %v", test.text, command, err)
-		}
-	}
-	for _, invalid := range []string{"IP LIST fortnight", "IP LIST LOOKUP day extra", "REJECTIONS * week extra", "WHITELIST LIST * month extra"} {
-		if _, _, err := parseEmailCommand(invalid, "phil@example.com", true); err == nil {
-			t.Errorf("invalid listing command %q was accepted", invalid)
-		}
-	}
-}
-
-func TestRejectionDetailCommandRequiresPositiveID(t *testing.T) {
-	command, _, err := parseEmailCommand("REJECTION 123", "phil@example.com", false)
-	if err != nil || command.kind != "rejection" || command.rejectionID != 123 {
-		t.Fatalf("rejection detail command = %#v, %v", command, err)
-	}
-	for _, invalid := range []string{"REJECTION", "REJECTION 0", "REJECTION -1", "REJECTION invalid", "REJECTION 9223372036854775808", "REJECTION 1 extra"} {
-		if _, _, err := parseEmailCommand(invalid, "phil@example.com", false); err == nil {
-			t.Errorf("invalid command %q was accepted", invalid)
-		}
-	}
-}
-
-func TestRejectionDetailFormattingContainsOnlyStoredMetadataAndBody(t *testing.T) {
-	entry := rejectionHistoryEntry{ID: 12, Sender: "sender@example.net", Recipients: []string{"local@example.com"},
-		Subject: "Example", RejectedAt: time.Date(2026, 9, 13, 5, 30, 0, 0, time.UTC), Reason: "Unwanted"}
-	formatted := formatRejectionDetail(entry, "Cleaned body")
-	for _, want := range []string{"Rejection ID: 12", "From: sender@example.net", "To: local@example.com", "Subject: Example", "Date: 2026-09-13 05:30:00 UTC", "Reason for rejection: Unwanted", "Processed email body text:\nCleaned body"} {
-		if !strings.Contains(formatted, want) {
-			t.Errorf("detail missing %q: %s", want, formatted)
-		}
-	}
-	for _, unwanted := range []string{"CONNECTION INFORMATION", "AUTHENTICATION INFORMATION", "CORRESPONDENT INFORMATION"} {
-		if strings.Contains(formatted, unwanted) {
-			t.Errorf("detail contains analysis section %q", unwanted)
-		}
-	}
-}
-
 func TestCommandReplyPayloadAttachesOriginalMessage(t *testing.T) {
 	original := []byte("From: sender@example.net\r\nTo: local@example.com\r\nSubject: Original\r\n\r\nOriginal body\r\n")
 	payload, err := buildCommandReplyPayload(
@@ -496,25 +306,6 @@ func TestBoundedCommandReplyAddsNoticeAfterExistingFullText(t *testing.T) {
 	}
 	if !strings.HasSuffix(body.String(), commandReplyTruncatedNotice) {
 		t.Fatal("full reply was not shortened to include the truncation notice")
-	}
-}
-
-func TestCommandPeriodCutoffs(t *testing.T) {
-	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
-	if got := periodDay.cutoff(now); !got.Equal(now.Add(-24 * time.Hour)) {
-		t.Fatalf("day cutoff = %v", got)
-	}
-	if got := periodWeek.cutoff(now); !got.Equal(now.Add(-7 * 24 * time.Hour)) {
-		t.Fatalf("week cutoff = %v", got)
-	}
-	if got := periodMonth.cutoff(now); !got.Equal(now.AddDate(0, -1, 0)) {
-		t.Fatalf("month cutoff = %v", got)
-	}
-	if got := periodYear.cutoff(now); !got.Equal(now.AddDate(-1, 0, 0)) {
-		t.Fatalf("year cutoff = %v", got)
-	}
-	if got := periodAll.cutoff(now); !got.IsZero() {
-		t.Fatalf("all cutoff = %v", got)
 	}
 }
 

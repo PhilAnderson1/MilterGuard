@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/milter"
@@ -148,7 +149,7 @@ func run() int {
 }
 
 type interactiveCommandProcessor interface {
-	ExecuteLine(context.Context, string, milter.CommandActor) (milter.CommandResponse, error)
+	ExecuteLine(context.Context, string, admincmd.Actor) (admincmd.Response, error)
 }
 
 func inputIsTerminal(input *os.File) bool {
@@ -162,7 +163,7 @@ func runCommandMode(ctx context.Context, input io.Reader, output io.Writer, proc
 	}
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
-	actor := milter.CommandActor{Administrator: true, DefaultRecipient: "*", NewestLast: true}
+	actor := admincmd.Actor{Administrator: true, DefaultRecipient: "*", NewestLast: true}
 	for {
 		if interactive {
 			fmt.Fprint(output, "milterguard> ")

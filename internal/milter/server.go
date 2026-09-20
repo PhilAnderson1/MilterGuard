@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
@@ -73,7 +74,7 @@ type Server struct {
 	internalToken      string
 	commandRecipient   string
 	replySlots         chan struct{}
-	commands           *CommandProcessor
+	commands           *admincmd.Processor
 	database           *sqlstore.Store
 	progressInterval   time.Duration
 	wg                 sync.WaitGroup
@@ -115,7 +116,6 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 		progressInterval: defaultMilterProgressInterval,
 	}
 	server.allowedPeerIPs = peerPrefixes(cfg.Milter.AllowedPeerIPs)
-	server.commands = newCommandProcessor(server)
 	server.startupErr = errors.Join(tokenErr, databaseErr)
 	if cfg.RejectionHistory.SaveMessages && rejectionHistoryEnabled(cfg.RejectionHistory) {
 		server.rejectedMail = rejectedmail.New(rejectedmail.Options{
@@ -123,6 +123,8 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 			MaxTotalBytes: cfg.RejectionHistory.MessageMaxTotalBytes,
 		}, log)
 	}
+	server.commands = commandProcessor(cfg, correspondents, rejections, server.ipReputation,
+		server.rejectedMail, server.resolver, log)
 	if cfg.Attachments.BlockExecutables {
 		server.attachments = attachment.New(attachment.Options{
 			BlockedExtensions: cfg.Attachments.BlockedExtensions, InspectSignatures: cfg.Attachments.InspectSignatures,

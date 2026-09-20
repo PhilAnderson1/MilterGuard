@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
@@ -27,6 +28,13 @@ type rejectedIPRecord struct {
 	BlockedUntil    time.Time
 	LegitimateCount int
 	LastActivityAt  time.Time
+}
+
+func testRecipientScope(recipient string) stores.RecipientScope {
+	if recipient == "*" {
+		return stores.RecipientScope{All: true}
+	}
+	return stores.RecipientScope{Address: recipient}
 }
 
 // These adapters let the Milter integration tests exercise repository
@@ -106,7 +114,7 @@ func newTestRejectionHistoryStore(t *testing.T, cfg config.RejectionHistoryConfi
 func rejectionEntries(t *testing.T, repository stores.RejectionHistoryRepository, recipient string) []rejectionHistoryEntry {
 	t.Helper()
 	page, err := repository.ListRejections(context.Background(), stores.RejectionListQuery{
-		Recipients: commandRecipientScope(recipient), Limit: maxEmailCommandListRows,
+		Recipients: testRecipientScope(recipient), Limit: admincmd.MaxListRows,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +158,7 @@ func (s *correspondentStore) match(ctx context.Context, correspondent string, re
 }
 
 func (s *correspondentStore) listAllowlist(ctx context.Context, recipient string, since time.Time) ([]stores.Correspondent, error) {
-	page, err := s.ListCorrespondents(ctx, stores.CorrespondentListQuery{Recipients: commandRecipientScope(recipient), ActiveSince: since, Limit: maxEmailCommandListRows})
+	page, err := s.ListCorrespondents(ctx, stores.CorrespondentListQuery{Recipients: testRecipientScope(recipient), ActiveSince: since, Limit: admincmd.MaxListRows})
 	return page.Entries, err
 }
 
@@ -165,7 +173,7 @@ func (s *correspondentStore) deleteManual(ctx context.Context, sender, recipient
 	if s == nil || s.CorrespondentRepository == nil {
 		return 0, fmt.Errorf("correspondent allowlist is disabled or unavailable")
 	}
-	return s.DeleteManual(ctx, sender, commandRecipientScope(recipient))
+	return s.DeleteManual(ctx, sender, testRecipientScope(recipient))
 }
 
 func (s *correspondentStore) cleanup(ctx context.Context) (int64, error) { return s.Cleanup(ctx) }
@@ -179,7 +187,7 @@ func (s *rejectionHistoryStore) add(ctx context.Context, visible, envelope, subj
 }
 
 func (s *rejectionHistoryStore) list(ctx context.Context, recipient string, since time.Time) ([]stores.Rejection, error) {
-	page, err := s.ListRejections(ctx, stores.RejectionListQuery{Recipients: commandRecipientScope(recipient), RejectedSince: since, Limit: maxEmailCommandListRows})
+	page, err := s.ListRejections(ctx, stores.RejectionListQuery{Recipients: testRecipientScope(recipient), RejectedSince: since, Limit: admincmd.MaxListRows})
 	return page.Entries, err
 }
 
@@ -214,7 +222,7 @@ func (s *ipReputationStore) manualDelete(ctx context.Context, addr netip.Addr) (
 	return s.Delete(ctx, addr)
 }
 func (s *ipReputationStore) listActive(ctx context.Context, since time.Time) ([]stores.IPBlock, error) {
-	page, err := s.ListActiveBlocks(ctx, stores.IPBlockListQuery{ActiveSince: since, Limit: maxEmailCommandListRows})
+	page, err := s.ListActiveBlocks(ctx, stores.IPBlockListQuery{ActiveSince: since, Limit: admincmd.MaxListRows})
 	return page.Entries, err
 }
 
@@ -310,8 +318,4 @@ func (s *ipReputationStore) snapshot() map[netip.Addr]rejectedIPRecord {
 		result[addr] = record
 	}
 	return result
-}
-
-func (ss *session) executeEmailCommand(command emailCommand, admin bool) (commandResult, error) {
-	return ss.server.commands.execute(context.Background(), command, CommandActor{Administrator: admin, DefaultRecipient: ss.envelopeSender})
 }

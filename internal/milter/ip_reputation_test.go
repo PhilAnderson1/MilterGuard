@@ -668,25 +668,12 @@ func TestManualIPManagementListsOnlyActiveBlocks(t *testing.T) {
 }
 
 func TestActiveIPListAddsReverseDNSHostname(t *testing.T) {
-	server := &Server{
-		cfg:      config.Config{Milter: config.MilterConfig{ConnectionDNSTimeout: config.Duration(time.Second)}},
-		resolver: &connectionTestResolver{ptr: []string{"dns.google."}},
-	}
-	entries := server.resolveActiveIPHostnames(context.Background(), []stores.IPBlock{{Address: netip.MustParseAddr("8.8.8.8")}, {Address: netip.MustParseAddr("192.0.2.1")}})
+	resolver := &commandIPResolver{timeout: time.Second, resolver: &connectionTestResolver{ptr: []string{"dns.google."}}}
+	entries := resolver.ResolveActiveIPHostnames(context.Background(), []stores.IPBlock{{Address: netip.MustParseAddr("8.8.8.8")}, {Address: netip.MustParseAddr("192.0.2.1")}})
 	if entries[0].Hostname != "dns.google" {
 		t.Fatalf("resolved hostname = %q", entries[0].Hostname)
 	}
 	if entries[1].Hostname != "" {
 		t.Fatalf("non-routable hostname = %q", entries[1].Hostname)
-	}
-	formatted := formatActiveIPBlocks(entries, true, false)
-	for _, want := range []string{"IP: 8.8.8.8 (dns.google)", "IP: 192.0.2.1 (not found)"} {
-		if !strings.Contains(formatted, want) {
-			t.Errorf("formatted list missing %q: %s", want, formatted)
-		}
-	}
-	withoutLookup := formatActiveIPBlocks(entries, false, false)
-	if strings.Contains(withoutLookup, "dns.google") || strings.Contains(withoutLookup, "not found") {
-		t.Fatalf("ordinary IP list included DNS results: %s", withoutLookup)
 	}
 }
