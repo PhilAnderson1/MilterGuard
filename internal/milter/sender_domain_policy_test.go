@@ -11,9 +11,9 @@ import (
 func TestUnauthenticatedProtectedSenderDomainRejectedBeforeAI(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
-	server.cfg.IPReputation = config.IPReputationConfig{BlockDuration: config.Duration(time.Hour), MaxEntries: 100}
-	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
+	ipCfg := config.IPReputationConfig{BlockDuration: config.Duration(time.Hour), MaxEntries: 100}
+	setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -39,12 +39,12 @@ func TestUnauthenticatedProtectedSenderDomainRejectedBeforeAI(t *testing.T) {
 func TestProtectedSenderDomainRejectionHonorsIPAllowlist(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
-	server.cfg.IPReputation = config.IPReputationConfig{
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
+	ipCfg := config.IPReputationConfig{
 		BlockDuration: config.Duration(time.Hour), MaxEntries: 100,
 		IPAllowlist: []string{"192.0.2.0/24"},
 	}
-	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
+	setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -68,10 +68,12 @@ func TestProtectedSenderDomainRejectionHonorsIPAllowlist(t *testing.T) {
 func TestProtectedSenderDomainRejectionIsRecordedAndArchived(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
-	server.rejectionHistory, _ = newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
+	rejections, _ := newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{
 		Expiry: config.Duration(24 * time.Hour), MaxEntries: 10,
 	})
+	server.sessions.policy.rejectionHistory = rejections
+	server.maintenance.rejections = rejections
 	root := enableTestRejectedMail(t, server)
 	defer func() { _ = conn.Close(); <-done }()
 
@@ -92,7 +94,7 @@ func TestProtectedSenderDomainRejectionIsRecordedAndArchived(t *testing.T) {
 	if files := archivedMessages(t, root); len(files) != 1 {
 		t.Fatalf("archived files = %v", files)
 	}
-	entries := rejectionEntries(t, server.rejectionHistory, "local@example.net")
+	entries := rejectionEntries(t, rejections, "local@example.net")
 	if len(entries) != 1 || entries[0].Sender != "support@invades.net" || entries[0].Subject != "Forged local sender" {
 		t.Fatalf("rejection history = %#v", entries)
 	}
@@ -101,7 +103,7 @@ func TestProtectedSenderDomainRejectionIsRecordedAndArchived(t *testing.T) {
 func TestAuthenticatedProtectedSenderDomainIsPermitted(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -127,7 +129,7 @@ func TestAuthenticatedProtectedSenderDomainIsPermitted(t *testing.T) {
 func TestProtectedDomainInDisplayNameDoesNotTriggerPolicy(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -149,7 +151,7 @@ func TestProtectedDomainInDisplayNameDoesNotTriggerPolicy(t *testing.T) {
 func TestProtectedDomainPolicyChecksEveryFromMailbox(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -171,7 +173,7 @@ func TestProtectedDomainPolicyChecksEveryFromMailbox(t *testing.T) {
 func TestProtectedDomainPolicyRecoversMailboxFromMalformedList(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -193,7 +195,7 @@ func TestProtectedDomainPolicyRecoversMailboxFromMalformedList(t *testing.T) {
 func TestMalformedFromListDoesNotTreatDisplayTextAsProtectedMailbox(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -215,9 +217,9 @@ func TestMalformedFromListDoesNotTreatDisplayTextAsProtectedMailbox(t *testing.T
 func TestProtectedSenderDomainMonitorModeTagsWithoutAI(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Mode = "monitor"
-	server.cfg.Filtering.AddEmailHeaders = true
-	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	setTestMode(server, "monitor")
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiateWithActions(t, conn, resultHeaderActions)
@@ -242,9 +244,9 @@ func TestProtectedSenderDomainMonitorModeTagsWithoutAI(t *testing.T) {
 func TestProtectedSenderDomainMonitorModeWithoutHeadersOnlyRemovesSpoofedResults(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Mode = "monitor"
-	server.cfg.Filtering.AddEmailHeaders = false
-	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	setTestMode(server, "monitor")
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = false })
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiateWithActions(t, conn, resultHeaderActions)

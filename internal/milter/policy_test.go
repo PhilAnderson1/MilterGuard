@@ -62,8 +62,8 @@ func TestApplyPolicy(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			server := &Server{cfg: config.Config{Mode: test.mode, Filtering: config.FilteringConfig{RejectScore: 0.9}}}
-			proposed, selected := server.applyPolicy(test.decision)
+			service := &analysisService{mode: test.mode, filtering: config.FilteringConfig{RejectScore: 0.9}}
+			proposed, selected := service.applyPolicy(test.decision)
 			if proposed != test.proposed || selected != test.selected {
 				t.Fatalf("actions = (%s, %s), want (%s, %s)", proposed, selected, test.proposed, test.selected)
 			}
@@ -72,7 +72,7 @@ func TestApplyPolicy(t *testing.T) {
 }
 
 func TestEncodeAction(t *testing.T) {
-	server := &Server{cfg: config.Config{Filtering: config.FilteringConfig{RejectMessage: "blocked"}}}
+	service := &analysisService{filtering: config.FilteringConfig{RejectMessage: "blocked"}}
 	tests := []struct {
 		action action
 		want   string
@@ -82,7 +82,7 @@ func TestEncodeAction(t *testing.T) {
 		{actionTempfail, "t"},
 	}
 	for _, test := range tests {
-		if got := string(server.encodeAction(test.action)); got != test.want {
+		if got := string(service.encodeAction(test.action)); got != test.want {
 			t.Errorf("encodeAction(%s) = %q, want %q", test.action, got, test.want)
 		}
 	}
@@ -90,8 +90,8 @@ func TestEncodeAction(t *testing.T) {
 
 func TestLogOutcomeRecordsResponseDelivery(t *testing.T) {
 	var output bytes.Buffer
-	server := &Server{
-		cfg: config.Config{Mode: "enforce", AI: config.AIConfig{Model: "test-model"}},
+	service := &analysisService{
+		mode: "enforce", ai: config.AIConfig{Model: "test-model"},
 		log: slog.New(slog.NewJSONHandler(&output, nil)),
 	}
 	msg := message.New(1024)
@@ -101,7 +101,7 @@ func TestLogOutcomeRecordsResponseDelivery(t *testing.T) {
 		classification: "unwanted", score: 1, reasons: []string{"test"},
 		latency: time.Millisecond,
 	}
-	server.logOutcome(context.Background(), msg, result, false, errors.New("write failed"))
+	service.logOutcome(context.Background(), msg, result, false, errors.New("write failed"))
 	logLine := output.String()
 	for _, wanted := range []string{`"actual_action":"reject"`, `"response_sent":false`, `"response_error":"write failed"`} {
 		if !strings.Contains(logLine, wanted) {
@@ -124,13 +124,13 @@ func TestLogOutcomeIdentifiesPermanentEndpointFailures(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var output bytes.Buffer
-			server := &Server{
-				cfg: config.Config{Mode: "enforce"},
-				log: slog.New(slog.NewJSONHandler(&output, nil)),
+			service := &analysisService{
+				mode: "enforce",
+				log:  slog.New(slog.NewJSONHandler(&output, nil)),
 			}
 			msg := message.New(1024)
 			msg.AddHeader("Message-ID", "<test@example.invalid>")
-			server.logOutcome(context.Background(), msg, evaluationResult{
+			service.logOutcome(context.Background(), msg, evaluationResult{
 				selected: actionAccept,
 				err: &ai.EndpointError{
 					Kind: test.kind, StatusCode: test.statusCode,

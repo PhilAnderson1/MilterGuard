@@ -149,8 +149,8 @@ func TestResolveConnectionDNSTimeoutIsLookupFailure(t *testing.T) {
 
 func TestConnectionDNSPanicIsRecoveredAsLookupFailure(t *testing.T) {
 	var logOutput strings.Builder
-	server := &Server{log: slog.New(slog.NewJSONHandler(&logOutput, nil))}
-	got := server.resolveConnectionDNSSafely(context.Background(), panickingDNSResolver{}, netip.MustParseAddr("8.8.8.8"), time.Second)
+	service := &connectionDNSService{log: slog.New(slog.NewJSONHandler(&logOutput, nil)), resolver: panickingDNSResolver{}, timeout: time.Second}
+	got := service.resolveSafely(context.Background(), netip.MustParseAddr("8.8.8.8"))
 	if got.status != message.ReverseDNSLookupFailed {
 		t.Fatalf("panic status = %q, want lookup failure", got.status)
 	}

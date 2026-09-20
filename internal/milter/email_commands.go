@@ -40,23 +40,23 @@ type commandReplyContent struct {
 }
 
 func (ss *session) isCommandRecipient(recipient string) bool {
-	return ss.server.cfg.EmailCommands.Enabled && normalizeEmailAddress(recipient) == ss.server.commandRecipient
+	return ss.deps.commands.cfg.Enabled && normalizeEmailAddress(recipient) == ss.deps.commands.recipient
 }
 
 func (ss *session) isInternalMessage() bool {
 	marker := strings.TrimSpace(ss.message.Header(internalMessageHeader))
-	return marker != "" && marker == ss.server.internalToken &&
+	return marker != "" && marker == ss.deps.commands.internalToken &&
 		(!ss.peerIP.IsValid() || ss.peerIP.IsLoopback() || !connectionAddressRoutable(ss.peerIP))
 }
 
 func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
-	cfg := ss.server.cfg.EmailCommands
+	cfg := ss.deps.commands.cfg
 	if !cfg.Enabled {
 		return false, true
 	}
 	hasCommandRecipient := false
 	for _, recipient := range ss.envelopeRecipients {
-		if normalizeEmailAddress(recipient) == ss.server.commandRecipient {
+		if normalizeEmailAddress(recipient) == ss.deps.commands.recipient {
 			hasCommandRecipient = true
 		}
 	}
@@ -83,7 +83,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	}
 	if !admin && cfg.VerifySenderViaAliases {
 		if err := senderOwnedViaAliases(cfg.AliasesFile, ss.envelopeSender, identity, cfg.Recipient); err != nil {
-			ss.server.log.WarnContext(ctx, "email command sender ownership verification failed", "authenticated_identity", identity, "envelope_sender", ss.envelopeSender, "error", err)
+			ss.deps.log.WarnContext(ctx, "email command sender ownership verification failed", "authenticated_identity", identity, "envelope_sender", ss.envelopeSender, "error", err)
 			return true, ss.rejectEmailCommand(ctx, "envelope sender is not owned by the authenticated user", false)
 		}
 	}
@@ -99,7 +99,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	actor := admincmd.Actor{Administrator: admin, DefaultRecipient: replyTo}
 	commands := make([]admincmd.Command, 0, len(lines))
 	for _, line := range lines {
-		command, parseErr := ss.server.commands.Parse(line, actor)
+		command, parseErr := ss.deps.commands.processor.Parse(line, actor)
 		if parseErr != nil {
 			if len(commands) == 0 {
 				return true, ss.completeInvalidEmailCommand(ctx, identity, replyTo, parseErr.Error())
@@ -121,10 +121,10 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	parts := make([]admincmd.DeferredResponse, 0, len(commands))
 	canonicals := make([]string, 0, len(commands))
 	for _, command := range commands {
-		body, operationErr := ss.server.commands.Execute(ctx, command, actor)
+		body, operationErr := ss.deps.commands.processor.Execute(ctx, command, actor)
 		canonicals = append(canonicals, command.Canonical())
 		if operationErr != nil {
-			ss.server.log.ErrorContext(ctx, "email command operation failed", "authenticated_identity", identity, "command", command.Canonical(), "error", operationErr)
+			ss.deps.log.ErrorContext(ctx, "email command operation failed", "authenticated_identity", identity, "command", command.Canonical(), "error", operationErr)
 			parts = append(parts, func() admincmd.Response {
 				return admincmd.Response{Text: "The command could not be completed. Check the server log.\n"}
 			})
@@ -132,7 +132,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 		}
 		parts = append(parts, body)
 	}
-	queued := ss.queueCommandReplyContentFunc(replyTo, "MilterGuard command results", func() commandReplyContent {
+	queued := ss.deps.commands.queueReplyContentFunc(replyTo, "MilterGuard command results", func() commandReplyContent {
 		var body strings.Builder
 		var attachments []commandReplyAttachment
 		attached := make(map[string]bool)
@@ -224,12 +224,12 @@ func appendBoundedCommandReply(body *strings.Builder, text string) bool {
 }
 
 func (ss *session) completeInvalidEmailCommand(ctx context.Context, identity, replyTo, reason string) bool {
-	queued := ss.queueCommandReply(replyTo, "MilterGuard command rejected", reason+".\n\n"+admincmd.Help(ss.isCommandAdministrator(identity)))
+	queued := ss.deps.commands.queueReply(replyTo, "MilterGuard command rejected", reason+".\n\n"+admincmd.Help(ss.isCommandAdministrator(identity)))
 	return ss.discardEmailCommand(ctx, identity, "invalid", reason, replyTo, "", queued)
 }
 
 func (ss *session) isCommandAdministrator(identity string) bool {
-	for _, configured := range ss.server.cfg.EmailCommands.Administrators {
+	for _, configured := range ss.deps.commands.cfg.Administrators {
 		if strings.EqualFold(strings.TrimSpace(configured), identity) {
 			return true
 		}
@@ -239,7 +239,7 @@ func (ss *session) isCommandAdministrator(identity string) bool {
 
 func (ss *session) rejectEmailCommand(ctx context.Context, reason string, replyQueued bool) bool {
 	err := writeFrame(ss.conn, replyCode("550", "5.7.1", "MilterGuard command rejected: "+reason))
-	ss.server.log.WarnContext(ctx, "email command rejected", "message_id", ss.message.Header("Message-ID"), "authenticated_identity", ss.authentication.Identity, "result", reason, "discarded", false, "confirmation_queued", replyQueued, "response_sent", err == nil)
+	ss.deps.log.WarnContext(ctx, "email command rejected", "message_id", ss.message.Header("Message-ID"), "authenticated_identity", ss.authentication.Identity, "result", reason, "discarded", false, "confirmation_queued", replyQueued, "response_sent", err == nil)
 	if err != nil {
 		return false
 	}
@@ -251,9 +251,9 @@ func (ss *session) discardEmailCommand(ctx context.Context, identity, command, r
 	err := writeFrame(ss.conn, []byte{responseDiscard})
 	attrs := []any{"message_id", ss.message.Header("Message-ID"), "authenticated_identity", identity, "command", command, "sender", sender, "recipient", recipient, "result", result, "discarded", err == nil, "confirmation_queued", confirmationQueued, "response_sent", err == nil}
 	if command == "invalid" {
-		ss.server.log.WarnContext(ctx, "email command processed", attrs...)
+		ss.deps.log.WarnContext(ctx, "email command processed", attrs...)
 	} else {
-		ss.server.log.InfoContext(ctx, "email command processed", attrs...)
+		ss.deps.log.InfoContext(ctx, "email command processed", attrs...)
 	}
 	if err != nil {
 		return false
@@ -262,36 +262,36 @@ func (ss *session) discardEmailCommand(ctx context.Context, identity, command, r
 	return true
 }
 
-func (ss *session) queueCommandReply(recipient, subject, body string) bool {
-	return ss.queueCommandReplyContentFunc(recipient, subject, func() commandReplyContent {
+func (s *emailCommandService) queueReply(recipient, subject, body string) bool {
+	return s.queueReplyContentFunc(recipient, subject, func() commandReplyContent {
 		return commandReplyContent{Text: body}
 	})
 }
 
-func (ss *session) queueCommandReplyContentFunc(recipient, subject string, content func() commandReplyContent) bool {
-	if !ss.server.cfg.EmailCommands.SendReplies {
+func (s *emailCommandService) queueReplyContentFunc(recipient, subject string, content func() commandReplyContent) bool {
+	if !s.cfg.SendReplies {
 		return false
 	}
-	cfg := ss.server.cfg.EmailCommands
-	token := ss.server.internalToken
-	log := ss.server.log
+	cfg := s.cfg
+	token := s.internalToken
+	log := s.log
 	select {
-	case ss.server.replySlots <- struct{}{}:
+	case s.replySlots <- struct{}{}:
 	default:
 		log.Error("email command confirmation queue is full", "recipient", recipient)
 		return false
 	}
 	go func() {
-		defer func() { <-ss.server.replySlots }()
+		defer func() { <-s.replySlots }()
 		defer func() {
 			if panicValue := recover(); panicValue != nil {
-				ss.server.logRecoveredWorkerPanic(context.Background(), "email command reply", panicValue, "recipient", recipient)
+				logRecoveredWorkerPanic(s.log, context.Background(), "email command reply", panicValue, "recipient", recipient)
 			}
 		}()
 		from := normalizeEmailAddress(cfg.Recipient)
 		date := time.Now().UTC().Format(time.RFC1123Z)
 		reply := content()
-		payload, err := buildBoundedCommandReplyPayload(from, recipient, subject, date, token, reply, ss.server.cfg.Milter.MaxMessageSize)
+		payload, err := buildBoundedCommandReplyPayload(from, recipient, subject, date, token, reply, s.maxMessageSize)
 		if err == nil {
 			err = submitSMTP(cfg.SMTPHost, cfg.SMTPTLS, recipient, payload)
 		}

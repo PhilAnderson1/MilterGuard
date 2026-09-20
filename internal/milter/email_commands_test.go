@@ -119,7 +119,7 @@ func TestAuthenticatedUserEmailCommandAddsOwnRelationshipAndDiscards(t *testing.
 	if analyzer.calls.Load() != 0 {
 		t.Fatal("command message was sent to AI")
 	}
-	match := testCorrespondentMatch(server.correspondents, context.Background(), "news@example.net", []string{"phil@example.com"})
+	match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "news@example.net", []string{"phil@example.com"})
 	if !match.Known {
 		t.Fatal("command did not add live correspondent relationship")
 	}
@@ -136,10 +136,10 @@ func TestEmailCommandBatchRunsSequentiallyAndStopsAtText(t *testing.T) {
 	if analyzer.calls.Load() != 0 {
 		t.Fatal("command message was sent to AI")
 	}
-	if testCorrespondentMatch(server.correspondents, context.Background(), "old@example.net", []string{"phil@example.com"}).Known {
+	if testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "old@example.net", []string{"phil@example.com"}).Known {
 		t.Fatal("deleted batch entry remains")
 	}
-	if !testCorrespondentMatch(server.correspondents, context.Background(), "current@example.net", []string{"phil@example.com"}).Known {
+	if !testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "current@example.net", []string{"phil@example.com"}).Known {
 		t.Fatal("later batch command was not executed")
 	}
 }

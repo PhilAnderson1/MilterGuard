@@ -15,7 +15,6 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 type protocolPhase uint8
@@ -35,7 +34,7 @@ const (
 const maxEnvelopeRecipients = 100
 
 type session struct {
-	server                      *Server
+	deps                        *sessionDependencies
 	conn                        net.Conn
 	reader                      *bufio.Reader
 	phase                       protocolPhase
@@ -57,8 +56,8 @@ type session struct {
 	negotiatedActions           uint32
 }
 
-func newSession(server *Server, conn net.Conn) *session {
-	ss := &session{server: server, conn: conn, reader: bufio.NewReader(conn)}
+func newSession(deps *sessionDependencies, conn net.Conn) *session {
+	ss := &session{deps: deps, conn: conn, reader: bufio.NewReader(conn)}
 	ss.resetMessage(phaseNegotiation)
 	return ss
 }
@@ -69,10 +68,10 @@ func (ss *session) run(ctx context.Context) {
 	})
 	defer stopClose()
 	for {
-		deadline := time.Now().Add(ss.server.cfg.Milter.Timeout.Value())
+		deadline := time.Now().Add(ss.deps.protocol.timeout)
 		if err := ss.conn.SetDeadline(deadline); err != nil {
 			if ctx.Err() == nil {
-				ss.server.log.Warn("cannot set Milter connection deadline",
+				ss.deps.log.Warn("cannot set Milter connection deadline",
 					"stage", "protocol read",
 					"local_addr", ss.conn.LocalAddr().String(),
 					"remote_addr", ss.conn.RemoteAddr().String(),
@@ -101,11 +100,11 @@ func (ss *session) handleReadError(ctx context.Context, bytesRead int, err error
 		if bytesRead == 0 {
 			return true
 		}
-		ss.server.log.Warn("milter connection timed out during frame", "bytes_read", bytesRead, "error", err)
+		ss.deps.log.Warn("milter connection timed out during frame", "bytes_read", bytesRead, "error", err)
 		return false
 	}
 	if err != io.EOF {
-		ss.server.log.Warn("milter connection error", "error", err)
+		ss.deps.log.Warn("milter connection error", "error", err)
 	}
 	return false
 }
@@ -157,7 +156,7 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 			ss.peerIP = addr
 			ss.startConnectionDNS(ctx)
 		} else {
-			ss.server.log.Debug("milter CONNECT did not provide a usable IP address")
+			ss.deps.log.Debug("milter CONNECT did not provide a usable IP address")
 		}
 		return ss.sendContinue(command)
 	case commandHelo:
@@ -242,14 +241,14 @@ func (ss *session) negotiate(payload []byte) bool {
 	// Request result-header capabilities even when result generation is disabled:
 	// sender-supplied X-MilterGuard result headers must still be removable.
 	requestedActions := offeredActions & resultHeaderActions
-	wantsResultHeaders := ss.server.cfg.Filtering.AddEmailHeaders || ss.server.cfg.Mode == "tag"
+	wantsResultHeaders := ss.deps.policy.filtering.AddEmailHeaders || ss.deps.protocol.mode == "tag"
 	if wantsResultHeaders && offeredActions&actionAddHeaders == 0 {
-		ss.server.log.Warn("result headers disabled for Milter connection because MTA did not offer add-header support",
+		ss.deps.log.Warn("result headers disabled for Milter connection because MTA did not offer add-header support",
 			"offered_actions", offeredActions)
 	}
-	wantsInternalHeaderRemoval := ss.server.cfg.EmailCommands.Enabled && ss.server.cfg.EmailCommands.SendReplies
+	wantsInternalHeaderRemoval := ss.deps.commands != nil && ss.deps.commands.cfg.Enabled && ss.deps.commands.cfg.SendReplies
 	if wantsInternalHeaderRemoval && offeredActions&actionChangeHeaders == 0 {
-		ss.server.log.Warn("internal reply protection disabled for Milter connection because MTA did not offer change-header support",
+		ss.deps.log.Warn("internal reply protection disabled for Milter connection because MTA did not offer change-header support",
 			"offered_actions", offeredActions)
 	}
 	ss.negotiatedActions = requestedActions
@@ -273,14 +272,14 @@ func (ss *session) addHeader(payload []byte) bool {
 }
 
 func (ss *session) finishMessage(ctx context.Context) bool {
-	ctx, cancel := context.WithTimeout(ctx, ss.server.analysisTimeout())
+	ctx, cancel := context.WithTimeout(ctx, ss.deps.analysis.analysisTimeout())
 	defer cancel()
 	if ss.phase != phaseBody {
 		return ss.protocolError("unexpected milter end-of-body command")
 	}
-	if err := ss.conn.SetDeadline(time.Now().Add(ss.server.analysisTimeout())); err != nil {
+	if err := ss.conn.SetDeadline(time.Now().Add(ss.deps.analysis.analysisTimeout())); err != nil {
 		if ctx.Err() == nil {
-			ss.server.log.WarnContext(ctx, "cannot set Milter connection deadline",
+			ss.deps.log.WarnContext(ctx, "cannot set Milter connection deadline",
 				"stage", "message processing",
 				"local_addr", ss.conn.LocalAddr().String(),
 				"remote_addr", ss.conn.RemoteAddr().String(),
@@ -300,12 +299,12 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if handled, keepConnection := ss.applyAuthenticatedOnlySenderDomain(ctx); handled {
 		return keepConnection
 	}
-	if ss.authentication.Authenticated && !ss.server.cfg.Filtering.ScanAuthenticated {
+	if ss.authentication.Authenticated && !ss.deps.policy.filtering.ScanAuthenticated {
 		return ss.finishBypassedMessage(ctx, "authenticated_connection", true, false)
 	}
-	if ss.server.attachments != nil {
+	if ss.deps.attachments != nil && ss.deps.attachments.scanner != nil {
 		if err := writeFrame(ss.conn, []byte{responseProgress}); err != nil {
-			ss.server.log.WarnContext(ctx, "cannot send Milter progress response before attachment inspection", "error", err)
+			ss.deps.log.WarnContext(ctx, "cannot send Milter progress response before attachment inspection", "error", err)
 			return false
 		}
 	}
@@ -324,7 +323,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	}
 	result, progressErr := ss.evaluateWithProgress(ctx, inbound)
 	if progressErr != nil {
-		ss.server.log.WarnContext(ctx, "cannot send Milter progress response", "error", progressErr)
+		ss.deps.log.WarnContext(ctx, "cannot send Milter progress response", "error", progressErr)
 		return false
 	}
 	var err error
@@ -332,9 +331,9 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		err = ss.writeAcceptedResultHeaders(&result)
 	}
 	if err == nil {
-		err = writeFrame(ss.conn, ss.server.encodeAction(result.selected))
+		err = writeFrame(ss.conn, ss.deps.analysis.encodeAction(result.selected))
 	}
-	ss.server.logOutcome(ctx, ss.message, result, err == nil, err)
+	ss.deps.analysis.logOutcome(ctx, ss.message, result, err == nil, err)
 	if err != nil {
 		return false
 	}
@@ -351,14 +350,14 @@ func (ss *session) evaluateWithProgress(ctx context.Context, inbound inboundEvid
 	go func() {
 		defer func() {
 			if panicValue := recover(); panicValue != nil {
-				ss.server.logRecoveredWorkerPanic(workerCtx, "message analysis", panicValue)
-				results <- ss.server.analysisFailure(fmt.Errorf("message analysis panic: %v", panicValue), started)
+				logRecoveredWorkerPanic(ss.deps.log, workerCtx, "message analysis", panicValue)
+				results <- ss.deps.analysis.analysisFailure(fmt.Errorf("message analysis panic: %v", panicValue), started)
 			}
 		}()
 		results <- ss.evaluateMessage(workerCtx, inbound)
 	}()
 
-	interval := ss.server.progressInterval
+	interval := ss.deps.protocol.progressInterval
 	if interval <= 0 {
 		interval = defaultMilterProgressInterval
 	}
@@ -384,21 +383,21 @@ func (ss *session) evaluateWithProgress(ctx context.Context, inbound inboundEvid
 
 func (ss *session) evaluateMessage(ctx context.Context, inbound inboundEvidence) evaluationResult {
 	if inbound.authenticatedDomain != "" {
-		info, err := ss.server.domainRegistration.evidence(ctx, inbound.authenticatedDomain)
+		info, err := ss.deps.policy.domainRegistration.evidence(ctx, inbound.authenticatedDomain)
 		if err != nil {
-			ss.server.log.DebugContext(ctx, "domain registration lookup unavailable", "domain", registrableDomain(inbound.authenticatedDomain), "error", err)
+			ss.deps.log.DebugContext(ctx, "domain registration lookup unavailable", "domain", registrableDomain(inbound.authenticatedDomain), "error", err)
 		} else {
 			ss.message.DomainRegistration = info
 		}
 	}
 	ss.message.TrustedAuthservIDs = ss.trustedAuthservIDs()
 	ss.message.Connection = ss.connectionInformation(ctx)
-	return ss.server.evaluate(ctx, ss.message)
+	return ss.deps.analysis.evaluate(ctx, ss.message)
 }
 
 func (ss *session) finishInternalMessage(ctx context.Context) bool {
 	if ss.negotiatedActions&actionChangeHeaders == 0 {
-		ss.server.log.ErrorContext(ctx, "cannot safely accept internal command reply because MTA did not offer header removal")
+		ss.deps.log.ErrorContext(ctx, "cannot safely accept internal command reply because MTA did not offer header removal")
 		if err := writeFrame(ss.conn, []byte{responseTempfail}); err != nil {
 			return false
 		}
@@ -450,30 +449,30 @@ func (ss *session) prepareInboundEvidence(ctx context.Context) inboundEvidence {
 	if authentication.anyAligned() {
 		evidence.authenticatedDomain = ss.visibleSenderDomain
 	}
-	if domain := allowedSenderDomain(ss.visibleSenderDomain, ss.server.cfg.Filtering.SenderDomainAllowlist); domain != "" &&
-		(!ss.server.cfg.Filtering.SenderDomainAllowlistRequireDKIM || authentication.DKIMAligned) {
+	if domain := allowedSenderDomain(ss.visibleSenderDomain, ss.deps.policy.filtering.SenderDomainAllowlist); domain != "" &&
+		(!ss.deps.policy.filtering.SenderDomainAllowlistRequireDKIM || authentication.DKIMAligned) {
 		evidence.allowedSenderDomain = domain
 	}
-	if !ss.server.cfg.Correspondents.UseAllowlist {
+	if !ss.deps.policy.correspondentCfg.UseAllowlist {
 		return evidence
 	}
-	match, err := ss.server.correspondents.Match(ctx, ss.visibleSender, ss.envelopeRecipients)
-	if err != nil && ss.server.log != nil {
-		ss.server.log.ErrorContext(ctx, "correspondent database operation failed", "operation", "match correspondent", "error", err)
+	match, err := ss.deps.policy.correspondents.Match(ctx, ss.visibleSender, ss.envelopeRecipients)
+	if err != nil && ss.deps.log != nil {
+		ss.deps.log.ErrorContext(ctx, "correspondent database operation failed", "operation", "match correspondent", "error", err)
 	}
 	known := match.Known
-	if ss.server.cfg.Correspondents.Scope == "per_sender" && ss.server.cfg.Correspondents.RecipientMatch == "all" {
+	if ss.deps.policy.correspondentCfg.Scope == "per_sender" && ss.deps.policy.correspondentCfg.RecipientMatch == "all" {
 		known = evidence.recipientsComplete && match.AllRecipientsMatched
 	}
 	evidence.knownCorrespondent = known
 	ss.message.Correspondent = message.CorrespondentInfo{
 		Enabled:               true,
 		Known:                 known,
-		Scope:                 ss.server.cfg.Correspondents.Scope,
+		Scope:                 ss.deps.policy.correspondentCfg.Scope,
 		AuthenticationAligned: known && authentication.anyAligned(),
 	}
-	bypassAuthentication := !ss.server.cfg.Correspondents.RequireDKIMForBypass || authentication.DKIMAligned
-	evidence.bypassAI = ss.server.cfg.Correspondents.BypassAI && evidence.recipientsComplete && known && bypassAuthentication
+	bypassAuthentication := !ss.deps.policy.correspondentCfg.RequireDKIMForBypass || authentication.DKIMAligned
+	evidence.bypassAI = ss.deps.policy.correspondentCfg.BypassAI && evidence.recipientsComplete && known && bypassAuthentication
 	return evidence
 }
 
@@ -490,44 +489,13 @@ func (ss *session) recipientSetComplete() bool {
 }
 
 func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluationResult, inbound inboundEvidence) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), postDecisionUpdateTimeout)
-	defer cancel()
-	if ss.server.cfg.Mode != "enforce" {
-		return
-	}
-	if result.selected == actionReject {
-		ss.server.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, result.reasons, "ai")
-		if !ss.authentication.Authenticated {
-			ss.server.ipReputation.add(ctx, ss.peerIP, ss.connectionDNS)
-		}
-	}
-	if !ss.authentication.Authenticated && result.err == nil && result.classification == "legitimate" {
-		if err := ss.server.ipReputation.RecordLegitimate(ctx, ss.peerIP); err != nil {
-			ss.server.log.ErrorContext(ctx, "cannot update sending IP reputation", "error", err)
-		}
-	}
-	if result.selected == actionAccept && ss.authentication.Authenticated {
-		ss.learnAuthenticatedRecipients(ctx)
-	} else if !ss.authentication.Authenticated && result.err == nil {
-		ss.recordInboundClassification(ctx, result, inbound.recipientsComplete, inbound.trustedDKIM)
-	}
-}
-
-func (ss *session) recordInboundClassification(ctx context.Context, result evaluationResult, recipientsComplete, dkimAligned bool) {
-	if err := ss.server.correspondents.RecordInboundClassification(ctx, stores.InboundClassification{
-		Correspondent: ss.visibleSender, Recipients: ss.envelopeRecipients,
-		RecipientsComplete: recipientsComplete, Classification: result.classification,
-		Score: result.score, UnwantedMinScore: ss.server.cfg.Filtering.RejectScore,
-		DKIMAligned: dkimAligned,
-	}); err != nil {
-		ss.server.log.ErrorContext(ctx, "cannot update inbound correspondent learning", "error", err)
-	}
+	ss.deps.policy.applyPostDecisionUpdates(ctx, ss.messageContext(inbound.recipientsComplete), result, inbound)
 }
 
 func (ss *session) captureSessionMacros(payload []byte) {
 	target, values, valid := parseSessionMacros(payload)
 	if !valid {
-		ss.server.log.Debug("ignored malformed milter macro data")
+		ss.deps.log.Debug("ignored malformed milter macro data")
 		return
 	}
 	if values.MTAHostnameFound {
@@ -546,7 +514,7 @@ func (ss *session) captureSessionMacros(payload []byte) {
 }
 
 func (ss *session) trustedAuthservIDs() []string {
-	configured := ss.server.cfg.Correspondents.TrustedAuthservIDs
+	configured := ss.deps.policy.correspondentCfg.TrustedAuthservIDs
 	trusted := make([]string, 0, len(configured))
 	for _, authservID := range configured {
 		if authservID == config.MTAHostnameAuthservID {
@@ -584,11 +552,11 @@ func validMTAHostname(value string) string {
 func (ss *session) finishBypassedMessage(ctx context.Context, source string, learn, touchInbound bool, extraAttrs ...any) bool {
 	err := ss.writeAcceptedBypassHeaders()
 	if err == nil {
-		err = writeFrame(ss.conn, ss.server.encodeAction(actionAccept))
+		err = writeFrame(ss.conn, ss.deps.analysis.encodeAction(actionAccept))
 	}
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
-		"mode", ss.server.cfg.Mode,
+		"mode", ss.deps.protocol.mode,
 		"actual_action", actionAccept.String(),
 		"source", source,
 		"response_sent", err == nil,
@@ -596,10 +564,10 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 	attrs = append(attrs, extraAttrs...)
 	if err != nil {
 		attrs = append(attrs, "response_error", err)
-		ss.server.log.ErrorContext(ctx, "message bypass response failed", attrs...)
+		ss.deps.log.ErrorContext(ctx, "message bypass response failed", attrs...)
 		return false
 	}
-	if ss.server.cfg.Mode == "enforce" {
+	if ss.deps.protocol.mode == "enforce" {
 		if learn {
 			ss.learnAuthenticatedRecipients(ctx)
 		}
@@ -608,48 +576,52 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 		}
 	}
 	if source == "internal_command_reply" {
-		ss.server.log.DebugContext(ctx, "message bypassed AI analysis", attrs...)
+		ss.deps.log.DebugContext(ctx, "message bypassed AI analysis", attrs...)
 	} else {
-		ss.server.log.InfoContext(ctx, "message bypassed AI analysis", attrs...)
+		ss.deps.log.InfoContext(ctx, "message bypassed AI analysis", attrs...)
 	}
 	ss.resetMessage(phaseConnection)
 	return true
 }
 
 func (ss *session) touchInboundCorrespondent(ctx context.Context) {
-	if err := ss.server.correspondents.TouchInbound(ctx, ss.visibleSender, ss.envelopeRecipients); err != nil {
-		ss.server.log.ErrorContext(ctx, "cannot update correspondent activity", "error", err)
-	}
+	ss.deps.policy.touchInboundCorrespondent(ctx, ss.visibleSender, ss.envelopeRecipients)
 }
 
 func (ss *session) learnAuthenticatedRecipients(ctx context.Context) {
-	if err := ss.server.correspondents.LearnAuthenticated(ctx, ss.envelopeSender, ss.envelopeRecipients); err != nil {
-		ss.server.log.ErrorContext(ctx, "cannot update correspondent allowlist", "error", err)
+	ss.deps.policy.learnAuthenticatedRecipients(ctx, ss.envelopeSender, ss.envelopeRecipients)
+}
+
+func (ss *session) messageContext(recipientsComplete bool) messageContext {
+	return messageContext{
+		message: ss.message, peerIP: ss.peerIP, connectionDNS: ss.connectionDNS,
+		authenticated: ss.authentication.Authenticated, visibleSender: ss.visibleSender,
+		visibleSenderDomain: ss.visibleSenderDomain, envelopeSender: ss.envelopeSender,
+		envelopeRecipients: append([]string(nil), ss.envelopeRecipients...), recipientsComplete: recipientsComplete,
 	}
 }
 
 func (ss *session) startConnectionDNS(ctx context.Context) {
-	timeout := ss.server.cfg.Milter.ConnectionDNSTimeout.Value()
-	if timeout <= 0 || !connectionAddressRoutable(ss.peerIP) || ss.server.resolver == nil {
+	timeout := ss.deps.dns.timeout
+	if timeout <= 0 || !connectionAddressRoutable(ss.peerIP) || ss.deps.dns.resolver == nil {
 		return
 	}
 	pending := make(chan connectionDNSResult, 1)
 	ss.connectionDNSPending = pending
-	resolver := ss.server.resolver
 	addr := ss.peerIP
 	go func() {
-		pending <- ss.server.resolveConnectionDNSSafely(ctx, resolver, addr, timeout)
+		pending <- ss.deps.dns.resolveSafely(ctx, addr)
 	}()
 }
 
-func (s *Server) resolveConnectionDNSSafely(ctx context.Context, resolver dnsResolver, addr netip.Addr, timeout time.Duration) (result connectionDNSResult) {
+func (s *connectionDNSService) resolveSafely(ctx context.Context, addr netip.Addr) (result connectionDNSResult) {
 	result = connectionDNSResult{status: message.ReverseDNSLookupFailed}
 	defer func() {
 		if panicValue := recover(); panicValue != nil {
-			s.logRecoveredWorkerPanic(ctx, "connection DNS lookup", panicValue, "remote_ip", addr.String())
+			logRecoveredWorkerPanic(s.log, ctx, "connection DNS lookup", panicValue, "remote_ip", addr.String())
 		}
 	}()
-	return resolveConnectionDNS(ctx, resolver, addr, timeout)
+	return resolveConnectionDNS(ctx, s.resolver, addr, s.timeout)
 }
 
 func (ss *session) connectionInformation(ctx context.Context) message.ConnectionInfo {
@@ -697,30 +669,30 @@ func cleanSMTPIdentity(value string) string {
 }
 
 func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
-	ctx, cancel := context.WithTimeout(ctx, ss.server.cfg.Milter.Timeout.Value())
+	ctx, cancel := context.WithTimeout(ctx, ss.deps.protocol.timeout)
 	defer cancel()
-	if ss.server.cfg.Mode != "enforce" || ss.authentication.Authenticated {
+	if ss.deps.protocol.mode != "enforce" || ss.authentication.Authenticated {
 		return false, true
 	}
-	if _, allowed := ss.server.ipReputation.allowed(ss.peerIP); allowed {
+	if _, allowed := ss.deps.policy.ipReputation.allowed(ss.peerIP); allowed {
 		return false, true
 	}
-	if len(ss.server.ipReputation.domainAllowlist) > 0 {
+	if len(ss.deps.policy.ipReputation.domainAllowlist) > 0 {
 		dns := ss.awaitConnectionDNS(ctx)
-		if hostname, domain, allowed := ss.server.ipReputation.domainAllowed(dns); allowed {
-			ss.server.log.DebugContext(ctx, "sending IP block bypassed by reverse-DNS domain allowlist",
+		if hostname, domain, allowed := ss.deps.policy.ipReputation.domainAllowed(dns); allowed {
+			ss.deps.log.DebugContext(ctx, "sending IP block bypassed by reverse-DNS domain allowlist",
 				"remote_ip", ss.peerIP.String(), "reverse_dns", hostname, "matched_domain", domain)
 			return false, true
 		}
 	}
-	entry, ok := ss.server.ipReputation.lookup(ctx, ss.peerIP)
+	entry, ok := ss.deps.policy.ipReputation.lookup(ctx, ss.peerIP)
 	if !ok {
 		return false, true
 	}
-	err := writeFrame(ss.conn, ss.server.encodeAction(actionReject))
+	err := writeFrame(ss.conn, ss.deps.analysis.encodeAction(actionReject))
 	attrs := []any{
 		"remote_ip", ss.peerIP.String(),
-		"mode", ss.server.cfg.Mode,
+		"mode", ss.deps.protocol.mode,
 		"proposed_action", actionReject.String(),
 		"actual_action", actionReject.String(),
 		"source", "rejected_ip_reputation",
@@ -732,15 +704,15 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 	}
 	if err != nil {
 		attrs = append(attrs, "response_error", err)
-		ss.server.log.ErrorContext(ctx, "message rejected by sending IP reputation", attrs...)
+		ss.deps.log.ErrorContext(ctx, "message rejected by sending IP reputation", attrs...)
 		return true, false
 	}
-	ss.server.log.InfoContext(ctx, "message rejected by sending IP reputation", attrs...)
+	ss.deps.log.InfoContext(ctx, "message rejected by sending IP reputation", attrs...)
 	return true, true
 }
 
 func (ss *session) resetMessage(phase protocolPhase) {
-	ss.message = message.New(ss.server.cfg.Milter.MaxMessageSize)
+	ss.message = message.New(ss.deps.protocol.maxMessageSize)
 	ss.envelopeSender = ""
 	ss.envelopeRecipients = nil
 	ss.envelopeRecipientsTruncated = false
@@ -755,14 +727,14 @@ func (ss *session) sendContinue(command byte) bool {
 
 func (ss *session) send(command byte, response []byte) bool {
 	if err := writeFrame(ss.conn, response); err != nil {
-		ss.server.log.Warn("cannot send milter response", "command", commandName(command), "error", err)
+		ss.deps.log.Warn("cannot send milter response", "command", commandName(command), "error", err)
 		return false
 	}
 	return true
 }
 
 func (ss *session) protocolError(message string, attrs ...any) bool {
-	ss.server.log.Warn(message, attrs...)
+	ss.deps.log.Warn(message, attrs...)
 	return false
 }
 

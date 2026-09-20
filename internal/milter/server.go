@@ -2,26 +2,19 @@ package milter
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/netip"
-	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
-	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
@@ -56,94 +49,28 @@ type evaluationResult struct {
 }
 
 type Server struct {
-	cfg                config.Config
-	analyzer           Analyzer
 	log                *slog.Logger
-	slots              chan struct{}
-	attachmentSlots    chan struct{}
 	sessionSlots       chan struct{}
+	maxConnections     int
+	includeConnections bool
 	allowedPeerIPs     []netip.Prefix
-	ipReputation       *ipReputationStore
-	ipRepository       stores.PersistentIPReputationRepository
-	correspondents     stores.CorrespondentRepository
-	rejectionHistory   stores.RejectionHistoryRepository
-	domainRegistration *domainRegistrationStore
-	rejectedMail       *rejectedmail.Archive
-	resolver           dnsResolver
-	attachments        *attachment.Scanner
-	internalToken      string
-	commandRecipient   string
-	replySlots         chan struct{}
-	commands           *admincmd.Processor
 	database           *sqlstore.Store
-	progressInterval   time.Duration
 	wg                 sync.WaitGroup
 	closeOnce          sync.Once
 	closeErr           error
 	startupErr         error
+	sessions           *sessionDependencies
+	maintenance        *maintenanceService
 }
 
 func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
-	internalToken := ""
-	var tokenErr error
-	if cfg.EmailCommands.Enabled && cfg.EmailCommands.SendReplies {
-		internalToken, tokenErr = generateInternalToken(rand.Reader)
+	runtime := buildRuntime(cfg, analyzer, log)
+	return &Server{
+		log: log, sessionSlots: make(chan struct{}, cfg.Milter.MaxConnections),
+		maxConnections: cfg.Milter.MaxConnections, includeConnections: cfg.Logging.IncludeConnections,
+		allowedPeerIPs: peerPrefixes(cfg.Milter.AllowedPeerIPs), database: runtime.database,
+		startupErr: runtime.err, sessions: runtime.sessions, maintenance: runtime.maintenance,
 	}
-	var database *sqlstore.Store
-	var databaseErr error
-	if correspondentFeaturesEnabled(cfg.Correspondents) || ipReputationFeaturesEnabled(cfg.IPReputation) || rejectionHistoryEnabled(cfg.RejectionHistory) || domainRegistrationEnabled(cfg.DomainRegistration) {
-		ctx, cancel := context.WithTimeout(context.Background(), maintenanceDatabaseTimeout)
-		database, databaseErr = sqlstore.Open(ctx, cfg.Persistence.DatabaseFile, sqlstore.DefaultOptions())
-		cancel()
-	}
-	ipRepository := newIPRepository(cfg.IPReputation, database, time.Now, log)
-	correspondents := newCorrespondentRepository(cfg.Correspondents, database, time.Now, log)
-	rejections := newRejectionRepository(cfg.RejectionHistory, database, time.Now, log)
-	domainCache := newDomainRepository(cfg.DomainRegistration, database, time.Now)
-	server := &Server{
-		cfg: cfg, analyzer: analyzer, log: log,
-		slots:              make(chan struct{}, cfg.AI.MaxConcurrent),
-		attachmentSlots:    make(chan struct{}, attachmentConcurrency(cfg.Milter.MaxConnections)),
-		sessionSlots:       make(chan struct{}, cfg.Milter.MaxConnections),
-		ipReputation:       newIPReputationStore(cfg.IPReputation, ipRepository, log),
-		ipRepository:       ipRepository,
-		correspondents:     correspondents,
-		rejectionHistory:   rejections,
-		domainRegistration: newDomainRegistrationStore(cfg.DomainRegistration, domainCache, log),
-		resolver:           net.DefaultResolver, internalToken: internalToken,
-		commandRecipient: normalizeEmailAddress(cfg.EmailCommands.Recipient),
-		replySlots:       make(chan struct{}, 4), database: database,
-		progressInterval: defaultMilterProgressInterval,
-	}
-	server.allowedPeerIPs = peerPrefixes(cfg.Milter.AllowedPeerIPs)
-	server.startupErr = errors.Join(tokenErr, databaseErr)
-	if cfg.RejectionHistory.SaveMessages && rejectionHistoryEnabled(cfg.RejectionHistory) {
-		server.rejectedMail = rejectedmail.New(rejectedmail.Options{
-			Directory: cfg.RejectionHistory.MessageDirectory, Retention: cfg.RejectionHistory.Expiry.Value(),
-			MaxTotalBytes: cfg.RejectionHistory.MessageMaxTotalBytes,
-		}, log)
-	}
-	server.commands = commandProcessor(cfg, correspondents, rejections, server.ipReputation,
-		server.rejectedMail, server.resolver, log)
-	if cfg.Attachments.BlockExecutables {
-		server.attachments = attachment.New(attachment.Options{
-			BlockedExtensions: cfg.Attachments.BlockedExtensions, InspectSignatures: cfg.Attachments.InspectSignatures,
-			InspectArchives: cfg.Attachments.InspectArchives, MaxAttachmentBytes: cfg.Attachments.MaxAttachmentBytes,
-			MaxArchiveDepth: cfg.Attachments.MaxArchiveDepth, MaxArchiveFiles: cfg.Attachments.MaxArchiveFiles,
-			MaxArchiveUncompressedBytes: cfg.Attachments.MaxArchiveUncompressedBytes,
-		})
-	}
-	return server
-}
-
-func attachmentConcurrency(maxConnections int) int {
-	if maxConnections < 1 {
-		return 1
-	}
-	if parallelism := runtime.GOMAXPROCS(0); parallelism < maxConnections {
-		return parallelism
-	}
-	return maxConnections
 }
 
 // Close releases persistent database resources. It may be called concurrently
@@ -167,14 +94,6 @@ func (s *Server) Close() error {
 	return s.closeErr
 }
 
-func generateInternalToken(random io.Reader) (string, error) {
-	var tokenBytes [32]byte
-	if _, err := io.ReadFull(random, tokenBytes[:]); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInternalTokenGeneration, err)
-	}
-	return hex.EncodeToString(tokenBytes[:]), nil
-}
-
 // StartupError reports persistent state that could not be loaded safely.
 func (s *Server) StartupError() error { return s.startupErr }
 
@@ -184,11 +103,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}
 	sessionCtx, cancelSessions := context.WithCancel(ctx)
 	defer cancelSessions()
-	if err := s.cleanupPersistentStores(sessionCtx, "startup"); err != nil {
+	if err := s.maintenance.cleanupPersistentStores(sessionCtx, "startup"); err != nil {
 		return err
 	}
-	s.startRejectedMailCleanup(sessionCtx)
-	if cleanupInterval := s.cfg.Persistence.CleanupInterval.Value(); cleanupInterval > 0 {
+	s.maintenance.startRejectedMailCleanup(sessionCtx)
+	if cleanupInterval := s.maintenance.cleanupInterval; cleanupInterval > 0 {
 		maintenanceCtx, stopMaintenance := context.WithCancel(sessionCtx)
 		maintenanceDone := make(chan struct{})
 		go func() {
@@ -198,8 +117,8 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			for {
 				select {
 				case <-ticker.C:
-					s.runMaintenance("persistence cleanup", func() {
-						if err := s.cleanupPersistentStores(maintenanceCtx, "timer"); err != nil {
+					s.maintenance.runMaintenance("persistence cleanup", func() {
+						if err := s.maintenance.cleanupPersistentStores(maintenanceCtx, "timer"); err != nil {
 							s.log.Warn("SQLite cleanup failed", "error", err)
 						}
 					})
@@ -229,11 +148,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		select {
 		case s.sessionSlots <- struct{}{}:
 		default:
-			s.log.Warn("maximum simultaneous Milter connections reached", "max_connections", s.cfg.Milter.MaxConnections, "remote_addr", conn.RemoteAddr().String())
+			s.log.Warn("maximum simultaneous Milter connections reached", "max_connections", s.maxConnections, "remote_addr", conn.RemoteAddr().String())
 			_ = conn.Close()
 			continue
 		}
-		logConnection := s.cfg.Logging.IncludeConnections
+		logConnection := s.includeConnections
 		started := time.Time{}
 		localAddress, remoteAddress := "", ""
 		if logConnection {
@@ -244,7 +163,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 				"local_addr", localAddress,
 				"remote_addr", remoteAddress,
 				"active_connections", len(s.sessionSlots),
-				"max_connections", s.cfg.Milter.MaxConnections)
+				"max_connections", s.maxConnections)
 		}
 		s.wg.Add(1)
 		go func() {
@@ -258,7 +177,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 						"remote_addr", remoteAddress,
 						"duration_ms", time.Since(started).Milliseconds(),
 						"active_connections", len(s.sessionSlots),
-						"max_connections", s.cfg.Milter.MaxConnections)
+						"max_connections", s.maxConnections)
 				}
 			}()
 			s.handle(sessionCtx, conn)
@@ -266,13 +185,13 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-func (s *Server) cleanupPersistentStores(parent context.Context, trigger string) error {
+func (s *maintenanceService) cleanupPersistentStores(parent context.Context, trigger string) error {
 	ctx, cancel := context.WithTimeout(parent, maintenanceDatabaseTimeout)
 	defer cancel()
-	ipDeleted, ipErr := s.ipRepository.Cleanup(ctx)
+	ipDeleted, ipErr := s.ip.Cleanup(ctx)
 	contactsDeleted, contactsErr := s.correspondents.Cleanup(ctx)
-	rejectionsDeleted, rejectionsErr := s.rejectionHistory.Cleanup(ctx)
-	domainsDeleted, domainsErr := s.domainRegistration.Cleanup(ctx)
+	rejectionsDeleted, rejectionsErr := s.rejections.Cleanup(ctx)
+	domainsDeleted, domainsErr := s.domains.Cleanup(ctx)
 	checkpoint, checkpointErr := sqlstore.CheckpointResult{}, error(nil)
 	if s.database != nil {
 		checkpoint, checkpointErr = s.database.CheckpointPassive(ctx)
@@ -282,10 +201,10 @@ func (s *Server) cleanupPersistentStores(parent context.Context, trigger string)
 	}
 
 	if s.log != nil && s.log.Enabled(ctx, slog.LevelDebug) {
-		ipRecords, ipCountErr := s.ipRepository.Count(ctx)
+		ipRecords, ipCountErr := s.ip.Count(ctx)
 		contactRecords, contactCountErr := s.correspondents.Count(ctx)
-		rejectionRecords, rejectionCountErr := s.rejectionHistory.Count(ctx)
-		domainRecords, domainCountErr := s.domainRegistration.Count(ctx)
+		rejectionRecords, rejectionCountErr := s.rejections.Count(ctx)
+		domainRecords, domainCountErr := s.domains.Count(ctx)
 		s.log.Debug("SQLite cleanup completed",
 			"trigger", trigger,
 			"ip_deleted", ipDeleted,
@@ -409,8 +328,8 @@ func (s *Server) peerAllowed(remote net.Addr) bool {
 	return false
 }
 
-func (s *Server) startRejectedMailCleanup(ctx context.Context) {
-	if s.rejectedMail == nil {
+func (s *maintenanceService) startRejectedMailCleanup(ctx context.Context) {
+	if s.archive == nil {
 		return
 	}
 	s.runRejectedMailCleanup()
@@ -428,24 +347,24 @@ func (s *Server) startRejectedMailCleanup(ctx context.Context) {
 	}()
 }
 
-func (s *Server) runRejectedMailCleanup() {
+func (s *maintenanceService) runRejectedMailCleanup() {
 	s.runMaintenance("rejected-mail cleanup", func() {
-		if err := s.rejectedMail.Cleanup(); err != nil {
+		if err := s.archive.Cleanup(); err != nil {
 			s.log.Warn("cannot clean rejected mail archive", "error", err)
 		}
 	})
 }
 
-func (s *Server) runMaintenance(name string, operation func()) {
+func (s *maintenanceService) runMaintenance(name string, operation func()) {
 	defer func() {
 		if panicValue := recover(); panicValue != nil {
-			s.logRecoveredWorkerPanic(context.Background(), name, panicValue)
+			logRecoveredWorkerPanic(s.log, context.Background(), name, panicValue)
 		}
 	}()
 	operation()
 }
 
-func (s *Server) recordRejection(ctx context.Context, msg *message.Message, visibleSender, envelopeSender string, recipients, reasons []string, source string) {
+func (s *messagePolicyService) recordRejection(ctx context.Context, msg *message.Message, visibleSender, envelopeSender string, recipients, reasons []string, source string) {
 	if msg == nil {
 		return
 	}
@@ -459,20 +378,20 @@ func (s *Server) recordRejection(ctx context.Context, msg *message.Message, visi
 		s.log.ErrorContext(ctx, "cannot save rejection history", "message_id", msg.Header("Message-ID"), "error", err)
 		recordID = 0
 	}
-	if s.rejectedMail == nil {
+	if s.archive == nil {
 		return
 	}
 	contents := msg.ArchiveBytes()
 	s.saveRejectedMailCopy(ctx, msg, contents, source, recordID, rejectedAt)
 }
 
-func (s *Server) saveRejectedMailCopy(ctx context.Context, msg *message.Message, contents []byte, source string, recordID uint64, rejectedAt time.Time) {
+func (s *messagePolicyService) saveRejectedMailCopy(ctx context.Context, msg *message.Message, contents []byte, source string, recordID uint64, rejectedAt time.Time) {
 	var path string
 	var err error
 	if recordID == 0 {
-		path, err = s.rejectedMail.Save(contents)
+		path, err = s.archive.Save(contents)
 	} else {
-		path, err = s.rejectedMail.SaveWithRecordIDAt(contents, recordID, rejectedAt)
+		path, err = s.archive.SaveWithRecordIDAt(contents, recordID, rejectedAt)
 	}
 	if err != nil {
 		s.log.WarnContext(ctx, "cannot save rejected message copy", "message_id", msg.Header("Message-ID"), "source", source, "rejection_id", recordID, "error", err)
@@ -485,7 +404,7 @@ func (s *Server) saveRejectedMailCopy(ctx context.Context, msg *message.Message,
 // listener and other active connections.
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer s.recoverSessionPanic(ctx, conn)
-	newSession(s, conn).run(ctx)
+	newSession(s.sessions, conn).run(ctx)
 }
 
 func (s *Server) recoverSessionPanic(ctx context.Context, conn net.Conn) {
@@ -498,29 +417,29 @@ func (s *Server) recoverSessionPanic(ctx context.Context, conn net.Conn) {
 	if closeErr != nil {
 		attrs = append(attrs, "close_error", closeErr)
 	}
-	s.logRecoveredWorkerPanic(ctx, "milter session", panicValue, attrs...)
+	logRecoveredWorkerPanic(s.log, ctx, "milter session", panicValue, attrs...)
 }
 
-func (s *Server) logRecoveredWorkerPanic(ctx context.Context, worker string, panicValue any, attrs ...any) {
+func logRecoveredWorkerPanic(log *slog.Logger, ctx context.Context, worker string, panicValue any, attrs ...any) {
 	fields := []any{"worker", worker, "panic", fmt.Sprint(panicValue), "stack", string(debug.Stack())}
 	fields = append(fields, attrs...)
-	s.log.ErrorContext(ctx, "MilterGuard worker recovered from panic", fields...)
+	log.ErrorContext(ctx, "MilterGuard worker recovered from panic", fields...)
 }
 
-func (s *Server) analysisTimeout() time.Duration {
-	timeout := ai.MaximumAnalysisDuration(s.cfg.AI) + analysisResponseMargin
-	if s.cfg.DomainRegistration.Enabled {
-		timeout += s.cfg.DomainRegistration.Timeout.Value()
+func (s *analysisService) analysisTimeout() time.Duration {
+	timeout := ai.MaximumAnalysisDuration(s.ai) + analysisResponseMargin
+	if s.domainLookupTimeout > 0 {
+		timeout += s.domainLookupTimeout
 	}
-	if milterTimeout := s.cfg.Milter.Timeout.Value(); milterTimeout > timeout {
-		return milterTimeout
+	if s.milterTimeout > timeout {
+		return s.milterTimeout
 	}
 	return timeout
 }
 
-func (s *Server) evaluate(parent context.Context, msg *message.Message) evaluationResult {
+func (s *analysisService) evaluate(parent context.Context, msg *message.Message) evaluationResult {
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(parent, ai.MaximumAnalysisDuration(s.cfg.AI))
+	ctx, cancel := context.WithTimeout(parent, ai.MaximumAnalysisDuration(s.ai))
 	defer cancel()
 
 	select {
@@ -530,12 +449,12 @@ func (s *Server) evaluate(parent context.Context, msg *message.Message) evaluati
 		return s.analysisFailure(ctx.Err(), started)
 	}
 
-	analysis := msg.BuildAnalysis(s.cfg.AI.MaxBodyChars, message.VisionOptions{
-		Mode:         s.cfg.AI.VisionMode,
-		MinTextChars: s.cfg.AI.VisionMinTextChars,
-		MaxImages:    s.cfg.AI.MaxImages,
-		MaxBytes:     s.cfg.AI.MaxImageBytes,
-		MaxPixels:    s.cfg.AI.MaxImagePixels,
+	analysis := msg.BuildAnalysis(s.ai.MaxBodyChars, message.VisionOptions{
+		Mode:         s.ai.VisionMode,
+		MinTextChars: s.ai.VisionMinTextChars,
+		MaxImages:    s.ai.MaxImages,
+		MaxBytes:     s.ai.MaxImageBytes,
+		MaxPixels:    s.ai.MaxImagePixels,
 	})
 	input := ai.Input{Text: analysis.Prompt, Images: make([]ai.Image, 0, len(analysis.Images))}
 	for _, image := range analysis.Images {
@@ -561,8 +480,8 @@ func (s *Server) evaluate(parent context.Context, msg *message.Message) evaluati
 	}
 }
 
-func (s *Server) logAIInput(msg *message.Message, input ai.Input) {
-	if !s.cfg.Logging.IncludeAIInput {
+func (s *analysisService) logAIInput(msg *message.Message, input ai.Input) {
+	if !s.logging.IncludeAIInput {
 		return
 	}
 	images := make([]map[string]any, 0, len(input.Images))
@@ -579,30 +498,30 @@ func (s *Server) logAIInput(msg *message.Message, input ai.Input) {
 		"images", images)
 }
 
-func (s *Server) applyPolicy(decision ai.Decision) (action, action) {
+func (s *analysisService) applyPolicy(decision ai.Decision) (action, action) {
 	proposed := actionAccept
-	if decision.Classification == "unwanted" && decision.Score >= s.cfg.Filtering.RejectScore {
+	if decision.Classification == "unwanted" && decision.Score >= s.filtering.RejectScore {
 		proposed = actionReject
 	}
 	selected := proposed
-	if s.cfg.Mode != "enforce" {
+	if s.mode != "enforce" {
 		selected = actionAccept
 	}
 	return proposed, selected
 }
 
-func (s *Server) analysisFailure(err error, started time.Time) evaluationResult {
+func (s *analysisService) analysisFailure(err error, started time.Time) evaluationResult {
 	selected := actionAccept
-	if s.cfg.Mode == "enforce" && s.cfg.Filtering.AIErrorAction == "tempfail" {
+	if s.mode == "enforce" && s.filtering.AIErrorAction == "tempfail" {
 		selected = actionTempfail
 	}
 	return evaluationResult{proposed: selected, selected: selected, err: err, latency: time.Since(started)}
 }
 
-func (s *Server) encodeAction(selected action) []byte {
+func (s *analysisService) encodeAction(selected action) []byte {
 	switch selected {
 	case actionReject:
-		return replyCode("550", "5.7.1", s.cfg.Filtering.RejectMessage)
+		return replyCode("550", "5.7.1", s.filtering.RejectMessage)
 	case actionTempfail:
 		return []byte{responseTempfail}
 	default:
@@ -610,11 +529,11 @@ func (s *Server) encodeAction(selected action) []byte {
 	}
 }
 
-func (s *Server) logOutcome(ctx context.Context, msg *message.Message, result evaluationResult, sent bool, responseErr error) {
+func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, result evaluationResult, sent bool, responseErr error) {
 	if result.err != nil {
 		logMessage := "message analysis failed"
 		attrs := []any{
-			"message_id", msg.Header("Message-ID"), "mode", s.cfg.Mode,
+			"message_id", msg.Header("Message-ID"), "mode", s.mode,
 			"actual_action", result.selected.String(), "error", result.err,
 			"latency_ms", result.latency.Milliseconds(), "response_sent", sent,
 			"vision_images", result.visionImages,
@@ -640,14 +559,14 @@ func (s *Server) logOutcome(ctx context.Context, msg *message.Message, result ev
 	}
 
 	attrs := []any{
-		"message_id", msg.Header("Message-ID"), "mode", s.cfg.Mode,
+		"message_id", msg.Header("Message-ID"), "mode", s.mode,
 		"classification", result.classification, "score", result.score,
 		"reasons", result.reasons, "proposed_action", result.proposed.String(),
-		"actual_action", result.selected.String(), "model", s.cfg.AI.Model,
+		"actual_action", result.selected.String(), "model", s.ai.Model,
 		"latency_ms", result.latency.Milliseconds(), "truncated", msg.Truncated,
 		"response_sent", sent, "vision_images", result.visionImages,
 	}
-	if s.cfg.Logging.IncludeSubject {
+	if s.logging.IncludeSubject {
 		attrs = append(attrs, "subject", msg.DecodedHeader("Subject"))
 	}
 	if responseErr != nil {

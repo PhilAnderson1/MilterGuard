@@ -14,18 +14,15 @@ import (
 )
 
 func enableTestAttachments(server *Server) {
-	server.cfg.Attachments.BlockExecutables = true
-	server.cfg.Attachments.BlockedExtensions = []string{"exe"}
-	server.cfg.Attachments.InspectSignatures = true
-	server.cfg.Attachments.InspectArchives = true
-	server.cfg.Attachments.MaxAttachmentBytes = 1 << 20
-	server.cfg.Attachments.MaxArchiveDepth = 2
-	server.cfg.Attachments.MaxArchiveFiles = 10
-	server.cfg.Attachments.MaxArchiveUncompressedBytes = 2 << 20
-	server.cfg.Attachments.EncryptedArchiveAction = "reject"
-	server.cfg.Attachments.UnscannableAction = "accept"
-	server.cfg.Attachments.RejectMessage = "executable attachment blocked"
-	server.attachments = attachment.New(attachment.Options{
+	cfg := config.AttachmentsConfig{
+		BlockExecutables: true, BlockedExtensions: []string{"exe"}, InspectSignatures: true,
+		InspectArchives: true, MaxAttachmentBytes: 1 << 20, MaxArchiveDepth: 2,
+		MaxArchiveFiles: 10, MaxArchiveUncompressedBytes: 2 << 20,
+		EncryptedArchiveAction: "reject", UnscannableAction: "accept",
+		RejectMessage: "executable attachment blocked",
+	}
+	server.sessions.attachments.cfg = cfg
+	server.sessions.attachments.scanner = attachment.New(attachment.Options{
 		BlockedExtensions: []string{"exe"}, InspectSignatures: true, InspectArchives: true,
 		MaxAttachmentBytes: 1 << 20, MaxArchiveDepth: 2, MaxArchiveFiles: 10, MaxArchiveUncompressedBytes: 2 << 20,
 	})
@@ -37,16 +34,16 @@ func expectAttachmentProgress(t *testing.T, conn net.Conn) {
 }
 
 func TestAttachmentScanWaitingForAttachmentSlotStopsWithContext(t *testing.T) {
-	server := &Server{
-		cfg:             config.Config{Attachments: config.AttachmentsConfig{BlockExecutables: true}},
-		log:             slog.New(slog.NewTextHandler(io.Discard, nil)),
-		attachmentSlots: make(chan struct{}, 1),
-		attachments: attachment.New(attachment.Options{
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	slots := make(chan struct{}, 1)
+	deps := &sessionDependencies{log: log, attachments: &attachmentPolicyService{
+		cfg: config.AttachmentsConfig{BlockExecutables: true}, log: log, slots: slots,
+		scanner: attachment.New(attachment.Options{
 			BlockedExtensions: []string{"exe"},
 		}),
-	}
-	server.attachmentSlots <- struct{}{}
-	ss := &session{server: server, message: message.New(1024)}
+	}}
+	slots <- struct{}{}
+	ss := &session{deps: deps, message: message.New(1024)}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -57,17 +54,14 @@ func TestAttachmentScanWaitingForAttachmentSlotStopsWithContext(t *testing.T) {
 }
 
 func TestAttachmentScanDoesNotWaitForAISlot(t *testing.T) {
-	server := &Server{
-		cfg:             config.Config{Attachments: config.AttachmentsConfig{BlockExecutables: true}},
-		log:             slog.New(slog.NewTextHandler(io.Discard, nil)),
-		slots:           make(chan struct{}, 1),
-		attachmentSlots: make(chan struct{}, 1),
-		attachments: attachment.New(attachment.Options{
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	deps := &sessionDependencies{log: log, attachments: &attachmentPolicyService{
+		cfg: config.AttachmentsConfig{BlockExecutables: true}, log: log, slots: make(chan struct{}, 1),
+		scanner: attachment.New(attachment.Options{
 			BlockedExtensions: []string{"exe"},
 		}),
-	}
-	server.slots <- struct{}{}
-	ss := &session{server: server, message: message.New(1024)}
+	}}
+	ss := &session{deps: deps, message: message.New(1024)}
 
 	handled, keepConnection := ss.applyAttachments(context.Background())
 	if handled || !keepConnection {
@@ -104,8 +98,8 @@ func TestAttachmentsMonitorModeAddsHeadersWhenEnabled(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
 	enableTestAttachments(server)
-	server.cfg.Mode = "monitor"
-	server.cfg.Filtering.AddEmailHeaders = true
+	setTestMode(server, "monitor")
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiateWithActions(t, conn, resultHeaderActions)
@@ -159,7 +153,7 @@ func TestAttachmentsMonitorModeAcceptsWithoutAI(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
 	enableTestAttachments(server)
-	server.cfg.Mode = "monitor"
+	setTestMode(server, "monitor")
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -185,7 +179,7 @@ func TestAttachmentsTagModeAcceptsAndAddsHeaders(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
 	enableTestAttachments(server)
-	server.cfg.Mode = "tag"
+	setTestMode(server, "tag")
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiateWithActions(t, conn, resultHeaderActions)
@@ -239,7 +233,7 @@ func TestUnscannableAttachmentCanTempfail(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
 	enableTestAttachments(server)
-	server.cfg.Attachments.UnscannableAction = "tempfail"
+	server.sessions.attachments.cfg.UnscannableAction = "tempfail"
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -265,7 +259,7 @@ func TestAuthenticatedBypassSkipsAttachmentInspection(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
 	enableTestAttachments(server)
-	server.cfg.Filtering.ScanAuthenticated = false
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = false })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)

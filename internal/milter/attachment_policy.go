@@ -6,69 +6,93 @@ import (
 	"strings"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
+type attachmentPolicyResult struct {
+	handled   bool
+	cancelled bool
+	proposed  action
+	path      string
+	detection string
+	err       error
+}
+
 func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
-	if ss.server.attachments == nil {
+	result := ss.deps.attachments.evaluate(ctx, ss.message)
+	if !result.handled {
 		return false, true
 	}
-	select {
-	case ss.server.attachmentSlots <- struct{}{}:
-		defer func() { <-ss.server.attachmentSlots }()
-	case <-ctx.Done():
+	if result.cancelled {
 		return true, false
 	}
-	finding, scanErr := ss.server.attachments.ScanContext(
+	if result.err != nil && result.proposed == actionAccept {
+		ss.deps.log.WarnContext(ctx, "attachment inspection incomplete; continuing with AI analysis",
+			"message_id", ss.message.Header("Message-ID"), "error", result.err)
+		return false, true
+	}
+	return true, ss.finishAttachmentDecision(ctx, result.proposed, result.path, result.detection, result.err)
+}
+
+func (s *attachmentPolicyService) evaluate(ctx context.Context, msg *message.Message) attachmentPolicyResult {
+	if s == nil || s.scanner == nil {
+		return attachmentPolicyResult{}
+	}
+	select {
+	case s.slots <- struct{}{}:
+		defer func() { <-s.slots }()
+	case <-ctx.Done():
+		return attachmentPolicyResult{handled: true, cancelled: true, err: ctx.Err()}
+	}
+	finding, scanErr := s.scanner.ScanContext(
 		ctx,
-		ss.message.FirstHeader("Content-Type"),
-		ss.message.FirstHeader("Content-Transfer-Encoding"),
-		ss.message.FirstHeader("Content-Disposition"),
-		ss.message.BodyBytes(),
+		msg.FirstHeader("Content-Type"),
+		msg.FirstHeader("Content-Transfer-Encoding"),
+		msg.FirstHeader("Content-Disposition"),
+		msg.BodyBytes(),
 	)
 	if finding != nil {
-		return true, ss.finishAttachmentDecision(ctx, actionReject, finding.Path, finding.Detection, nil)
+		return attachmentPolicyResult{handled: true, proposed: actionReject, path: finding.Path, detection: finding.Detection}
 	}
-	if scanErr == nil && ss.message.BodyTruncated {
+	if scanErr == nil && msg.BodyTruncated {
 		scanErr = errors.New("message body was truncated before attachment inspection completed")
 	}
 	if scanErr == nil {
-		return false, true
+		return attachmentPolicyResult{}
 	}
-	actionName := ss.server.cfg.Attachments.UnscannableAction
+	actionName := s.cfg.UnscannableAction
 	var typedError *attachment.ScanError
 	if errors.As(scanErr, &typedError) && typedError.Encrypted {
-		actionName = ss.server.cfg.Attachments.EncryptedArchiveAction
+		actionName = s.cfg.EncryptedArchiveAction
 	}
 	proposed := attachmentConfiguredAction(actionName)
-	if proposed == actionAccept {
-		ss.server.log.WarnContext(ctx, "attachment inspection incomplete; continuing with AI analysis",
-			"message_id", ss.message.Header("Message-ID"), "error", scanErr)
-		return false, true
+	return attachmentPolicyResult{
+		handled: true, proposed: proposed, path: attachmentErrorPath(scanErr),
+		detection: "attachment inspection incomplete", err: scanErr,
 	}
-	return true, ss.finishAttachmentDecision(ctx, proposed, attachmentErrorPath(scanErr), "attachment inspection incomplete", scanErr)
 }
 
 func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action, path, detection string, scanErr error) bool {
 	selected := proposed
-	if ss.server.cfg.Mode != "enforce" {
+	if ss.deps.attachments.mode != "enforce" {
 		selected = actionAccept
 	}
 	response := []byte{responseAccept}
 	switch selected {
 	case actionReject:
-		response = replyCode("550", "5.7.1", ss.server.cfg.Attachments.RejectMessage)
+		response = replyCode("550", "5.7.1", ss.deps.attachments.cfg.RejectMessage)
 	case actionTempfail:
 		response = []byte{responseTempfail}
 	}
 	var err error
 	if selected == actionAccept {
-		if proposed != actionAccept && (ss.server.cfg.Filtering.AddEmailHeaders || ss.server.cfg.Mode == "tag") {
+		if proposed != actionAccept && (ss.deps.attachments.filtering.AddEmailHeaders || ss.deps.attachments.mode == "tag") {
 			classification := "unwanted"
 			if scanErr != nil {
 				classification = "unavailable"
 			}
 			action := "accepted-monitor-mode"
-			if ss.server.cfg.Mode == "tag" {
+			if ss.deps.attachments.mode == "tag" {
 				action = "accepted-tag-mode"
 			}
 			err = ss.writeTagHeaders(classification, nil, action)
@@ -81,7 +105,7 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 	}
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
-		"mode", ss.server.cfg.Mode,
+		"mode", ss.deps.attachments.mode,
 		"attachment_path", path,
 		"detection", detection,
 		"proposed_action", proposed.String(),
@@ -91,21 +115,21 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 	if scanErr != nil {
 		attrs = append(attrs, "inspection_error", scanErr)
 	}
-	if ss.server.cfg.Logging.IncludeSubject {
+	if ss.deps.analysis.logging.IncludeSubject {
 		attrs = append(attrs, "subject", ss.message.DecodedHeader("Subject"))
 	}
 	if err != nil {
 		attrs = append(attrs, "response_error", err)
-		ss.server.log.ErrorContext(ctx, "attachment policy response failed", attrs...)
+		ss.deps.log.ErrorContext(ctx, "attachment policy response failed", attrs...)
 		return false
 	}
-	ss.server.log.InfoContext(ctx, "attachment policy decision", attrs...)
+	ss.deps.log.InfoContext(ctx, "attachment policy decision", attrs...)
 	if selected == actionReject {
 		reason := detection
 		if path != "" {
 			reason += ": " + path
 		}
-		ss.server.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, "attachment_policy")
+		ss.deps.attachments.policy.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, "attachment_policy")
 	}
 	ss.resetMessage(phaseConnection)
 	return true

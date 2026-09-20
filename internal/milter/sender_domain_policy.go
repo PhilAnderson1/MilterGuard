@@ -14,7 +14,7 @@ func (ss *session) applyAuthenticatedOnlySenderDomain(ctx context.Context) (bool
 	if ss.authentication.Authenticated {
 		return false, true
 	}
-	domain := authenticatedOnlyFromDomain(ss.message, ss.server.cfg.Filtering.AuthenticatedOnlySenderDomains)
+	domain := authenticatedOnlyFromDomain(ss.message, ss.deps.policy.filtering.AuthenticatedOnlySenderDomains)
 	if domain == "" {
 		return false, true
 	}
@@ -62,15 +62,15 @@ func recoverFromAddresses(value string) []*mail.Address {
 
 func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, domain string) bool {
 	selected := actionReject
-	if ss.server.cfg.Mode != "enforce" {
+	if ss.deps.policy.mode != "enforce" {
 		selected = actionAccept
 	}
 
 	var err error
 	if selected == actionAccept {
-		if ss.server.cfg.Filtering.AddEmailHeaders || ss.server.cfg.Mode == "tag" {
+		if ss.deps.policy.filtering.AddEmailHeaders || ss.deps.policy.mode == "tag" {
 			actionName := "accepted-monitor-mode"
-			if ss.server.cfg.Mode == "tag" {
+			if ss.deps.policy.mode == "tag" {
 				actionName = "accepted-tag-mode"
 			}
 			err = ss.writeTagHeaders("unwanted", nil, actionName)
@@ -81,7 +81,7 @@ func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, doma
 	if err == nil {
 		response := []byte{responseAccept}
 		if selected == actionReject {
-			response = replyCode("550", "5.7.1", ss.server.cfg.Filtering.RejectMessage)
+			response = replyCode("550", "5.7.1", ss.deps.policy.filtering.RejectMessage)
 		}
 		err = writeFrame(ss.conn, response)
 	}
@@ -89,25 +89,25 @@ func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, doma
 	reason := "Visible From domain " + domain + " may only be used by authenticated SMTP submissions"
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
-		"mode", ss.server.cfg.Mode,
+		"mode", ss.deps.policy.mode,
 		"sender_domain", domain,
 		"proposed_action", actionReject.String(),
 		"actual_action", selected.String(),
 		"source", authenticatedOnlySenderDomainSource,
 		"response_sent", err == nil,
 	}
-	if ss.server.cfg.Logging.IncludeSubject {
+	if ss.deps.analysis.logging.IncludeSubject {
 		attrs = append(attrs, "subject", ss.message.DecodedHeader("Subject"))
 	}
 	if err != nil {
 		attrs = append(attrs, "response_error", err)
-		ss.server.log.ErrorContext(ctx, "authenticated-only sender domain policy response failed", attrs...)
+		ss.deps.log.ErrorContext(ctx, "authenticated-only sender domain policy response failed", attrs...)
 		return false
 	}
-	ss.server.log.InfoContext(ctx, "authenticated-only sender domain policy decision", attrs...)
+	ss.deps.log.InfoContext(ctx, "authenticated-only sender domain policy decision", attrs...)
 	if selected == actionReject {
-		ss.server.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, authenticatedOnlySenderDomainSource)
-		ss.server.ipReputation.add(ctx, ss.peerIP, ss.awaitConnectionDNS(ctx))
+		ss.deps.policy.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, authenticatedOnlySenderDomainSource)
+		ss.deps.policy.ipReputation.add(ctx, ss.peerIP, ss.awaitConnectionDNS(ctx))
 	}
 	ss.resetMessage(phaseConnection)
 	return true

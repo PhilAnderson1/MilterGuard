@@ -24,6 +24,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 type fixedAnalyzer struct {
@@ -73,9 +74,9 @@ func TestSessionPanicIsRecoveredAndConnectionClosed(t *testing.T) {
 
 func TestMaintenancePanicIsRecovered(t *testing.T) {
 	var logOutput bytes.Buffer
-	server := &Server{log: slog.New(slog.NewJSONHandler(&logOutput, nil))}
+	service := &maintenanceService{log: slog.New(slog.NewJSONHandler(&logOutput, nil))}
 	completed := false
-	server.runMaintenance("test maintenance", func() { panic("test maintenance panic") })
+	service.runMaintenance("test maintenance", func() { panic("test maintenance panic") })
 	completed = true
 	if !completed {
 		t.Fatal("maintenance recovery did not return")
@@ -265,9 +266,9 @@ func TestGenerateInternalToken(t *testing.T) {
 
 func TestInternalCommandReplyHeaderIsRemoved(t *testing.T) {
 	server, conn, done := testServer(t, fixedAnalyzer{})
-	server.cfg.EmailCommands.Enabled = true
-	server.cfg.EmailCommands.SendReplies = true
-	server.internalToken = "test-token"
+	server.sessions.commands.cfg.Enabled = true
+	server.sessions.commands.cfg.SendReplies = true
+	server.sessions.commands.internalToken = "test-token"
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiateWithExpectedActions(t, conn, actionChangeHeaders, actionChangeHeaders)
@@ -287,9 +288,9 @@ func TestInternalCommandReplyHeaderIsRemoved(t *testing.T) {
 
 func TestInternalCommandReplyTempfailsWithoutHeaderRemoval(t *testing.T) {
 	server, conn, done := testServer(t, fixedAnalyzer{})
-	server.cfg.EmailCommands.Enabled = true
-	server.cfg.EmailCommands.SendReplies = true
-	server.internalToken = "test-token"
+	server.sessions.commands.cfg.Enabled = true
+	server.sessions.commands.cfg.SendReplies = true
+	server.sessions.commands.internalToken = "test-token"
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -362,15 +363,12 @@ func TestPostDecisionUpdatesDoNotInheritExpiredAnalysisContext(t *testing.T) {
 	store, _ := newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{
 		Expiry: config.Duration(24 * time.Hour), MaxEntries: 10,
 	})
-	server := &Server{
-		cfg:              config.Config{Mode: "enforce"},
-		log:              slog.New(slog.NewTextHandler(io.Discard, nil)),
-		rejectionHistory: store,
-	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	policy := &messagePolicyService{mode: "enforce", log: log, rejectionHistory: store}
 	msg := message.New(1024)
 	msg.AddHeader("Subject", "context test")
 	ss := &session{
-		server:             server,
+		deps:               &sessionDependencies{protocol: protocolOptions{mode: "enforce"}, policy: policy, log: log},
 		message:            msg,
 		visibleSender:      "sender@example.net",
 		envelopeSender:     "bounce@example.net",
@@ -412,12 +410,42 @@ func testServer(t *testing.T, analyzer Analyzer) (*Server, net.Conn, <-chan stru
 	return s, clientConn, done
 }
 
+func setTestMode(server *Server, mode string) {
+	server.sessions.protocol.mode = mode
+	server.sessions.analysis.mode = mode
+	server.sessions.policy.mode = mode
+	server.sessions.attachments.mode = mode
+}
+
+func setTestFiltering(server *Server, update func(*config.FilteringConfig)) {
+	update(&server.sessions.analysis.filtering)
+	update(&server.sessions.policy.filtering)
+	update(&server.sessions.attachments.filtering)
+}
+
+func setTestCorrespondents(server *Server, cfg config.CorrespondentsConfig, repository stores.CorrespondentRepository) {
+	server.sessions.policy.correspondentCfg = cfg
+	server.sessions.policy.correspondents = repository
+	server.maintenance.correspondents = repository
+}
+
+func setTestIPReputation(server *Server, store *ipReputationStore) {
+	server.sessions.policy.ipReputation = store
+}
+
+func setTestResolver(server *Server, resolver dnsResolver) {
+	server.sessions.dns.resolver = resolver
+}
+
 func enableTestRejectedMail(t *testing.T, server *Server) string {
 	t.Helper()
 	root := t.TempDir()
-	server.rejectedMail = rejectedmail.New(rejectedmail.Options{
+	archive := rejectedmail.New(rejectedmail.Options{
 		Directory: root, Retention: 24 * time.Hour, MaxTotalBytes: 1 << 20,
 	}, server.log)
+	server.sessions.policy.archive = archive
+	server.sessions.attachments.policy.archive = archive
+	server.maintenance.archive = archive
 	return root
 }
 
@@ -434,10 +462,10 @@ func TestServerUsesUnifiedRejectionHistoryArchiveSettings(t *testing.T) {
 	}
 	server := NewServer(cfg, fixedAnalyzer{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { _ = server.Close() })
-	if server.rejectedMail == nil {
+	if server.sessions.policy.archive == nil {
 		t.Fatal("unified rejection-history settings did not enable the message archive")
 	}
-	if _, err := server.rejectedMail.SaveWithRecordID([]byte("test"), 7); err != nil {
+	if _, err := server.sessions.policy.archive.SaveWithRecordID([]byte("test"), 7); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, time.Now().UTC().Format("2006"), time.Now().UTC().Format("01"), time.Now().UTC().Format("02"), "7.eml")
@@ -464,13 +492,13 @@ func TestRejectionCommandRetrievesProcessedArchivedMessage(t *testing.T) {
 	msg.AddHeader("Subject", "Archived subject")
 	msg.AddHeader("Content-Type", "text/html; charset=UTF-8")
 	msg.AddBody([]byte(`<p>Review <a href="https://example.net/account">account</a></p>`))
-	server.recordRejection(context.Background(), msg, "sender@example.net", "", []string{"owner@example.com"}, []string{"test reason"}, "ai")
-	entries := rejectionEntries(t, server.rejectionHistory, "owner@example.com")
+	server.sessions.policy.recordRejection(context.Background(), msg, "sender@example.net", "", []string{"owner@example.com"}, []string{"test reason"}, "ai")
+	entries := rejectionEntries(t, server.sessions.policy.rejectionHistory, "owner@example.com")
 	if len(entries) != 1 {
 		t.Fatalf("rejection history = %#v", entries)
 	}
 	command := fmt.Sprintf("REJECTION %d", entries[0].ID)
-	body, err := server.commands.ExecuteLine(context.Background(), command,
+	body, err := server.sessions.commands.processor.ExecuteLine(context.Background(), command,
 		admincmd.Actor{DefaultRecipient: "owner@example.com"})
 	if err != nil {
 		t.Fatal(err)
@@ -489,13 +517,13 @@ func TestRejectionCommandRetrievesProcessedArchivedMessage(t *testing.T) {
 	if err := os.Remove(archivePath); err != nil {
 		t.Fatal(err)
 	}
-	body, err = server.commands.ExecuteLine(context.Background(), command,
+	body, err = server.sessions.commands.processor.ExecuteLine(context.Background(), command,
 		admincmd.Actor{DefaultRecipient: "owner@example.com"})
 	missing := body
 	if err != nil || !strings.Contains(missing.Text, "Saved message is not available") || len(missing.Attachments) != 0 {
 		t.Fatalf("missing archive result = %#v, %v", missing, err)
 	}
-	body, err = server.commands.ExecuteLine(context.Background(), command,
+	body, err = server.sessions.commands.processor.ExecuteLine(context.Background(), command,
 		admincmd.Actor{DefaultRecipient: "other@example.com"})
 	unauthorized := body
 	if err != nil || unauthorized.Text != "Rejection record not found.\n" || len(unauthorized.Attachments) != 0 {
@@ -569,9 +597,9 @@ func TestRejectedMessageArchiveUsesRejectionRecordIDs(t *testing.T) {
 	msg.AddHeader("Message-ID", "<archive-id-test@example.net>")
 	_, _ = msg.Body.WriteString("rejected body")
 
-	server.recordRejection(context.Background(), msg, "sender@example.net", "bounce@example.net", []string{"one@example.com", "two@example.com"}, []string{"unwanted"}, "ai")
+	server.sessions.policy.recordRejection(context.Background(), msg, "sender@example.net", "bounce@example.net", []string{"one@example.com", "two@example.com"}, []string{"unwanted"}, "ai")
 
-	entries := rejectionEntries(t, server.rejectionHistory, "*")
+	entries := rejectionEntries(t, server.sessions.policy.rejectionHistory, "*")
 	if len(entries) != 1 {
 		t.Fatalf("rejection entries = %d, want 1", len(entries))
 	}
@@ -658,7 +686,8 @@ func TestEnvelopeRecipientLimitIsIndependentAndMarksTruncation(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
 	defer clientConn.Close()
-	ss := newSession(&Server{log: slog.New(slog.NewTextHandler(io.Discard, nil))}, serverConn)
+	ss := newSession(&sessionDependencies{log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		protocol: protocolOptions{timeout: time.Second, maxMessageSize: 1024}}, serverConn)
 	ss.phase = phaseEnvelope
 	ss.connected = true
 	for index := range maxEnvelopeRecipients + 1 {
@@ -712,7 +741,7 @@ func headerFrame(name, value string) []byte {
 func TestBelowThresholdUnwantedAddsTrustedResultHeaders(t *testing.T) {
 	analyzer := fixedAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 0.85, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AddEmailHeaders = true
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
 	defer func() {
 		_ = conn.Close()
 		<-done
@@ -741,7 +770,7 @@ func TestBelowThresholdUnwantedAddsTrustedResultHeaders(t *testing.T) {
 func TestResultHeaderRemovalSurvivesRetentionLimit(t *testing.T) {
 	analyzer := fixedAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AddEmailHeaders = true
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiateWithActions(t, conn, resultHeaderActions)
@@ -774,7 +803,7 @@ func TestResultHeaderRemovalSurvivesRetentionLimit(t *testing.T) {
 
 func TestSenderResultHeadersRemovedWhenResultGenerationDisabled(t *testing.T) {
 	server, conn, done := testServer(t, fixedAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}})
-	server.cfg.Filtering.AddEmailHeaders = false
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = false })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiateWithActions(t, conn, resultHeaderActions)
@@ -797,7 +826,7 @@ func TestSenderResultHeadersRemovedWhenResultGenerationDisabled(t *testing.T) {
 
 func TestCounterfeitResultHeadersDoNotAffectDeliveryWithoutMTASupport(t *testing.T) {
 	server, conn, done := testServer(t, fixedAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}})
-	server.cfg.Filtering.AddEmailHeaders = true
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -820,7 +849,7 @@ func TestCounterfeitResultHeadersDoNotAffectDeliveryWithoutMTASupport(t *testing
 func TestAcceptedLegitimateAddsTrustedResultHeaders(t *testing.T) {
 	analyzer := fixedAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0.79, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AddEmailHeaders = true
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiateWithActions(t, conn, resultHeaderActions)
@@ -852,7 +881,7 @@ func TestTagModeAddsHeadersForEveryAIClassification(t *testing.T) {
 	} {
 		t.Run(test.decision.Classification, func(t *testing.T) {
 			server, conn, done := testServer(t, fixedAnalyzer{decision: test.decision})
-			server.cfg.Mode = "tag"
+			setTestMode(server, "tag")
 			defer func() { _ = conn.Close(); <-done }()
 
 			negotiateWithActions(t, conn, resultHeaderActions)
@@ -877,7 +906,7 @@ func TestTagModeAddsHeadersForEveryAIClassification(t *testing.T) {
 
 func TestAcceptedAIErrorAddsDiagnosticHeadersWithoutScore(t *testing.T) {
 	server, conn, done := testServer(t, failingAnalyzer{})
-	server.cfg.Filtering.AddEmailHeaders = true
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
 	defer func() {
 		_ = conn.Close()
 		<-done
@@ -910,7 +939,7 @@ func TestAcceptedAIErrorAddsDiagnosticHeadersWithoutScore(t *testing.T) {
 func TestResultHeadersDoNotAffectDeliveryWithoutMTASupport(t *testing.T) {
 	analyzer := fixedAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 0.85, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.AddEmailHeaders = true
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
 	defer func() {
 		_ = conn.Close()
 		<-done
@@ -937,8 +966,8 @@ func TestConnectionIdentityAndDNSAreSuppliedOncePerConnection(t *testing.T) {
 		forward:    map[string][]net.IPAddr{"dns.google": {{IP: net.ParseIP("8.8.8.8")}}},
 		forwardErr: map[string]error{},
 	}
-	server.resolver = resolver
-	server.cfg.Milter.ConnectionDNSTimeout = config.Duration(time.Second)
+	setTestResolver(server, resolver)
+	server.sessions.dns.timeout = time.Second
 	defer func() {
 		_ = conn.Close()
 		<-done
@@ -994,12 +1023,12 @@ func TestAIInputDiagnosticLoggingIsExplicitAndOmitsImageData(t *testing.T) {
 		IPReputation: config.IPReputationConfig{MaxEntries: 1},
 	}, fixedAnalyzer{}, logger)
 
-	server.logAIInput(msg, input)
+	server.sessions.analysis.logAIInput(msg, input)
 	if output.Len() != 0 {
 		t.Fatalf("AI input logged while disabled: %s", output.String())
 	}
-	server.cfg.Logging.IncludeAIInput = true
-	server.logAIInput(msg, input)
+	server.sessions.analysis.logging.IncludeAIInput = true
+	server.sessions.analysis.logAIInput(msg, input)
 	logged := output.String()
 	for _, want := range []string{
 		`"msg":"AI analysis input"`,
@@ -1022,11 +1051,9 @@ func TestRejectedIPDomainAllowlistReusesConnectionDNS(t *testing.T) {
 	server, conn, _ := testServer(t, fixedAnalyzer{decision: ai.Decision{
 		Classification: "unwanted", Score: 1, Reasons: []string{"test"},
 	}})
-	server.cfg.Milter.ConnectionDNSTimeout = config.Duration(time.Second)
-	server.cfg.IPReputation.BlockDuration = config.Duration(time.Hour)
-	server.cfg.IPReputation.MaxEntries = 100
-	server.cfg.IPReputation.DomainAllowlist = []string{"google.com"}
-	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
+	server.sessions.dns.timeout = time.Second
+	ipCfg := config.IPReputationConfig{BlockDuration: config.Duration(time.Hour), MaxEntries: 100, DomainAllowlist: []string{"google.com"}}
+	setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
 	resolver := &connectionTestResolver{
 		ptr: []string{"smtp.google.com."},
 		forward: map[string][]net.IPAddr{
@@ -1034,7 +1061,7 @@ func TestRejectedIPDomainAllowlistReusesConnectionDNS(t *testing.T) {
 		},
 		forwardErr: map[string]error{},
 	}
-	server.resolver = resolver
+	setTestResolver(server, resolver)
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -1048,7 +1075,7 @@ func TestRejectedIPDomainAllowlistReusesConnectionDNS(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
-	if _, found := server.ipReputation.lookup(context.Background(), netip.MustParseAddr("8.8.8.8")); found {
+	if _, found := server.sessions.policy.ipReputation.lookup(context.Background(), netip.MustParseAddr("8.8.8.8")); found {
 		t.Fatal("forward-confirmed domain-allowlisted IP was added to rejection cache")
 	}
 	if got := resolver.ptrCalls.Load(); got != 1 {
@@ -1062,13 +1089,11 @@ func TestRejectedIPDomainAllowlistReusesConnectionDNS(t *testing.T) {
 func TestForwardConfirmedDomainAllowlistBypassesExistingIPBlock(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Milter.ConnectionDNSTimeout = config.Duration(time.Second)
-	server.cfg.IPReputation.BlockDuration = config.Duration(time.Hour)
-	server.cfg.IPReputation.MaxEntries = 100
-	server.cfg.IPReputation.DomainAllowlist = []string{"google.com"}
-	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
+	server.sessions.dns.timeout = time.Second
+	ipCfg := config.IPReputationConfig{BlockDuration: config.Duration(time.Hour), MaxEntries: 100, DomainAllowlist: []string{"google.com"}}
+	setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
 	addr := netip.MustParseAddr("8.8.8.8")
-	if !server.ipReputation.add(context.Background(), addr, connectionDNSResult{status: message.ReverseDNSLookupFailed}) {
+	if !server.sessions.policy.ipReputation.add(context.Background(), addr, connectionDNSResult{status: message.ReverseDNSLookupFailed}) {
 		t.Fatal("test IP was not initially blocked")
 	}
 	resolver := &connectionTestResolver{
@@ -1076,7 +1101,7 @@ func TestForwardConfirmedDomainAllowlistBypassesExistingIPBlock(t *testing.T) {
 		forward:    map[string][]net.IPAddr{"smtp.google.com": {{IP: net.ParseIP(addr.String())}}},
 		forwardErr: map[string]error{},
 	}
-	server.resolver = resolver
+	setTestResolver(server, resolver)
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -1096,7 +1121,7 @@ func TestForwardConfirmedDomainAllowlistBypassesExistingIPBlock(t *testing.T) {
 	if resolver.ptrCalls.Load() != 1 || resolver.forwardCalls.Load() != 1 {
 		t.Fatalf("DNS calls = PTR %d, forward %d; want one each", resolver.ptrCalls.Load(), resolver.forwardCalls.Load())
 	}
-	_, retained := server.ipReputation.snapshot()[addr]
+	_, retained := server.sessions.policy.ipReputation.snapshot()[addr]
 	if !retained {
 		t.Fatal("domain allowlist bypass unexpectedly deleted persisted IP reputation")
 	}
@@ -1105,12 +1130,11 @@ func TestForwardConfirmedDomainAllowlistBypassesExistingIPBlock(t *testing.T) {
 func TestAuthenticatedSubmissionBypassesExistingIPBlock(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.ScanAuthenticated = true
-	server.cfg.IPReputation.BlockDuration = config.Duration(time.Hour)
-	server.cfg.IPReputation.MaxEntries = 100
-	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = true })
+	ipCfg := config.IPReputationConfig{BlockDuration: config.Duration(time.Hour), MaxEntries: 100}
+	setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
 	addr := netip.MustParseAddr("192.0.2.25")
-	if !server.ipReputation.add(context.Background(), addr, connectionDNSResult{}) {
+	if !server.sessions.policy.ipReputation.add(context.Background(), addr, connectionDNSResult{}) {
 		t.Fatal("test IP was not initially blocked")
 	}
 	defer func() { _ = conn.Close(); <-done }()
@@ -1133,7 +1157,7 @@ func TestAuthenticatedSubmissionBypassesExistingIPBlock(t *testing.T) {
 	if got := analyzer.calls.Load(); got != 1 {
 		t.Fatalf("AI analysis calls = %d, want 1", got)
 	}
-	if _, retained := server.ipReputation.lookup(context.Background(), addr); !retained {
+	if _, retained := server.sessions.policy.ipReputation.lookup(context.Background(), addr); !retained {
 		t.Fatal("authenticated bypass unexpectedly removed existing IP reputation")
 	}
 }
@@ -1141,10 +1165,9 @@ func TestAuthenticatedSubmissionBypassesExistingIPBlock(t *testing.T) {
 func TestRejectedAuthenticatedSubmissionDoesNotCreateIPBlock(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Filtering.ScanAuthenticated = true
-	server.cfg.IPReputation.BlockDuration = config.Duration(time.Hour)
-	server.cfg.IPReputation.MaxEntries = 100
-	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = true })
+	ipCfg := config.IPReputationConfig{BlockDuration: config.Duration(time.Hour), MaxEntries: 100}
+	setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
 	addr := netip.MustParseAddr("192.0.2.26")
 	defer func() { _ = conn.Close(); <-done }()
 
@@ -1163,7 +1186,7 @@ func TestRejectedAuthenticatedSubmissionDoesNotCreateIPBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
-	if _, blocked := server.ipReputation.lookup(context.Background(), addr); blocked {
+	if _, blocked := server.sessions.policy.ipReputation.lookup(context.Background(), addr); blocked {
 		t.Fatal("authenticated submission created IP reputation block")
 	}
 }
@@ -1297,7 +1320,7 @@ func TestParseMTAHostnameMacro(t *testing.T) {
 func TestAuthenticatedMessagesCanBypassAndAuthenticationPersists(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 	server, conn, _ := testServer(t, analyzer)
-	server.cfg.Filtering.ScanAuthenticated = false
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = false })
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -1342,7 +1365,7 @@ func TestAuthenticatedMessagesCanBypassAndAuthenticationPersists(t *testing.T) {
 func TestExplicitEmptyAuthenticationMacroClearsAuthentication(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
 	server, conn, _ := testServer(t, analyzer)
-	server.cfg.Filtering.ScanAuthenticated = false
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = false })
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -1377,7 +1400,7 @@ func TestExplicitEmptyAuthenticationMacroClearsAuthentication(t *testing.T) {
 func TestAuthenticatedMessagesAreScannedWhenEnabled(t *testing.T) {
 	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 1)}
 	server, conn, _ := testServer(t, analyzer)
-	server.cfg.Filtering.ScanAuthenticated = true
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = true })
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -1429,9 +1452,9 @@ func TestSenderDomainAllowlistBypassPolicy(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 			server, conn, done := testServer(t, analyzer)
-			server.cfg.Filtering.SenderDomainAllowlist = []string{"amazon.com"}
-			server.cfg.Filtering.SenderDomainAllowlistRequireDKIM = test.requireDKIM
-			server.cfg.Correspondents.TrustedAuthservIDs = []string{"nl.invades.net"}
+			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.SenderDomainAllowlist = []string{"amazon.com"} })
+			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.SenderDomainAllowlistRequireDKIM = test.requireDKIM })
+			server.sessions.policy.correspondentCfg.TrustedAuthservIDs = []string{"nl.invades.net"}
 			defer func() {
 				_ = conn.Close()
 				<-done
@@ -1464,9 +1487,8 @@ func TestAuthenticatedAcceptedMessageLearnsEnvelopeRecipients(t *testing.T) {
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 		MaxEntries: 100,
 	}
-	server.cfg.Filtering.ScanAuthenticated = false
-	server.cfg.Correspondents = cfg
-	server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = false })
+	setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -1486,7 +1508,7 @@ func TestAuthenticatedAcceptedMessageLearnsEnvelopeRecipients(t *testing.T) {
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	deadline := time.Now().Add(time.Second)
 	for {
-		match := testCorrespondentMatch(server.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"})
+		match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"})
 		if match.Known && match.AllRecipientsMatched {
 			break
 		}
@@ -1507,8 +1529,7 @@ func TestAbortedAuthenticatedMessageDoesNotLearnRecipients(t *testing.T) {
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 		MaxEntries: 100,
 	}
-	server.cfg.Correspondents = cfg
-	server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
+	setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -1525,7 +1546,7 @@ func TestAbortedAuthenticatedMessageDoesNotLearnRecipients(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectNoFrame(t, conn)
-	if match := testCorrespondentMatch(server.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
+	if match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
 		t.Fatalf("aborted recipient was learned: %#v", match)
 	}
 }
@@ -1566,9 +1587,8 @@ func TestKnownCorrespondentIsSuppliedAsAIEvidence(t *testing.T) {
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 		MaxEntries: 100,
 	}
-	server.cfg.Correspondents = cfg
-	server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
-	if err := server.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
+	setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
+	if err := server.sessions.policy.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
@@ -1625,9 +1645,8 @@ func TestKnownCorrespondentBypassAuthenticationPolicy(t *testing.T) {
 				RequireDKIMForBypass: test.requireDKIM,
 				MaxEntries:           100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
-			server.cfg.Correspondents = cfg
-			server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
-			if err := server.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
+			setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
+			if err := server.sessions.policy.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
 				t.Fatal(err)
 			}
 			defer func() {
@@ -1678,9 +1697,8 @@ func TestMTAHostnameMacroExpandsTrustedAuthenticationService(t *testing.T) {
 				BypassAI: true, RequireDKIMForBypass: true,
 				MaxEntries: 100, TrustedAuthservIDs: []string{config.MTAHostnameAuthservID},
 			}
-			server.cfg.Correspondents = cfg
-			server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
-			if err := server.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
+			setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
+			if err := server.sessions.policy.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
 				t.Fatal(err)
 			}
 			defer func() {
@@ -1733,19 +1751,18 @@ func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
 				BypassAI: true, RequireDKIMForBypass: test.requireDKIM,
 				MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
-			server.cfg.Correspondents = cfg
-			server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
+			setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
 			if test.allowedDomain != "" {
-				server.cfg.Filtering.SenderDomainAllowlist = []string{test.allowedDomain}
-				server.cfg.Filtering.SenderDomainAllowlistRequireDKIM = true
+				setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.SenderDomainAllowlist = []string{test.allowedDomain} })
+				setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.SenderDomainAllowlistRequireDKIM = true })
 			}
 			learnedAt := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
-			server.correspondents.(*correspondentStore).now = func() time.Time { return learnedAt }
-			if err := server.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
+			server.sessions.policy.correspondents.(*correspondentStore).now = func() time.Time { return learnedAt }
+			if err := server.sessions.policy.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
 				t.Fatal(err)
 			}
 			activityAt := learnedAt.Add(time.Hour)
-			server.correspondents.(*correspondentStore).now = func() time.Time { return activityAt }
+			server.sessions.policy.correspondents.(*correspondentStore).now = func() time.Time { return activityAt }
 			negotiate(t, conn)
 			sendContinueFrames(t, conn,
 				connectFrame('4', "127.0.0.1"),
@@ -1761,7 +1778,7 @@ func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
 			expectFrame(t, conn, string([]byte{responseAccept}))
 			_ = conn.Close()
 			<-done
-			activity := server.correspondents.(*correspondentStore).snapshot()["philip@invades.net\x00alice@example.com"].LastActivityAt
+			activity := server.sessions.policy.correspondents.(*correspondentStore).snapshot()["philip@invades.net\x00alice@example.com"].LastActivityAt
 			want := learnedAt
 			if test.wantRefresh {
 				want = activityAt
@@ -1784,8 +1801,7 @@ func TestAIResultLearnsInboundSender(t *testing.T) {
 		LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
 		MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 	}
-	server.cfg.Correspondents = cfg
-	server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
+	setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
 
 	negotiate(t, conn)
 	sendContinueFrames(t, conn,
@@ -1805,7 +1821,7 @@ func TestAIResultLearnsInboundSender(t *testing.T) {
 	}
 	<-done
 	_ = conn.Close()
-	if match := testCorrespondentMatch(server.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); !match.Known {
+	if match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); !match.Known {
 		t.Fatal("qualifying AI result did not create a known correspondent")
 	}
 }
@@ -1815,20 +1831,20 @@ func TestNonEnforceModesDoNotLearnFromAIResultsOrDecayIPReputation(t *testing.T)
 		t.Run(mode, func(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
 			server, conn, done := testServer(t, analyzer)
-			server.cfg.Mode = mode
-			server.cfg.Correspondents = config.CorrespondentsConfig{
+			setTestMode(server, mode)
+			correspondentCfg := config.CorrespondentsConfig{
 				LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 				LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
 				MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
-			server.correspondents = newTestCorrespondentStore(t, server.cfg.Correspondents, server.log)
-			server.cfg.IPReputation = config.IPReputationConfig{
+			setTestCorrespondents(server, correspondentCfg, newTestCorrespondentStore(t, correspondentCfg, server.log))
+			ipCfg := config.IPReputationConfig{
 				BlockDuration: config.Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: config.Duration(24 * time.Hour), LegitimatePerStrike: 1,
 				MaxEntries: 100,
 			}
-			server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
+			setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
 			addr := netip.MustParseAddr("192.0.2.90")
-			server.ipReputation.add(context.Background(), addr, connectionDNSResult{})
+			server.sessions.policy.ipReputation.add(context.Background(), addr, connectionDNSResult{})
 
 			negotiate(t, conn)
 			sendContinueFrames(t, conn,
@@ -1846,10 +1862,10 @@ func TestNonEnforceModesDoNotLearnFromAIResultsOrDecayIPReputation(t *testing.T)
 			_ = conn.Close()
 			<-done
 
-			if match := testCorrespondentMatch(server.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); match.Known {
+			if match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); match.Known {
 				t.Fatalf("%s mode learned an inbound correspondent", mode)
 			}
-			strikes := len(server.ipReputation.snapshot()[addr].Strikes)
+			strikes := len(server.sessions.policy.ipReputation.snapshot()[addr].Strikes)
 			if strikes != 1 {
 				t.Fatalf("%s mode changed IP strike count to %d", mode, strikes)
 			}
@@ -1861,13 +1877,13 @@ func TestNonEnforceModesDoNotLearnAuthenticatedRecipients(t *testing.T) {
 	for _, mode := range []string{"monitor", "tag"} {
 		t.Run(mode, func(t *testing.T) {
 			server, conn, done := testServer(t, &countingAnalyzer{})
-			server.cfg.Mode = mode
-			server.cfg.Filtering.ScanAuthenticated = false
-			server.cfg.Correspondents = config.CorrespondentsConfig{
+			setTestMode(server, mode)
+			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = false })
+			correspondentCfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 				MaxEntries: 100,
 			}
-			server.correspondents = newTestCorrespondentStore(t, server.cfg.Correspondents, server.log)
+			setTestCorrespondents(server, correspondentCfg, newTestCorrespondentStore(t, correspondentCfg, server.log))
 
 			negotiate(t, conn)
 			sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
@@ -1886,7 +1902,7 @@ func TestNonEnforceModesDoNotLearnAuthenticatedRecipients(t *testing.T) {
 			expectFrame(t, conn, string([]byte{responseAccept}))
 			_ = conn.Close()
 			<-done
-			if match := testCorrespondentMatch(server.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
+			if match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
 				t.Fatalf("%s mode learned an authenticated recipient", mode)
 			}
 		})
@@ -1896,9 +1912,8 @@ func TestNonEnforceModesDoNotLearnAuthenticatedRecipients(t *testing.T) {
 func TestRejectedIPBypassesSecondAIAnalysis(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.IPReputation.BlockDuration = config.Duration(15 * time.Minute)
-	server.cfg.IPReputation.MaxEntries = 100
-	server.ipReputation = newTestIPReputationStore(t, server.cfg.IPReputation, server.log)
+	ipCfg := config.IPReputationConfig{BlockDuration: config.Duration(15 * time.Minute), MaxEntries: 100}
+	setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -1936,30 +1951,21 @@ func TestRejectedIPBypassesSecondAIAnalysis(t *testing.T) {
 }
 
 func TestAnalysisTimeoutUsesAITimeoutWithResponseMargin(t *testing.T) {
-	s := &Server{cfg: config.Config{
-		Milter: config.MilterConfig{Timeout: config.Duration(30 * time.Second)},
-		AI:     config.AIConfig{Timeout: config.Duration(60 * time.Second)},
-	}}
+	s := &analysisService{milterTimeout: 30 * time.Second, ai: config.AIConfig{Timeout: config.Duration(60 * time.Second)}}
 	if got, want := s.analysisTimeout(), 65*time.Second; got != want {
 		t.Fatalf("analysis timeout = %v, want %v", got, want)
 	}
 }
 
 func TestAnalysisTimeoutIncludesRetryAttemptsAndWaits(t *testing.T) {
-	s := &Server{cfg: config.Config{
-		Milter: config.MilterConfig{Timeout: config.Duration(30 * time.Second)},
-		AI:     config.AIConfig{Timeout: config.Duration(60 * time.Second), Retries: 2},
-	}}
+	s := &analysisService{milterTimeout: 30 * time.Second, ai: config.AIConfig{Timeout: config.Duration(60 * time.Second), Retries: 2}}
 	if got, want := s.analysisTimeout(), 245*time.Second; got != want {
 		t.Fatalf("analysis timeout = %v, want %v", got, want)
 	}
 }
 
 func TestAnalysisTimeoutPreservesLongerMilterTimeout(t *testing.T) {
-	s := &Server{cfg: config.Config{
-		Milter: config.MilterConfig{Timeout: config.Duration(90 * time.Second)},
-		AI:     config.AIConfig{Timeout: config.Duration(60 * time.Second)},
-	}}
+	s := &analysisService{milterTimeout: 90 * time.Second, ai: config.AIConfig{Timeout: config.Duration(60 * time.Second)}}
 	if got, want := s.analysisTimeout(), 90*time.Second; got != want {
 		t.Fatalf("analysis timeout = %v, want %v", got, want)
 	}

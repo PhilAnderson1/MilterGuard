@@ -52,7 +52,7 @@ func (a *blockingAnalyzer) Analyze(ctx context.Context, _ ai.Input) (ai.Decision
 func TestSlowEndOfMessageSendsProgressBeforeFinalResponse(t *testing.T) {
 	analyzer := &blockingAnalyzer{started: make(chan struct{}), release: make(chan struct{})}
 	server, conn, done := testServer(t, analyzer)
-	server.progressInterval = 10 * time.Millisecond
+	server.sessions.protocol.progressInterval = 10 * time.Millisecond
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -99,7 +99,7 @@ func TestCompletedCommandRemainsUsableAcrossReadTimeouts(t *testing.T) {
 		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
 		Filtering: config.FilteringConfig{RejectScore: 0.9, AIErrorAction: "accept"},
 	}, analyzer, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ss := newSession(server, serverConn)
+	ss := newSession(server.sessions, serverConn)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -141,7 +141,7 @@ func TestProgressWriteFailureCancelsAnalysis(t *testing.T) {
 		cancelRelease: make(chan struct{}), finished: make(chan struct{}),
 	}
 	server, conn, done := testServer(t, analyzer)
-	server.progressInterval = 10 * time.Millisecond
+	server.sessions.protocol.progressInterval = 10 * time.Millisecond
 
 	negotiate(t, conn)
 	sendContinueFrames(t, conn,
@@ -191,10 +191,10 @@ func TestDeadlineFailureClosesSession(t *testing.T) {
 	defer clientConn.Close()
 	deadlineErr := errors.New("deadline unavailable")
 	var logOutput bytes.Buffer
-	server := &Server{
-		cfg: config.Config{Milter: config.MilterConfig{Timeout: config.Duration(time.Minute)}},
-		log: slog.New(slog.NewTextHandler(&logOutput, &slog.HandlerOptions{Level: slog.LevelDebug})),
-	}
+	log := slog.New(slog.NewTextHandler(&logOutput, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	server := &Server{log: log, sessions: &sessionDependencies{
+		protocol: protocolOptions{timeout: time.Minute, maxMessageSize: 1024}, log: log,
+	}}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -334,7 +334,11 @@ func TestUnsupportedCommandClosesConnection(t *testing.T) {
 func TestIdleConnectionRemainsOpenAcrossReadTimeouts(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
-	server := &Server{cfg: config.Config{Milter: config.MilterConfig{Timeout: config.Duration(20 * time.Millisecond)}}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := NewServer(config.Config{
+		Mode: "enforce", Milter: config.MilterConfig{Timeout: config.Duration(20 * time.Millisecond), MaxMessageSize: 1024, MaxConnections: 1},
+		AI: config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1},
+	}, fixedAnalyzer{}, log)
 	done := make(chan struct{})
 	go func() { defer close(done); defer serverConn.Close(); server.handle(context.Background(), serverConn) }()
 	time.Sleep(75 * time.Millisecond)
@@ -364,7 +368,11 @@ func TestContextCancellationClosesIdleConnectionImmediately(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
 	var logOutput bytes.Buffer
-	server := &Server{cfg: config.Config{Milter: config.MilterConfig{Timeout: config.Duration(time.Hour)}}, log: slog.New(slog.NewTextHandler(&logOutput, nil))}
+	log := slog.New(slog.NewTextHandler(&logOutput, nil))
+	server := NewServer(config.Config{
+		Mode: "enforce", Milter: config.MilterConfig{Timeout: config.Duration(time.Hour), MaxMessageSize: 1024, MaxConnections: 1},
+		AI: config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1},
+	}, fixedAnalyzer{}, log)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); server.handle(ctx, serverConn) }()
@@ -387,7 +395,10 @@ func TestContextCancellationClosesIdleConnectionImmediately(t *testing.T) {
 func TestHandleClosesAfterPartialFrameTimeout(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
-	server := &Server{cfg: config.Config{Milter: config.MilterConfig{Timeout: config.Duration(20 * time.Millisecond)}}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := &Server{log: log, sessions: &sessionDependencies{
+		protocol: protocolOptions{timeout: 20 * time.Millisecond, maxMessageSize: 1024}, log: log,
+	}}
 	done := make(chan struct{})
 	go func() { defer close(done); defer serverConn.Close(); server.handle(context.Background(), serverConn) }()
 	if _, err := clientConn.Write([]byte{0, 0}); err != nil {

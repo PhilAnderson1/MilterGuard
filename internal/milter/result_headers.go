@@ -15,7 +15,7 @@ var resultHeaderNames = []string{classificationHeader, scoreHeader, confidenceHe
 // accepted message. Genuine values are then added for tag mode, an AI
 // classification, an AI failure, or a bypass.
 func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
-	if !ss.server.cfg.Filtering.AddEmailHeaders && ss.server.cfg.Mode != "tag" {
+	if !ss.deps.policy.filtering.AddEmailHeaders && ss.deps.protocol.mode != "tag" {
 		return ss.replaceResultHeaders(nil)
 	}
 	if result == nil {
@@ -30,7 +30,7 @@ func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 		}
 	} else {
 		action := "accepted"
-		if ss.server.cfg.Mode == "tag" {
+		if ss.deps.protocol.mode == "tag" {
 			action = "accepted-tag-mode"
 		} else if result.proposed == actionReject {
 			action = "accepted-monitor-mode"
@@ -48,7 +48,7 @@ func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 }
 
 func (ss *session) writeAcceptedBypassHeaders() error {
-	if ss.server.cfg.Mode == "tag" {
+	if ss.deps.protocol.mode == "tag" {
 		return ss.writeTagHeaders("not-scanned", nil, "accepted-bypass")
 	}
 	return ss.writeAcceptedResultHeaders(nil)
@@ -67,9 +67,9 @@ func (ss *session) writeTagHeaders(classification string, score *float64, action
 }
 
 func (ss *session) confidenceLabel(classification string, score float64) string {
-	threshold := ss.server.cfg.Filtering.RejectScore
+	threshold := ss.deps.policy.filtering.RejectScore
 	if classification == "legitimate" {
-		threshold = ss.server.cfg.Filtering.LegitimateLowConfidenceScore
+		threshold = ss.deps.policy.filtering.LegitimateLowConfidenceScore
 	}
 	if score < threshold {
 		return "low"
@@ -93,7 +93,7 @@ func (ss *session) replaceResultHeaders(headers [][2]string) error {
 			}
 		}
 	} else if len(received) > 0 {
-		ss.server.log.Warn("sender-supplied MilterGuard result headers could not be removed because the MTA did not offer change-header support",
+		ss.deps.log.Warn("sender-supplied MilterGuard result headers could not be removed because the MTA did not offer change-header support",
 			"message_id", ss.message.Header("Message-ID"), "headers", received)
 		// Do not add genuine values alongside counterfeit values that could not be
 		// removed; the conflicting result set would be ambiguous downstream.
