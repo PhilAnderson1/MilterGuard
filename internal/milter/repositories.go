@@ -7,7 +7,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 	storesqlite "github.com/PhilAnderson1/MilterGuard/internal/stores/sqlite"
 )
@@ -18,7 +18,7 @@ func correspondentFeaturesEnabled(cfg config.CorrespondentsConfig) bool {
 
 func rejectionHistoryEnabled(cfg config.RejectionHistoryConfig) bool { return cfg.Expiry.Value() > 0 }
 
-func newCorrespondentRepository(cfg config.CorrespondentsConfig, db *sqlstore.Store, now func() time.Time, log *slog.Logger) stores.CorrespondentRepository {
+func newCorrespondentRepository(cfg config.CorrespondentsConfig, db *sqlitedb.Store, now func() time.Time, log *slog.Logger) stores.CorrespondentRepository {
 	return storesqlite.NewCorrespondents(db, storesqlite.CorrespondentOptions{
 		LearnAuthenticatedRecipients: cfg.LearnAuthenticatedRecipients,
 		LearnLegitimateSenders:       cfg.LearnLegitimateSenders,
@@ -34,19 +34,19 @@ func newCorrespondentRepository(cfg config.CorrespondentsConfig, db *sqlstore.St
 	}, log)
 }
 
-func newRejectionRepository(cfg config.RejectionHistoryConfig, db *sqlstore.Store, now func() time.Time, log *slog.Logger) stores.RejectionHistoryRepository {
+func newRejectionRepository(cfg config.RejectionHistoryConfig, db *sqlitedb.Store, now func() time.Time, log *slog.Logger) stores.RejectionHistoryRepository {
 	return storesqlite.NewRejections(db, storesqlite.RejectionOptions{
 		Expiry: cfg.Expiry.Value(), MaxEntries: cfg.MaxEntries, Now: now,
 	}, log)
 }
 
-func newDomainRepository(cfg config.DomainRegistrationConfig, db *sqlstore.Store, now func() time.Time) stores.DomainRegistrationCache {
+func newDomainRepository(cfg config.DomainRegistrationConfig, db *sqlitedb.Store, now func() time.Time) stores.DomainRegistrationCache {
 	return storesqlite.NewDomains(db, storesqlite.DomainOptions{
 		MaxEntries: cfg.MaxEntries, ExpiryGrace: domainRegistrationExpiryGrace, Now: now,
 	})
 }
 
-func newIPRepository(cfg config.IPReputationConfig, db *sqlstore.Store, now func() time.Time, log *slog.Logger) stores.PersistentIPReputationRepository {
+func newIPRepository(cfg config.IPReputationConfig, db *sqlitedb.Store, now func() time.Time, log *slog.Logger) stores.PersistentIPReputationRepository {
 	return storesqlite.NewIPReputation(db, storesqlite.IPReputationOptions{
 		BlockDuration:          cfg.BlockDuration.Value(),
 		RepeatThreshold:        cfg.RepeatThreshold,

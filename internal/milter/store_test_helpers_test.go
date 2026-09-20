@@ -13,7 +13,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
@@ -42,12 +42,12 @@ func testRecipientScope(recipient string) stores.RecipientScope {
 // Production code depends only on the interfaces in internal/stores.
 type correspondentStore struct {
 	stores.CorrespondentRepository
-	db  *sqlstore.Store
+	db  *sqlitedb.Store
 	now func() time.Time
 	cfg config.CorrespondentsConfig
 }
 
-func newCorrespondentStore(cfg config.CorrespondentsConfig, db *sqlstore.Store, log *slog.Logger) *correspondentStore {
+func newCorrespondentStore(cfg config.CorrespondentsConfig, db *sqlitedb.Store, log *slog.Logger) *correspondentStore {
 	store := &correspondentStore{db: db, now: time.Now, cfg: cfg}
 	store.CorrespondentRepository = newCorrespondentRepository(cfg, db, func() time.Time { return store.now() }, log)
 	return store
@@ -55,7 +55,7 @@ func newCorrespondentStore(cfg config.CorrespondentsConfig, db *sqlstore.Store, 
 
 func newTestCorrespondentStore(t *testing.T, cfg config.CorrespondentsConfig, log *slog.Logger) *correspondentStore {
 	t.Helper()
-	db, err := sqlstore.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlstore.DefaultOptions())
+	db, err := sqlitedb.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlitedb.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ type rejectionHistoryStore struct {
 }
 
 type ipReputationTestState struct {
-	db  *sqlstore.Store
+	db  *sqlitedb.Store
 	now func() time.Time
 }
 
@@ -87,7 +87,7 @@ func setIPTestClock(store *ipReputationStore, now func() time.Time) {
 	state.(*ipReputationTestState).now = now
 }
 
-func ipTestDatabase(store *ipReputationStore) *sqlstore.Store {
+func ipTestDatabase(store *ipReputationStore) *sqlitedb.Store {
 	state, ok := ipReputationTestStates.Load(store)
 	if !ok {
 		panic("IP reputation test store is not registered")
@@ -95,15 +95,15 @@ func ipTestDatabase(store *ipReputationStore) *sqlstore.Store {
 	return state.(*ipReputationTestState).db
 }
 
-func newRejectionHistoryStore(cfg config.RejectionHistoryConfig, db *sqlstore.Store, log *slog.Logger) *rejectionHistoryStore {
+func newRejectionHistoryStore(cfg config.RejectionHistoryConfig, db *sqlitedb.Store, log *slog.Logger) *rejectionHistoryStore {
 	store := &rejectionHistoryStore{now: time.Now}
 	store.RejectionHistoryRepository = newRejectionRepository(cfg, db, func() time.Time { return store.now() }, log)
 	return store
 }
 
-func newTestRejectionHistoryStore(t *testing.T, cfg config.RejectionHistoryConfig) (*rejectionHistoryStore, *sqlstore.Store) {
+func newTestRejectionHistoryStore(t *testing.T, cfg config.RejectionHistoryConfig) (*rejectionHistoryStore, *sqlitedb.Store) {
 	t.Helper()
-	db, err := sqlstore.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlstore.DefaultOptions())
+	db, err := sqlitedb.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlitedb.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}

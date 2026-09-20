@@ -14,15 +14,16 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/rdap"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 )
 
 type runtimeComponents struct {
 	sessions    *sessionDependencies
 	maintenance *maintenanceService
-	database    *sqlstore.Store
+	database    *sqlitedb.Store
 	err         error
 }
 
@@ -33,12 +34,12 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		internalToken, tokenErr = generateInternalToken(rand.Reader)
 	}
 
-	var database *sqlstore.Store
+	var database *sqlitedb.Store
 	var databaseErr error
 	if correspondentFeaturesEnabled(cfg.Correspondents) || ipReputationFeaturesEnabled(cfg.IPReputation) ||
 		rejectionHistoryEnabled(cfg.RejectionHistory) || domainRegistrationEnabled(cfg.DomainRegistration) {
 		ctx, cancel := context.WithTimeout(context.Background(), maintenanceDatabaseTimeout)
-		database, databaseErr = sqlstore.Open(ctx, cfg.Persistence.DatabaseFile, sqlstore.DefaultOptions())
+		database, databaseErr = sqlitedb.Open(ctx, cfg.Persistence.DatabaseFile, sqlitedb.DefaultOptions())
 		cancel()
 	}
 
@@ -47,7 +48,11 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	rejections := newRejectionRepository(cfg.RejectionHistory, database, time.Now, log)
 	domainCache := newDomainRepository(cfg.DomainRegistration, database, time.Now)
 	ipReputation := newIPReputationStore(cfg.IPReputation, ipRepository, log)
-	domainRegistration := newDomainRegistrationStore(cfg.DomainRegistration, domainCache, log)
+	var domainLookup domainRegistrationLookup
+	if domainRegistrationEnabled(cfg.DomainRegistration) {
+		domainLookup = rdap.New(cfg.DomainRegistration.Timeout.Value())
+	}
+	domainRegistration := newDomainRegistrationStore(cfg.DomainRegistration, domainCache, domainLookup, log)
 
 	var archive *rejectedmail.Archive
 	if cfg.RejectionHistory.SaveMessages && rejectionHistoryEnabled(cfg.RejectionHistory) {

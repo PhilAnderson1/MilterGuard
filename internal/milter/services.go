@@ -12,7 +12,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
@@ -150,7 +150,7 @@ type maintenanceService struct {
 	correspondents  stores.CorrespondentRepository
 	rejections      stores.RejectionHistoryRepository
 	domains         *domainRegistrationStore
-	database        *sqlstore.Store
+	database        *sqlitedb.Store
 	archive         *rejectedmail.Archive
 	cleanupInterval time.Duration
 	log             *slog.Logger

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
@@ -23,7 +23,7 @@ const (
 type rejectionHistoryStore = rejectionRepository
 type rejectionHistoryEntry = stores.Rejection
 
-func newRejectionHistoryStore(options RejectionOptions, db *sqlstore.Store, log *slog.Logger) *rejectionHistoryStore {
+func newRejectionHistoryStore(options RejectionOptions, db *sqlitedb.Store, log *slog.Logger) *rejectionHistoryStore {
 	return NewRejections(db, options, log).(*rejectionRepository)
 }
 
@@ -55,9 +55,9 @@ func (s *rejectionHistoryStore) size(ctx context.Context) int {
 	return count
 }
 
-func newTestRejectionHistoryStore(t *testing.T, cfg RejectionOptions) (*rejectionHistoryStore, *sqlstore.Store) {
+func newTestRejectionHistoryStore(t *testing.T, cfg RejectionOptions) (*rejectionHistoryStore, *sqlitedb.Store) {
 	t.Helper()
-	db, err := sqlstore.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlstore.DefaultOptions())
+	db, err := sqlitedb.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlitedb.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func rejectionEntries(t *testing.T, store stores.RejectionHistoryRepository, rec
 func TestRejectionHistoryPersistsOneEventWithMultipleRecipients(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "milterguard.db")
 	cfg := RejectionOptions{Expiry: 24 * time.Hour, MaxEntries: 10}
-	db, err := sqlstore.Open(context.Background(), path, sqlstore.DefaultOptions())
+	db, err := sqlitedb.Open(context.Background(), path, sqlitedb.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestRejectionHistoryPersistsOneEventWithMultipleRecipients(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := sqlstore.Open(context.Background(), path, sqlstore.DefaultOptions())
+	reopened, err := sqlitedb.Open(context.Background(), path, sqlitedb.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,6 @@
-// Package sqlstore owns MilterGuard's SQLite connection, schema lifecycle,
+// Package sqlitedb owns MilterGuard's SQLite connection, schema lifecycle,
 // transaction handling, and transient-lock retry policy.
-package sqlstore
+package sqlitedb
 
 import (
 	"context"

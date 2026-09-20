@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 func testIPRepository(t *testing.T, options IPReputationOptions) *ipReputationRepository {
 	t.Helper()
-	db, err := sqlstore.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlstore.DefaultOptions())
+	db, err := sqlitedb.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlitedb.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}

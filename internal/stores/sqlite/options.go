@@ -1,5 +1,5 @@
 // Package sqlite implements MilterGuard's persistent repository contracts
-// using the shared SQLite connection owned by sqlstore.
+// using the shared SQLite connection owned by sqlitedb.
 package sqlite
 
 import "time"

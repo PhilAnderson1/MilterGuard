@@ -15,6 +15,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 )
 
 type protocolPhase uint8
@@ -603,7 +604,7 @@ func (ss *session) messageContext(recipientsComplete bool) messageContext {
 
 func (ss *session) startConnectionDNS(ctx context.Context) {
 	timeout := ss.deps.dns.timeout
-	if timeout <= 0 || !connectionAddressRoutable(ss.peerIP) || ss.deps.dns.resolver == nil {
+	if timeout <= 0 || !netsafety.AddressRoutable(ss.peerIP) || ss.deps.dns.resolver == nil {
 		return
 	}
 	pending := make(chan connectionDNSResult, 1)

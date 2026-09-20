@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
-func testDomainRepository(t *testing.T, options DomainOptions) (*domainRepository, *sqlstore.Store) {
+func testDomainRepository(t *testing.T, options DomainOptions) (*domainRepository, *sqlitedb.Store) {
 	t.Helper()
-	db, err := sqlstore.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlstore.DefaultOptions())
+	db, err := sqlitedb.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlitedb.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}

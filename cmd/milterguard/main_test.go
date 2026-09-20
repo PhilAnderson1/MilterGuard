@@ -13,14 +13,14 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 )
 
 func TestPersistentStateStartupErrorMessage(t *testing.T) {
 	if got := persistentStateStartupErrorMessage(errors.New("permission denied")); got != "persistent state cannot be read" {
 		t.Fatalf("read error message = %q", got)
 	}
-	sqliteErr := fmt.Errorf("correspondents: %w", sqlstore.ErrIncompatibleDatabase)
+	sqliteErr := fmt.Errorf("correspondents: %w", sqlitedb.ErrIncompatibleDatabase)
 	if got := persistentStateStartupErrorMessage(sqliteErr); got != "incompatible SQLite database format" {
 		t.Fatalf("SQLite format error message = %q", got)
 	}

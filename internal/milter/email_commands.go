@@ -10,6 +10,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
 )
 
@@ -36,7 +37,7 @@ func (ss *session) isCommandRecipient(recipient string) bool {
 func (ss *session) isInternalMessage() bool {
 	marker := strings.TrimSpace(ss.message.Header(internalMessageHeader))
 	return marker != "" && marker == ss.deps.commands.internalToken &&
-		(!ss.peerIP.IsValid() || ss.peerIP.IsLoopback() || !connectionAddressRoutable(ss.peerIP))
+		(!ss.peerIP.IsValid() || ss.peerIP.IsLoopback() || !netsafety.AddressRoutable(ss.peerIP))
 }
 
 func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {

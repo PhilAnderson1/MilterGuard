@@ -11,7 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
@@ -23,12 +23,12 @@ const (
 
 type rejectionRepository struct {
 	options RejectionOptions
-	db      *sqlstore.Store
+	db      *sqlitedb.Store
 	now     func() time.Time
 	log     *slog.Logger
 }
 
-func NewRejections(db *sqlstore.Store, options RejectionOptions, log *slog.Logger) stores.RejectionHistoryRepository {
+func NewRejections(db *sqlitedb.Store, options RejectionOptions, log *slog.Logger) stores.RejectionHistoryRepository {
 	return &rejectionRepository{options: options, db: db, now: clock(options.Now), log: log}
 }
 

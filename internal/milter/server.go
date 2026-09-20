@@ -15,7 +15,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
@@ -55,7 +55,7 @@ type Server struct {
 	maxConnections     int
 	includeConnections bool
 	allowedPeerIPs     []netip.Prefix
-	database           *sqlstore.Store
+	database           *sqlitedb.Store
 	wg                 sync.WaitGroup
 	closeOnce          sync.Once
 	closeErr           error
@@ -193,7 +193,7 @@ func (s *maintenanceService) cleanupPersistentStores(parent context.Context, tri
 	contactsDeleted, contactsErr := s.correspondents.Cleanup(ctx)
 	rejectionsDeleted, rejectionsErr := s.rejections.Cleanup(ctx)
 	domainsDeleted, domainsErr := s.domains.Cleanup(ctx)
-	checkpoint, checkpointErr := sqlstore.CheckpointResult{}, error(nil)
+	checkpoint, checkpointErr := sqlitedb.CheckpointResult{}, error(nil)
 	if s.database != nil {
 		checkpoint, checkpointErr = s.database.CheckpointPassive(ctx)
 		if checkpointErr != nil && s.log != nil {

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
@@ -23,7 +23,7 @@ const (
 	whitelistManual                = stores.CorrespondentKindManual
 )
 
-func newCorrespondentStore(options CorrespondentOptions, database *sqlstore.Store, log *slog.Logger) *correspondentStore {
+func newCorrespondentStore(options CorrespondentOptions, database *sqlitedb.Store, log *slog.Logger) *correspondentStore {
 	return NewCorrespondents(database, options, log).(*correspondentRepository)
 }
 
@@ -75,9 +75,9 @@ func (s *correspondentStore) snapshot() map[string]correspondentEntry {
 	return result
 }
 
-func testCorrespondentDatabase(t *testing.T, path string) *sqlstore.Store {
+func testCorrespondentDatabase(t *testing.T, path string) *sqlitedb.Store {
 	t.Helper()
-	database, err := sqlstore.Open(context.Background(), path, sqlstore.DefaultOptions())
+	database, err := sqlitedb.Open(context.Background(), path, sqlitedb.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}

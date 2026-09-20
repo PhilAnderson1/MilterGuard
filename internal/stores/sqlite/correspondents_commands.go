@@ -9,8 +9,8 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
-func (store *correspondentRepository) AddManual(ctx context.Context, sender, recipient string) (bool, error) {
-	if store == nil || store.db == nil || !store.options.UseAllowlist {
+func (r *correspondentRepository) AddManual(ctx context.Context, sender, recipient string) (bool, error) {
+	if r == nil || r.db == nil || !r.options.UseAllowlist {
 		return false, fmt.Errorf("correspondent allowlisting is disabled or unavailable")
 	}
 	sender = message.NormalizeEmailAddress(sender)
@@ -18,9 +18,9 @@ func (store *correspondentRepository) AddManual(ctx context.Context, sender, rec
 	if sender == "" || recipient == "" {
 		return false, fmt.Errorf("sender and recipient must be valid email addresses")
 	}
-	now := store.now().UTC()
+	now := r.now().UTC()
 	created := false
-	err := store.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+	err := r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		var exists int
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM correspondents
 			WHERE local_address = ? AND correspondent = ?)`, recipient, sender).Scan(&exists); err != nil {
@@ -39,8 +39,8 @@ func (store *correspondentRepository) AddManual(ctx context.Context, sender, rec
 	return created, err
 }
 
-func (store *correspondentRepository) DeleteManual(ctx context.Context, sender string, scope stores.RecipientScope) (int, error) {
-	if store == nil || store.db == nil || !store.options.UseAllowlist {
+func (r *correspondentRepository) DeleteManual(ctx context.Context, sender string, scope stores.RecipientScope) (int, error) {
+	if r == nil || r.db == nil || !r.options.UseAllowlist {
 		return 0, fmt.Errorf("correspondent allowlisting is disabled or unavailable")
 	}
 	sender = message.NormalizeEmailAddress(sender)
@@ -60,7 +60,7 @@ func (store *correspondentRepository) DeleteManual(ctx context.Context, sender s
 		query += " AND local_address = ?"
 		args = append(args, recipient)
 	}
-	result, err := store.db.Exec(ctx, query, args...)
+	result, err := r.db.Exec(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}

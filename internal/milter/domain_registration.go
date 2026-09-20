@@ -2,17 +2,9 @@ package milter
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net"
-	"net/http"
-	"net/netip"
-	"net/url"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,10 +15,8 @@ import (
 )
 
 const (
-	domainRegistrationExpiryGrace        = 14 * 24 * time.Hour
-	domainRegistrationFailureRetry       = time.Hour
-	ianaRDAPBootstrapURL                 = "https://data.iana.org/rdap/dns.json"
-	maxRDAPResponseBytes           int64 = 1 << 20
+	domainRegistrationExpiryGrace  = 14 * 24 * time.Hour
+	domainRegistrationFailureRetry = time.Hour
 )
 
 type domainRegistrationStore struct {
@@ -47,11 +37,11 @@ type domainRegistrationLookup interface {
 	Lookup(context.Context, string) (time.Time, time.Time, error)
 }
 
-func newDomainRegistrationStore(cfg config.DomainRegistrationConfig, cache stores.DomainRegistrationCache, log *slog.Logger) *domainRegistrationStore {
+func newDomainRegistrationStore(cfg config.DomainRegistrationConfig, cache stores.DomainRegistrationCache, lookup domainRegistrationLookup, log *slog.Logger) *domainRegistrationStore {
 	store := &domainRegistrationStore{now: time.Now, log: log, timeout: cfg.Timeout.Value(), maxSize: cfg.MaxEntries, failures: make(map[string]time.Time), inflight: make(map[string]chan struct{})}
 	if domainRegistrationEnabled(cfg) {
 		store.slots = make(chan struct{}, min(8, cfg.MaxEntries))
-		store.lookup = newRDAPClient(cfg.Timeout.Value())
+		store.lookup = lookup
 	}
 	store.repository, store.maintenance = cache, cache
 	return store
@@ -190,218 +180,4 @@ func (s *domainRegistrationStore) pruneFailuresLocked(now time.Time) {
 
 func domainRegistrationEvidence(record stores.DomainRegistration) message.DomainRegistrationInfo {
 	return message.DomainRegistrationInfo{Available: true, Domain: record.Domain, RegisteredAt: record.RegisteredAt}
-}
-
-type rdapClient struct {
-	http              *http.Client
-	resolve           func(context.Context, string) ([]net.IPAddr, error)
-	dial              func(context.Context, string, string) (net.Conn, error)
-	now               func() time.Time
-	bootstrapURL      string
-	mu                sync.Mutex
-	services          map[string][]string
-	bootstrapInflight chan struct{}
-	bootstrapErr      error
-	bootstrapRetryAt  time.Time
-}
-
-func newRDAPClient(timeout time.Duration) *rdapClient {
-	dialer := &net.Dialer{}
-	rdap := &rdapClient{
-		resolve:      net.DefaultResolver.LookupIPAddr,
-		dial:         dialer.DialContext,
-		now:          time.Now,
-		bootstrapURL: ianaRDAPBootstrapURL,
-	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.DialContext = rdap.dialContext
-	rdap.http = &http.Client{Timeout: timeout, Transport: transport}
-	rdap.http.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 3 {
-			return errors.New("too many RDAP redirects")
-		}
-		return rdap.validateRedirect(req.Context(), req.URL)
-	}
-	return rdap
-}
-
-func (c *rdapClient) validateRedirect(_ context.Context, destination *url.URL) error {
-	if destination == nil || destination.Scheme != "https" || destination.User != nil {
-		return errors.New("unsafe RDAP redirect destination")
-	}
-	hostname := safeDNSHostname(destination.Hostname())
-	if hostname == "" || !strings.Contains(hostname, ".") || net.ParseIP(hostname) != nil {
-		return errors.New("unsafe RDAP redirect hostname")
-	}
-	return nil
-}
-
-// dialContext resolves, validates, and dials an RDAP endpoint in one operation.
-// Dialing the selected address directly prevents a second DNS lookup from
-// rebinding an already validated public hostname to an internal service.
-func (c *rdapClient) dialContext(ctx context.Context, network, endpoint string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("invalid RDAP endpoint %q: %w", endpoint, err)
-	}
-	hostname := safeDNSHostname(host)
-	if hostname == "" || !strings.Contains(hostname, ".") || net.ParseIP(hostname) != nil {
-		return nil, fmt.Errorf("unsafe RDAP endpoint hostname %q", host)
-	}
-	addresses, err := c.resolve(ctx, hostname)
-	if err != nil {
-		return nil, fmt.Errorf("cannot resolve RDAP endpoint hostname %q: %w", hostname, err)
-	}
-	if len(addresses) == 0 {
-		return nil, fmt.Errorf("cannot resolve RDAP endpoint hostname %q: no addresses", hostname)
-	}
-	validated := make([]netip.Addr, 0, len(addresses))
-	for _, resolved := range addresses {
-		address, ok := netip.AddrFromSlice(resolved.IP)
-		if !ok || !connectionAddressRoutable(address) {
-			return nil, fmt.Errorf("unsafe RDAP endpoint address for %q", hostname)
-		}
-		validated = append(validated, address.Unmap())
-	}
-	var dialErrors []error
-	for _, address := range validated {
-		conn, err := c.dial(ctx, network, net.JoinHostPort(address.String(), port))
-		if err == nil {
-			return conn, nil
-		}
-		dialErrors = append(dialErrors, err)
-	}
-	return nil, fmt.Errorf("cannot connect to RDAP endpoint %q: %w", hostname, errors.Join(dialErrors...))
-}
-
-func (c *rdapClient) Lookup(ctx context.Context, domain string) (time.Time, time.Time, error) {
-	services, err := c.rdapServices(ctx)
-	if err != nil {
-		return time.Time{}, time.Time{}, err
-	}
-	tld := domain[strings.LastIndexByte(domain, '.')+1:]
-	bases := services[tld]
-	if len(bases) == 0 {
-		return time.Time{}, time.Time{}, fmt.Errorf("no RDAP service for .%s", tld)
-	}
-	var lastErr error
-	for _, base := range bases {
-		endpoint := strings.TrimRight(base, "/") + "/domain/" + url.PathEscape(domain)
-		var response struct {
-			Events []struct {
-				Action string    `json:"eventAction"`
-				Date   time.Time `json:"eventDate"`
-			} `json:"events"`
-		}
-		if err := c.getJSON(ctx, endpoint, &response); err != nil {
-			lastErr = err
-			continue
-		}
-		var registeredAt, expiresAt time.Time
-		for _, event := range response.Events {
-			switch strings.ToLower(event.Action) {
-			case "registration":
-				registeredAt = event.Date
-			case "expiration":
-				expiresAt = event.Date
-			}
-		}
-		if registeredAt.IsZero() || expiresAt.IsZero() {
-			lastErr = errors.New("RDAP response lacks registration or expiration event")
-			continue
-		}
-		return registeredAt, expiresAt, nil
-	}
-	return time.Time{}, time.Time{}, lastErr
-}
-
-func (c *rdapClient) rdapServices(ctx context.Context) (map[string][]string, error) {
-	for {
-		c.mu.Lock()
-		if c.services != nil {
-			services := c.services
-			c.mu.Unlock()
-			return services, nil
-		}
-		if c.bootstrapRetryAt.After(c.now()) {
-			err := c.bootstrapErr
-			c.mu.Unlock()
-			return nil, err
-		}
-		if pending := c.bootstrapInflight; pending != nil {
-			c.mu.Unlock()
-			select {
-			case <-pending:
-				continue
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-		pending := make(chan struct{})
-		c.bootstrapInflight = pending
-		c.mu.Unlock()
-
-		services, err := c.fetchRDAPServices(ctx)
-		c.mu.Lock()
-		if err == nil {
-			c.services = services
-			c.bootstrapErr = nil
-			c.bootstrapRetryAt = time.Time{}
-		} else if !errors.Is(err, context.Canceled) {
-			c.bootstrapErr = err
-			c.bootstrapRetryAt = c.now().Add(domainRegistrationFailureRetry)
-		}
-		c.bootstrapInflight = nil
-		close(pending)
-		c.mu.Unlock()
-		return services, err
-	}
-}
-
-func (c *rdapClient) fetchRDAPServices(ctx context.Context) (map[string][]string, error) {
-	var bootstrap struct {
-		Services [][][]string `json:"services"`
-	}
-	if err := c.getJSON(ctx, c.bootstrapURL, &bootstrap); err != nil {
-		return nil, err
-	}
-	services := make(map[string][]string)
-	for _, entry := range bootstrap.Services {
-		if len(entry) != 2 {
-			continue
-		}
-		for _, tld := range entry[0] {
-			tld = normalizeDomain(tld)
-			for _, base := range entry[1] {
-				parsed, err := url.Parse(base)
-				if tld != "" && err == nil && parsed.Scheme == "https" && parsed.Hostname() != "" && parsed.User == nil {
-					services[tld] = append(services[tld], base)
-				}
-			}
-		}
-	}
-	return services, nil
-}
-
-func (c *rdapClient) getJSON(ctx context.Context, endpoint string, destination any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/rdap+json, application/json")
-	req.Header.Set("User-Agent", "MilterGuard")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("RDAP endpoint returned HTTP %d", resp.StatusCode)
-	}
-	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxRDAPResponseBytes+1))
-	if err := decoder.Decode(destination); err != nil {
-		return err
-	}
-	return nil
 }

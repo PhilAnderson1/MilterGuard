@@ -14,14 +14,14 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 func newTestIPReputationStore(t *testing.T, cfg config.IPReputationConfig, log *slog.Logger) *ipReputationStore {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ip-reputation.db")
-	db, err := sqlstore.Open(context.Background(), path, sqlstore.DefaultOptions())
+	db, err := sqlitedb.Open(context.Background(), path, sqlitedb.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func newTestIPReputationStore(t *testing.T, cfg config.IPReputationConfig, log *
 	return newTestIPReputationStoreWithDB(t, cfg, db, log)
 }
 
-func newTestIPReputationStoreWithDB(t *testing.T, cfg config.IPReputationConfig, db *sqlstore.Store, log *slog.Logger) *ipReputationStore {
+func newTestIPReputationStoreWithDB(t *testing.T, cfg config.IPReputationConfig, db *sqlitedb.Store, log *slog.Logger) *ipReputationStore {
 	t.Helper()
 	state := &ipReputationTestState{db: db, now: time.Now}
 	repository := newIPRepository(cfg, db, func() time.Time { return state.now() }, log)
@@ -419,7 +419,7 @@ func TestRejectedIPCachePersistsReputation(t *testing.T) {
 		MaxEntries:          10,
 	}
 	now := time.Now().UTC().Truncate(time.Second)
-	db, err := sqlstore.Open(context.Background(), stateFile, sqlstore.DefaultOptions())
+	db, err := sqlitedb.Open(context.Background(), stateFile, sqlitedb.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}

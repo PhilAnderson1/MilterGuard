@@ -20,7 +20,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/milter"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/mattn/go-isatty"
 )
 
@@ -337,7 +337,7 @@ func endpointCheckErrorMessage(err error) string {
 }
 
 func persistentStateStartupErrorMessage(err error) string {
-	if errors.Is(err, sqlstore.ErrIncompatibleDatabase) {
+	if errors.Is(err, sqlitedb.ErrIncompatibleDatabase) {
 		return "incompatible SQLite database format"
 	}
 	return "persistent state cannot be read"

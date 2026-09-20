@@ -7,17 +7,17 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 type domainRepository struct {
-	db      *sqlstore.Store
+	db      *sqlitedb.Store
 	options DomainOptions
 	now     func() time.Time
 }
 
-func NewDomains(db *sqlstore.Store, options DomainOptions) stores.DomainRegistrationCache {
+func NewDomains(db *sqlitedb.Store, options DomainOptions) stores.DomainRegistrationCache {
 	return &domainRepository{db: db, options: options, now: clock(options.Now)}
 }
 

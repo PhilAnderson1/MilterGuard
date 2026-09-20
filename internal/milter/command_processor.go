@@ -13,8 +13,9 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
@@ -48,7 +49,7 @@ func (s commandArchiveSource) ReadWithRecordID(id uint64, rejectedAt time.Time, 
 // required by standalone command mode. It does not construct a Milter server.
 func OpenCommandProcessor(cfg config.Config, log *slog.Logger) (*admincmd.Processor, func() error, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), maintenanceDatabaseTimeout)
-	database, err := sqlstore.Open(ctx, cfg.Persistence.DatabaseFile, sqlstore.DefaultOptions())
+	database, err := sqlitedb.Open(ctx, cfg.Persistence.DatabaseFile, sqlitedb.DefaultOptions())
 	cancel()
 	if err != nil {
 		return nil, nil, err
@@ -96,7 +97,7 @@ func (r *commandIPResolver) ResolveActiveIPHostnames(parent context.Context, ent
 			defer wait.Done()
 			for index := range indices {
 				addr := entries[index].Address
-				if !addr.IsValid() || !connectionAddressRoutable(addr) {
+				if !addr.IsValid() || !netsafety.AddressRoutable(addr) {
 					continue
 				}
 				ctx, cancel := context.WithTimeout(parent, r.timeout)
@@ -106,7 +107,7 @@ func (r *commandIPResolver) ResolveActiveIPHostnames(parent context.Context, ent
 					continue
 				}
 				for _, candidate := range names {
-					if hostname := safeDNSHostname(candidate); hostname != "" {
+					if hostname := netsafety.DNSHostname(candidate); hostname != "" {
 						entries[index].Hostname = hostname
 						break
 					}
