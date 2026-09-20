@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
-	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 	storesqlite "github.com/PhilAnderson1/MilterGuard/internal/stores/sqlite"
@@ -58,8 +57,6 @@ func newIPRepository(cfg config.IPReputationConfig, db *sqlitedb.Store, now func
 		Now:                    now,
 	}, log)
 }
-
-func normalizeEmailAddress(value string) string { return message.NormalizeEmailAddress(value) }
 
 func emailAddressDomain(address string) string {
 	if separator := strings.LastIndexByte(address, '@'); separator >= 0 {

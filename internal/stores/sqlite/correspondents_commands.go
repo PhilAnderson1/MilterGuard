@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
@@ -13,8 +13,8 @@ func (r *correspondentRepository) AddManual(ctx context.Context, sender, recipie
 	if r == nil || r.db == nil || !r.options.UseAllowlist {
 		return false, fmt.Errorf("correspondent allowlisting is disabled or unavailable")
 	}
-	sender = message.NormalizeEmailAddress(sender)
-	recipient = message.NormalizeEmailAddress(recipient)
+	sender = mailaddr.Normalize(sender)
+	recipient = mailaddr.Normalize(recipient)
 	if sender == "" || recipient == "" {
 		return false, fmt.Errorf("sender and recipient must be valid email addresses")
 	}
@@ -43,7 +43,7 @@ func (r *correspondentRepository) DeleteManual(ctx context.Context, sender strin
 	if r == nil || r.db == nil || !r.options.UseAllowlist {
 		return 0, fmt.Errorf("correspondent allowlisting is disabled or unavailable")
 	}
-	sender = message.NormalizeEmailAddress(sender)
+	sender = mailaddr.Normalize(sender)
 	if sender == "" {
 		return 0, fmt.Errorf("sender must be a valid email address")
 	}
@@ -53,7 +53,7 @@ func (r *correspondentRepository) DeleteManual(ctx context.Context, sender strin
 		return 0, err
 	}
 	if !scope.All {
-		recipient := message.NormalizeEmailAddress(scope.Address)
+		recipient := mailaddr.Normalize(scope.Address)
 		if recipient == "" {
 			return 0, fmt.Errorf("recipient must be a valid email address or *")
 		}

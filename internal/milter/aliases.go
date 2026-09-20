@@ -6,6 +6,8 @@ import (
 	"net/mail"
 	"os"
 	"strings"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 )
 
 const maxAliasesFileBytes = 2 << 20
@@ -14,8 +16,8 @@ const maxAliasesFileBytes = 2 << 20
 // More expressive aliases are deliberately rejected because they do not prove
 // exclusive ownership by one authenticated identity.
 func senderOwnedViaAliases(path, envelopeSender, identity, commandRecipient string) error {
-	sender := normalizeEmailAddress(envelopeSender)
-	command := normalizeEmailAddress(commandRecipient)
+	sender := mailaddr.Normalize(envelopeSender)
+	command := mailaddr.Normalize(commandRecipient)
 	if sender == "" || command == "" {
 		return fmt.Errorf("invalid sender or command address")
 	}

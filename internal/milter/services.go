@@ -1,7 +1,6 @@
 package milter
 
 import (
-	"context"
 	"log/slog"
 	"net/netip"
 	"time"
@@ -59,56 +58,6 @@ type messageContext struct {
 	envelopeSender      string
 	envelopeRecipients  []string
 	recipientsComplete  bool
-}
-
-// applyPostDecisionUpdates records adaptive trust and reputation evidence only
-// after a completed enforce-mode decision. Analysis failures never count as
-// legitimate evidence.
-func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, current messageContext, result evaluationResult, inbound inboundEvidence) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), postDecisionUpdateTimeout)
-	defer cancel()
-	if s.mode != "enforce" {
-		return
-	}
-	if result.selected == actionReject {
-		s.recordRejection(ctx, current.message, current.visibleSender, current.envelopeSender, current.envelopeRecipients, result.reasons, "ai")
-		if !current.authenticated {
-			s.ipReputation.add(ctx, current.peerIP, current.connectionDNS)
-		}
-	}
-	if !current.authenticated && result.err == nil && result.classification == "legitimate" {
-		if err := s.ipReputation.RecordLegitimate(ctx, current.peerIP); err != nil {
-			s.log.ErrorContext(ctx, "cannot update sending IP reputation", "error", err)
-		}
-	}
-	if result.selected == actionAccept && current.authenticated {
-		s.learnAuthenticatedRecipients(ctx, current.envelopeSender, current.envelopeRecipients)
-	}
-	if !current.authenticated && result.err == nil {
-		s.recordInboundClassification(ctx, current, result, inbound.trustedDKIM)
-	}
-}
-
-func (s *messagePolicyService) recordInboundClassification(ctx context.Context, current messageContext, result evaluationResult, dkimAligned bool) {
-	if err := s.correspondents.RecordInboundClassification(ctx, stores.InboundClassification{
-		Correspondent: current.visibleSender, Recipients: current.envelopeRecipients,
-		RecipientsComplete: current.recipientsComplete, Classification: result.classification,
-		Score: result.score, UnwantedMinScore: s.filtering.RejectScore, DKIMAligned: dkimAligned,
-	}); err != nil {
-		s.log.ErrorContext(ctx, "cannot update inbound correspondent learning", "error", err)
-	}
-}
-
-func (s *messagePolicyService) touchInboundCorrespondent(ctx context.Context, sender string, recipients []string) {
-	if err := s.correspondents.TouchInbound(ctx, sender, recipients); err != nil {
-		s.log.ErrorContext(ctx, "cannot update correspondent activity", "error", err)
-	}
-}
-
-func (s *messagePolicyService) learnAuthenticatedRecipients(ctx context.Context, sender string, recipients []string) {
-	if err := s.correspondents.LearnAuthenticated(ctx, sender, recipients); err != nil {
-		s.log.ErrorContext(ctx, "cannot update correspondent allowlist", "error", err)
-	}
 }
 
 type attachmentPolicyService struct {

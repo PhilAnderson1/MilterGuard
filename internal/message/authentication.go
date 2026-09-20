@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 )
 
@@ -76,7 +77,7 @@ func availableValue(value string) string {
 }
 
 func visibleFromDomain(value string) string {
-	if address, ok := MailboxAddress(value); ok {
+	if address, ok := mailaddr.Mailbox(value); ok {
 		return emailDomain(address)
 	}
 	return ""

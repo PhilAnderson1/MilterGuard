@@ -9,15 +9,9 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
-
-func canonicalIP(addr netip.Addr) netip.Addr {
-	if addr.Is6() {
-		addr = addr.WithZone("")
-	}
-	return addr.Unmap()
-}
 
 func canonicalIPPrefix(prefix netip.Prefix) (netip.Prefix, bool) {
 	addr, bits := prefix.Addr(), prefix.Bits()
@@ -57,7 +51,7 @@ func newIPReputationStore(cfg config.IPReputationConfig, repository stores.IPRep
 			if addr.Is4() || addr.Is4In6() {
 				bits = 32
 			}
-			policy.allowlist = append(policy.allowlist, netip.PrefixFrom(canonicalIP(addr), bits))
+			policy.allowlist = append(policy.allowlist, netip.PrefixFrom(netsafety.CanonicalIP(addr), bits))
 		}
 	}
 	for _, domain := range cfg.DomainAllowlist {
@@ -80,7 +74,7 @@ func (s *ipReputationStore) allowed(addr netip.Addr) (netip.Prefix, bool) {
 	if !addr.IsValid() {
 		return netip.Prefix{}, true
 	}
-	addr = canonicalIP(addr)
+	addr = netsafety.CanonicalIP(addr)
 	for _, prefix := range s.allowlist {
 		if prefix.Contains(addr) {
 			return prefix, true
@@ -95,7 +89,7 @@ func (s *ipReputationStore) add(ctx context.Context, addr netip.Addr, dns connec
 	if !s.enabled() || !addr.IsValid() {
 		return false
 	}
-	addr = canonicalIP(addr)
+	addr = netsafety.CanonicalIP(addr)
 	if prefix, ok := s.allowed(addr); ok {
 		s.debug("sending IP excluded from rejection reputation", "remote_ip", addr.String(), "matched_prefix", prefix.String(), "reason", "ip_allowlist")
 		return false
@@ -126,7 +120,7 @@ func (s *ipReputationStore) RecordRejection(ctx context.Context, addr netip.Addr
 	if !s.enabled() || !addr.IsValid() {
 		return stores.IPBlock{}, nil
 	}
-	addr = canonicalIP(addr)
+	addr = netsafety.CanonicalIP(addr)
 	if _, ok := s.allowed(addr); ok {
 		return stores.IPBlock{}, nil
 	}
@@ -137,14 +131,14 @@ func (s *ipReputationStore) RecordLegitimate(ctx context.Context, addr netip.Add
 	if !s.enabled() || !addr.IsValid() {
 		return nil
 	}
-	return s.repository.RecordLegitimate(ctx, canonicalIP(addr))
+	return s.repository.RecordLegitimate(ctx, netsafety.CanonicalIP(addr))
 }
 
 func (s *ipReputationStore) ActiveBlock(ctx context.Context, addr netip.Addr) (stores.IPBlock, bool, error) {
 	if !s.enabled() || !addr.IsValid() {
 		return stores.IPBlock{}, false, nil
 	}
-	addr = canonicalIP(addr)
+	addr = netsafety.CanonicalIP(addr)
 	if _, ok := s.allowed(addr); ok {
 		return stores.IPBlock{}, false, nil
 	}
@@ -155,7 +149,7 @@ func (s *ipReputationStore) AddManualBlock(ctx context.Context, addr netip.Addr)
 	if !s.enabled() || !addr.IsValid() {
 		return stores.IPBlock{}, fmt.Errorf("IP reputation blocking is disabled or the address is invalid")
 	}
-	addr = canonicalIP(addr)
+	addr = netsafety.CanonicalIP(addr)
 	if prefix, ok := s.allowed(addr); ok {
 		return stores.IPBlock{}, fmt.Errorf("IP address is protected by allowlist %s", prefix)
 	}
@@ -166,7 +160,7 @@ func (s *ipReputationStore) Delete(ctx context.Context, addr netip.Addr) (bool, 
 	if !s.enabled() {
 		return false, fmt.Errorf("IP reputation blocking is disabled or unavailable")
 	}
-	return s.repository.Delete(ctx, canonicalIP(addr))
+	return s.repository.Delete(ctx, netsafety.CanonicalIP(addr))
 }
 
 func (s *ipReputationStore) ListActiveBlocks(ctx context.Context, query stores.IPBlockListQuery) (stores.IPBlockPage, error) {

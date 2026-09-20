@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 )
@@ -252,7 +253,7 @@ func (ss *session) negotiate(payload []byte) bool {
 		ss.deps.log.Warn("result headers disabled for Milter connection because MTA did not offer add-header support",
 			"offered_actions", offeredActions)
 	}
-	wantsInternalHeaderRemoval := ss.deps.commands != nil && ss.deps.commands.cfg.Enabled && ss.deps.commands.cfg.SendReplies
+	wantsInternalHeaderRemoval := ss.deps.commands.cfg.Enabled && ss.deps.commands.cfg.SendReplies
 	if wantsInternalHeaderRemoval && offeredActions&actionChangeHeaders == 0 {
 		ss.deps.log.Warn("internal reply protection disabled for Milter connection because MTA did not offer change-header support",
 			"offered_actions", offeredActions)
@@ -298,7 +299,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		}
 		return false
 	}
-	ss.visibleSender = normalizeEmailAddress(ss.message.Header("From"))
+	ss.visibleSender = mailaddr.Normalize(ss.message.Header("From"))
 	ss.visibleSenderDomain = emailAddressDomain(ss.visibleSender)
 	if ss.isInternalMessage() {
 		return ss.finishInternalMessage(ctx)
@@ -432,7 +433,7 @@ func (ss *session) knownCorrespondentLogAttrs() []any {
 	seen := make(map[string]bool, len(ss.envelopeRecipients))
 	localAddresses := make([]string, 0, len(ss.envelopeRecipients))
 	for _, recipient := range ss.envelopeRecipients {
-		recipient = normalizeEmailAddress(recipient)
+		recipient = mailaddr.Normalize(recipient)
 		if recipient == "" || seen[recipient] {
 			continue
 		}
@@ -500,7 +501,7 @@ func (ss *session) recipientSetComplete() bool {
 		return false
 	}
 	for _, recipient := range ss.envelopeRecipients {
-		if normalizeEmailAddress(recipient) == "" {
+		if mailaddr.Normalize(recipient) == "" {
 			return false
 		}
 	}

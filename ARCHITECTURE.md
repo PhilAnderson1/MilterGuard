@@ -218,9 +218,9 @@ packages and repository use.
 For changes that affect runtime wiring, run at least:
 
 ```sh
-go test ./cmd/... ./internal/... ./local-testing
+go test ./cmd/... ./internal/...
 go test -race ./internal/milter ./internal/admincmd ./internal/stores/...
-go vet ./cmd/... ./internal/... ./local-testing
+go vet ./cmd/... ./internal/...
 ```
 
 The release build is compiled statically and both distributed configuration

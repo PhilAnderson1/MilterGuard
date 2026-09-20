@@ -1,12 +1,11 @@
 package sqlite
 
 import (
-	"net/netip"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 )
 
 type rowScanner interface{ Scan(...any) error }
@@ -26,7 +25,7 @@ func normalizedAddressSet(values []string, maximum int) map[string]bool {
 		if len(result) >= maximum {
 			break
 		}
-		if value = message.NormalizeEmailAddress(value); value != "" {
+		if value = mailaddr.Normalize(value); value != "" {
 			result[value] = true
 		}
 	}
@@ -40,11 +39,4 @@ func sortedSet(values map[string]bool) []string {
 	}
 	sort.Strings(result)
 	return result
-}
-
-func canonicalIP(addr netip.Addr) netip.Addr {
-	if addr.Is6() {
-		addr = addr.WithZone("")
-	}
-	return addr.Unmap()
 }

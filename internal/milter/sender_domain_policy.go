@@ -5,6 +5,7 @@ import (
 	"net/mail"
 	"strings"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
@@ -53,7 +54,7 @@ func recoverFromAddresses(value string) []*mail.Address {
 			addresses = append(addresses, address)
 			continue
 		}
-		if mailbox, ok := message.MailboxAddress(fragment); ok {
+		if mailbox, ok := mailaddr.Mailbox(fragment); ok {
 			addresses = append(addresses, &mail.Address{Address: mailbox})
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
@@ -31,7 +32,7 @@ type commandReplyContent struct {
 }
 
 func (ss *session) isCommandRecipient(recipient string) bool {
-	return ss.deps.commands.cfg.Enabled && normalizeEmailAddress(recipient) == ss.deps.commands.recipient
+	return ss.deps.commands.cfg.Enabled && mailaddr.Normalize(recipient) == ss.deps.commands.recipient
 }
 
 func (ss *session) isInternalMessage() bool {
@@ -51,7 +52,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	}
 	hasCommandRecipient := false
 	for _, recipient := range ss.envelopeRecipients {
-		if normalizeEmailAddress(recipient) == ss.deps.commands.recipient {
+		if mailaddr.Normalize(recipient) == ss.deps.commands.recipient {
 			hasCommandRecipient = true
 		}
 	}
@@ -82,7 +83,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 			return true, ss.rejectEmailCommand(ctx, "envelope sender is not owned by the authenticated user", false)
 		}
 	}
-	replyTo := normalizeEmailAddress(ss.envelopeSender)
+	replyTo := mailaddr.Normalize(ss.envelopeSender)
 	if replyTo == "" {
 		return true, ss.rejectEmailCommand(ctx, "authenticated envelope sender is invalid", false)
 	}
@@ -287,7 +288,7 @@ func (s *emailCommandService) queueReplyContentFunc(recipient, subject string, c
 				logRecoveredWorkerPanic(s.log, context.Background(), "email command reply", panicValue, "recipient", recipient)
 			}
 		}()
-		from := normalizeEmailAddress(cfg.Recipient)
+		from := mailaddr.Normalize(cfg.Recipient)
 		date := time.Now().UTC().Format(time.RFC1123Z)
 		reply := content()
 		message, err := buildBoundedCommandReplyMessage(from, recipient, subject, date, token, reply, s.maxMessageSize)

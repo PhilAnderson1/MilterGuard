@@ -7,7 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 )
 
 type period string
@@ -43,7 +44,7 @@ func normalizeRecipient(value string) string {
 	if strings.TrimSpace(value) == "*" {
 		return "*"
 	}
-	return message.NormalizeEmailAddress(value)
+	return mailaddr.Normalize(value)
 }
 
 func (p *Processor) Parse(line string, actor Actor) (Command, error) {
@@ -114,7 +115,7 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 		if err != nil {
 			return Command{}, fmt.Errorf("IP command requires a valid IPv4 or IPv6 address")
 		}
-		addr = canonicalIP(addr)
+		addr = netsafety.CanonicalIP(addr)
 		verb := strings.ToUpper(fields[1])
 		return Command{kind: "ip_" + strings.ToLower(verb), canonical: "IP " + verb + " " + addr.String(), ip: addr}, nil
 	}
@@ -135,7 +136,7 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 					return Command{}, fmt.Errorf("wildcard rejection history is restricted to administrators")
 				}
 			} else {
-				recipient = message.NormalizeEmailAddress(recipient)
+				recipient = mailaddr.Normalize(recipient)
 				if recipient == "" {
 					return Command{}, fmt.Errorf("rejection-history recipient must be a valid email address")
 				}
@@ -170,7 +171,7 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 					return Command{}, fmt.Errorf("wildcard allowlist listing is restricted to administrators")
 				}
 			} else {
-				recipient = message.NormalizeEmailAddress(recipient)
+				recipient = mailaddr.Normalize(recipient)
 				if recipient == "" {
 					return Command{}, fmt.Errorf("allowlist recipient must be a valid email address")
 				}
@@ -198,7 +199,7 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 	if verb != "ADD" && verb != "DELETE" {
 		return Command{}, fmt.Errorf("operation must be ADD or DELETE")
 	}
-	sender := message.NormalizeEmailAddress(fields[2])
+	sender := mailaddr.Normalize(fields[2])
 	if sender == "" {
 		return Command{}, fmt.Errorf("sender must be a valid email address")
 	}
@@ -214,7 +215,7 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 			return Command{}, fmt.Errorf("wildcard deletion is restricted to administrators")
 		}
 	} else {
-		recipient = message.NormalizeEmailAddress(recipient)
+		recipient = mailaddr.Normalize(recipient)
 		if recipient == "" {
 			return Command{}, fmt.Errorf("recipient must be a valid email address")
 		}
@@ -238,11 +239,4 @@ func listPeriod(fields []string, index int) (period, error) {
 		return "", fmt.Errorf("invalid period")
 	}
 	return p, nil
-}
-
-func canonicalIP(addr netip.Addr) netip.Addr {
-	if addr.Is6() {
-		addr = addr.WithZone("")
-	}
-	return addr.Unmap()
 }

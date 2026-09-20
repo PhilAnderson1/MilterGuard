@@ -14,6 +14,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/rdap"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
@@ -91,7 +92,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		scanner: attachmentScanner, slots: make(chan struct{}, attachmentConcurrency(cfg.Milter.MaxConnections)), policy: policy,
 	}
 	emailCommands := &emailCommandService{
-		cfg: cfg.EmailCommands, processor: commands, recipient: normalizeEmailAddress(cfg.EmailCommands.Recipient),
+		cfg: cfg.EmailCommands, processor: commands, recipient: mailaddr.Normalize(cfg.EmailCommands.Recipient),
 		internalToken: internalToken, replySlots: make(chan struct{}, 4), log: log,
 		maxMessageSize: cfg.Milter.MaxMessageSize,
 		sender: smtpreply.New(smtpreply.Options{

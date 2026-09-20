@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 )
 
 const (
@@ -239,7 +241,7 @@ func parseConnectIP(payload []byte) (netip.Addr, bool) {
 	if err != nil || (family == '4' && !addr.Is4() && !addr.Is4In6()) || (family == '6' && !addr.Is6()) {
 		return netip.Addr{}, false
 	}
-	return canonicalIP(addr), true
+	return netsafety.CanonicalIP(addr), true
 }
 
 func readFrame(reader io.Reader) ([]byte, error) {

@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
@@ -35,7 +35,7 @@ func (r *correspondentRepository) LearnAuthenticated(ctx context.Context, localA
 	if r == nil || r.db == nil || !r.options.LearnAuthenticatedRecipients {
 		return nil
 	}
-	localAddress = message.NormalizeEmailAddress(localAddress)
+	localAddress = mailaddr.Normalize(localAddress)
 	if localAddress == "" {
 		return fmt.Errorf("authenticated envelope sender is unavailable or invalid")
 	}
@@ -332,7 +332,7 @@ func (r *correspondentRepository) ListCorrespondents(ctx context.Context, list s
 	allRecipients := list.Recipients.All
 	recipient := list.Recipients.Address
 	if !allRecipients {
-		recipient = message.NormalizeEmailAddress(recipient)
+		recipient = mailaddr.Normalize(recipient)
 		if recipient == "" {
 			return stores.CorrespondentPage{}, nil
 		}

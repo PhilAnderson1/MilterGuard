@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
@@ -58,7 +59,7 @@ func (r *ipReputationRepository) RecordRejection(ctx context.Context, addr netip
 	if !r.enabled() || !addr.IsValid() {
 		return stores.IPBlock{}, nil
 	}
-	addr = canonicalIP(addr)
+	addr = netsafety.CanonicalIP(addr)
 	now := r.now().UTC()
 	record := rejectedIPRecord{IP: addr.String(), LastActivityAt: now}
 	strikeCount := 0
@@ -133,7 +134,7 @@ func (r *ipReputationRepository) RecordLegitimate(ctx context.Context, addr neti
 	if !r.enabled() || r.legitimatePerStrike <= 0 || !addr.IsValid() {
 		return nil
 	}
-	addr, now := canonicalIP(addr), r.now().UTC()
+	addr, now := netsafety.CanonicalIP(addr), r.now().UTC()
 	hasStrike, err := r.hasCurrentStrike(ctx, addr.String(), now)
 	if err != nil {
 		return fmt.Errorf("check sending IP for legitimate evidence: %w", err)
@@ -229,7 +230,7 @@ func (r *ipReputationRepository) ActiveBlock(ctx context.Context, addr netip.Add
 	if !r.enabled() || !addr.IsValid() {
 		return stores.IPBlock{}, false, nil
 	}
-	addr = canonicalIP(addr)
+	addr = netsafety.CanonicalIP(addr)
 	now := r.now().UTC()
 	block, found, err := r.readActiveBlock(ctx, addr.String(), now)
 	if err != nil {
@@ -376,7 +377,7 @@ func (r *ipReputationRepository) AddManualBlock(ctx context.Context, addr netip.
 	if !r.enabled() || !addr.IsValid() {
 		return stores.IPBlock{}, fmt.Errorf("IP reputation blocking is disabled or the address is invalid")
 	}
-	addr = canonicalIP(addr)
+	addr = netsafety.CanonicalIP(addr)
 	now := r.now().UTC()
 	level, duration := stores.IPBlockLevelRepeat, r.repeatDuration
 	if duration <= 0 {
@@ -402,7 +403,7 @@ func (r *ipReputationRepository) Delete(ctx context.Context, addr netip.Addr) (b
 	if r == nil || r.db == nil || !addr.IsValid() {
 		return false, fmt.Errorf("invalid IP address")
 	}
-	addr = canonicalIP(addr)
+	addr = netsafety.CanonicalIP(addr)
 	result, err := r.db.Exec(ctx, `DELETE FROM ip_reputation WHERE ip=?`, addr.String())
 	if err != nil {
 		return false, err

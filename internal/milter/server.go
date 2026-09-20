@@ -12,42 +12,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
-	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
-	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
-const (
-	maintenanceDatabaseTimeout = 60 * time.Second
-	commandDatabaseTimeout     = 15 * time.Second
-)
-
-const analysisResponseMargin = 5 * time.Second
+const commandDatabaseTimeout = 15 * time.Second
 const defaultMilterProgressInterval = 30 * time.Second
-const rejectedMailCleanupInterval = 24 * time.Hour
-const postDecisionUpdateTimeout = 5 * time.Second
 const initialAcceptRetryDelay = 5 * time.Millisecond
 const maximumAcceptRetryDelay = time.Second
 const commandReplySMTPTimeout = 15 * time.Second
 
 var ErrInternalTokenGeneration = errors.New("cannot generate internal reply token")
-
-type Analyzer interface {
-	Analyze(context.Context, ai.Input) (ai.Decision, error)
-}
-
-type evaluationResult struct {
-	proposed       action
-	selected       action
-	classification string
-	score          float64
-	reasons        []string
-	visionImages   int
-	err            error
-	latency        time.Duration
-}
 
 type Server struct {
 	log                *slog.Logger
@@ -190,73 +165,6 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-// cleanupPersistentStores removes expired or excess repository records and
-// passively checkpoints the WAL. Startup and the maintenance timer call it.
-func (s *maintenanceService) cleanupPersistentStores(parent context.Context, trigger string) error {
-	ctx, cancel := context.WithTimeout(parent, maintenanceDatabaseTimeout)
-	defer cancel()
-	ipDeleted, ipErr := s.ip.Cleanup(ctx)
-	contactsDeleted, contactsErr := s.correspondents.Cleanup(ctx)
-	rejectionsDeleted, rejectionsErr := s.rejections.Cleanup(ctx)
-	domainsDeleted, domainsErr := s.domains.Cleanup(ctx)
-	checkpoint, checkpointErr := sqlitedb.CheckpointResult{}, error(nil)
-	if s.database != nil {
-		checkpoint, checkpointErr = s.database.CheckpointPassive(ctx)
-		if checkpointErr != nil && s.log != nil {
-			s.log.Warn("SQLite WAL checkpoint failed", "trigger", trigger, "error", checkpointErr)
-		}
-	}
-
-	if s.log != nil && s.log.Enabled(ctx, slog.LevelDebug) {
-		ipRecords, ipCountErr := s.ip.Count(ctx)
-		contactRecords, contactCountErr := s.correspondents.Count(ctx)
-		rejectionRecords, rejectionCountErr := s.rejections.Count(ctx)
-		domainRecords, domainCountErr := s.domains.Count(ctx)
-		s.log.Debug("SQLite cleanup completed",
-			"trigger", trigger,
-			"ip_deleted", ipDeleted,
-			"ip_records", ipRecords,
-			"contacts_deleted", contactsDeleted,
-			"contacts_records", contactRecords,
-			"rejections_deleted", rejectionsDeleted,
-			"rejections_records", rejectionRecords,
-			"domains_deleted", domainsDeleted,
-			"domains_records", domainRecords,
-			"wal_busy", checkpoint.Busy,
-			"wal_frames", checkpoint.LogFrames,
-			"wal_checkpointed_frames", checkpoint.CheckpointedFrames)
-		if countErr := errors.Join(
-			wrapStoreError("count IP reputation", ipCountErr),
-			wrapStoreError("count correspondents", contactCountErr),
-			wrapStoreError("count rejections", rejectionCountErr),
-			wrapStoreError("count domain registrations", domainCountErr),
-		); countErr != nil {
-			s.log.Warn("SQLite record counts failed", "trigger", trigger, "error", countErr)
-		}
-	}
-
-	return errors.Join(
-		wrapCleanupError("IP reputation", ipErr),
-		wrapCleanupError("correspondents", contactsErr),
-		wrapCleanupError("rejection history", rejectionsErr),
-		wrapCleanupError("domain registrations", domainsErr),
-	)
-}
-
-func wrapCleanupError(store string, err error) error {
-	if err == nil {
-		return nil
-	}
-	return fmt.Errorf("clean expired %s: %w", store, err)
-}
-
-func wrapStoreError(operation string, err error) error {
-	if err == nil {
-		return nil
-	}
-	return fmt.Errorf("%s: %w", operation, err)
-}
-
 func (s *Server) acceptConnection(ctx context.Context, ln net.Listener) (net.Conn, error) {
 	delay := time.Duration(0)
 	for {
@@ -335,84 +243,6 @@ func (s *Server) peerAllowed(remote net.Addr) bool {
 	return false
 }
 
-func (s *maintenanceService) startRejectedMailCleanup(ctx context.Context) {
-	if s.archive == nil {
-		return
-	}
-	s.runRejectedMailCleanup()
-	go func() {
-		ticker := time.NewTicker(rejectedMailCleanupInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				s.runRejectedMailCleanup()
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-}
-
-// runRejectedMailCleanup applies archive retention and target-size limits. It
-// is intentionally independent of SQLite rejection-history cleanup.
-func (s *maintenanceService) runRejectedMailCleanup() {
-	s.runMaintenance("rejected-mail cleanup", func() {
-		if err := s.archive.Cleanup(); err != nil {
-			s.log.Warn("cannot clean rejected mail archive", "error", err)
-		}
-	})
-}
-
-// runMaintenance contains panics from a background maintenance operation so a
-// cleanup defect cannot terminate the mail-filtering service.
-func (s *maintenanceService) runMaintenance(name string, operation func()) {
-	defer func() {
-		if panicValue := recover(); panicValue != nil {
-			logRecoveredWorkerPanic(s.log, context.Background(), name, panicValue)
-		}
-	}()
-	operation()
-}
-
-// recordRejection persists one rejection event and all affected recipients,
-// then saves the original message under that record ID when archiving is on.
-func (s *messagePolicyService) recordRejection(ctx context.Context, msg *message.Message, visibleSender, envelopeSender string, recipients, reasons []string, source string) {
-	if msg == nil {
-		return
-	}
-	rejectedAt := time.Now().UTC()
-	recordID, err := s.rejectionHistory.AddRejection(ctx, stores.NewRejection{
-		VisibleSender: visibleSender, EnvelopeSender: envelopeSender,
-		Subject: msg.DecodedHeader("Subject"), Recipients: recipients,
-		Reasons: reasons, RejectedAt: rejectedAt,
-	})
-	if err != nil {
-		s.log.ErrorContext(ctx, "cannot save rejection history", "message_id", msg.Header("Message-ID"), "error", err)
-		recordID = 0
-	}
-	if s.archive == nil {
-		return
-	}
-	contents := msg.ArchiveBytes()
-	s.saveRejectedMailCopy(ctx, msg, contents, source, recordID, rejectedAt)
-}
-
-func (s *messagePolicyService) saveRejectedMailCopy(ctx context.Context, msg *message.Message, contents []byte, source string, recordID uint64, rejectedAt time.Time) {
-	var path string
-	var err error
-	if recordID == 0 {
-		path, err = s.archive.Save(contents)
-	} else {
-		path, err = s.archive.SaveWithRecordIDAt(contents, recordID, rejectedAt)
-	}
-	if err != nil {
-		s.log.WarnContext(ctx, "cannot save rejected message copy", "message_id", msg.Header("Message-ID"), "source", source, "rejection_id", recordID, "error", err)
-		return
-	}
-	s.log.DebugContext(ctx, "rejected message copy saved", "message_id", msg.Header("Message-ID"), "source", source, "rejection_id", recordID, "file", path)
-}
-
 // handle runs one Milter connection and isolates session panics from the
 // listener and other active connections.
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
@@ -437,159 +267,4 @@ func logRecoveredWorkerPanic(log *slog.Logger, ctx context.Context, worker strin
 	fields := []any{"worker", worker, "panic", fmt.Sprint(panicValue), "stack", string(debug.Stack())}
 	fields = append(fields, attrs...)
 	log.ErrorContext(ctx, "MilterGuard worker recovered from panic", fields...)
-}
-
-func (s *analysisService) analysisTimeout() time.Duration {
-	timeout := ai.MaximumAnalysisDuration(s.ai) + analysisResponseMargin
-	if s.domainLookupTimeout > 0 {
-		timeout += s.domainLookupTimeout
-	}
-	if s.milterTimeout > timeout {
-		return s.milterTimeout
-	}
-	return timeout
-}
-
-// evaluate submits a prepared message to the analyzer and applies configured
-// mode and confidence thresholds to produce the final Milter action.
-func (s *analysisService) evaluate(parent context.Context, msg *message.Message) evaluationResult {
-	started := time.Now()
-	ctx, cancel := context.WithTimeout(parent, ai.MaximumAnalysisDuration(s.ai))
-	defer cancel()
-
-	select {
-	case s.slots <- struct{}{}:
-		defer func() { <-s.slots }()
-	case <-ctx.Done():
-		return s.analysisFailure(ctx.Err(), started)
-	}
-
-	analysis := msg.BuildAnalysis(s.ai.MaxBodyChars, message.VisionOptions{
-		Mode:         s.ai.VisionMode,
-		MinTextChars: s.ai.VisionMinTextChars,
-		MaxImages:    s.ai.MaxImages,
-		MaxBytes:     s.ai.MaxImageBytes,
-		MaxPixels:    s.ai.MaxImagePixels,
-	})
-	input := ai.Input{Text: analysis.Prompt, Images: make([]ai.Image, 0, len(analysis.Images))}
-	for _, image := range analysis.Images {
-		input.Images = append(input.Images, ai.Image{MediaType: image.MediaType, Data: image.Data})
-	}
-	s.logAIInput(msg, input)
-	decision, err := s.analyzer.Analyze(ctx, input)
-	if err != nil {
-		failure := s.analysisFailure(err, started)
-		failure.visionImages = len(input.Images)
-		return failure
-	}
-
-	proposed, selected := s.applyPolicy(decision)
-	return evaluationResult{
-		proposed:       proposed,
-		selected:       selected,
-		classification: decision.Classification,
-		score:          decision.Score,
-		reasons:        decision.Reasons,
-		visionImages:   len(input.Images),
-		latency:        time.Since(started),
-	}
-}
-
-func (s *analysisService) logAIInput(msg *message.Message, input ai.Input) {
-	if !s.logging.IncludeAIInput {
-		return
-	}
-	images := make([]map[string]any, 0, len(input.Images))
-	for _, image := range input.Images {
-		images = append(images, map[string]any{
-			"media_type": image.MediaType,
-			"bytes":      len(image.Data),
-		})
-	}
-	s.log.Debug("AI analysis input",
-		"message_id", msg.Header("Message-ID"),
-		"ai_input", input.Text,
-		"image_count", len(input.Images),
-		"images", images)
-}
-
-func (s *analysisService) applyPolicy(decision ai.Decision) (action, action) {
-	proposed := actionAccept
-	if decision.Classification == "unwanted" && decision.Score >= s.filtering.RejectScore {
-		proposed = actionReject
-	}
-	selected := proposed
-	if s.mode != "enforce" {
-		selected = actionAccept
-	}
-	return proposed, selected
-}
-
-func (s *analysisService) analysisFailure(err error, started time.Time) evaluationResult {
-	selected := actionAccept
-	if s.mode == "enforce" && s.filtering.AIErrorAction == "tempfail" {
-		selected = actionTempfail
-	}
-	return evaluationResult{proposed: selected, selected: selected, err: err, latency: time.Since(started)}
-}
-
-func (s *analysisService) encodeAction(selected action) []byte {
-	switch selected {
-	case actionReject:
-		return replyCode("550", "5.7.1", s.filtering.RejectMessage)
-	case actionTempfail:
-		return []byte{responseTempfail}
-	default:
-		return []byte{responseAccept}
-	}
-}
-
-func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, result evaluationResult, sent bool, responseErr error) {
-	if result.err != nil {
-		logMessage := "message analysis failed"
-		attrs := []any{
-			"message_id", msg.Header("Message-ID"), "mode", s.mode,
-			"actual_action", result.selected.String(), "error", result.err,
-			"latency_ms", result.latency.Milliseconds(), "response_sent", sent,
-			"vision_images", result.visionImages,
-		}
-		if responseErr != nil {
-			attrs = append(attrs, "response_error", responseErr)
-		}
-		var endpointErr *ai.EndpointError
-		if errors.As(result.err, &endpointErr) {
-			attrs = append(attrs, "endpoint_error_kind", endpointErr.Kind.String())
-			if endpointErr.StatusCode > 0 {
-				attrs = append(attrs, "endpoint_status_code", endpointErr.StatusCode)
-			}
-			switch endpointErr.Kind {
-			case ai.ErrorCredentials:
-				logMessage = "AI endpoint credentials rejected"
-			case ai.ErrorPaymentRequired:
-				logMessage = "AI endpoint credit unavailable"
-			}
-		}
-		s.log.Log(ctx, slog.LevelError, logMessage, attrs...)
-		return
-	}
-
-	attrs := []any{
-		"message_id", msg.Header("Message-ID"), "mode", s.mode,
-		"classification", result.classification, "score", result.score,
-		"reasons", result.reasons, "proposed_action", result.proposed.String(),
-		"actual_action", result.selected.String(), "model", s.ai.Model,
-		"latency_ms", result.latency.Milliseconds(), "truncated", msg.Truncated,
-		"response_sent", sent, "vision_images", result.visionImages,
-	}
-	if s.logging.IncludeSubject {
-		attrs = append(attrs, "subject", msg.DecodedHeader("Subject"))
-	}
-	if responseErr != nil {
-		attrs = append(attrs, "response_error", responseErr)
-	}
-	level := slog.LevelInfo
-	if responseErr != nil {
-		level = slog.LevelError
-	}
-	s.log.Log(ctx, level, "message classified", attrs...)
 }

@@ -17,6 +17,15 @@ var nonRoutablePrefixes = []netip.Prefix{
 	netip.MustParsePrefix("2001:db8::/32"),
 }
 
+// CanonicalIP removes IPv6 zone information and converts IPv4-mapped IPv6
+// addresses to their IPv4 representation so all components use the same key.
+func CanonicalIP(addr netip.Addr) netip.Addr {
+	if addr.Is6() {
+		addr = addr.WithZone("")
+	}
+	return addr.Unmap()
+}
+
 // AddressRoutable reports whether addr is a globally routable address that is
 // safe to use for externally discovered network destinations.
 func AddressRoutable(addr netip.Addr) bool {

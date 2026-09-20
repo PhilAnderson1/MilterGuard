@@ -10,7 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
@@ -46,9 +46,9 @@ func (r *rejectionRepository) AddRejection(ctx context.Context, input stores.New
 	if rejectedAt.IsZero() {
 		rejectedAt = r.now().UTC()
 	}
-	sender := message.NormalizeEmailAddress(input.VisibleSender)
+	sender := mailaddr.Normalize(input.VisibleSender)
 	if sender == "" {
-		sender = message.NormalizeEmailAddress(input.EnvelopeSender)
+		sender = mailaddr.Normalize(input.EnvelopeSender)
 	}
 	if sender == "" {
 		return 0, nil
@@ -126,7 +126,7 @@ func (r *rejectionRepository) ListRejections(ctx context.Context, query stores.R
 	}
 	recipient := query.Recipients.Address
 	if !query.Recipients.All {
-		recipient = message.NormalizeEmailAddress(recipient)
+		recipient = mailaddr.Normalize(recipient)
 		if recipient == "" {
 			return stores.RejectionPage{}, nil
 		}
@@ -211,7 +211,7 @@ func (r *rejectionRepository) RejectionByID(ctx context.Context, id uint64, scop
 		WHERE r.id = ? AND r.rejected_at_ms >= ?`
 	args := []any{id, unixMillis(r.now().UTC().Add(-r.options.Expiry))}
 	if !scope.All {
-		recipient := message.NormalizeEmailAddress(scope.Address)
+		recipient := mailaddr.Normalize(scope.Address)
 		if recipient == "" {
 			return stores.Rejection{}, false, nil
 		}
