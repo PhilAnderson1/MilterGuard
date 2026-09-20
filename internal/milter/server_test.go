@@ -464,9 +464,9 @@ func TestRejectionCommandRetrievesProcessedArchivedMessage(t *testing.T) {
 	msg.AddHeader("Content-Type", "text/html; charset=UTF-8")
 	msg.AddBody([]byte(`<p>Review <a href="https://example.net/account">account</a></p>`))
 	server.recordRejection(context.Background(), msg, "sender@example.net", "", []string{"owner@example.com"}, []string{"test reason"}, "ai")
-	entries, err := server.rejectionHistory.list(context.Background(), "owner@example.com", time.Time{})
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("rejection history = %#v, %v", entries, err)
+	entries := rejectionEntries(t, server.rejectionHistory, "owner@example.com")
+	if len(entries) != 1 {
+		t.Fatalf("rejection history = %#v", entries)
 	}
 	command := emailCommand{kind: "rejection", canonical: fmt.Sprintf("REJECTION %d", entries[0].ID), rejectionID: entries[0].ID}
 	owner := &session{server: server, envelopeSender: "owner@example.com"}
@@ -569,10 +569,7 @@ func TestRejectedMessageArchiveUsesRejectionRecordIDs(t *testing.T) {
 
 	server.recordRejection(context.Background(), msg, "sender@example.net", "bounce@example.net", []string{"one@example.com", "two@example.com"}, []string{"unwanted"}, "ai")
 
-	entries, err := server.rejectionHistory.list(context.Background(), "*", time.Time{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	entries := rejectionEntries(t, server.rejectionHistory, "*")
 	if len(entries) != 1 {
 		t.Fatalf("rejection entries = %d, want 1", len(entries))
 	}
@@ -1487,7 +1484,7 @@ func TestAuthenticatedAcceptedMessageLearnsEnvelopeRecipients(t *testing.T) {
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	deadline := time.Now().Add(time.Second)
 	for {
-		match := server.correspondents.match(context.Background(), "alice@example.com", []string{"philip@invades.net"})
+		match := testCorrespondentMatch(server.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"})
 		if match.Known && match.AllRecipientsMatched {
 			break
 		}
@@ -1526,7 +1523,7 @@ func TestAbortedAuthenticatedMessageDoesNotLearnRecipients(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectNoFrame(t, conn)
-	if match := server.correspondents.match(context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
+	if match := testCorrespondentMatch(server.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
 		t.Fatalf("aborted recipient was learned: %#v", match)
 	}
 }
@@ -1569,7 +1566,7 @@ func TestKnownCorrespondentIsSuppliedAsAIEvidence(t *testing.T) {
 	}
 	server.cfg.Correspondents = cfg
 	server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
-	if err := server.correspondents.learn(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
+	if err := server.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
@@ -1628,7 +1625,7 @@ func TestKnownCorrespondentBypassAuthenticationPolicy(t *testing.T) {
 			}
 			server.cfg.Correspondents = cfg
 			server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
-			if err := server.correspondents.learn(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
+			if err := server.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
 				t.Fatal(err)
 			}
 			defer func() {
@@ -1681,7 +1678,7 @@ func TestMTAHostnameMacroExpandsTrustedAuthenticationService(t *testing.T) {
 			}
 			server.cfg.Correspondents = cfg
 			server.correspondents = newTestCorrespondentStore(t, cfg, server.log)
-			if err := server.correspondents.learn(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
+			if err := server.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
 				t.Fatal(err)
 			}
 			defer func() {
@@ -1741,12 +1738,12 @@ func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
 				server.cfg.Filtering.SenderDomainAllowlistRequireDKIM = true
 			}
 			learnedAt := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
-			server.correspondents.now = func() time.Time { return learnedAt }
-			if err := server.correspondents.learn(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
+			server.correspondents.(*correspondentStore).now = func() time.Time { return learnedAt }
+			if err := server.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
 				t.Fatal(err)
 			}
 			activityAt := learnedAt.Add(time.Hour)
-			server.correspondents.now = func() time.Time { return activityAt }
+			server.correspondents.(*correspondentStore).now = func() time.Time { return activityAt }
 			negotiate(t, conn)
 			sendContinueFrames(t, conn,
 				connectFrame('4', "127.0.0.1"),
@@ -1762,7 +1759,7 @@ func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
 			expectFrame(t, conn, string([]byte{responseAccept}))
 			_ = conn.Close()
 			<-done
-			activity := server.correspondents.snapshot()["philip@invades.net\x00alice@example.com"].LastActivityAt
+			activity := server.correspondents.(*correspondentStore).snapshot()["philip@invades.net\x00alice@example.com"].LastActivityAt
 			want := learnedAt
 			if test.wantRefresh {
 				want = activityAt
@@ -1806,7 +1803,7 @@ func TestAIResultLearnsInboundSender(t *testing.T) {
 	}
 	<-done
 	_ = conn.Close()
-	if match := server.correspondents.match(context.Background(), "news@example.com", []string{"philip@invades.net"}); !match.Known {
+	if match := testCorrespondentMatch(server.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); !match.Known {
 		t.Fatal("qualifying AI result did not create a known correspondent")
 	}
 }
@@ -1847,7 +1844,7 @@ func TestNonEnforceModesDoNotLearnFromAIResultsOrDecayIPReputation(t *testing.T)
 			_ = conn.Close()
 			<-done
 
-			if match := server.correspondents.match(context.Background(), "news@example.com", []string{"philip@invades.net"}); match.Known {
+			if match := testCorrespondentMatch(server.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); match.Known {
 				t.Fatalf("%s mode learned an inbound correspondent", mode)
 			}
 			strikes := len(server.ipReputation.snapshot()[addr].Strikes)
@@ -1887,7 +1884,7 @@ func TestNonEnforceModesDoNotLearnAuthenticatedRecipients(t *testing.T) {
 			expectFrame(t, conn, string([]byte{responseAccept}))
 			_ = conn.Close()
 			<-done
-			if match := server.correspondents.match(context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
+			if match := testCorrespondentMatch(server.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
 				t.Fatalf("%s mode learned an authenticated recipient", mode)
 			}
 		})

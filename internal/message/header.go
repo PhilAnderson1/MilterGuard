@@ -45,3 +45,43 @@ func MailboxAddress(value string) (string, bool) {
 	}
 	return address.Address, true
 }
+
+// NormalizeEmailAddress returns the canonical mailbox representation used by
+// MilterGuard's persistent stores and command authorization. Local parts are
+// deliberately folded to lower case to preserve the application's existing
+// identity semantics.
+func NormalizeEmailAddress(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 320 {
+		return ""
+	}
+	address, ok := MailboxAddress(value)
+	if !ok || strings.Count(address, "@") != 1 {
+		return ""
+	}
+	parts := strings.SplitN(address, "@", 2)
+	local := strings.ToLower(strings.TrimSpace(parts[0]))
+	domain := strictHostname(parts[1])
+	if local == "" || domain == "" || len(local)+len(domain)+1 > 254 {
+		return ""
+	}
+	return local + "@" + domain
+}
+
+func strictHostname(value string) string {
+	value = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+	if value == "" || len(value) > 253 {
+		return ""
+	}
+	for _, label := range strings.Split(value, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return ""
+		}
+		for _, char := range label {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+				return ""
+			}
+		}
+	}
+	return value
+}

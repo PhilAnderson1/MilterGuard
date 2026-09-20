@@ -3,12 +3,31 @@ package milter
 import (
 	"context"
 	"net/netip"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
+
+func TestServerOpensSQLiteForRejectionHistoryAlone(t *testing.T) {
+	cfg := config.Config{
+		AI:          config.AIConfig{MaxConcurrent: 1},
+		Milter:      config.MilterConfig{MaxConnections: 1},
+		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db")},
+		RejectionHistory: config.RejectionHistoryConfig{
+			Expiry: config.Duration(time.Hour), MaxEntries: 10,
+		},
+	}
+	server := NewServer(cfg, fixedAnalyzer{}, nil)
+	if server.StartupError() != nil || server.database == nil {
+		t.Fatalf("rejection-only SQLite startup: database=%v, error=%v", server.database, server.StartupError())
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 type recordingRejectionRepository struct {
 	listQuery stores.RejectionListQuery

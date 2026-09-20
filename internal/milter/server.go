@@ -63,8 +63,9 @@ type Server struct {
 	sessionSlots       chan struct{}
 	allowedPeerIPs     []netip.Prefix
 	ipReputation       *ipReputationStore
-	correspondents     *correspondentStore
-	rejectionHistory   *rejectionHistoryStore
+	ipRepository       stores.PersistentIPReputationRepository
+	correspondents     stores.CorrespondentRepository
+	rejectionHistory   stores.RejectionHistoryRepository
 	domainRegistration *domainRegistrationStore
 	rejectedMail       *rejectedmail.Archive
 	resolver           dnsResolver
@@ -94,15 +95,20 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 		database, databaseErr = sqlstore.Open(ctx, cfg.Persistence.DatabaseFile, sqlstore.DefaultOptions())
 		cancel()
 	}
+	ipRepository := newIPRepository(cfg.IPReputation, database, time.Now, log)
+	correspondents := newCorrespondentRepository(cfg.Correspondents, database, time.Now, log)
+	rejections := newRejectionRepository(cfg.RejectionHistory, database, time.Now, log)
+	domainCache := newDomainRepository(cfg.DomainRegistration, database, time.Now)
 	server := &Server{
 		cfg: cfg, analyzer: analyzer, log: log,
 		slots:              make(chan struct{}, cfg.AI.MaxConcurrent),
 		attachmentSlots:    make(chan struct{}, attachmentConcurrency(cfg.Milter.MaxConnections)),
 		sessionSlots:       make(chan struct{}, cfg.Milter.MaxConnections),
-		ipReputation:       newIPReputationStore(cfg.IPReputation, database, log),
-		correspondents:     newCorrespondentStore(cfg.Correspondents, database, log),
-		rejectionHistory:   newRejectionHistoryStore(cfg.RejectionHistory, database, log),
-		domainRegistration: newDomainRegistrationStore(cfg.DomainRegistration, database, log),
+		ipReputation:       newIPReputationStore(cfg.IPReputation, ipRepository, log),
+		ipRepository:       ipRepository,
+		correspondents:     correspondents,
+		rejectionHistory:   rejections,
+		domainRegistration: newDomainRegistrationStore(cfg.DomainRegistration, domainCache, log),
 		resolver:           net.DefaultResolver, internalToken: internalToken,
 		commandRecipient: normalizeEmailAddress(cfg.EmailCommands.Recipient),
 		replySlots:       make(chan struct{}, 4), database: database,
@@ -261,7 +267,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 func (s *Server) cleanupPersistentStores(parent context.Context, trigger string) error {
 	ctx, cancel := context.WithTimeout(parent, maintenanceDatabaseTimeout)
 	defer cancel()
-	ipDeleted, ipErr := s.ipReputation.Cleanup(ctx)
+	ipDeleted, ipErr := s.ipRepository.Cleanup(ctx)
 	contactsDeleted, contactsErr := s.correspondents.Cleanup(ctx)
 	rejectionsDeleted, rejectionsErr := s.rejectionHistory.Cleanup(ctx)
 	domainsDeleted, domainsErr := s.domainRegistration.Cleanup(ctx)
@@ -274,7 +280,7 @@ func (s *Server) cleanupPersistentStores(parent context.Context, trigger string)
 	}
 
 	if s.log != nil && s.log.Enabled(ctx, slog.LevelDebug) {
-		ipRecords, ipCountErr := s.ipReputation.Count(ctx)
+		ipRecords, ipCountErr := s.ipRepository.Count(ctx)
 		contactRecords, contactCountErr := s.correspondents.Count(ctx)
 		rejectionRecords, rejectionCountErr := s.rejectionHistory.Count(ctx)
 		domainRecords, domainCountErr := s.domainRegistration.Count(ctx)

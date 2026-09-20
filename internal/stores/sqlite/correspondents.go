@@ -1,4 +1,4 @@
-package milter
+package sqlite
 
 import (
 	"context"
@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strings"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
@@ -17,33 +15,25 @@ import (
 
 const maxCorrespondentRecipients = 100
 
-// correspondentStore is a purpose-built SQL repository. It deliberately does
-// not expose generic map-like access or reproduce the former JSON-store API.
-type correspondentStore struct {
-	cfg config.CorrespondentsConfig
-	db  *sqlstore.Store
-	now func() time.Time
-	log *slog.Logger
+// correspondentRepository persists learned and manually managed correspondents.
+type correspondentRepository struct {
+	options CorrespondentOptions
+	db      *sqlstore.Store
+	now     func() time.Time
+	log     *slog.Logger
 }
 
-func newCorrespondentStore(cfg config.CorrespondentsConfig, db *sqlstore.Store, log *slog.Logger) *correspondentStore {
-	return &correspondentStore{cfg: cfg, db: db, now: time.Now, log: log}
+func NewCorrespondents(db *sqlstore.Store, options CorrespondentOptions, log *slog.Logger) stores.CorrespondentRepository {
+	return &correspondentRepository{options: options, db: db, now: clock(options.Now), log: log}
 }
 
-func correspondentFeaturesEnabled(cfg config.CorrespondentsConfig) bool {
-	return cfg.LearnAuthenticatedRecipients || cfg.LearnLegitimateSenders || cfg.UseAllowlist
-}
+var _ stores.CorrespondentRepository = (*correspondentRepository)(nil)
 
-var _ stores.CorrespondentPolicyRepository = (*correspondentStore)(nil)
-var _ stores.CorrespondentAdminRepository = (*correspondentStore)(nil)
-var _ stores.MaintainedRepository = (*correspondentStore)(nil)
-var _ stores.CorrespondentRepository = (*correspondentStore)(nil)
-
-func (s *correspondentStore) LearnAuthenticated(ctx context.Context, localAddress string, recipients []string) error {
-	if s == nil || s.db == nil || !s.cfg.LearnAuthenticatedRecipients {
+func (s *correspondentRepository) LearnAuthenticated(ctx context.Context, localAddress string, recipients []string) error {
+	if s == nil || s.db == nil || !s.options.LearnAuthenticatedRecipients {
 		return nil
 	}
-	localAddress = normalizeEmailAddress(localAddress)
+	localAddress = message.NormalizeEmailAddress(localAddress)
 	if localAddress == "" {
 		return fmt.Errorf("authenticated envelope sender is unavailable or invalid")
 	}
@@ -70,8 +60,8 @@ func (s *correspondentStore) LearnAuthenticated(ctx context.Context, localAddres
 	added := 0
 	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		added = 0
-		if s.cfg.StaleAfter.Value() > 0 {
-			args := append(append([]any{}, targetArgs...), unixMillis(now.Add(-s.cfg.StaleAfter.Value())))
+		if s.options.StaleAfter > 0 {
+			args := append(append([]any{}, targetArgs...), unixMillis(now.Add(-s.options.StaleAfter)))
 			if _, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE `+target+` AND last_activity_at_ms < ?`, args...); err != nil {
 				return err
 			}
@@ -110,8 +100,8 @@ func (s *correspondentStore) LearnAuthenticated(ctx context.Context, localAddres
 
 // touchInbound expects the canonical correspondent address derived for the
 // current message; recipient addresses are normalized at the store boundary.
-func (s *correspondentStore) TouchInbound(ctx context.Context, correspondent string, recipients []string) error {
-	if s == nil || s.db == nil || !s.cfg.UseAllowlist {
+func (s *correspondentRepository) TouchInbound(ctx context.Context, correspondent string, recipients []string) error {
+	if s == nil || s.db == nil || !s.options.UseAllowlist {
 		return nil
 	}
 	if correspondent == "" {
@@ -120,10 +110,10 @@ func (s *correspondentStore) TouchInbound(ctx context.Context, correspondent str
 	now := s.now().UTC()
 	query := `UPDATE correspondents SET last_activity_at_ms = ?
 		WHERE correspondent = ? AND ` + s.qualifiedSQL() + s.notStaleSQL() + s.activityDueSQL()
-	args := []any{unixMillis(now), correspondent, s.cfg.LegitimateSenderMinMessages}
+	args := []any{unixMillis(now), correspondent, s.options.LegitimateSenderMinMessages}
 	args = append(args, s.notStaleArgs(now)...)
 	args = append(args, s.activityDueArgs(now)...)
-	if s.cfg.Scope == "per_sender" {
+	if s.options.Scope == "per_sender" {
 		addresses := sortedSet(normalizedAddressSet(recipients, maxCorrespondentRecipients))
 		if len(addresses) == 0 {
 			return nil
@@ -139,7 +129,7 @@ func (s *correspondentStore) TouchInbound(ctx context.Context, correspondent str
 
 // recordInboundClassification expects the canonical correspondent address
 // derived for the current message.
-func (s *correspondentStore) RecordInboundClassification(ctx context.Context, input stores.InboundClassification) error {
+func (s *correspondentRepository) RecordInboundClassification(ctx context.Context, input stores.InboundClassification) error {
 	if s == nil || s.db == nil || !input.RecipientsComplete {
 		return nil
 	}
@@ -156,7 +146,7 @@ func (s *correspondentStore) RecordInboundClassification(ctx context.Context, in
 		}
 		query := `DELETE FROM correspondents WHERE correspondent = ? AND whitelist_type = ?`
 		args := []any{correspondent, stores.CorrespondentKindRepeatedLegitimateInbound}
-		if s.cfg.Scope == "per_sender" {
+		if s.options.Scope == "per_sender" {
 			query += " AND local_address IN (" + placeholders(len(recipientList)) + ")"
 			for _, recipient := range recipientList {
 				args = append(args, recipient)
@@ -176,7 +166,7 @@ func (s *correspondentStore) RecordInboundClassification(ctx context.Context, in
 		return nil
 	}
 
-	qualifying := s.cfg.LearnLegitimateSenders && input.Score >= s.cfg.LegitimateSenderMinScore && (!s.cfg.LegitimateSenderRequireDKIM || input.DKIMAligned)
+	qualifying := s.options.LearnLegitimateSenders && input.Score >= s.options.LegitimateSenderMinScore && (!s.options.LegitimateSenderRequireDKIM || input.DKIMAligned)
 	type candidateEvent struct {
 		recipient string
 		count     int
@@ -204,8 +194,8 @@ func (s *correspondentStore) RecordInboundClassification(ctx context.Context, in
 	}
 	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		events = nil
-		if s.cfg.StaleAfter.Value() > 0 {
-			args := append(append([]any{}, targetArgs...), unixMillis(now.Add(-s.cfg.StaleAfter.Value())))
+		if s.options.StaleAfter > 0 {
+			args := append(append([]any{}, targetArgs...), unixMillis(now.Add(-s.options.StaleAfter)))
 			if _, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE `+target+` AND last_activity_at_ms < ?`, args...); err != nil {
 				return err
 			}
@@ -213,7 +203,7 @@ func (s *correspondentStore) RecordInboundClassification(ctx context.Context, in
 		if qualifying {
 			args := []any{unixMillis(now)}
 			args = append(args, targetArgs...)
-			args = append(args, stores.CorrespondentKindRepeatedLegitimateInbound, s.cfg.LegitimateSenderMinMessages)
+			args = append(args, stores.CorrespondentKindRepeatedLegitimateInbound, s.options.LegitimateSenderMinMessages)
 			rows, err := tx.QueryContext(ctx, `UPDATE correspondents
 				SET legitimate_email_count=legitimate_email_count+1, last_activity_at_ms=?
 				WHERE `+target+` AND whitelist_type=? AND legitimate_email_count<?
@@ -227,7 +217,7 @@ func (s *correspondentStore) RecordInboundClassification(ctx context.Context, in
 					rows.Close()
 					return err
 				}
-				event.promoted = event.count >= s.cfg.LegitimateSenderMinMessages
+				event.promoted = event.count >= s.options.LegitimateSenderMinMessages
 				events = append(events, event)
 			}
 			if err := rows.Close(); err != nil {
@@ -239,7 +229,7 @@ func (s *correspondentStore) RecordInboundClassification(ctx context.Context, in
 		}
 		args := []any{unixMillis(now)}
 		args = append(args, targetArgs...)
-		args = append(args, s.cfg.LegitimateSenderMinMessages, unixMillis(now))
+		args = append(args, s.options.LegitimateSenderMinMessages, unixMillis(now))
 		args = append(args, s.activityDueArgs(now)...)
 		if _, err := tx.ExecContext(ctx, `UPDATE correspondents SET last_activity_at_ms=?
 			WHERE `+target+` AND `+s.qualifiedSQL()+` AND last_activity_at_ms<>?`+s.activityDueSQL(), args...); err != nil {
@@ -256,7 +246,7 @@ func (s *correspondentStore) RecordInboundClassification(ctx context.Context, in
 					rows.Close()
 					return err
 				}
-				event.promoted = event.count >= s.cfg.LegitimateSenderMinMessages
+				event.promoted = event.count >= s.options.LegitimateSenderMinMessages
 				events = append(events, event)
 			}
 			if err := rows.Close(); err != nil {
@@ -276,7 +266,7 @@ func (s *correspondentStore) RecordInboundClassification(ctx context.Context, in
 		if event.promoted {
 			s.log.Debug("inbound sender promoted to known correspondent", "local_address", event.recipient, "correspondent", correspondent, "legitimate_email_count", event.count)
 		} else {
-			s.log.Debug("inbound sender legitimate candidate updated", "local_address", event.recipient, "correspondent", correspondent, "legitimate_email_count", event.count, "required_count", s.cfg.LegitimateSenderMinMessages)
+			s.log.Debug("inbound sender legitimate candidate updated", "local_address", event.recipient, "correspondent", correspondent, "legitimate_email_count", event.count, "required_count", s.options.LegitimateSenderMinMessages)
 		}
 	}
 	return nil
@@ -284,19 +274,19 @@ func (s *correspondentStore) RecordInboundClassification(ctx context.Context, in
 
 // match expects the canonical correspondent address derived for the current
 // message.
-func (s *correspondentStore) Match(ctx context.Context, correspondent string, recipients []string) (stores.CorrespondentMatch, error) {
+func (s *correspondentRepository) Match(ctx context.Context, correspondent string, recipients []string) (stores.CorrespondentMatch, error) {
 	result := stores.CorrespondentMatch{}
-	if s == nil || s.db == nil || !s.cfg.UseAllowlist {
+	if s == nil || s.db == nil || !s.options.UseAllowlist {
 		return result, nil
 	}
 	if correspondent == "" {
 		return result, nil
 	}
 	now := s.now().UTC()
-	if s.cfg.Scope == "global" {
+	if s.options.Scope == "global" {
 		var found int
 		query := `SELECT EXISTS(SELECT 1 FROM correspondents WHERE correspondent = ? AND ` + s.qualifiedSQL() + s.notStaleSQL() + `)`
-		args := []any{correspondent, s.cfg.LegitimateSenderMinMessages}
+		args := []any{correspondent, s.options.LegitimateSenderMinMessages}
 		args = append(args, s.notStaleArgs(now)...)
 		if err := s.db.QueryRow(ctx, query, args...).Scan(&found); err != nil {
 			return result, fmt.Errorf("match correspondent: %w", err)
@@ -314,7 +304,7 @@ func (s *correspondentStore) Match(ctx context.Context, correspondent string, re
 	}
 	query := `SELECT count(*) FROM correspondents WHERE correspondent = ? AND ` + s.qualifiedSQL() + s.notStaleSQL() +
 		" AND local_address IN (" + placeholders(len(addresses)) + ")"
-	args := []any{correspondent, s.cfg.LegitimateSenderMinMessages}
+	args := []any{correspondent, s.options.LegitimateSenderMinMessages}
 	args = append(args, s.notStaleArgs(now)...)
 	for _, address := range addresses {
 		args = append(args, address)
@@ -327,7 +317,7 @@ func (s *correspondentStore) Match(ctx context.Context, correspondent string, re
 	return result, nil
 }
 
-func (s *correspondentStore) ListCorrespondents(ctx context.Context, list stores.CorrespondentListQuery) (stores.CorrespondentPage, error) {
+func (s *correspondentRepository) ListCorrespondents(ctx context.Context, list stores.CorrespondentListQuery) (stores.CorrespondentPage, error) {
 	if s == nil || s.db == nil {
 		return stores.CorrespondentPage{}, nil
 	}
@@ -340,7 +330,7 @@ func (s *correspondentStore) ListCorrespondents(ctx context.Context, list stores
 	allRecipients := list.Recipients.All
 	recipient := list.Recipients.Address
 	if !allRecipients {
-		recipient = normalizeEmailAddress(recipient)
+		recipient = message.NormalizeEmailAddress(recipient)
 		if recipient == "" {
 			return stores.CorrespondentPage{}, nil
 		}
@@ -348,7 +338,7 @@ func (s *correspondentStore) ListCorrespondents(ctx context.Context, list stores
 	now := s.now().UTC()
 	query := `SELECT id, local_address, correspondent, learned_at_ms, last_activity_at_ms,
 		whitelist_type, legitimate_email_count FROM correspondents WHERE ` + s.qualifiedSQL() + s.notStaleSQL()
-	args := []any{s.cfg.LegitimateSenderMinMessages}
+	args := []any{s.options.LegitimateSenderMinMessages}
 	args = append(args, s.notStaleArgs(now)...)
 	if !list.ActiveSince.IsZero() {
 		query += " AND last_activity_at_ms >= ?"
@@ -383,45 +373,43 @@ func (s *correspondentStore) ListCorrespondents(ctx context.Context, list stores
 	return stores.CorrespondentPage{Entries: result, Truncated: truncated}, nil
 }
 
-func (s *correspondentStore) qualified(entry stores.Correspondent) bool {
+func (s *correspondentRepository) qualified(entry stores.Correspondent) bool {
 	return entry.WhitelistType == stores.CorrespondentKindAuthenticatedOutbound || entry.WhitelistType == stores.CorrespondentKindManual ||
-		(entry.WhitelistType == stores.CorrespondentKindRepeatedLegitimateInbound && entry.LegitimateEmailCount >= s.cfg.LegitimateSenderMinMessages)
+		(entry.WhitelistType == stores.CorrespondentKindRepeatedLegitimateInbound && entry.LegitimateEmailCount >= s.options.LegitimateSenderMinMessages)
 }
 
-func (s *correspondentStore) qualifiedSQL() string {
+func (s *correspondentRepository) qualifiedSQL() string {
 	return `(whitelist_type IN ('authenticated_outbound', 'manual') OR
 		(whitelist_type = 'repeated_legitimate_inbound' AND legitimate_email_count >= ?))`
 }
 
-func (s *correspondentStore) notStaleSQL() string {
-	if s.cfg.StaleAfter.Value() <= 0 {
+func (s *correspondentRepository) notStaleSQL() string {
+	if s.options.StaleAfter <= 0 {
 		return ""
 	}
 	return " AND last_activity_at_ms >= ?"
 }
 
-func (s *correspondentStore) notStaleArgs(now time.Time) []any {
-	if s.cfg.StaleAfter.Value() <= 0 {
+func (s *correspondentRepository) notStaleArgs(now time.Time) []any {
+	if s.options.StaleAfter <= 0 {
 		return nil
 	}
-	return []any{unixMillis(now.Add(-s.cfg.StaleAfter.Value()))}
+	return []any{unixMillis(now.Add(-s.options.StaleAfter))}
 }
 
-func (s *correspondentStore) activityDueSQL() string {
-	if s.cfg.ActivityUpdateInterval.Value() <= 0 {
+func (s *correspondentRepository) activityDueSQL() string {
+	if s.options.ActivityUpdateInterval <= 0 {
 		return ""
 	}
 	return " AND last_activity_at_ms <= ?"
 }
 
-func (s *correspondentStore) activityDueArgs(now time.Time) []any {
-	if s.cfg.ActivityUpdateInterval.Value() <= 0 {
+func (s *correspondentRepository) activityDueArgs(now time.Time) []any {
+	if s.options.ActivityUpdateInterval <= 0 {
 		return nil
 	}
-	return []any{unixMillis(now.Add(-s.cfg.ActivityUpdateInterval.Value()))}
+	return []any{unixMillis(now.Add(-s.options.ActivityUpdateInterval))}
 }
-
-type rowScanner interface{ Scan(...any) error }
 
 func scanCorrespondent(row rowScanner) (stores.Correspondent, error) {
 	var entry stores.Correspondent
@@ -434,15 +422,15 @@ func scanCorrespondent(row rowScanner) (stores.Correspondent, error) {
 	return entry, err
 }
 
-func (s *correspondentStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+func (s *correspondentRepository) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
 	var excess int
-	if err := tx.QueryRowContext(ctx, `SELECT max(count(*) - ?, 0) FROM correspondents`, s.cfg.MaxEntries).Scan(&excess); err != nil || excess == 0 {
+	if err := tx.QueryRowContext(ctx, `SELECT max(count(*) - ?, 0) FROM correspondents`, s.options.MaxEntries).Scan(&excess); err != nil || excess == 0 {
 		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE id IN (
 		SELECT id FROM correspondents
 		WHERE whitelist_type = 'repeated_legitimate_inbound' AND legitimate_email_count < ?
-		ORDER BY last_activity_at_ms, id LIMIT ?)`, s.cfg.LegitimateSenderMinMessages, excess)
+		ORDER BY last_activity_at_ms, id LIMIT ?)`, s.options.LegitimateSenderMinMessages, excess)
 	if err != nil {
 		return 0, err
 	}
@@ -459,16 +447,16 @@ func (s *correspondentStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) 
 	return removed + remainingRemoved, err
 }
 
-func (s *correspondentStore) Cleanup(ctx context.Context) (int64, error) {
+func (s *correspondentRepository) Cleanup(ctx context.Context) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, nil
 	}
 	var deleted int64
 	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		var attemptDeleted int64
-		if s.cfg.StaleAfter.Value() > 0 {
+		if s.options.StaleAfter > 0 {
 			result, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE last_activity_at_ms < ?`,
-				unixMillis(s.now().UTC().Add(-s.cfg.StaleAfter.Value())))
+				unixMillis(s.now().UTC().Add(-s.options.StaleAfter)))
 			if err != nil {
 				return err
 			}
@@ -491,7 +479,7 @@ func (s *correspondentStore) Cleanup(ctx context.Context) (int64, error) {
 	return deleted, nil
 }
 
-func (s *correspondentStore) Count(ctx context.Context) (int, error) {
+func (s *correspondentRepository) Count(ctx context.Context) (int, error) {
 	if s == nil || s.db == nil {
 		return 0, nil
 	}
@@ -500,58 +488,4 @@ func (s *correspondentStore) Count(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("count correspondents: %w", err)
 	}
 	return count, nil
-}
-
-func normalizedAddressSet(values []string, maximum int) map[string]bool {
-	result := make(map[string]bool)
-	for _, value := range values {
-		if len(result) >= maximum {
-			break
-		}
-		if value = normalizeEmailAddress(value); value != "" {
-			result[value] = true
-		}
-	}
-	return result
-}
-
-func sortedSet(values map[string]bool) []string {
-	result := make([]string, 0, len(values))
-	for value := range values {
-		result = append(result, value)
-	}
-	sort.Strings(result)
-	return result
-}
-
-func placeholders(count int) string { return strings.TrimSuffix(strings.Repeat("?,", count), ",") }
-func valuePlaceholders(rows, columns int) string {
-	return strings.TrimSuffix(strings.Repeat("("+placeholders(columns)+"),", rows), ",")
-}
-func unixMillis(value time.Time) int64     { return value.UTC().UnixMilli() }
-func timeFromMillis(value int64) time.Time { return time.UnixMilli(value).UTC() }
-
-func normalizeEmailAddress(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 320 {
-		return ""
-	}
-	address, ok := message.MailboxAddress(value)
-	if !ok || strings.Count(address, "@") != 1 {
-		return ""
-	}
-	parts := strings.SplitN(address, "@", 2)
-	local := strings.ToLower(strings.TrimSpace(parts[0]))
-	domain := normalizeDomain(parts[1])
-	if local == "" || len(local)+len(domain)+1 > 254 || safeDNSHostname(domain) == "" {
-		return ""
-	}
-	return local + "@" + domain
-}
-
-func emailAddressDomain(address string) string {
-	if separator := strings.LastIndexByte(address, '@'); separator >= 0 {
-		return address[separator+1:]
-	}
-	return ""
 }

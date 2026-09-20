@@ -1,4 +1,4 @@
-package milter
+package sqlite
 
 import (
 	"context"
@@ -10,9 +10,70 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
+
+type correspondentStore = correspondentRepository
+type correspondentEntry = stores.Correspondent
+
+const (
+	whitelistAuthenticatedOutbound = stores.CorrespondentKindAuthenticatedOutbound
+	whitelistRepeatedLegitimate    = stores.CorrespondentKindRepeatedLegitimateInbound
+	whitelistManual                = stores.CorrespondentKindManual
+)
+
+func newCorrespondentStore(options CorrespondentOptions, database *sqlstore.Store, log *slog.Logger) *correspondentStore {
+	return NewCorrespondents(database, options, log).(*correspondentRepository)
+}
+
+func (s *correspondentStore) learn(ctx context.Context, local string, recipients []string) error {
+	return s.LearnAuthenticated(ctx, local, recipients)
+}
+func (s *correspondentStore) touchInbound(ctx context.Context, correspondent string, recipients []string) error {
+	return s.TouchInbound(ctx, correspondent, recipients)
+}
+func (s *correspondentStore) recordInboundClassification(ctx context.Context, correspondent string, recipients []string, complete bool, classification string, score, minimum float64, aligned bool) error {
+	return s.RecordInboundClassification(ctx, stores.InboundClassification{Correspondent: correspondent, Recipients: recipients,
+		RecipientsComplete: complete, Classification: classification, Score: score, UnwantedMinScore: minimum, DKIMAligned: aligned})
+}
+func (s *correspondentStore) match(ctx context.Context, correspondent string, recipients []string) stores.CorrespondentMatch {
+	result, _ := s.Match(ctx, correspondent, recipients)
+	return result
+}
+func (s *correspondentStore) cleanup(ctx context.Context) (int64, error) { return s.Cleanup(ctx) }
+func (s *correspondentStore) addManual(ctx context.Context, sender, recipient string) (bool, error) {
+	return s.AddManual(ctx, sender, recipient)
+}
+func (s *correspondentStore) deleteManual(ctx context.Context, sender, recipient string) (int, error) {
+	return s.DeleteManual(ctx, sender, stores.RecipientScope{Address: recipient})
+}
+func (s *correspondentStore) listAllowlist(ctx context.Context, recipient string, since time.Time) ([]stores.Correspondent, error) {
+	scope := stores.RecipientScope{Address: recipient}
+	if recipient == "*" {
+		scope = stores.RecipientScope{All: true}
+	}
+	page, err := s.ListCorrespondents(ctx, stores.CorrespondentListQuery{Recipients: scope, ActiveSince: since, Limit: 1000})
+	return page.Entries, err
+}
+
+func (s *correspondentStore) snapshot() map[string]correspondentEntry {
+	result := make(map[string]correspondentEntry)
+	rows, err := s.db.Query(context.Background(), `SELECT id, local_address, correspondent,
+		learned_at_ms, last_activity_at_ms, whitelist_type, legitimate_email_count FROM correspondents`)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		entry, err := scanCorrespondent(rows)
+		if err != nil {
+			return result
+		}
+		result[entry.LocalAddress+"\x00"+entry.Correspondent] = entry
+	}
+	return result
+}
 
 func testCorrespondentDatabase(t *testing.T, path string) *sqlstore.Store {
 	t.Helper()
@@ -24,7 +85,7 @@ func testCorrespondentDatabase(t *testing.T, path string) *sqlstore.Store {
 	return database
 }
 
-func newTestCorrespondentStore(t *testing.T, cfg config.CorrespondentsConfig, log *slog.Logger) *correspondentStore {
+func newTestCorrespondentStore(t *testing.T, cfg CorrespondentOptions, log *slog.Logger) *correspondentStore {
 	t.Helper()
 	database := testCorrespondentDatabase(t, filepath.Join(t.TempDir(), "milterguard.db"))
 	return newCorrespondentStore(cfg, database, log)
@@ -43,7 +104,7 @@ func putTestCorrespondent(t *testing.T, store *correspondentStore, entry corresp
 
 func TestCorrespondentStorePersistsPerSenderRelationships(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "milterguard.db")
-	cfg := config.CorrespondentsConfig{LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", MaxEntries: 10}
+	cfg := CorrespondentOptions{LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", MaxEntries: 10}
 	database := testCorrespondentDatabase(t, path)
 	store := newCorrespondentStore(cfg, database, slog.Default())
 	if err := store.learn(context.Background(), "Owner@Example.COM", []string{"Alice@Example.net", "alice@example.net", "invalid"}); err != nil {
@@ -68,8 +129,8 @@ func TestManualCorrespondentOperationsRequireAvailableAllowlist(t *testing.T) {
 		store *correspondentStore
 	}{
 		{name: "nil store"},
-		{name: "nil database", store: newCorrespondentStore(config.CorrespondentsConfig{UseAllowlist: true}, nil, nil)},
-		{name: "allowlist disabled", store: newTestCorrespondentStore(t, config.CorrespondentsConfig{MaxEntries: 10}, nil)},
+		{name: "nil database", store: newCorrespondentStore(CorrespondentOptions{UseAllowlist: true}, nil, nil)},
+		{name: "allowlist disabled", store: newTestCorrespondentStore(t, CorrespondentOptions{MaxEntries: 10}, nil)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -84,7 +145,7 @@ func TestManualCorrespondentOperationsRequireAvailableAllowlist(t *testing.T) {
 }
 
 func TestCorrespondentLearningRecipientLimit(t *testing.T) {
-	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
+	store := newTestCorrespondentStore(t, CorrespondentOptions{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", MaxEntries: 1000,
 	}, nil)
 	recipients := make([]string, maxCorrespondentRecipients+10)
@@ -101,7 +162,7 @@ func TestCorrespondentLearningRecipientLimit(t *testing.T) {
 
 func TestCorrespondentStoreScopeChangesOnlyMatching(t *testing.T) {
 	database := testCorrespondentDatabase(t, filepath.Join(t.TempDir(), "milterguard.db"))
-	cfg := config.CorrespondentsConfig{LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "global", MaxEntries: 10}
+	cfg := CorrespondentOptions{LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "global", MaxEntries: 10}
 	store := newCorrespondentStore(cfg, database, nil)
 	if err := store.learn(context.Background(), "owner@example.com", []string{"alice@example.net"}); err != nil {
 		t.Fatal(err)
@@ -120,7 +181,7 @@ func TestCorrespondentStoreScopeChangesOnlyMatching(t *testing.T) {
 }
 
 func TestCorrespondentCleanupEvictsLeastUsefulAtCapacity(t *testing.T) {
-	cfg := config.CorrespondentsConfig{
+	cfg := CorrespondentOptions{
 		LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true, UseAllowlist: true,
 		Scope: "global", LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .99, MaxEntries: 2,
 	}
@@ -153,7 +214,7 @@ func TestCorrespondentCleanupEvictsLeastUsefulAtCapacity(t *testing.T) {
 }
 
 func TestCorrespondentCleanupEvictsOldestQualifiedAtCapacity(t *testing.T) {
-	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
+	store := newTestCorrespondentStore(t, CorrespondentOptions{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "global", MaxEntries: 2,
 	}, nil)
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
@@ -180,9 +241,9 @@ func TestCorrespondentCleanupEvictsOldestQualifiedAtCapacity(t *testing.T) {
 }
 
 func TestCorrespondentStoreIgnoresAndCleansStaleRelationships(t *testing.T) {
-	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
+	store := newTestCorrespondentStore(t, CorrespondentOptions{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "global", MaxEntries: 10,
-		StaleAfter: config.Duration(24 * time.Hour),
+		StaleAfter: 24 * time.Hour,
 	}, nil)
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
@@ -205,8 +266,8 @@ func TestCorrespondentStoreIgnoresAndCleansStaleRelationships(t *testing.T) {
 }
 
 func TestCorrespondentCleanupRemovesOnlyStaleRelationships(t *testing.T) {
-	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
-		UseAllowlist: true, Scope: "global", MaxEntries: 10, StaleAfter: config.Duration(24 * time.Hour),
+	store := newTestCorrespondentStore(t, CorrespondentOptions{
+		UseAllowlist: true, Scope: "global", MaxEntries: 10, StaleAfter: 24 * time.Hour,
 	}, nil)
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
@@ -224,9 +285,9 @@ func TestCorrespondentCleanupRemovesOnlyStaleRelationships(t *testing.T) {
 }
 
 func TestCorrespondentActivityUpdatesAreThrottled(t *testing.T) {
-	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
+	store := newTestCorrespondentStore(t, CorrespondentOptions{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", MaxEntries: 10,
-		ActivityUpdateInterval: config.Duration(24 * time.Hour),
+		ActivityUpdateInterval: 24 * time.Hour,
 	}, nil)
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
@@ -251,13 +312,13 @@ func TestCorrespondentActivityUpdatesAreThrottled(t *testing.T) {
 }
 
 func TestCorrespondentOutboundBatchPreservesRelationshipRules(t *testing.T) {
-	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
+	store := newTestCorrespondentStore(t, CorrespondentOptions{
 		LearnAuthenticatedRecipients: true,
 		UseAllowlist:                 true,
 		Scope:                        "per_sender",
 		LegitimateSenderMinMessages:  3,
-		ActivityUpdateInterval:       config.Duration(24 * time.Hour),
-		StaleAfter:                   config.Duration(48 * time.Hour),
+		ActivityUpdateInterval:       24 * time.Hour,
+		StaleAfter:                   48 * time.Hour,
 		MaxEntries:                   20,
 	}, nil)
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
@@ -292,14 +353,14 @@ func TestCorrespondentOutboundBatchPreservesRelationshipRules(t *testing.T) {
 }
 
 func TestCorrespondentInboundBatchPreservesRelationshipRules(t *testing.T) {
-	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
+	store := newTestCorrespondentStore(t, CorrespondentOptions{
 		LearnLegitimateSenders:      true,
 		UseAllowlist:                true,
 		Scope:                       "per_sender",
 		LegitimateSenderMinMessages: 3,
 		LegitimateSenderMinScore:    .9,
-		ActivityUpdateInterval:      config.Duration(24 * time.Hour),
-		StaleAfter:                  config.Duration(48 * time.Hour),
+		ActivityUpdateInterval:      24 * time.Hour,
+		StaleAfter:                  48 * time.Hour,
 		MaxEntries:                  20,
 	}, nil)
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
@@ -328,7 +389,7 @@ func TestCorrespondentInboundBatchPreservesRelationshipRules(t *testing.T) {
 }
 
 func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
-	cfg := config.CorrespondentsConfig{
+	cfg := CorrespondentOptions{
 		LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true, UseAllowlist: true,
 		Scope: "per_sender", LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .99,
 		LegitimateSenderRequireDKIM: true, MaxEntries: 10,
@@ -375,7 +436,7 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 }
 
 func TestListAllowlistIsScopedQualifiedAndOrdered(t *testing.T) {
-	cfg := config.CorrespondentsConfig{UseAllowlist: true, Scope: "per_sender", MaxEntries: 10, LegitimateSenderMinMessages: 3}
+	cfg := CorrespondentOptions{UseAllowlist: true, Scope: "per_sender", MaxEntries: 10, LegitimateSenderMinMessages: 3}
 	store := newTestCorrespondentStore(t, cfg, nil)
 	older := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	newer := older.Add(time.Hour)
@@ -399,7 +460,7 @@ func TestListAllowlistIsScopedQualifiedAndOrdered(t *testing.T) {
 }
 
 func TestCorrespondentConcurrentLearningIsAtomic(t *testing.T) {
-	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
+	store := newTestCorrespondentStore(t, CorrespondentOptions{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", MaxEntries: 100,
 	}, nil)
 	var wait sync.WaitGroup
@@ -419,7 +480,7 @@ func TestCorrespondentConcurrentLearningIsAtomic(t *testing.T) {
 }
 
 func TestCorrespondentLookupIndexes(t *testing.T) {
-	store := newTestCorrespondentStore(t, config.CorrespondentsConfig{
+	store := newTestCorrespondentStore(t, CorrespondentOptions{
 		UseAllowlist: true, Scope: "per_sender", LegitimateSenderMinMessages: 3, MaxEntries: 100,
 	}, nil)
 	assertPlanUsesIndex := func(query, index string, args ...any) {

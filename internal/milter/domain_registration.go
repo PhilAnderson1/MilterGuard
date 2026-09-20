@@ -2,7 +2,6 @@ package milter
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +18,6 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 	"golang.org/x/net/publicsuffix"
 )
@@ -45,30 +43,19 @@ type domainRegistrationStore struct {
 	inflight    map[string]chan struct{}
 }
 
-type domainRegistrationCache struct {
-	db      *sqlstore.Store
-	maxSize int
-	now     func() time.Time
-}
-
 type domainRegistrationLookup interface {
 	Lookup(context.Context, string) (time.Time, time.Time, error)
 }
 
-func newDomainRegistrationStore(cfg config.DomainRegistrationConfig, db *sqlstore.Store, log *slog.Logger) *domainRegistrationStore {
+func newDomainRegistrationStore(cfg config.DomainRegistrationConfig, cache stores.DomainRegistrationCache, log *slog.Logger) *domainRegistrationStore {
 	store := &domainRegistrationStore{now: time.Now, log: log, timeout: cfg.Timeout.Value(), maxSize: cfg.MaxEntries, failures: make(map[string]time.Time), inflight: make(map[string]chan struct{})}
 	if domainRegistrationEnabled(cfg) {
 		store.slots = make(chan struct{}, min(8, cfg.MaxEntries))
 		store.lookup = newRDAPClient(cfg.Timeout.Value())
 	}
-	cache := &domainRegistrationCache{db: db, maxSize: cfg.MaxEntries, now: func() time.Time { return store.now() }}
 	store.repository, store.maintenance = cache, cache
 	return store
 }
-
-var _ stores.DomainRegistrationRepository = (*domainRegistrationCache)(nil)
-var _ stores.MaintainedRepository = (*domainRegistrationCache)(nil)
-var _ stores.DomainRegistrationCache = (*domainRegistrationCache)(nil)
 
 func domainRegistrationEnabled(cfg config.DomainRegistrationConfig) bool {
 	return cfg.Enabled
@@ -157,98 +144,6 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 		s.log.DebugContext(ctx, "domain registration cached", "domain", domain, "registered_at", refreshed.RegisteredAt, "expires_at", refreshed.ExpiresAt)
 	}
 	return domainRegistrationEvidence(refreshed), nil
-}
-
-func (s *domainRegistrationCache) DomainRegistration(ctx context.Context, domain string) (stores.DomainRegistration, bool, error) {
-	if s == nil || s.db == nil {
-		return stores.DomainRegistration{}, false, nil
-	}
-	var record stores.DomainRegistration
-	var id, registeredAt, expiresAt int64
-	err := s.db.QueryRow(ctx, `SELECT id, domain, registered_at_ms, expires_at_ms
-		FROM domain_registrations WHERE domain = ?`, domain).Scan(&id, &record.Domain, &registeredAt, &expiresAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return stores.DomainRegistration{}, false, nil
-	}
-	if err != nil {
-		return stores.DomainRegistration{}, false, err
-	}
-	record.ID = uint64(id)
-	record.RegisteredAt = time.UnixMilli(registeredAt).UTC()
-	record.ExpiresAt = time.UnixMilli(expiresAt).UTC()
-	return record, true, nil
-}
-
-func (s *domainRegistrationCache) PutDomainRegistration(ctx context.Context, record stores.DomainRegistration) error {
-	if s == nil || s.db == nil {
-		return fmt.Errorf("domain registration repository is unavailable")
-	}
-	return s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO domain_registrations
-			(domain, registered_at_ms, expires_at_ms) VALUES (?, ?, ?)
-			ON CONFLICT(domain) DO UPDATE SET registered_at_ms = excluded.registered_at_ms,
-				expires_at_ms = excluded.expires_at_ms`, record.Domain,
-			unixMillis(record.RegisteredAt), unixMillis(record.ExpiresAt)); err != nil {
-			return err
-		}
-		return nil
-	})
-}
-
-func (s *domainRegistrationCache) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
-	var excess int
-	if err := tx.QueryRowContext(ctx, `SELECT max(count(*) - ?, 0) FROM domain_registrations`, s.maxSize).Scan(&excess); err != nil || excess == 0 {
-		return 0, err
-	}
-	result, err := tx.ExecContext(ctx, `DELETE FROM domain_registrations WHERE id IN (
-		SELECT id FROM domain_registrations ORDER BY expires_at_ms, id LIMIT ?
-	)`, excess)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-func (s *domainRegistrationCache) Cleanup(ctx context.Context) (int64, error) {
-	if s == nil || s.db == nil {
-		return 0, nil
-	}
-	var deleted int64
-	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
-		var attemptDeleted int64
-		result, err := tx.ExecContext(ctx, `DELETE FROM domain_registrations WHERE expires_at_ms < ?`,
-			unixMillis(s.now().UTC().Add(-domainRegistrationExpiryGrace)))
-		if err != nil {
-			return err
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		attemptDeleted += n
-		capacityDeleted, err := s.enforceCapacityTx(ctx, tx)
-		if err != nil {
-			return err
-		}
-		attemptDeleted += capacityDeleted
-		deleted = attemptDeleted
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	return deleted, nil
-}
-
-func (s *domainRegistrationCache) Count(ctx context.Context) (int, error) {
-	if s == nil || s.db == nil {
-		return 0, nil
-	}
-	var count int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM domain_registrations`).Scan(&count); err != nil {
-		return 0, err
-	}
-	return count, nil
 }
 
 func (s *domainRegistrationStore) Cleanup(ctx context.Context) (int64, error) {

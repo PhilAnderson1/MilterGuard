@@ -26,6 +26,8 @@ type fakeDomainRegistrationLookup struct {
 	calls      atomic.Int32
 }
 
+var domainTestDatabases sync.Map
+
 func TestDomainRegistrationCleanupHonorsCanceledContext(t *testing.T) {
 	store := newTestDomainRegistrationStore(t, time.Now().UTC(), &fakeDomainRegistrationLookup{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -67,17 +69,24 @@ func (f *fakeDomainRegistrationLookup) Lookup(context.Context, string) (time.Tim
 }
 
 func newTestDomainRegistrationStore(t *testing.T, now time.Time, lookup domainRegistrationLookup) *domainRegistrationStore {
+	return newTestDomainRegistrationStoreWithMax(t, now, lookup, 10)
+}
+
+func newTestDomainRegistrationStoreWithMax(t *testing.T, now time.Time, lookup domainRegistrationLookup, maxEntries int) *domainRegistrationStore {
 	t.Helper()
 	db, err := sqlstore.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlstore.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	store := newDomainRegistrationStore(config.DomainRegistrationConfig{
-		Enabled: true, Timeout: config.Duration(time.Second), MaxEntries: 10,
-	}, db, slog.Default())
+	cfg := config.DomainRegistrationConfig{
+		Enabled: true, Timeout: config.Duration(time.Second), MaxEntries: maxEntries,
+	}
+	store := newDomainRegistrationStore(cfg, newDomainRepository(cfg, db, func() time.Time { return now }), slog.Default())
 	store.now = func() time.Time { return now }
 	store.lookup = lookup
+	domainTestDatabases.Store(store, db)
+	t.Cleanup(func() { domainTestDatabases.Delete(store) })
 	return store
 }
 
@@ -204,7 +213,7 @@ func TestDomainRegistrationPersistsAndUpsertsInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.DomainRegistrationConfig{Enabled: true, Timeout: config.Duration(time.Second), MaxEntries: 10}
-	store := newDomainRegistrationStore(cfg, db, nil)
+	store := newDomainRegistrationStore(cfg, newDomainRepository(cfg, db, time.Now), nil)
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	first := domainRegistrationRecord{Domain: "example.com", RegisteredAt: now.Add(-365 * 24 * time.Hour), ExpiresAt: now.Add(24 * time.Hour)}
 	if err := store.put(context.Background(), first); err != nil {
@@ -231,7 +240,7 @@ func TestDomainRegistrationPersistsAndUpsertsInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	reloaded := newDomainRegistrationStore(cfg, reopened, nil)
+	reloaded := newDomainRegistrationStore(cfg, newDomainRepository(cfg, reopened, time.Now), nil)
 	if record, found, err := reloaded.get(context.Background(), "example.com"); err != nil || !found || record.ID != firstID {
 		t.Fatalf("reloaded record = %+v, found=%v, err=%v", record, found, err)
 	}
@@ -253,9 +262,7 @@ func TestDomainRegistrationFailedRefreshRetainsExpiredRecord(t *testing.T) {
 
 func TestDomainRegistrationCapacityKeepsLatestExpirations(t *testing.T) {
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
-	store := newTestDomainRegistrationStore(t, now, &fakeDomainRegistrationLookup{})
-	store.maxSize = 2
-	store.repository.(*domainRegistrationCache).maxSize = 2
+	store := newTestDomainRegistrationStoreWithMax(t, now, &fakeDomainRegistrationLookup{}, 2)
 	for i, domain := range []string{"soon.example", "middle.example", "late.example"} {
 		putTestDomainRegistration(t, store, domainRegistrationRecord{Domain: domain, RegisteredAt: now.Add(-24 * time.Hour), ExpiresAt: now.Add(time.Duration(i+1) * 24 * time.Hour)})
 	}
@@ -280,8 +287,12 @@ func TestDomainRegistrationCapacityKeepsLatestExpirations(t *testing.T) {
 func TestDomainRegistrationLookupUsesUniqueIndex(t *testing.T) {
 	now := time.Now().UTC()
 	store := newTestDomainRegistrationStore(t, now, &fakeDomainRegistrationLookup{})
-	cache := store.repository.(*domainRegistrationCache)
-	rows, err := cache.db.Query(context.Background(), `EXPLAIN QUERY PLAN SELECT id, domain, registered_at_ms, expires_at_ms
+	dbValue, ok := domainTestDatabases.Load(store)
+	if !ok {
+		t.Fatal("domain test database is not registered")
+	}
+	db := dbValue.(*sqlstore.Store)
+	rows, err := db.Query(context.Background(), `EXPLAIN QUERY PLAN SELECT id, domain, registered_at_ms, expires_at_ms
 		FROM domain_registrations WHERE domain = ?`, "example.com")
 	if err != nil {
 		t.Fatal(err)

@@ -319,6 +319,17 @@ func TestMailboxAddressFallsBackToUnambiguousAngleAddress(t *testing.T) {
 	}
 }
 
+func TestNormalizeEmailAddressPreservesPersistentIdentitySemantics(t *testing.T) {
+	if got := NormalizeEmailAddress(`Malformed [display <Sender@Example.COM>`); got != "sender@example.com" {
+		t.Fatalf("NormalizeEmailAddress() = %q", got)
+	}
+	for _, value := range []string{"", "missing-at.example", "a@under_score.example", "a@-bad.example"} {
+		if got := NormalizeEmailAddress(value); got != "" {
+			t.Errorf("NormalizeEmailAddress(%q) = %q, want empty", value, got)
+		}
+	}
+}
+
 func TestConnectionInformationPrecedesHeadersAndReportsDNSPrecisely(t *testing.T) {
 	m := New(1000)
 	m.Connection = ConnectionInfo{

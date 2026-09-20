@@ -48,7 +48,7 @@ func newCommandProcessor(server *Server) *CommandProcessor {
 		return &CommandProcessor{}
 	}
 	return &CommandProcessor{server: server, correspondents: server.correspondents,
-		rejections: server.rejectionHistory, ipReputation: server.ipReputation.repository}
+		rejections: server.rejectionHistory, ipReputation: server.ipReputation}
 }
 
 // OpenCommandProcessor opens the configured persistent state without starting

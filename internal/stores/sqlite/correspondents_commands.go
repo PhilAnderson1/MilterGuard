@@ -1,19 +1,20 @@
-package milter
+package sqlite
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
-func (store *correspondentStore) AddManual(ctx context.Context, sender, recipient string) (bool, error) {
-	if store == nil || store.db == nil || !store.cfg.UseAllowlist {
+func (store *correspondentRepository) AddManual(ctx context.Context, sender, recipient string) (bool, error) {
+	if store == nil || store.db == nil || !store.options.UseAllowlist {
 		return false, fmt.Errorf("correspondent allowlisting is disabled or unavailable")
 	}
-	sender = normalizeEmailAddress(sender)
-	recipient = normalizeEmailAddress(recipient)
+	sender = message.NormalizeEmailAddress(sender)
+	recipient = message.NormalizeEmailAddress(recipient)
 	if sender == "" || recipient == "" {
 		return false, fmt.Errorf("sender and recipient must be valid email addresses")
 	}
@@ -38,11 +39,11 @@ func (store *correspondentStore) AddManual(ctx context.Context, sender, recipien
 	return created, err
 }
 
-func (store *correspondentStore) DeleteManual(ctx context.Context, sender string, scope stores.RecipientScope) (int, error) {
-	if store == nil || store.db == nil || !store.cfg.UseAllowlist {
+func (store *correspondentRepository) DeleteManual(ctx context.Context, sender string, scope stores.RecipientScope) (int, error) {
+	if store == nil || store.db == nil || !store.options.UseAllowlist {
 		return 0, fmt.Errorf("correspondent allowlisting is disabled or unavailable")
 	}
-	sender = normalizeEmailAddress(sender)
+	sender = message.NormalizeEmailAddress(sender)
 	if sender == "" {
 		return 0, fmt.Errorf("sender must be a valid email address")
 	}
@@ -52,7 +53,7 @@ func (store *correspondentStore) DeleteManual(ctx context.Context, sender string
 		return 0, err
 	}
 	if !scope.All {
-		recipient := normalizeEmailAddress(scope.Address)
+		recipient := message.NormalizeEmailAddress(scope.Address)
 		if recipient == "" {
 			return 0, fmt.Errorf("recipient must be a valid email address or *")
 		}
