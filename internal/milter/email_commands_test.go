@@ -3,16 +3,15 @@ package milter
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
+	"errors"
 	"io"
 	"log/slog"
-	"mime"
-	"mime/multipart"
 	"net"
 	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -20,7 +19,41 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
 )
+
+type fakeReplySender struct {
+	messages chan smtpreply.Message
+	err      error
+	panic    bool
+}
+
+type synchronizedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (s *fakeReplySender) Send(_ context.Context, message smtpreply.Message) error {
+	if s.messages != nil {
+		s.messages <- message
+	}
+	if s.panic {
+		panic("test reply sender panic")
+	}
+	return s.err
+}
 
 func commandTestServer(t *testing.T, allowUsers bool, administrators []string) (*Server, *countingAnalyzer, net.Conn, <-chan struct{}) {
 	t.Helper()
@@ -40,48 +73,6 @@ func commandTestServer(t *testing.T, allowUsers bool, administrators []string) (
 	done := make(chan struct{})
 	go func() { defer close(done); defer serverConn.Close(); server.handle(context.Background(), serverConn) }()
 	return server, analyzer, clientConn, done
-}
-
-func TestSMTPTLSDecision(t *testing.T) {
-	tests := []struct {
-		name       string
-		mode       string
-		host       string
-		advertised bool
-		wantTLS    bool
-		wantError  bool
-	}{
-		{name: "required advertised", mode: "required", host: "mail.example.com", advertised: true, wantTLS: true},
-		{name: "required unavailable", mode: "required", host: "mail.example.com", wantError: true},
-		{name: "opportunistic remote", mode: "opportunistic", host: "mail.example.com", advertised: true, wantTLS: true},
-		{name: "opportunistic loopback", mode: "opportunistic", host: "127.0.0.1", advertised: true},
-		{name: "opportunistic unavailable", mode: "opportunistic", host: "mail.example.com"},
-		{name: "off", mode: "off", host: "mail.example.com", advertised: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := smtpTLSDecision(test.mode, test.host, test.advertised)
-			if (err != nil) != test.wantError {
-				t.Fatalf("error = %v, wantError %v", err, test.wantError)
-			}
-			if got != test.wantTLS {
-				t.Fatalf("use TLS = %v, want %v", got, test.wantTLS)
-			}
-		})
-	}
-}
-
-func TestSMTPHostIsLoopback(t *testing.T) {
-	for _, host := range []string{"127.0.0.1", "::1", "localhost", "LOCALHOST."} {
-		if !smtpHostIsLoopback(host) {
-			t.Errorf("%q was not recognized as loopback", host)
-		}
-	}
-	for _, host := range []string{"192.0.2.1", "mail.example.com"} {
-		if smtpHostIsLoopback(host) {
-			t.Errorf("%q was incorrectly recognized as loopback", host)
-		}
-	}
 }
 
 func submitCommand(t *testing.T, conn net.Conn, identity, from string, recipients []string, body string) []byte {
@@ -182,68 +173,40 @@ func TestMixedRecipientCommandIsRejectedWithoutExecution(t *testing.T) {
 	}
 }
 
-func TestCommandReplyPayloadAttachesOriginalMessage(t *testing.T) {
+func TestCommandReplyMessageIncludesMarkerAndAttachment(t *testing.T) {
 	original := []byte("From: sender@example.net\r\nTo: local@example.com\r\nSubject: Original\r\n\r\nOriginal body\r\n")
-	payload, err := buildCommandReplyPayload(
+	message := commandReplyMessage(
 		"milterguard@example.com", "local@example.com", "MilterGuard command results",
 		"Sun, 13 Sep 2026 07:00:00 +0000", "token",
 		commandReplyContent{
 			Text: "Rejection details\n",
-			Attachments: []commandReplyAttachment{{
+			Attachments: []smtpreply.Attachment{{
 				Filename: "rejection-12.eml", MediaType: "application/octet-stream", Contents: original,
 			}},
 		},
 	)
-	if err != nil {
-		t.Fatal(err)
+	if len(message.Headers) != 1 || message.Headers[0].Name != internalMessageHeader || message.Headers[0].Value != "token" {
+		t.Fatalf("internal headers = %#v", message.Headers)
 	}
-	message, err := mail.ReadMessage(bytes.NewReader(payload))
-	if err != nil {
-		t.Fatal(err)
-	}
-	mediaType, params, err := mime.ParseMediaType(message.Header.Get("Content-Type"))
-	if err != nil || mediaType != "multipart/mixed" {
-		t.Fatalf("Content-Type = %q, params=%v, err=%v", mediaType, params, err)
-	}
-	reader := multipart.NewReader(message.Body, params["boundary"])
-	textPart, err := reader.NextPart()
-	if err != nil {
-		t.Fatal(err)
-	}
-	textBody, err := io.ReadAll(textPart)
-	if err != nil || !strings.Contains(string(textBody), "Rejection details") {
-		t.Fatalf("text part = %q, err=%v", textBody, err)
-	}
-	attachment, err := reader.NextPart()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if attachment.FileName() != "rejection-12.eml" || attachment.Header.Get("Content-Transfer-Encoding") != "base64" {
-		t.Fatalf("attachment headers = %#v", attachment.Header)
-	}
-	attachmentType, _, err := mime.ParseMediaType(attachment.Header.Get("Content-Type"))
-	if err != nil || attachmentType != "application/octet-stream" {
-		t.Fatalf("attachment Content-Type = %q, err=%v", attachmentType, err)
-	}
-	decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, attachment))
-	if err != nil || !bytes.Equal(decoded, original) {
-		t.Fatalf("decoded attachment = %q, err=%v", decoded, err)
-	}
-	if _, err := reader.NextPart(); err != io.EOF {
-		t.Fatalf("unexpected extra MIME part: %v", err)
+	if len(message.Attachments) != 1 || !bytes.Equal(message.Attachments[0].Contents, original) {
+		t.Fatalf("attachments = %#v", message.Attachments)
 	}
 }
 
 func TestBoundedCommandReplyPayloadOmitsOversizedAttachment(t *testing.T) {
-	payload, err := buildBoundedCommandReplyPayload(
+	reply, err := buildBoundedCommandReplyMessage(
 		"milterguard@example.com", "local@example.com", "Results", "date", "token",
 		commandReplyContent{
 			Text: "Rejection details\n",
-			Attachments: []commandReplyAttachment{{
+			Attachments: []smtpreply.Attachment{{
 				Filename: "rejection-12.eml", MediaType: "application/octet-stream", Contents: bytes.Repeat([]byte("x"), 1024),
 			}},
 		}, 512,
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := smtpreply.Build(reply)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,10 +224,14 @@ func TestBoundedCommandReplyPayloadOmitsOversizedAttachment(t *testing.T) {
 }
 
 func TestBoundedCommandReplyPayloadLimitsPlainText(t *testing.T) {
-	payload, err := buildBoundedCommandReplyPayload(
+	reply, err := buildBoundedCommandReplyMessage(
 		"milterguard@example.com", "local@example.com", "Results", "date", "token",
 		commandReplyContent{Text: strings.Repeat("x", maxEmailCommandReplyBytes+1024)}, 0,
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := smtpreply.Build(reply)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,6 +273,117 @@ func TestBoundedCommandReplyAddsNoticeAfterExistingFullText(t *testing.T) {
 	}
 	if !strings.HasSuffix(body.String(), commandReplyTruncatedNotice) {
 		t.Fatal("full reply was not shortened to include the truncation notice")
+	}
+}
+
+func TestEmailCommandReplyRenderingIsDeferredToWorker(t *testing.T) {
+	sender := &fakeReplySender{messages: make(chan smtpreply.Message, 1)}
+	service := &emailCommandService{
+		cfg:           config.EmailCommandsConfig{SendReplies: true, Recipient: "milterguard@example.com"},
+		internalToken: "token", replySlots: make(chan struct{}, 1), sender: sender,
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)), maxMessageSize: 4096,
+	}
+	release := make(chan struct{})
+	queued := service.queueReplyContentFunc("recipient@example.com", "Results", func() commandReplyContent {
+		<-release
+		return commandReplyContent{Text: "deferred result"}
+	})
+	if !queued {
+		t.Fatal("reply was not queued")
+	}
+	select {
+	case <-sender.messages:
+		t.Fatal("reply content was rendered synchronously")
+	default:
+	}
+	close(release)
+	select {
+	case message := <-sender.messages:
+		if message.To != "recipient@example.com" || message.Subject != "Results" || message.Text != "deferred result" {
+			t.Fatalf("reply message = %#v", message)
+		}
+		if len(message.Headers) != 1 || message.Headers[0].Value != "token" {
+			t.Fatalf("reply headers = %#v", message.Headers)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("deferred reply was not delivered")
+	}
+}
+
+func TestEmailCommandReplyQueueLimit(t *testing.T) {
+	sender := &fakeReplySender{messages: make(chan smtpreply.Message, 1)}
+	service := &emailCommandService{
+		cfg: config.EmailCommandsConfig{SendReplies: true}, replySlots: make(chan struct{}, 1),
+		sender: sender, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	service.replySlots <- struct{}{}
+	if service.queueReply("recipient@example.com", "Results", "body") {
+		t.Fatal("reply was queued despite a full worker queue")
+	}
+	select {
+	case <-sender.messages:
+		t.Fatal("sender was called despite a full worker queue")
+	default:
+	}
+}
+
+func TestEmailCommandReplyWorkerContainsSenderPanicAndReleasesSlot(t *testing.T) {
+	panicking := &fakeReplySender{messages: make(chan smtpreply.Message, 1), panic: true}
+	service := &emailCommandService{
+		cfg: config.EmailCommandsConfig{SendReplies: true}, replySlots: make(chan struct{}, 1),
+		sender: panicking, log: slog.New(slog.NewTextHandler(io.Discard, nil)), maxMessageSize: 4096,
+	}
+	if !service.queueReply("recipient@example.com", "Results", "body") {
+		t.Fatal("reply was not queued")
+	}
+	select {
+	case <-panicking.messages:
+	case <-time.After(time.Second):
+		t.Fatal("panicking sender was not called")
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(service.replySlots) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(service.replySlots) != 0 {
+		t.Fatal("reply slot was not released after panic")
+	}
+	replacement := &fakeReplySender{messages: make(chan smtpreply.Message, 1), err: errors.New("test delivery failure")}
+	service.sender = replacement
+	if !service.queueReply("recipient@example.com", "Results", "body") {
+		t.Fatal("reply slot could not be reused")
+	}
+	select {
+	case <-replacement.messages:
+	case <-time.After(time.Second):
+		t.Fatal("replacement sender was not called")
+	}
+}
+
+func TestEmailCommandReplyDeliveryFailureIsLogged(t *testing.T) {
+	var output synchronizedBuffer
+	sender := &fakeReplySender{messages: make(chan smtpreply.Message, 1), err: errors.New("test delivery failure")}
+	service := &emailCommandService{
+		cfg:        config.EmailCommandsConfig{SendReplies: true, SMTPHost: "smtp.example:25"},
+		replySlots: make(chan struct{}, 1), sender: sender,
+		log: slog.New(slog.NewTextHandler(&output, nil)), maxMessageSize: 4096,
+	}
+	if !service.queueReply("recipient@example.com", "Results", "body") {
+		t.Fatal("reply was not queued")
+	}
+	select {
+	case <-sender.messages:
+	case <-time.After(time.Second):
+		t.Fatal("failing sender was not called")
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(service.replySlots) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	logged := output.String()
+	if !strings.Contains(logged, "cannot send email command confirmation") ||
+		!strings.Contains(logged, "test delivery failure") || !strings.Contains(logged, "smtp.example:25") {
+		t.Fatalf("delivery failure log = %q", logged)
 	}
 }
 

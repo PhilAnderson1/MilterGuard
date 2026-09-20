@@ -11,6 +11,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
+	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
@@ -123,6 +124,7 @@ type emailCommandService struct {
 	recipient      string
 	internalToken  string
 	replySlots     chan struct{}
+	sender         smtpreply.Sender
 	log            *slog.Logger
 	maxMessageSize int64
 }

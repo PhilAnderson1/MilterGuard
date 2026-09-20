@@ -1,24 +1,16 @@
 package milter
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
-	"encoding/base64"
-	"errors"
 	"fmt"
-	"io"
 	"mime"
-	"mime/multipart"
-	"net"
-	"net/smtp"
-	"net/textproto"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
 )
 
 const internalMessageHeader = "X-MilterGuard-Internal"
@@ -32,11 +24,9 @@ const (
 	commandReplyTruncatedNotice = "\nCommand reply was truncated at 1 MiB.\n"
 )
 
-type commandReplyAttachment = admincmd.Attachment
-
 type commandReplyContent struct {
 	Text        string
-	Attachments []commandReplyAttachment
+	Attachments []smtpreply.Attachment
 }
 
 func (ss *session) isCommandRecipient(recipient string) bool {
@@ -134,7 +124,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	}
 	queued := ss.deps.commands.queueReplyContentFunc(replyTo, "MilterGuard command results", func() commandReplyContent {
 		var body strings.Builder
-		var attachments []commandReplyAttachment
+		var attachments []smtpreply.Attachment
 		attached := make(map[string]bool)
 		for i, command := range commands {
 			prefix := command.Canonical() + "\n\n"
@@ -152,7 +142,9 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 			}
 			for _, attachment := range result.Attachments {
 				if !attached[attachment.Filename] {
-					attachments = append(attachments, attachment)
+					attachments = append(attachments, smtpreply.Attachment{
+						Filename: attachment.Filename, MediaType: attachment.MediaType, Contents: attachment.Contents,
+					})
 					attached[attachment.Filename] = true
 				}
 			}
@@ -291,9 +283,9 @@ func (s *emailCommandService) queueReplyContentFunc(recipient, subject string, c
 		from := normalizeEmailAddress(cfg.Recipient)
 		date := time.Now().UTC().Format(time.RFC1123Z)
 		reply := content()
-		payload, err := buildBoundedCommandReplyPayload(from, recipient, subject, date, token, reply, s.maxMessageSize)
+		message, err := buildBoundedCommandReplyMessage(from, recipient, subject, date, token, reply, s.maxMessageSize)
 		if err == nil {
-			err = submitSMTP(cfg.SMTPHost, cfg.SMTPTLS, recipient, payload)
+			err = s.sender.Send(context.Background(), message)
 		}
 		if err != nil {
 			log.Error("cannot send email command confirmation", "recipient", recipient, "smtp_host", cfg.SMTPHost, "error", err)
@@ -304,15 +296,16 @@ func (s *emailCommandService) queueReplyContentFunc(recipient, subject string, c
 	return true
 }
 
-func buildBoundedCommandReplyPayload(from, recipient, subject, date, token string, reply commandReplyContent, maxBytes int64) ([]byte, error) {
+func buildBoundedCommandReplyMessage(from, recipient, subject, date, token string, reply commandReplyContent, maxBytes int64) (smtpreply.Message, error) {
 	reply.Text = boundedCommandReplyText(reply.Text)
-	payload, err := buildCommandReplyPayload(from, recipient, subject, date, token, reply)
+	message := commandReplyMessage(from, recipient, subject, date, token, reply)
+	payload, err := smtpreply.Build(message)
 	if err != nil || len(reply.Attachments) == 0 || maxBytes <= 0 || int64(len(payload)) <= maxBytes {
-		return payload, err
+		return message, err
 	}
 	reply.Text += "\nOne or more original saved messages were too large to attach.\n"
 	reply.Attachments = nil
-	return buildCommandReplyPayload(from, recipient, subject, date, token, reply)
+	return commandReplyMessage(from, recipient, subject, date, token, reply), nil
 }
 
 func boundedCommandReplyText(text string) string {
@@ -324,121 +317,10 @@ func boundedCommandReplyText(text string) string {
 	return bounded.String()
 }
 
-func buildCommandReplyPayload(from, recipient, subject, date, token string, reply commandReplyContent) ([]byte, error) {
-	var payload bytes.Buffer
-	fmt.Fprintf(&payload, "From: MilterGuard <%s>\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nAuto-Submitted: auto-replied\r\nX-Auto-Response-Suppress: All\r\n%s: %s\r\n", from, recipient, subject, date, internalMessageHeader, token)
-	if len(reply.Attachments) == 0 {
-		payload.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
-		payload.WriteString(reply.Text)
-		return payload.Bytes(), nil
+func commandReplyMessage(from, recipient, subject, date, token string, reply commandReplyContent) smtpreply.Message {
+	return smtpreply.Message{
+		From: from, To: recipient, Subject: subject, Date: date, Text: reply.Text,
+		Headers:     []smtpreply.Header{{Name: internalMessageHeader, Value: token}},
+		Attachments: reply.Attachments,
 	}
-
-	var multipartBody bytes.Buffer
-	writer := multipart.NewWriter(&multipartBody)
-	fmt.Fprintf(&payload, "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=%q\r\n\r\n", writer.Boundary())
-	textHeader := make(textproto.MIMEHeader)
-	textHeader.Set("Content-Type", "text/plain; charset=UTF-8")
-	textHeader.Set("Content-Transfer-Encoding", "8bit")
-	part, err := writer.CreatePart(textHeader)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := io.WriteString(part, reply.Text); err != nil {
-		return nil, err
-	}
-	for _, attachment := range reply.Attachments {
-		header := make(textproto.MIMEHeader)
-		header.Set("Content-Type", mime.FormatMediaType(attachment.MediaType, map[string]string{"name": attachment.Filename}))
-		header.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": attachment.Filename}))
-		header.Set("Content-Transfer-Encoding", "base64")
-		part, err = writer.CreatePart(header)
-		if err != nil {
-			return nil, err
-		}
-		if err := writeMIMEBase64(part, attachment.Contents); err != nil {
-			return nil, err
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	if _, err := multipartBody.WriteTo(&payload); err != nil {
-		return nil, err
-	}
-	return payload.Bytes(), nil
-}
-
-func writeMIMEBase64(writer io.Writer, contents []byte) error {
-	encoded := base64.StdEncoding.EncodeToString(contents)
-	for len(encoded) > 76 {
-		if _, err := io.WriteString(writer, encoded[:76]+"\r\n"); err != nil {
-			return err
-		}
-		encoded = encoded[76:]
-	}
-	_, err := io.WriteString(writer, encoded+"\r\n")
-	return err
-}
-
-func submitSMTP(address, tlsMode, recipient string, payload []byte) error {
-	conn, err := net.DialTimeout("tcp", address, 15*time.Second)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
-		return err
-	}
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return err
-	}
-	client, err := smtp.NewClient(conn, host)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-	startTLS, _ := client.Extension("STARTTLS")
-	useTLS, err := smtpTLSDecision(tlsMode, host, startTLS)
-	if err != nil {
-		return err
-	}
-	if useTLS {
-		if err := client.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
-			return fmt.Errorf("start SMTP TLS: %w", err)
-		}
-	}
-	if err := client.Mail(""); err != nil {
-		return err
-	}
-	if err := client.Rcpt(recipient); err != nil {
-		return err
-	}
-	data, err := client.Data()
-	if err != nil {
-		return err
-	}
-	if _, err := data.Write(payload); err != nil {
-		_ = data.Close()
-		return err
-	}
-	if err := data.Close(); err != nil {
-		return err
-	}
-	return client.Quit()
-}
-
-func smtpTLSDecision(mode, host string, advertised bool) (bool, error) {
-	if mode == "required" && !advertised {
-		return false, errors.New("SMTP server does not advertise STARTTLS")
-	}
-	return advertised && (mode == "required" || (mode == "opportunistic" && !smtpHostIsLoopback(host))), nil
-}
-
-func smtpHostIsLoopback(host string) bool {
-	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
-		return true
-	}
-	address := net.ParseIP(host)
-	return address != nil && address.IsLoopback()
 }

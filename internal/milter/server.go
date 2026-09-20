@@ -30,6 +30,7 @@ const rejectedMailCleanupInterval = 24 * time.Hour
 const postDecisionUpdateTimeout = 5 * time.Second
 const initialAcceptRetryDelay = 5 * time.Millisecond
 const maximumAcceptRetryDelay = time.Second
+const commandReplySMTPTimeout = 15 * time.Second
 
 var ErrInternalTokenGeneration = errors.New("cannot generate internal reply token")
 
