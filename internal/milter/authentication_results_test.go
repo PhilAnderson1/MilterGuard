@@ -40,6 +40,16 @@ func TestTrustedSenderAuthenticationAlignment(t *testing.T) {
 			header: "nl.invades.net; dkim=fail header.d=example.com; dmarc=fail header.from=example.com",
 			domain: "example.com", trust: []string{"nl.invades.net"},
 		},
+		{
+			name:   "quoted semicolon cannot manufacture a pass",
+			header: `nl.invades.net; dkim=fail reason="bad; dmarc=pass header.from=example.com" header.d=example.com`,
+			domain: "example.com", trust: []string{"nl.invades.net"},
+		},
+		{
+			name:   "SPF is not sufficient for correspondent authentication",
+			header: "nl.invades.net; spf=pass smtp.mailfrom=example.com",
+			domain: "example.com", trust: []string{"nl.invades.net"},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

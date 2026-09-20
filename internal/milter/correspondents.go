@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	maxLearnedRecipients           = 100
+	maxCorrespondentRecipients     = 100
 	whitelistAuthenticatedOutbound = "authenticated_outbound"
 	whitelistRepeatedLegitimate    = "repeated_legitimate_inbound"
 	whitelistManual                = "manual"
@@ -63,7 +63,7 @@ func (s *correspondentStore) learn(ctx context.Context, localAddress string, rec
 	if localAddress == "" {
 		return fmt.Errorf("authenticated envelope sender is unavailable or invalid")
 	}
-	unique := normalizedAddressSet(recipients, maxLearnedRecipients)
+	unique := normalizedAddressSet(recipients, maxCorrespondentRecipients)
 	if len(unique) == 0 {
 		return nil
 	}
@@ -140,7 +140,7 @@ func (s *correspondentStore) touchInbound(ctx context.Context, correspondent str
 	args = append(args, s.notStaleArgs(now)...)
 	args = append(args, s.activityDueArgs(now)...)
 	if s.cfg.Scope == "per_sender" {
-		addresses := sortedSet(normalizedAddressSet(recipients, maxLearnedRecipients))
+		addresses := sortedSet(normalizedAddressSet(recipients, maxCorrespondentRecipients))
 		if len(addresses) == 0 {
 			return nil
 		}
@@ -159,7 +159,7 @@ func (s *correspondentStore) recordInboundClassification(ctx context.Context, co
 	if s == nil || s.db == nil || !recipientsComplete {
 		return nil
 	}
-	recipientSet := normalizedAddressSet(recipients, maxLearnedRecipients)
+	recipientSet := normalizedAddressSet(recipients, maxCorrespondentRecipients)
 	if correspondent == "" || len(recipientSet) == 0 {
 		return nil
 	}
@@ -323,7 +323,7 @@ func (s *correspondentStore) match(ctx context.Context, correspondent string, re
 		}
 		return result
 	}
-	addresses := sortedSet(normalizedAddressSet(recipients, maxLearnedRecipients))
+	addresses := sortedSet(normalizedAddressSet(recipients, maxCorrespondentRecipients))
 	result.TotalRecipients = len(addresses)
 	if len(addresses) == 0 {
 		return result
@@ -515,31 +515,6 @@ func (s *correspondentStore) logDatabaseError(operation string, err error) {
 	if s != nil && s.log != nil && err != nil {
 		s.log.Error("correspondent database operation failed", "operation", operation, "error", err)
 	}
-}
-
-// snapshot is a diagnostic/test helper, not a storage API used by production.
-func (s *correspondentStore) snapshot() map[string]correspondentEntry {
-	result := make(map[string]correspondentEntry)
-	if s == nil || s.db == nil {
-		return result
-	}
-	rows, err := s.db.Query(context.Background(), `SELECT id, local_address, correspondent,
-		learned_at_ms, last_activity_at_ms, whitelist_type, legitimate_email_count FROM correspondents`)
-	if err != nil {
-		return result
-	}
-	defer rows.Close()
-	for rows.Next() {
-		entry, err := scanCorrespondent(rows)
-		if err != nil {
-			return result
-		}
-		result[entry.LocalAddress+"\x00"+entry.Correspondent] = entry
-	}
-	if rows.Err() != nil {
-		return map[string]correspondentEntry{}
-	}
-	return result
 }
 
 func normalizedAddressSet(values []string, maximum int) map[string]bool {

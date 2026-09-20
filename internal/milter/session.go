@@ -31,6 +31,8 @@ const (
 	phaseBody
 )
 
+const maxEnvelopeRecipients = 100
+
 type session struct {
 	server                      *Server
 	conn                        net.Conn
@@ -182,7 +184,7 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		if ss.phase != phaseEnvelope {
 			return ss.protocolError("milter transaction command outside message", "command", commandName(command))
 		}
-		if recipient, ok := parseEnvelopeAddress(payload); ok && len(ss.envelopeRecipients) < maxLearnedRecipients {
+		if recipient, ok := parseEnvelopeAddress(payload); ok && len(ss.envelopeRecipients) < maxEnvelopeRecipients {
 			ss.envelopeRecipients = append(ss.envelopeRecipients, recipient)
 		} else if ok {
 			ss.envelopeRecipientsTruncated = true

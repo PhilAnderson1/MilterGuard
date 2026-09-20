@@ -56,12 +56,16 @@ type domainRegistrationLookup interface {
 
 func newDomainRegistrationStore(cfg config.DomainRegistrationConfig, db *sqlstore.Store, log *slog.Logger) *domainRegistrationStore {
 	store := &domainRegistrationStore{now: time.Now, log: log, timeout: cfg.Timeout.Value(), maxSize: cfg.MaxEntries, failures: make(map[string]time.Time), inflight: make(map[string]chan struct{})}
-	if cfg.Enabled {
+	if domainRegistrationEnabled(cfg) {
 		store.slots = make(chan struct{}, min(8, cfg.MaxEntries))
 		store.lookup = newRDAPClient(cfg.Timeout.Value())
 	}
 	store.db = db
 	return store
+}
+
+func domainRegistrationEnabled(cfg config.DomainRegistrationConfig) bool {
+	return cfg.Enabled
 }
 
 func registrableDomain(domain string) string {

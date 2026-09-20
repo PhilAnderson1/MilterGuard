@@ -317,6 +317,24 @@ func TestServerOpensSQLiteForDomainRegistrationAlone(t *testing.T) {
 	}
 }
 
+func TestDisabledDomainRegistrationDoesNotOpenSQLite(t *testing.T) {
+	cfg := config.Config{
+		AI:          config.AIConfig{MaxConcurrent: 1},
+		Milter:      config.MilterConfig{MaxConnections: 1},
+		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db")},
+		DomainRegistration: config.DomainRegistrationConfig{
+			Enabled: false, Timeout: config.Duration(time.Second), MaxEntries: 10,
+		},
+	}
+	server := NewServer(cfg, fixedAnalyzer{}, nil)
+	if server.StartupError() != nil || server.database != nil {
+		t.Fatalf("disabled domain registration database=%v, error=%v", server.database, server.StartupError())
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRDAPClientReadsRegistrationAndExpirationEvents(t *testing.T) {
 	transport := domainRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/domain/example.com" {

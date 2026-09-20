@@ -75,7 +75,7 @@ func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, doma
 			}
 			err = ss.writeTagHeaders("unwanted", nil, actionName)
 		} else {
-			err = ss.replaceResultHeaders(nil)
+			err = ss.writeAcceptedResultHeaders(nil)
 		}
 	}
 	if err == nil {

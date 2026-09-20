@@ -513,10 +513,6 @@ func reverseSlice[T any](values []T) {
 	}
 }
 
-func (ss *session) executeEmailCommand(command emailCommand, admin bool) (commandResult, error) {
-	return ss.server.commands.execute(context.Background(), command, CommandActor{Administrator: admin, DefaultRecipient: ss.envelopeSender})
-}
-
 func commandHelp(admin bool, defaultRecipient ...string) string {
 	terminalAdmin := admin && len(defaultRecipient) > 0 && defaultRecipient[0] == "*"
 	text := "Send one or more commands, one per line:\n\nWHITELIST ADD sender@example.com\nWHITELIST DELETE sender@example.com\nWHITELIST LIST [day|week|month|year|all]\nREJECTIONS [day|week|month|year|all]\nREJECTION id\nHELP\n\nListing commands default to the previous week. The local address is taken from your authenticated envelope sender.\n"

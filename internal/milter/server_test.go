@@ -655,6 +655,29 @@ func sendContinueFrames(t *testing.T, conn net.Conn, frames ...[]byte) {
 	}
 }
 
+func TestEnvelopeRecipientLimitIsIndependentAndMarksTruncation(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+	ss := newSession(&Server{log: slog.New(slog.NewTextHandler(io.Discard, nil))}, serverConn)
+	ss.phase = phaseEnvelope
+	ss.connected = true
+	for index := range maxEnvelopeRecipients + 1 {
+		finished := make(chan bool, 1)
+		go func(index int) {
+			frame := envelopeFrame(commandRecipient, fmt.Sprintf("recipient-%d@example.net", index))
+			finished <- ss.handleCommand(context.Background(), frame[0], frame[1:])
+		}(index)
+		expectFrame(t, clientConn, string([]byte{responseContinue}))
+		if !<-finished {
+			t.Fatal("recipient frame closed the session")
+		}
+	}
+	if len(ss.envelopeRecipients) != maxEnvelopeRecipients || !ss.envelopeRecipientsTruncated {
+		t.Fatalf("recipients=%d truncated=%v, want %d and true", len(ss.envelopeRecipients), ss.envelopeRecipientsTruncated, maxEnvelopeRecipients)
+	}
+}
+
 func connectFrame(family byte, address string) []byte {
 	return connectFrameWithHostname("mail.example", family, address)
 }

@@ -238,3 +238,29 @@ func TestProtectedSenderDomainMonitorModeTagsWithoutAI(t *testing.T) {
 		t.Fatalf("AI analysis calls = %d, want 0", got)
 	}
 }
+
+func TestProtectedSenderDomainMonitorModeWithoutHeadersOnlyRemovesSpoofedResults(t *testing.T) {
+	analyzer := &countingAnalyzer{}
+	server, conn, done := testServer(t, analyzer)
+	server.cfg.Mode = "monitor"
+	server.cfg.Filtering.AddEmailHeaders = false
+	server.cfg.Filtering.AuthenticatedOnlySenderDomains = []string{"invades.net"}
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiateWithActions(t, conn, resultHeaderActions)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "192.0.2.10"),
+		[]byte{commandMail},
+		headerFrame("From", "Support <support@invades.net>"),
+		headerFrame(classificationHeader, "legitimate"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string(deleteHeaderResponse(classificationHeader)))
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if got := analyzer.calls.Load(); got != 0 {
+		t.Fatalf("AI analysis calls = %d, want 0", got)
+	}
+}

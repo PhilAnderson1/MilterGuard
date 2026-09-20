@@ -193,7 +193,7 @@ func TestRejectionHistoryFormattingAndBounds(t *testing.T) {
 
 func TestRejectionHistoryCapsRecipientsPerRecord(t *testing.T) {
 	store, _ := newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{Expiry: config.Duration(time.Hour), MaxEntries: 10})
-	recipients := make([]string, maxLearnedRecipients+10)
+	recipients := make([]string, maxRejectionRecipients+10)
 	for i := range recipients {
 		recipients[i] = fmt.Sprintf("recipient-%03d@example.com", i)
 	}
@@ -201,7 +201,7 @@ func TestRejectionHistoryCapsRecipientsPerRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	entries := rejectionEntries(t, store, "*")
-	if len(entries) != 1 || len(entries[0].Recipients) != maxLearnedRecipients {
+	if len(entries) != 1 || len(entries[0].Recipients) != maxRejectionRecipients {
 		t.Fatalf("stored entries = %#v", entries)
 	}
 }

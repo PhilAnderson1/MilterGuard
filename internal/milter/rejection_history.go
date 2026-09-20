@@ -17,6 +17,7 @@ import (
 const (
 	maxRejectionSubjectRunes = 1000
 	maxRejectionReasonRunes  = 1000
+	maxRejectionRecipients   = 100
 )
 
 type rejectionHistoryEntry struct {
@@ -69,7 +70,7 @@ func (s *rejectionHistoryStore) addWithIDAt(ctx context.Context, visibleSender, 
 	if sender == "" {
 		return 0, nil
 	}
-	unique := normalizedAddressSet(recipients, maxLearnedRecipients)
+	unique := normalizedAddressSet(recipients, maxRejectionRecipients)
 	if len(unique) == 0 {
 		return 0, nil
 	}

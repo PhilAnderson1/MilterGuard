@@ -7,6 +7,9 @@ import (
 )
 
 func (store *correspondentStore) addManual(ctx context.Context, sender, recipient string) (bool, error) {
+	if store == nil || store.db == nil || !store.cfg.UseAllowlist {
+		return false, fmt.Errorf("correspondent allowlisting is disabled or unavailable")
+	}
 	sender = normalizeEmailAddress(sender)
 	recipient = normalizeEmailAddress(recipient)
 	if sender == "" || recipient == "" {
@@ -34,6 +37,9 @@ func (store *correspondentStore) addManual(ctx context.Context, sender, recipien
 }
 
 func (store *correspondentStore) deleteManual(ctx context.Context, sender, recipient string) (int, error) {
+	if store == nil || store.db == nil || !store.cfg.UseAllowlist {
+		return 0, fmt.Errorf("correspondent allowlisting is disabled or unavailable")
+	}
 	sender = normalizeEmailAddress(sender)
 	if sender == "" {
 		return 0, fmt.Errorf("sender must be a valid email address")

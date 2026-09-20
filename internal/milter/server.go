@@ -88,7 +88,7 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 	}
 	var database *sqlstore.Store
 	var databaseErr error
-	if correspondentFeaturesEnabled(cfg.Correspondents) || ipReputationFeaturesEnabled(cfg.IPReputation) || rejectionHistoryEnabled(cfg.RejectionHistory) || cfg.DomainRegistration.Enabled {
+	if correspondentFeaturesEnabled(cfg.Correspondents) || ipReputationFeaturesEnabled(cfg.IPReputation) || rejectionHistoryEnabled(cfg.RejectionHistory) || domainRegistrationEnabled(cfg.DomainRegistration) {
 		ctx, cancel := context.WithTimeout(context.Background(), maintenanceDatabaseTimeout)
 		database, databaseErr = sqlstore.Open(ctx, cfg.Persistence.DatabaseFile, sqlstore.DefaultOptions())
 		cancel()
@@ -449,7 +449,8 @@ func (s *Server) saveRejectedMailCopy(ctx context.Context, msg *message.Message,
 	s.log.DebugContext(ctx, "rejected message copy saved", "message_id", msg.Header("Message-ID"), "source", source, "rejection_id", recordID, "file", path)
 }
 
-// handle is retained as the single-connection entry point used by tests.
+// handle runs one Milter connection and isolates session panics from the
+// listener and other active connections.
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer s.recoverSessionPanic(ctx, conn)
 	newSession(s, conn).run(ctx)

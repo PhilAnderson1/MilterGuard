@@ -32,8 +32,8 @@ type activeIPBlock struct {
 	ExpiresAt           time.Time
 }
 
-// rejectedIPRecord is retained only as a diagnostic representation for tests.
-// Production operations use indexed SQL directly.
+// rejectedIPRecord is the internal SQL representation used by transactional
+// reputation operations and test diagnostics.
 type rejectedIPRecord struct {
 	ID              uint64
 	IP              string
@@ -457,22 +457,6 @@ func (s *ipReputationStore) pruneStrikesTx(ctx context.Context, tx *sql.Tx, id i
 	_, err := tx.ExecContext(ctx, `DELETE FROM ip_strikes WHERE ip_reputation_id=? AND struck_at_ms<=?`, id, unixMillis(now.Add(-s.repeatWindow)))
 	return err
 }
-func (s *ipReputationStore) strikesTx(ctx context.Context, tx *sql.Tx, id int64) ([]time.Time, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT struck_at_ms FROM ip_strikes WHERE ip_reputation_id=? ORDER BY struck_at_ms,id`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var values []time.Time
-	for rows.Next() {
-		var ms int64
-		if err := rows.Scan(&ms); err != nil {
-			return nil, err
-		}
-		values = append(values, timeFromMillis(ms))
-	}
-	return values, rows.Err()
-}
 func (s *ipReputationStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
 	var excess int
 	if err := tx.QueryRowContext(ctx, `SELECT max(count(*)-?,0) FROM ip_reputation`, s.maxSize).Scan(&excess); err != nil || excess == 0 {
@@ -506,19 +490,6 @@ func (s *ipReputationStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (
 	}
 	return totalRemoved, nil
 }
-func nullableString(v string) any {
-	if v == "" {
-		return nil
-	}
-	return v
-}
-func nullableMillis(v time.Time) any {
-	if v.IsZero() {
-		return nil
-	}
-	return unixMillis(v)
-}
-
 func (s *ipReputationStore) domainAllowed(dns connectionDNSResult) (string, string, bool) {
 	if len(s.domainAllowlist) == 0 || dns.status != message.ReverseDNSAvailable {
 		return "", "", false
@@ -556,55 +527,6 @@ func (s *ipReputationStore) size(ctx context.Context) int {
 		s.logDatabaseError("count sending IP records", err)
 	}
 	return n
-}
-
-func (s *ipReputationStore) snapshot() map[netip.Addr]rejectedIPRecord {
-	result := map[netip.Addr]rejectedIPRecord{}
-	if s == nil || s.db == nil {
-		return result
-	}
-	rows, err := s.db.Query(context.Background(), `SELECT id,ip,block_level,blocked_until_ms,legitimate_count,last_activity_at_ms FROM ip_reputation`)
-	if err != nil {
-		return result
-	}
-	for rows.Next() {
-		var r rejectedIPRecord
-		var id, activity int64
-		var level sql.NullString
-		var blocked sql.NullInt64
-		if rows.Scan(&id, &r.IP, &level, &blocked, &r.LegitimateCount, &activity) != nil {
-			rows.Close()
-			return map[netip.Addr]rejectedIPRecord{}
-		}
-		r.ID, r.BlockLevel, r.LastActivityAt = uint64(id), level.String, timeFromMillis(activity)
-		if blocked.Valid {
-			r.BlockedUntil = timeFromMillis(blocked.Int64)
-		}
-		addr, e := netip.ParseAddr(r.IP)
-		if e != nil {
-			rows.Close()
-			return map[netip.Addr]rejectedIPRecord{}
-		}
-		result[addr] = r
-	}
-	rows.Close()
-	for addr, r := range result {
-		strikeRows, e := s.db.Query(context.Background(), `SELECT struck_at_ms FROM ip_strikes WHERE ip_reputation_id=? ORDER BY struck_at_ms,id`, r.ID)
-		if e != nil {
-			return map[netip.Addr]rejectedIPRecord{}
-		}
-		for strikeRows.Next() {
-			var ms int64
-			if strikeRows.Scan(&ms) != nil {
-				strikeRows.Close()
-				return map[netip.Addr]rejectedIPRecord{}
-			}
-			r.Strikes = append(r.Strikes, timeFromMillis(ms))
-		}
-		strikeRows.Close()
-		result[addr] = r
-	}
-	return result
 }
 
 func (s *ipReputationStore) manualAdd(ctx context.Context, addr netip.Addr) (activeIPBlock, error) {
