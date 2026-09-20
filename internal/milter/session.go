@@ -15,6 +15,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 type protocolPhase uint8
@@ -456,7 +457,10 @@ func (ss *session) prepareInboundEvidence(ctx context.Context) inboundEvidence {
 	if !ss.server.cfg.Correspondents.UseAllowlist {
 		return evidence
 	}
-	match := ss.server.correspondents.match(ctx, ss.visibleSender, ss.envelopeRecipients)
+	match, err := ss.server.correspondents.Match(ctx, ss.visibleSender, ss.envelopeRecipients)
+	if err != nil && ss.server.log != nil {
+		ss.server.log.ErrorContext(ctx, "correspondent database operation failed", "operation", "match correspondent", "error", err)
+	}
 	known := match.Known
 	if ss.server.cfg.Correspondents.Scope == "per_sender" && ss.server.cfg.Correspondents.RecipientMatch == "all" {
 		known = evidence.recipientsComplete && match.AllRecipientsMatched
@@ -498,7 +502,9 @@ func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluati
 		}
 	}
 	if !ss.authentication.Authenticated && result.err == nil && result.classification == "legitimate" {
-		ss.server.ipReputation.recordLegitimate(ctx, ss.peerIP)
+		if err := ss.server.ipReputation.RecordLegitimate(ctx, ss.peerIP); err != nil {
+			ss.server.log.ErrorContext(ctx, "cannot update sending IP reputation", "error", err)
+		}
 	}
 	if result.selected == actionAccept && ss.authentication.Authenticated {
 		ss.learnAuthenticatedRecipients(ctx)
@@ -508,10 +514,12 @@ func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluati
 }
 
 func (ss *session) recordInboundClassification(ctx context.Context, result evaluationResult, recipientsComplete, dkimAligned bool) {
-	if err := ss.server.correspondents.recordInboundClassification(ctx,
-		ss.visibleSender, ss.envelopeRecipients, recipientsComplete,
-		result.classification, result.score, ss.server.cfg.Filtering.RejectScore, dkimAligned,
-	); err != nil {
+	if err := ss.server.correspondents.RecordInboundClassification(ctx, stores.InboundClassification{
+		Correspondent: ss.visibleSender, Recipients: ss.envelopeRecipients,
+		RecipientsComplete: recipientsComplete, Classification: result.classification,
+		Score: result.score, UnwantedMinScore: ss.server.cfg.Filtering.RejectScore,
+		DKIMAligned: dkimAligned,
+	}); err != nil {
 		ss.server.log.ErrorContext(ctx, "cannot update inbound correspondent learning", "error", err)
 	}
 }
@@ -609,13 +617,13 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 }
 
 func (ss *session) touchInboundCorrespondent(ctx context.Context) {
-	if err := ss.server.correspondents.touchInbound(ctx, ss.visibleSender, ss.envelopeRecipients); err != nil {
+	if err := ss.server.correspondents.TouchInbound(ctx, ss.visibleSender, ss.envelopeRecipients); err != nil {
 		ss.server.log.ErrorContext(ctx, "cannot update correspondent activity", "error", err)
 	}
 }
 
 func (ss *session) learnAuthenticatedRecipients(ctx context.Context) {
-	if err := ss.server.correspondents.learn(ctx, ss.envelopeSender, ss.envelopeRecipients); err != nil {
+	if err := ss.server.correspondents.LearnAuthenticated(ctx, ss.envelopeSender, ss.envelopeRecipients); err != nil {
 		ss.server.log.ErrorContext(ctx, "cannot update correspondent allowlist", "error", err)
 	}
 }
@@ -716,10 +724,10 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 		"proposed_action", actionReject.String(),
 		"actual_action", actionReject.String(),
 		"source", "rejected_ip_reputation",
-		"block_level", entry.level,
-		"strike_count", entry.strikeCount,
-		"block_expires_at", entry.expires,
-		"block_remaining_ms", time.Until(entry.expires).Milliseconds(),
+		"block_level", entry.Level,
+		"strike_count", entry.StrikeCount,
+		"block_expires_at", entry.ExpiresAt,
+		"block_remaining_ms", time.Until(entry.ExpiresAt).Milliseconds(),
 		"response_sent", err == nil,
 	}
 	if err != nil {

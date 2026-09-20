@@ -22,6 +22,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 const (
@@ -260,10 +261,10 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 func (s *Server) cleanupPersistentStores(parent context.Context, trigger string) error {
 	ctx, cancel := context.WithTimeout(parent, maintenanceDatabaseTimeout)
 	defer cancel()
-	ipDeleted, ipErr := s.ipReputation.cleanup(ctx)
-	contactsDeleted, contactsErr := s.correspondents.cleanup(ctx)
-	rejectionsDeleted, rejectionsErr := s.rejectionHistory.cleanup(ctx)
-	domainsDeleted, domainsErr := s.domainRegistration.cleanup(ctx)
+	ipDeleted, ipErr := s.ipReputation.Cleanup(ctx)
+	contactsDeleted, contactsErr := s.correspondents.Cleanup(ctx)
+	rejectionsDeleted, rejectionsErr := s.rejectionHistory.Cleanup(ctx)
+	domainsDeleted, domainsErr := s.domainRegistration.Cleanup(ctx)
 	checkpoint, checkpointErr := sqlstore.CheckpointResult{}, error(nil)
 	if s.database != nil {
 		checkpoint, checkpointErr = s.database.CheckpointPassive(ctx)
@@ -273,19 +274,31 @@ func (s *Server) cleanupPersistentStores(parent context.Context, trigger string)
 	}
 
 	if s.log != nil && s.log.Enabled(ctx, slog.LevelDebug) {
+		ipRecords, ipCountErr := s.ipReputation.Count(ctx)
+		contactRecords, contactCountErr := s.correspondents.Count(ctx)
+		rejectionRecords, rejectionCountErr := s.rejectionHistory.Count(ctx)
+		domainRecords, domainCountErr := s.domainRegistration.Count(ctx)
 		s.log.Debug("SQLite cleanup completed",
 			"trigger", trigger,
 			"ip_deleted", ipDeleted,
-			"ip_records", s.ipReputation.size(ctx),
+			"ip_records", ipRecords,
 			"contacts_deleted", contactsDeleted,
-			"contacts_records", s.correspondents.size(ctx),
+			"contacts_records", contactRecords,
 			"rejections_deleted", rejectionsDeleted,
-			"rejections_records", s.rejectionHistory.size(ctx),
+			"rejections_records", rejectionRecords,
 			"domains_deleted", domainsDeleted,
-			"domains_records", s.domainRegistration.size(ctx),
+			"domains_records", domainRecords,
 			"wal_busy", checkpoint.Busy,
 			"wal_frames", checkpoint.LogFrames,
 			"wal_checkpointed_frames", checkpoint.CheckpointedFrames)
+		if countErr := errors.Join(
+			wrapStoreError("count IP reputation", ipCountErr),
+			wrapStoreError("count correspondents", contactCountErr),
+			wrapStoreError("count rejections", rejectionCountErr),
+			wrapStoreError("count domain registrations", domainCountErr),
+		); countErr != nil {
+			s.log.Warn("SQLite record counts failed", "trigger", trigger, "error", countErr)
+		}
 	}
 
 	return errors.Join(
@@ -301,6 +314,13 @@ func wrapCleanupError(store string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("clean expired %s: %w", store, err)
+}
+
+func wrapStoreError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 func (s *Server) acceptConnection(ctx context.Context, ln net.Listener) (net.Conn, error) {
@@ -422,7 +442,11 @@ func (s *Server) recordRejection(ctx context.Context, msg *message.Message, visi
 		return
 	}
 	rejectedAt := time.Now().UTC()
-	recordID, err := s.rejectionHistory.addWithIDAt(ctx, visibleSender, envelopeSender, msg.DecodedHeader("Subject"), recipients, reasons, rejectedAt)
+	recordID, err := s.rejectionHistory.AddRejection(ctx, stores.NewRejection{
+		VisibleSender: visibleSender, EnvelopeSender: envelopeSender,
+		Subject: msg.DecodedHeader("Subject"), Recipients: recipients,
+		Reasons: reasons, RejectedAt: rejectedAt,
+	})
 	if err != nil {
 		s.log.ErrorContext(ctx, "cannot save rejection history", "message_id", msg.Header("Message-ID"), "error", err)
 		recordID = 0

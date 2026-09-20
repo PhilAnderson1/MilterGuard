@@ -14,23 +14,12 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 const (
-	rejectedIPBlockShort  = "short"
-	rejectedIPBlockRepeat = "repeat"
 	repeatRefreshInterval = time.Minute
 )
-
-type ipBlock struct {
-	expires     time.Time
-	level       string
-	strikeCount int
-}
-type activeIPBlock struct {
-	IP, Hostname, Level string
-	ExpiresAt           time.Time
-}
 
 // rejectedIPRecord is the internal SQL representation used by transactional
 // reputation operations and test diagnostics.
@@ -64,7 +53,7 @@ func canonicalIPPrefix(prefix netip.Prefix) (netip.Prefix, bool) {
 	return netip.PrefixFrom(addr, bits).Masked(), true
 }
 
-func (s *Server) resolveActiveIPHostnames(parent context.Context, entries []activeIPBlock) []activeIPBlock {
+func (s *Server) resolveActiveIPHostnames(parent context.Context, entries []stores.IPBlock) []stores.IPBlock {
 	if len(entries) == 0 || s.resolver == nil || s.cfg.Milter.ConnectionDNSTimeout.Value() <= 0 {
 		return entries
 	}
@@ -75,8 +64,8 @@ func (s *Server) resolveActiveIPHostnames(parent context.Context, entries []acti
 		go func() {
 			defer wg.Done()
 			for index := range indices {
-				addr, err := netip.ParseAddr(entries[index].IP)
-				if err != nil || !connectionAddressRoutable(addr) {
+				addr := entries[index].Address
+				if !addr.IsValid() || !connectionAddressRoutable(addr) {
 					continue
 				}
 				ctx, cancel := context.WithTimeout(parent, s.cfg.Milter.ConnectionDNSTimeout.Value())
@@ -122,6 +111,7 @@ func (s *Server) reverseLookupSafely(ctx context.Context, addr netip.Addr) (name
 // their associated strike changes are committed in one transaction.
 type ipReputationStore struct {
 	db                           *sqlstore.Store
+	repository                   stores.IPReputationRepository
 	shortDuration                time.Duration
 	repeatThreshold              int
 	repeatWindow, repeatDuration time.Duration
@@ -156,6 +146,9 @@ func newIPReputationStore(cfg config.IPReputationConfig, db *sqlstore.Store, log
 	for _, domain := range cfg.DomainAllowlist {
 		s.domainAllowlist = append(s.domainAllowlist, normalizeDomain(domain))
 	}
+	if db != nil {
+		s.repository = s
+	}
 	return s
 }
 
@@ -163,8 +156,12 @@ func ipReputationFeaturesEnabled(cfg config.IPReputationConfig) bool {
 	return cfg.MaxEntries > 0 && (cfg.BlockDuration.Value() > 0 || cfg.RepeatThreshold > 0)
 }
 func (s *ipReputationStore) enabled() bool {
-	return s != nil && s.db != nil && s.maxSize > 0 && (s.shortDuration > 0 || s.repeatThreshold > 0)
+	return s != nil && s.repository != nil && s.maxSize > 0 && (s.shortDuration > 0 || s.repeatThreshold > 0)
 }
+
+var _ stores.IPReputationRepository = (*ipReputationStore)(nil)
+var _ stores.MaintainedRepository = (*ipReputationStore)(nil)
+var _ stores.PersistentIPReputationRepository = (*ipReputationStore)(nil)
 
 func (s *ipReputationStore) allowed(addr netip.Addr) (netip.Prefix, bool) {
 	if !addr.IsValid() {
@@ -192,6 +189,20 @@ func (s *ipReputationStore) add(ctx context.Context, addr netip.Addr, dns connec
 		s.debug("sending IP excluded from rejection reputation", "remote_ip", addr.String(), "reverse_dns", hostname, "matched_domain", domain, "reason", "domain_allowlist")
 		return false
 	}
+	block, err := s.repository.RecordRejection(ctx, addr)
+	if err != nil {
+		s.logDatabaseError("add sending IP strike", err)
+		return false
+	}
+	s.debug("sending IP reputation updated", "remote_ip", addr.String(), "block_level", block.Level, "strike_count", block.StrikeCount, "block_expires_at", block.ExpiresAt)
+	return block.Level != ""
+}
+
+func (s *ipReputationStore) RecordRejection(ctx context.Context, addr netip.Addr) (stores.IPBlock, error) {
+	if !s.enabled() || !addr.IsValid() {
+		return stores.IPBlock{}, nil
+	}
+	addr = canonicalIP(addr)
 	now := s.now().UTC()
 	record := rejectedIPRecord{IP: addr.String(), LastActivityAt: now}
 	strikeCount := 0
@@ -256,25 +267,23 @@ func (s *ipReputationStore) add(ctx context.Context, addr netip.Addr, dns connec
 		return nil
 	})
 	if err != nil {
-		s.logDatabaseError("add sending IP strike", err)
-		return false
+		return stores.IPBlock{}, err
 	}
-	s.debug("sending IP reputation updated", "remote_ip", addr.String(), "block_level", record.BlockLevel, "strike_count", strikeCount, "block_expires_at", record.BlockedUntil)
-	return record.BlockLevel != ""
+	block := stores.IPBlock{Address: addr, Level: stores.IPBlockLevel(record.BlockLevel), ExpiresAt: record.BlockedUntil, StrikeCount: strikeCount}
+	return block, nil
 }
 
-func (s *ipReputationStore) recordLegitimate(ctx context.Context, addr netip.Addr) {
+func (s *ipReputationStore) RecordLegitimate(ctx context.Context, addr netip.Addr) error {
 	if !s.enabled() || s.legitimatePerStrike <= 0 || !addr.IsValid() {
-		return
+		return nil
 	}
 	addr, now := canonicalIP(addr), s.now().UTC()
 	hasStrike, err := s.hasCurrentStrike(ctx, addr.String(), now)
 	if err != nil {
-		s.logDatabaseError("check sending IP for legitimate evidence", err)
-		return
+		return fmt.Errorf("check sending IP for legitimate evidence: %w", err)
 	}
 	if !hasStrike {
-		return
+		return nil
 	}
 	type legitimateResult struct {
 		record        rejectedIPRecord
@@ -335,14 +344,14 @@ func (s *ipReputationStore) recordLegitimate(ctx context.Context, addr netip.Add
 		return err
 	})
 	if err != nil {
-		s.logDatabaseError("record legitimate sending IP evidence", err)
-		return
+		return fmt.Errorf("record legitimate sending IP evidence: %w", err)
 	}
 	if outcome.removed {
 		s.debug("sending IP removed from rejection reputation", "remote_ip", addr.String(), "reason", "no_strikes")
-		return
+		return nil
 	}
 	s.debug("sending IP legitimate evidence recorded", "remote_ip", addr.String(), "legitimate_count", outcome.record.LegitimateCount, "strike_removed", outcome.strikeRemoved, "strike_count", outcome.strikeCount, "block_level", outcome.record.BlockLevel)
+	return nil
 }
 
 func (s *ipReputationStore) hasCurrentStrike(ctx context.Context, ip string, now time.Time) (bool, error) {
@@ -358,38 +367,51 @@ func (s *ipReputationStore) hasCurrentStrike(ctx context.Context, ip string, now
 	return exists != 0, err
 }
 
-func (s *ipReputationStore) lookup(ctx context.Context, addr netip.Addr) (ipBlock, bool) {
+func (s *ipReputationStore) lookup(ctx context.Context, addr netip.Addr) (stores.IPBlock, bool) {
 	if !s.enabled() || !addr.IsValid() {
-		return ipBlock{}, false
+		return stores.IPBlock{}, false
 	}
 	addr = canonicalIP(addr)
 	if _, ok := s.allowed(addr); ok {
-		return ipBlock{}, false
+		return stores.IPBlock{}, false
 	}
+	block, found, err := s.repository.ActiveBlock(ctx, addr)
+	if err != nil {
+		s.logDatabaseError("look up sending IP reputation", err)
+		return stores.IPBlock{}, false
+	}
+	return block, found
+}
+
+// ActiveBlock returns the active block for addr. A repeat block may have its
+// sliding expiry refreshed atomically as part of this lookup.
+func (s *ipReputationStore) ActiveBlock(ctx context.Context, addr netip.Addr) (stores.IPBlock, bool, error) {
+	if !s.enabled() || !addr.IsValid() {
+		return stores.IPBlock{}, false, nil
+	}
+	addr = canonicalIP(addr)
 	now := s.now().UTC()
 	block, found, err := s.readActiveBlock(ctx, addr.String(), now)
 	if err != nil {
-		s.logDatabaseError("look up sending IP reputation", err)
-		return ipBlock{}, false
+		return stores.IPBlock{}, false, err
 	}
-	if !found || block.level != rejectedIPBlockRepeat || !s.repeatRefreshOnAttempt {
-		return block, found
+	if !found || block.Level != stores.IPBlockLevelRepeat || !s.repeatRefreshOnAttempt {
+		return block, found, nil
 	}
-	if now.Add(s.repeatDuration).Sub(block.expires) < repeatRefreshInterval {
-		return block, true
+	if now.Add(s.repeatDuration).Sub(block.ExpiresAt) < repeatRefreshInterval {
+		return block, true, nil
 	}
 	refreshed, err := s.refreshRepeatBlock(ctx, addr.String(), now, &block)
 	if err != nil {
-		s.logDatabaseError("refresh repeat sending IP block", err)
-		return block, true
+		return block, true, fmt.Errorf("refresh repeat sending IP block: %w", err)
 	}
 	if refreshed {
-		s.debug("sending IP repeat block expiry refreshed", "remote_ip", addr.String(), "block_level", block.level, "strike_count", block.strikeCount, "block_expires_at", block.expires)
+		s.debug("sending IP repeat block expiry refreshed", "remote_ip", addr.String(), "block_level", block.Level, "strike_count", block.StrikeCount, "block_expires_at", block.ExpiresAt)
 	}
-	return block, true
+	return block, true, nil
 }
 
-func (s *ipReputationStore) readActiveBlock(ctx context.Context, ip string, now time.Time) (ipBlock, bool, error) {
+func (s *ipReputationStore) readActiveBlock(ctx context.Context, ip string, now time.Time) (stores.IPBlock, bool, error) {
 	var level string
 	var blockedUntil int64
 	var strikeCount int
@@ -403,16 +425,20 @@ func (s *ipReputationStore) readActiveBlock(ctx context.Context, ip string, now 
 		WHERE r.ip=? AND r.block_level IS NOT NULL AND r.blocked_until_ms>?`,
 		cutoff, ip, unixMillis(now)).Scan(&level, &blockedUntil, &strikeCount)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ipBlock{}, false, nil
+		return stores.IPBlock{}, false, nil
 	}
 	if err != nil {
-		return ipBlock{}, false, err
+		return stores.IPBlock{}, false, err
 	}
 	expires := timeFromMillis(blockedUntil)
-	return ipBlock{expires: expires, level: level, strikeCount: strikeCount}, true, nil
+	addr, parseErr := netip.ParseAddr(ip)
+	if parseErr != nil {
+		return stores.IPBlock{}, false, fmt.Errorf("parse stored IP address: %w", parseErr)
+	}
+	return stores.IPBlock{Address: addr, ExpiresAt: expires, Level: stores.IPBlockLevel(level), StrikeCount: strikeCount}, true, nil
 }
 
-func (s *ipReputationStore) refreshRepeatBlock(ctx context.Context, ip string, now time.Time, block *ipBlock) (bool, error) {
+func (s *ipReputationStore) refreshRepeatBlock(ctx context.Context, ip string, now time.Time, block *stores.IPBlock) (bool, error) {
 	expires := now.Add(s.repeatDuration)
 	result, err := s.db.Exec(ctx, `UPDATE ip_reputation
 		SET blocked_until_ms=?, last_activity_at_ms=?
@@ -426,7 +452,7 @@ func (s *ipReputationStore) refreshRepeatBlock(ctx context.Context, ip string, n
 	if err != nil || updated == 0 {
 		return false, err
 	}
-	block.expires = expires
+	block.ExpiresAt = expires
 	return true, nil
 }
 
@@ -463,7 +489,7 @@ func (s *ipReputationStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (
 		return 0, err
 	}
 	var totalRemoved int64
-	for _, level := range []any{nil, rejectedIPBlockShort, rejectedIPBlockRepeat} {
+	for _, level := range []any{nil, stores.IPBlockLevelShort, stores.IPBlockLevelRepeat} {
 		if excess == 0 {
 			return totalRemoved, nil
 		}
@@ -518,32 +544,32 @@ func (s *ipReputationStore) debug(msg string, attrs ...any) {
 		s.log.Debug(msg, attrs...)
 	}
 }
-func (s *ipReputationStore) size(ctx context.Context) int {
+func (s *ipReputationStore) Count(ctx context.Context) (int, error) {
 	if s == nil || s.db == nil {
-		return 0
+		return 0, nil
 	}
 	var n int
 	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM ip_reputation`).Scan(&n); err != nil {
-		s.logDatabaseError("count sending IP records", err)
+		return 0, fmt.Errorf("count sending IP records: %w", err)
 	}
-	return n
+	return n, nil
 }
 
-func (s *ipReputationStore) manualAdd(ctx context.Context, addr netip.Addr) (activeIPBlock, error) {
+func (s *ipReputationStore) AddManualBlock(ctx context.Context, addr netip.Addr) (stores.IPBlock, error) {
 	if !s.enabled() || !addr.IsValid() {
-		return activeIPBlock{}, fmt.Errorf("IP reputation blocking is disabled or the address is invalid")
+		return stores.IPBlock{}, fmt.Errorf("IP reputation blocking is disabled or the address is invalid")
 	}
 	addr = canonicalIP(addr)
 	if prefix, ok := s.allowed(addr); ok {
-		return activeIPBlock{}, fmt.Errorf("IP address is protected by allowlist %s", prefix)
+		return stores.IPBlock{}, fmt.Errorf("IP address is protected by allowlist %s", prefix)
 	}
 	now := s.now().UTC()
-	level, duration := rejectedIPBlockRepeat, s.repeatDuration
+	level, duration := stores.IPBlockLevelRepeat, s.repeatDuration
 	if duration <= 0 {
-		level, duration = rejectedIPBlockShort, s.shortDuration
+		level, duration = stores.IPBlockLevelShort, s.shortDuration
 	}
 	if duration <= 0 {
-		return activeIPBlock{}, fmt.Errorf("no IP block duration is configured")
+		return stores.IPBlock{}, fmt.Errorf("no IP block duration is configured")
 	}
 	expires := now.Add(duration)
 	err := s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
@@ -553,12 +579,12 @@ func (s *ipReputationStore) manualAdd(ctx context.Context, addr netip.Addr) (act
 		return nil
 	})
 	if err != nil {
-		return activeIPBlock{}, err
+		return stores.IPBlock{}, err
 	}
 	s.debug("sending IP manually blocked", "remote_ip", addr.String(), "block_level", level, "block_expires_at", expires)
-	return activeIPBlock{IP: addr.String(), Level: level, ExpiresAt: expires}, nil
+	return stores.IPBlock{Address: addr, Level: stores.IPBlockLevel(level), ExpiresAt: expires}, nil
 }
-func (s *ipReputationStore) manualDelete(ctx context.Context, addr netip.Addr) (bool, error) {
+func (s *ipReputationStore) Delete(ctx context.Context, addr netip.Addr) (bool, error) {
 	if s == nil || s.db == nil || !addr.IsValid() {
 		return false, fmt.Errorf("invalid IP address")
 	}
@@ -573,40 +599,50 @@ func (s *ipReputationStore) manualDelete(ctx context.Context, addr netip.Addr) (
 	}
 	return n > 0, nil
 }
-func (s *ipReputationStore) listActive(ctx context.Context, activitySince time.Time) ([]activeIPBlock, error) {
+func (s *ipReputationStore) ListActiveBlocks(ctx context.Context, list stores.IPBlockListQuery) (stores.IPBlockPage, error) {
 	if !s.enabled() {
-		return nil, nil
+		return stores.IPBlockPage{}, nil
+	}
+	if list.Limit < 1 {
+		return stores.IPBlockPage{}, fmt.Errorf("IP block list limit must be positive")
 	}
 	query := `SELECT ip,block_level,blocked_until_ms FROM ip_reputation WHERE block_level IS NOT NULL AND blocked_until_ms>?`
 	args := []any{unixMillis(s.now().UTC())}
-	if !activitySince.IsZero() {
+	if !list.ActiveSince.IsZero() {
 		query += ` AND last_activity_at_ms>=?`
-		args = append(args, unixMillis(activitySince))
+		args = append(args, unixMillis(list.ActiveSince))
 	}
 	query += ` ORDER BY ip LIMIT ?`
-	args = append(args, maxEmailCommandListRows+1)
+	args = append(args, list.Limit+1)
 	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
-		s.logDatabaseError("list active sending IP blocks", err)
-		return nil, err
+		return stores.IPBlockPage{}, fmt.Errorf("list active sending IP blocks: %w", err)
 	}
 	defer rows.Close()
-	var out []activeIPBlock
+	var out []stores.IPBlock
 	for rows.Next() {
-		var v activeIPBlock
+		var ip, level string
 		var ms int64
-		if err := rows.Scan(&v.IP, &v.Level, &ms); err != nil {
-			return nil, fmt.Errorf("read active sending IP block: %w", err)
+		if err := rows.Scan(&ip, &level, &ms); err != nil {
+			return stores.IPBlockPage{}, fmt.Errorf("read active sending IP block: %w", err)
 		}
-		v.ExpiresAt = timeFromMillis(ms)
+		address, err := netip.ParseAddr(ip)
+		if err != nil {
+			return stores.IPBlockPage{}, fmt.Errorf("parse stored IP address: %w", err)
+		}
+		v := stores.IPBlock{Address: address, Level: stores.IPBlockLevel(level), ExpiresAt: timeFromMillis(ms)}
 		out = append(out, v)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return stores.IPBlockPage{}, err
 	}
-	return out, nil
+	truncated := len(out) > list.Limit
+	if truncated {
+		out = out[:list.Limit]
+	}
+	return stores.IPBlockPage{Entries: out, Truncated: truncated}, nil
 }
-func (s *ipReputationStore) cleanup(ctx context.Context) (int64, error) {
+func (s *ipReputationStore) Cleanup(ctx context.Context) (int64, error) {
 	if !s.enabled() {
 		return 0, nil
 	}

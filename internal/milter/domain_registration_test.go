@@ -255,6 +255,7 @@ func TestDomainRegistrationCapacityKeepsLatestExpirations(t *testing.T) {
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	store := newTestDomainRegistrationStore(t, now, &fakeDomainRegistrationLookup{})
 	store.maxSize = 2
+	store.repository.(*domainRegistrationCache).maxSize = 2
 	for i, domain := range []string{"soon.example", "middle.example", "late.example"} {
 		putTestDomainRegistration(t, store, domainRegistrationRecord{Domain: domain, RegisteredAt: now.Add(-24 * time.Hour), ExpiresAt: now.Add(time.Duration(i+1) * 24 * time.Hour)})
 	}
@@ -279,7 +280,8 @@ func TestDomainRegistrationCapacityKeepsLatestExpirations(t *testing.T) {
 func TestDomainRegistrationLookupUsesUniqueIndex(t *testing.T) {
 	now := time.Now().UTC()
 	store := newTestDomainRegistrationStore(t, now, &fakeDomainRegistrationLookup{})
-	rows, err := store.db.Query(context.Background(), `EXPLAIN QUERY PLAN SELECT id, domain, registered_at_ms, expires_at_ms
+	cache := store.repository.(*domainRegistrationCache)
+	rows, err := cache.db.Query(context.Background(), `EXPLAIN QUERY PLAN SELECT id, domain, registered_at_ms, expires_at_ms
 		FROM domain_registrations WHERE domain = ?`, "example.com")
 	if err != nil {
 		t.Fatal(err)

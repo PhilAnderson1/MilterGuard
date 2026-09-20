@@ -15,6 +15,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 func newTestIPReputationStore(t *testing.T, cfg config.IPReputationConfig, log *slog.Logger) *ipReputationStore {
@@ -140,8 +141,8 @@ func TestRejectedIPCacheShortBlockDoesNotRefreshOnAttempt(t *testing.T) {
 		t.Fatal("IP was not found before its original expiry")
 	}
 	wantExpiry := now.Add(15 * time.Second)
-	if !entry.expires.Equal(wantExpiry) {
-		t.Fatalf("fixed expiry = %v, want %v", entry.expires, wantExpiry)
+	if !entry.ExpiresAt.Equal(wantExpiry) {
+		t.Fatalf("fixed expiry = %v, want %v", entry.ExpiresAt, wantExpiry)
 	}
 
 	now = now.Add(30 * time.Second)
@@ -335,8 +336,8 @@ func TestRejectedIPCachePromotesRepeatedAIRejections(t *testing.T) {
 		if strike == 3 {
 			wantLevel = rejectedIPBlockRepeat
 		}
-		if entry.level != wantLevel || entry.strikeCount != strike {
-			t.Fatalf("strike %d yielded level=%q count=%d", strike, entry.level, entry.strikeCount)
+		if entry.Level != wantLevel || entry.StrikeCount != strike {
+			t.Fatalf("strike %d yielded level=%q count=%d", strike, entry.Level, entry.StrikeCount)
 		}
 		now = now.Add(2 * time.Minute)
 	}
@@ -357,7 +358,7 @@ func TestRejectedIPCachePrunesStrikesOutsideWindow(t *testing.T) {
 	now = now.Add(11 * time.Minute)
 	cache.add(context.Background(), addr, connectionDNSResult{})
 	entry, ok := cache.lookup(context.Background(), addr)
-	if !ok || entry.level != rejectedIPBlockShort || entry.strikeCount != 1 {
+	if !ok || entry.Level != rejectedIPBlockShort || entry.StrikeCount != 1 {
 		t.Fatalf("old strike was not pruned: %+v, found=%v", entry, ok)
 	}
 }
@@ -382,18 +383,18 @@ func TestRejectedIPCacheRefreshesOnlyRepeatBlockWithoutAddingStrike(t *testing.T
 	cache.add(context.Background(), addr, connectionDNSResult{})
 	now = now.Add(time.Hour)
 	entry, ok := cache.lookup(context.Background(), addr)
-	if !ok || entry.strikeCount != 2 || !entry.expires.Equal(now.Add(24*time.Hour)) {
+	if !ok || entry.StrikeCount != 2 || !entry.ExpiresAt.Equal(now.Add(24*time.Hour)) {
 		t.Fatalf("repeat refresh changed strikes or expiry incorrectly: %+v, found=%v", entry, ok)
 	}
-	firstRefresh := entry.expires
+	firstRefresh := entry.ExpiresAt
 	now = now.Add(30 * time.Second)
 	entry, ok = cache.lookup(context.Background(), addr)
-	if !ok || !entry.expires.Equal(firstRefresh) {
+	if !ok || !entry.ExpiresAt.Equal(firstRefresh) {
 		t.Fatalf("repeat block was refreshed inside throttle interval: %+v, found=%v", entry, ok)
 	}
 	now = now.Add(30 * time.Second)
 	entry, ok = cache.lookup(context.Background(), addr)
-	if !ok || !entry.expires.Equal(now.Add(24*time.Hour)) {
+	if !ok || !entry.ExpiresAt.Equal(now.Add(24*time.Hour)) {
 		t.Fatalf("second repeat refresh did not extend expiry: %+v, found=%v", entry, ok)
 	}
 }
@@ -424,7 +425,7 @@ func TestRejectedIPCachePersistsReputation(t *testing.T) {
 		t.Fatal("reloaded IP reputation record has no ID")
 	}
 	entry, ok := reloaded.lookup(context.Background(), addr)
-	if !ok || entry.level != rejectedIPBlockRepeat || entry.strikeCount != 2 {
+	if !ok || entry.Level != rejectedIPBlockRepeat || entry.StrikeCount != 2 {
 		t.Fatalf("persisted repeat reputation was not restored: %+v, found=%v", entry, ok)
 	}
 }
@@ -443,7 +444,7 @@ func TestIPReputationRetainsDistinctStrikesAtSameMillisecond(t *testing.T) {
 	store.add(context.Background(), addr, connectionDNSResult{})
 	store.add(context.Background(), addr, connectionDNSResult{})
 	block, found := store.lookup(context.Background(), addr)
-	if !found || block.level != rejectedIPBlockRepeat || block.strikeCount != 2 {
+	if !found || block.Level != rejectedIPBlockRepeat || block.StrikeCount != 2 {
 		t.Fatalf("same-millisecond strikes = %+v, found=%v", block, found)
 	}
 }
@@ -466,7 +467,7 @@ func TestIPReputationConcurrentStrikesAreAtomic(t *testing.T) {
 	}
 	wait.Wait()
 	block, found := store.lookup(context.Background(), addr)
-	if !found || block.level != rejectedIPBlockRepeat || block.strikeCount != strikes {
+	if !found || block.Level != rejectedIPBlockRepeat || block.StrikeCount != strikes {
 		t.Fatalf("concurrent strikes = %+v, found=%v", block, found)
 	}
 }
@@ -541,7 +542,7 @@ func TestRejectedIPCacheRepeatExpiryDiscardsStrikeHistory(t *testing.T) {
 	}
 	cache.add(context.Background(), addr, connectionDNSResult{})
 	entry, _ := cache.lookup(context.Background(), addr)
-	if entry.level != rejectedIPBlockShort || entry.strikeCount != 1 {
+	if entry.Level != rejectedIPBlockShort || entry.StrikeCount != 1 {
 		t.Fatalf("expired repeat history was retained: %+v", entry)
 	}
 }
@@ -616,7 +617,7 @@ func TestRejectedIPCacheLegitimateDecayDoesNotCancelActiveBlock(t *testing.T) {
 	cache.add(context.Background(), addr, connectionDNSResult{})
 	cache.recordLegitimate(context.Background(), addr)
 	entry, ok := cache.lookup(context.Background(), addr)
-	if !ok || entry.level != rejectedIPBlockShort || entry.strikeCount != 0 {
+	if !ok || entry.Level != rejectedIPBlockShort || entry.StrikeCount != 0 {
 		t.Fatalf("legitimate decay cancelled an active block: %+v, found=%v", entry, ok)
 	}
 }
@@ -643,7 +644,7 @@ func TestManualIPManagementListsOnlyActiveBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].IP != manual.String() {
+	if len(got) != 1 || got[0].Address != manual {
 		t.Fatalf("expired short block was listed: %#v", got)
 	}
 	removed, err := cache.manualDelete(context.Background(), manual)
@@ -661,7 +662,7 @@ func TestActiveIPListAddsReverseDNSHostname(t *testing.T) {
 		cfg:      config.Config{Milter: config.MilterConfig{ConnectionDNSTimeout: config.Duration(time.Second)}},
 		resolver: &connectionTestResolver{ptr: []string{"dns.google."}},
 	}
-	entries := server.resolveActiveIPHostnames(context.Background(), []activeIPBlock{{IP: "8.8.8.8"}, {IP: "192.0.2.1"}})
+	entries := server.resolveActiveIPHostnames(context.Background(), []stores.IPBlock{{Address: netip.MustParseAddr("8.8.8.8")}, {Address: netip.MustParseAddr("192.0.2.1")}})
 	if entries[0].Hostname != "dns.google" {
 		t.Fatalf("resolved hostname = %q", entries[0].Hostname)
 	}

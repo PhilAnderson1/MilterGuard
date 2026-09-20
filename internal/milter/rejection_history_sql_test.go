@@ -180,7 +180,7 @@ func TestRejectionHistoryFormattingAndBounds(t *testing.T) {
 	if err := store.add(context.Background(), "news@example.net", "", "Urgent\naccount notice", []string{"alice@example.com", "bob@example.com"}, []string{"Phishing link", "Impersonated sender"}); err != nil {
 		t.Fatal(err)
 	}
-	formatted := formatRejectionHistory(rejectionEntries(t, store, "*"))
+	formatted := formatRejectionHistory(rejectionEntries(t, store, "*"), false)
 	want := "From: news@example.net\nTo: alice@example.com, bob@example.com\nSubject: Urgent account notice\nDate: 2026-09-03 12:34:56 UTC\nRejection ID: 1\nReason: Phishing link; Impersonated sender\n\n"
 	if !strings.Contains(formatted, want) {
 		t.Errorf("formatted history missing %q: %s", want, formatted)

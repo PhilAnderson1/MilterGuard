@@ -12,6 +12,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 const (
@@ -19,15 +20,6 @@ const (
 	maxRejectionReasonRunes  = 1000
 	maxRejectionRecipients   = 100
 )
-
-type rejectionHistoryEntry struct {
-	ID         uint64
-	Sender     string
-	Subject    string
-	Recipients []string
-	RejectedAt time.Time
-	Reason     string
-}
 
 // rejectionHistoryStore is a purpose-built SQL repository. One rejection row
 // represents one SMTP event; its recipients are committed in the same
@@ -47,37 +39,33 @@ func rejectionHistoryEnabled(cfg config.RejectionHistoryConfig) bool {
 	return cfg.Expiry.Value() > 0
 }
 
-func (s *rejectionHistoryStore) add(ctx context.Context, visibleSender, envelopeSender, subject string, recipients, reasons []string) error {
-	_, err := s.addWithID(ctx, visibleSender, envelopeSender, subject, recipients, reasons)
-	return err
-}
+var _ stores.RejectionRepository = (*rejectionHistoryStore)(nil)
+var _ stores.MaintainedRepository = (*rejectionHistoryStore)(nil)
+var _ stores.RejectionHistoryRepository = (*rejectionHistoryStore)(nil)
 
-func (s *rejectionHistoryStore) addWithID(ctx context.Context, visibleSender, envelopeSender, subject string, recipients, reasons []string) (uint64, error) {
-	if s == nil {
-		return 0, nil
-	}
-	return s.addWithIDAt(ctx, visibleSender, envelopeSender, subject, recipients, reasons, s.now().UTC())
-}
-
-func (s *rejectionHistoryStore) addWithIDAt(ctx context.Context, visibleSender, envelopeSender, subject string, recipients, reasons []string, rejectedAt time.Time) (uint64, error) {
+func (s *rejectionHistoryStore) AddRejection(ctx context.Context, input stores.NewRejection) (uint64, error) {
 	if s == nil || s.db == nil || !rejectionHistoryEnabled(s.cfg) {
 		return 0, nil
 	}
-	sender := normalizeEmailAddress(visibleSender)
+	rejectedAt := input.RejectedAt
+	if rejectedAt.IsZero() {
+		rejectedAt = s.now().UTC()
+	}
+	sender := normalizeEmailAddress(input.VisibleSender)
 	if sender == "" {
-		sender = normalizeEmailAddress(envelopeSender)
+		sender = normalizeEmailAddress(input.EnvelopeSender)
 	}
 	if sender == "" {
 		return 0, nil
 	}
-	unique := normalizedAddressSet(recipients, maxRejectionRecipients)
+	unique := normalizedAddressSet(input.Recipients, maxRejectionRecipients)
 	if len(unique) == 0 {
 		return 0, nil
 	}
 	normalizedRecipients := sortedSet(unique)
 	rejectedAt = rejectedAt.UTC()
-	subject = rejectionSingleLine(subject, maxRejectionSubjectRunes)
-	reason := rejectionReason(reasons)
+	subject := rejectionSingleLine(input.Subject, maxRejectionSubjectRunes)
+	reason := rejectionReason(input.Reasons)
 	recipientQuery := `INSERT INTO rejection_recipients (rejection_id, recipient) VALUES ` +
 		valuePlaceholders(len(normalizedRecipients), 2)
 
@@ -103,7 +91,7 @@ func (s *rejectionHistoryStore) addWithIDAt(ctx context.Context, visibleSender, 
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("add rejection history record: %w", err)
 	}
 	if s.log != nil {
 		s.log.Debug("rejection history updated", "new_entries", 1, "recipient_count", len(normalizedRecipients))
@@ -136,42 +124,52 @@ func rejectionSingleLine(value string, maxRunes int) string {
 	return string([]rune(value)[:maxRunes]) + "…"
 }
 
-func (s *rejectionHistoryStore) list(ctx context.Context, recipient string, requestedSince time.Time) ([]rejectionHistoryEntry, error) {
+func (s *rejectionHistoryStore) ListRejections(ctx context.Context, query stores.RejectionListQuery) (stores.RejectionPage, error) {
 	if s == nil || s.db == nil || !rejectionHistoryEnabled(s.cfg) {
-		return nil, nil
+		return stores.RejectionPage{}, nil
 	}
-	allRecipients := recipient == "*"
+	if err := query.Recipients.Validate(); err != nil {
+		return stores.RejectionPage{}, fmt.Errorf("invalid rejection list query: %w", err)
+	}
+	if query.Limit < 1 {
+		return stores.RejectionPage{}, fmt.Errorf("rejection list limit must be positive")
+	}
+	allRecipients := query.Recipients.All
+	recipient := query.Recipients.Address
 	if !allRecipients {
 		recipient = normalizeEmailAddress(recipient)
 		if recipient == "" {
-			return nil, nil
+			return stores.RejectionPage{}, nil
 		}
 	}
 	retentionSince := s.now().UTC().Add(-s.cfg.Expiry.Value())
-	if !requestedSince.IsZero() && requestedSince.After(retentionSince) {
-		retentionSince = requestedSince
+	if !query.RejectedSince.IsZero() && query.RejectedSince.After(retentionSince) {
+		retentionSince = query.RejectedSince
 	}
 	cutoff := unixMillis(retentionSince)
 	if !allRecipients {
 		rows, err := s.db.Query(ctx, `SELECT r.id, r.sender, r.subject, r.rejected_at_ms, r.reason
 			FROM rejection_recipients rr JOIN rejections r ON r.id = rr.rejection_id
 			WHERE rr.recipient = ? AND r.rejected_at_ms >= ?
-			ORDER BY r.rejected_at_ms DESC, r.id DESC LIMIT ?`, recipient, cutoff, maxEmailCommandListRows+1)
+			ORDER BY r.rejected_at_ms DESC, r.id DESC LIMIT ?`, recipient, cutoff, query.Limit+1)
 		if err != nil {
-			return nil, err
+			return stores.RejectionPage{}, fmt.Errorf("list rejection history: %w", err)
 		}
 		defer rows.Close()
-		var entries []rejectionHistoryEntry
+		var entries []stores.Rejection
 		for rows.Next() {
-			entry := rejectionHistoryEntry{Recipients: []string{recipient}}
+			entry := stores.Rejection{Recipients: []string{recipient}}
 			var id, rejectedAt int64
 			if err := rows.Scan(&id, &entry.Sender, &entry.Subject, &rejectedAt, &entry.Reason); err != nil {
-				return nil, err
+				return stores.RejectionPage{}, fmt.Errorf("read rejection history: %w", err)
 			}
 			entry.ID, entry.RejectedAt = uint64(id), time.UnixMilli(rejectedAt).UTC()
 			entries = append(entries, entry)
 		}
-		return entries, rows.Err()
+		if err := rows.Err(); err != nil {
+			return stores.RejectionPage{}, fmt.Errorf("read rejection history: %w", err)
+		}
+		return rejectionPage(entries, query.Limit), nil
 	}
 
 	rows, err := s.db.Query(ctx, `WITH limited_rejections AS (
@@ -181,40 +179,54 @@ func (s *rejectionHistoryStore) list(ctx context.Context, recipient string, requ
 		)
 		SELECT r.id, r.sender, r.subject, r.rejected_at_ms, r.reason, rr.recipient
 		FROM limited_rejections r JOIN rejection_recipients rr ON rr.rejection_id = r.id
-		ORDER BY r.rejected_at_ms DESC, r.id DESC, rr.recipient ASC`, cutoff, maxEmailCommandListRows+1)
+		ORDER BY r.rejected_at_ms DESC, r.id DESC, rr.recipient ASC`, cutoff, query.Limit+1)
 	if err != nil {
-		return nil, err
+		return stores.RejectionPage{}, fmt.Errorf("list rejection history: %w", err)
 	}
 	defer rows.Close()
-	var entries []rejectionHistoryEntry
+	var entries []stores.Rejection
 	for rows.Next() {
 		var id, rejectedAt int64
 		var sender, subject, reason, currentRecipient string
 		if err := rows.Scan(&id, &sender, &subject, &rejectedAt, &reason, &currentRecipient); err != nil {
-			return nil, err
+			return stores.RejectionPage{}, fmt.Errorf("read rejection history: %w", err)
 		}
 		if len(entries) == 0 || entries[len(entries)-1].ID != uint64(id) {
-			entries = append(entries, rejectionHistoryEntry{ID: uint64(id), Sender: sender, Subject: subject,
+			entries = append(entries, stores.Rejection{ID: uint64(id), Sender: sender, Subject: subject,
 				RejectedAt: time.UnixMilli(rejectedAt).UTC(), Reason: reason})
 		}
 		entries[len(entries)-1].Recipients = append(entries[len(entries)-1].Recipients, currentRecipient)
 	}
-	return entries, rows.Err()
+	if err := rows.Err(); err != nil {
+		return stores.RejectionPage{}, fmt.Errorf("read rejection history: %w", err)
+	}
+	return rejectionPage(entries, query.Limit), nil
 }
 
-func (s *rejectionHistoryStore) getByID(ctx context.Context, id uint64, recipient string, administrator bool) (rejectionHistoryEntry, bool, error) {
+func rejectionPage(entries []stores.Rejection, limit int) stores.RejectionPage {
+	truncated := len(entries) > limit
+	if truncated {
+		entries = entries[:limit]
+	}
+	return stores.RejectionPage{Entries: entries, Truncated: truncated}
+}
+
+func (s *rejectionHistoryStore) RejectionByID(ctx context.Context, id uint64, scope stores.RecipientScope) (stores.Rejection, bool, error) {
 	if s == nil || s.db == nil || !rejectionHistoryEnabled(s.cfg) || id == 0 {
-		return rejectionHistoryEntry{}, false, nil
+		return stores.Rejection{}, false, nil
+	}
+	if err := scope.Validate(); err != nil {
+		return stores.Rejection{}, false, err
 	}
 	cutoff := unixMillis(s.now().UTC().Add(-s.cfg.Expiry.Value()))
 	query := `SELECT r.id, r.sender, r.subject, r.rejected_at_ms, r.reason, rr.recipient
 		FROM rejections r JOIN rejection_recipients rr ON rr.rejection_id = r.id
 		WHERE r.id = ? AND r.rejected_at_ms >= ?`
 	args := []any{id, cutoff}
-	if !administrator {
-		recipient = normalizeEmailAddress(recipient)
+	if !scope.All {
+		recipient := normalizeEmailAddress(scope.Address)
 		if recipient == "" {
-			return rejectionHistoryEntry{}, false, nil
+			return stores.Rejection{}, false, nil
 		}
 		query += ` AND rr.recipient = ?`
 		args = append(args, recipient)
@@ -222,24 +234,24 @@ func (s *rejectionHistoryStore) getByID(ctx context.Context, id uint64, recipien
 	query += ` ORDER BY rr.recipient`
 	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
-		return rejectionHistoryEntry{}, false, err
+		return stores.Rejection{}, false, fmt.Errorf("look up rejection history record: %w", err)
 	}
 	defer rows.Close()
-	var entry rejectionHistoryEntry
+	var entry stores.Rejection
 	for rows.Next() {
 		var rowID, rejectedAt int64
 		var sender, subject, reason, currentRecipient string
 		if err := rows.Scan(&rowID, &sender, &subject, &rejectedAt, &reason, &currentRecipient); err != nil {
-			return rejectionHistoryEntry{}, false, err
+			return stores.Rejection{}, false, fmt.Errorf("read rejection history record: %w", err)
 		}
 		if entry.ID == 0 {
-			entry = rejectionHistoryEntry{ID: uint64(rowID), Sender: sender, Subject: subject,
+			entry = stores.Rejection{ID: uint64(rowID), Sender: sender, Subject: subject,
 				RejectedAt: time.UnixMilli(rejectedAt).UTC(), Reason: reason}
 		}
 		entry.Recipients = append(entry.Recipients, currentRecipient)
 	}
 	if err := rows.Err(); err != nil {
-		return rejectionHistoryEntry{}, false, err
+		return stores.Rejection{}, false, fmt.Errorf("read rejection history record: %w", err)
 	}
 	return entry, entry.ID != 0, nil
 }
@@ -253,12 +265,12 @@ func (s *rejectionHistoryStore) enforceCapacityTx(ctx context.Context, tx *sql.T
 		SELECT id FROM rejections ORDER BY rejected_at_ms, id LIMIT ?
 	)`, excess)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("clean rejection history: %w", err)
 	}
 	return result.RowsAffected()
 }
 
-func (s *rejectionHistoryStore) cleanup(ctx context.Context) (int64, error) {
+func (s *rejectionHistoryStore) Cleanup(ctx context.Context) (int64, error) {
 	if s == nil || s.db == nil || !rejectionHistoryEnabled(s.cfg) {
 		return 0, nil
 	}
@@ -285,18 +297,18 @@ func (s *rejectionHistoryStore) cleanup(ctx context.Context) (int64, error) {
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("clean rejection history: %w", err)
 	}
 	return deleted, nil
 }
 
-func (s *rejectionHistoryStore) size(ctx context.Context) int {
+func (s *rejectionHistoryStore) Count(ctx context.Context) (int, error) {
 	if s == nil || s.db == nil {
-		return 0
+		return 0, nil
 	}
 	var count int
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rejections`).Scan(&count); err != nil {
-		return 0
+		return 0, fmt.Errorf("count rejection history: %w", err)
 	}
-	return count
+	return count, nil
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 func commandTestServer(t *testing.T, allowUsers bool, administrators []string) (*Server, *countingAnalyzer, net.Conn, <-chan struct{}) {
@@ -223,10 +224,10 @@ func TestAllowlistListCommandAuthorization(t *testing.T) {
 
 func TestAllowlistFormattingIncludesRecipientsOnlyForAdministrators(t *testing.T) {
 	entries := []correspondentEntry{{Correspondent: "news@example.net", LocalAddress: "phil@example.com", WhitelistType: whitelistRepeatedLegitimate}}
-	if got := formatAllowlist(entries, false); got != "Sender: news@example.net\nAdded: learned from repeated legitimate inbound emails\n\n" {
+	if got := formatAllowlist(entries, false, false); got != "Sender: news@example.net\nAdded: learned from repeated legitimate inbound emails\n\n" {
 		t.Fatalf("ordinary-user output = %q", got)
 	}
-	if got := formatAllowlist(entries, true); got != "Sender: news@example.net\nRecipient: phil@example.com\nAdded: learned from repeated legitimate inbound emails\n\n" {
+	if got := formatAllowlist(entries, true, false); got != "Sender: news@example.net\nRecipient: phil@example.com\nAdded: learned from repeated legitimate inbound emails\n\n" {
 		t.Fatalf("administrator output = %q", got)
 	}
 }
@@ -239,7 +240,7 @@ func TestEmailCommandListFormattingLimitsRows(t *testing.T) {
 			WhitelistType: whitelistManual,
 		}
 	}
-	formatted := formatAllowlist(entries, false)
+	formatted := formatAllowlist(entries, false, false)
 	if strings.Contains(formatted, "sender-1000@example.net") {
 		t.Fatal("allowlist output contains a record beyond the hard limit")
 	}
@@ -270,7 +271,7 @@ func TestAllowlistListIncludesRecipientOnlyForAdministratorWildcard(t *testing.T
 }
 
 func TestAllowlistAddedDescriptions(t *testing.T) {
-	tests := map[string]string{
+	tests := map[stores.CorrespondentKind]string{
 		whitelistManual:                "manually",
 		whitelistAuthenticatedOutbound: "learned from authenticated outbound email",
 		whitelistRepeatedLegitimate:    "learned from repeated legitimate inbound emails",

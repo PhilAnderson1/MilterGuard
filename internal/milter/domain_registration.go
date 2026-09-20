@@ -20,6 +20,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlstore"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -30,24 +31,24 @@ const (
 	maxRDAPResponseBytes           int64 = 1 << 20
 )
 
-type domainRegistrationRecord struct {
-	ID           uint64
-	Domain       string
-	RegisteredAt time.Time
-	ExpiresAt    time.Time
+type domainRegistrationStore struct {
+	repository  stores.DomainRegistrationRepository
+	maintenance stores.MaintainedRepository
+	lookup      domainRegistrationLookup
+	timeout     time.Duration
+	slots       chan struct{}
+	maxSize     int
+	now         func() time.Time
+	log         *slog.Logger
+	mu          sync.Mutex
+	failures    map[string]time.Time
+	inflight    map[string]chan struct{}
 }
 
-type domainRegistrationStore struct {
-	db       *sqlstore.Store
-	lookup   domainRegistrationLookup
-	timeout  time.Duration
-	slots    chan struct{}
-	maxSize  int
-	now      func() time.Time
-	log      *slog.Logger
-	mu       sync.Mutex
-	failures map[string]time.Time
-	inflight map[string]chan struct{}
+type domainRegistrationCache struct {
+	db      *sqlstore.Store
+	maxSize int
+	now     func() time.Time
 }
 
 type domainRegistrationLookup interface {
@@ -60,9 +61,14 @@ func newDomainRegistrationStore(cfg config.DomainRegistrationConfig, db *sqlstor
 		store.slots = make(chan struct{}, min(8, cfg.MaxEntries))
 		store.lookup = newRDAPClient(cfg.Timeout.Value())
 	}
-	store.db = db
+	cache := &domainRegistrationCache{db: db, maxSize: cfg.MaxEntries, now: func() time.Time { return store.now() }}
+	store.repository, store.maintenance = cache, cache
 	return store
 }
+
+var _ stores.DomainRegistrationRepository = (*domainRegistrationCache)(nil)
+var _ stores.MaintainedRepository = (*domainRegistrationCache)(nil)
+var _ stores.DomainRegistrationCache = (*domainRegistrationCache)(nil)
 
 func domainRegistrationEnabled(cfg config.DomainRegistrationConfig) bool {
 	return cfg.Enabled
@@ -79,11 +85,11 @@ func registrableDomain(domain string) string {
 
 func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (message.DomainRegistrationInfo, error) {
 	domain = registrableDomain(domain)
-	if s == nil || s.db == nil || s.lookup == nil || domain == "" {
+	if s == nil || s.repository == nil || s.lookup == nil || domain == "" {
 		return message.DomainRegistrationInfo{}, nil
 	}
 	now := s.now().UTC()
-	record, found, err := s.get(ctx, domain)
+	record, found, err := s.repository.DomainRegistration(ctx, domain)
 	if err != nil {
 		return message.DomainRegistrationInfo{}, err
 	}
@@ -100,7 +106,7 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 		s.mu.Unlock()
 		select {
 		case <-pending:
-			record, found, err := s.get(ctx, domain)
+			record, found, err := s.repository.DomainRegistration(ctx, domain)
 			if err != nil {
 				return message.DomainRegistrationInfo{}, err
 			}
@@ -130,9 +136,9 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 	if err == nil && (!registeredAt.Before(expiresAt) || registeredAt.After(now) || !expiresAt.After(now)) {
 		err = fmt.Errorf("RDAP returned invalid or expired registration dates for %s", domain)
 	}
-	refreshed := domainRegistrationRecord{Domain: domain, RegisteredAt: registeredAt.UTC(), ExpiresAt: expiresAt.UTC()}
+	refreshed := stores.DomainRegistration{Domain: domain, RegisteredAt: registeredAt.UTC(), ExpiresAt: expiresAt.UTC()}
 	if err == nil {
-		err = s.put(ctx, refreshed)
+		err = s.repository.PutDomainRegistration(ctx, refreshed)
 	}
 	s.mu.Lock()
 	delete(s.inflight, domain)
@@ -153,16 +159,19 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 	return domainRegistrationEvidence(refreshed), nil
 }
 
-func (s *domainRegistrationStore) get(ctx context.Context, domain string) (domainRegistrationRecord, bool, error) {
-	var record domainRegistrationRecord
+func (s *domainRegistrationCache) DomainRegistration(ctx context.Context, domain string) (stores.DomainRegistration, bool, error) {
+	if s == nil || s.db == nil {
+		return stores.DomainRegistration{}, false, nil
+	}
+	var record stores.DomainRegistration
 	var id, registeredAt, expiresAt int64
 	err := s.db.QueryRow(ctx, `SELECT id, domain, registered_at_ms, expires_at_ms
 		FROM domain_registrations WHERE domain = ?`, domain).Scan(&id, &record.Domain, &registeredAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domainRegistrationRecord{}, false, nil
+		return stores.DomainRegistration{}, false, nil
 	}
 	if err != nil {
-		return domainRegistrationRecord{}, false, err
+		return stores.DomainRegistration{}, false, err
 	}
 	record.ID = uint64(id)
 	record.RegisteredAt = time.UnixMilli(registeredAt).UTC()
@@ -170,7 +179,10 @@ func (s *domainRegistrationStore) get(ctx context.Context, domain string) (domai
 	return record, true, nil
 }
 
-func (s *domainRegistrationStore) put(ctx context.Context, record domainRegistrationRecord) error {
+func (s *domainRegistrationCache) PutDomainRegistration(ctx context.Context, record stores.DomainRegistration) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("domain registration repository is unavailable")
+	}
 	return s.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO domain_registrations
 			(domain, registered_at_ms, expires_at_ms) VALUES (?, ?, ?)
@@ -183,7 +195,7 @@ func (s *domainRegistrationStore) put(ctx context.Context, record domainRegistra
 	})
 }
 
-func (s *domainRegistrationStore) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+func (s *domainRegistrationCache) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
 	var excess int
 	if err := tx.QueryRowContext(ctx, `SELECT max(count(*) - ?, 0) FROM domain_registrations`, s.maxSize).Scan(&excess); err != nil || excess == 0 {
 		return 0, err
@@ -197,8 +209,8 @@ func (s *domainRegistrationStore) enforceCapacityTx(ctx context.Context, tx *sql
 	return result.RowsAffected()
 }
 
-func (s *domainRegistrationStore) cleanup(ctx context.Context) (int64, error) {
-	if s == nil || s.db == nil || s.lookup == nil {
+func (s *domainRegistrationCache) Cleanup(ctx context.Context) (int64, error) {
+	if s == nil || s.db == nil {
 		return 0, nil
 	}
 	var deleted int64
@@ -228,15 +240,29 @@ func (s *domainRegistrationStore) cleanup(ctx context.Context) (int64, error) {
 	return deleted, nil
 }
 
-func (s *domainRegistrationStore) size(ctx context.Context) int {
+func (s *domainRegistrationCache) Count(ctx context.Context) (int, error) {
 	if s == nil || s.db == nil {
-		return 0
+		return 0, nil
 	}
 	var count int
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM domain_registrations`).Scan(&count); err != nil {
-		return 0
+		return 0, err
 	}
-	return count
+	return count, nil
+}
+
+func (s *domainRegistrationStore) Cleanup(ctx context.Context) (int64, error) {
+	if s == nil || s.maintenance == nil || s.lookup == nil {
+		return 0, nil
+	}
+	return s.maintenance.Cleanup(ctx)
+}
+
+func (s *domainRegistrationStore) Count(ctx context.Context) (int, error) {
+	if s == nil || s.maintenance == nil {
+		return 0, nil
+	}
+	return s.maintenance.Count(ctx)
 }
 
 func (s *domainRegistrationStore) lookupSafely(ctx context.Context, domain string) (registeredAt, expiresAt time.Time, err error) {
@@ -267,7 +293,7 @@ func (s *domainRegistrationStore) pruneFailuresLocked(now time.Time) {
 	}
 }
 
-func domainRegistrationEvidence(record domainRegistrationRecord) message.DomainRegistrationInfo {
+func domainRegistrationEvidence(record stores.DomainRegistration) message.DomainRegistrationInfo {
 	return message.DomainRegistrationInfo{Available: true, Domain: record.Domain, RegisteredAt: record.RegisteredAt}
 }
 

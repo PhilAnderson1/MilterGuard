@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
-func (store *correspondentStore) addManual(ctx context.Context, sender, recipient string) (bool, error) {
+func (store *correspondentStore) AddManual(ctx context.Context, sender, recipient string) (bool, error) {
 	if store == nil || store.db == nil || !store.cfg.UseAllowlist {
 		return false, fmt.Errorf("correspondent allowlisting is disabled or unavailable")
 	}
@@ -30,13 +32,13 @@ func (store *correspondentStore) addManual(ctx context.Context, sender, recipien
 			ON CONFLICT(local_address, correspondent) DO UPDATE SET
 			last_activity_at_ms = excluded.last_activity_at_ms,
 			whitelist_type = excluded.whitelist_type,
-			legitimate_email_count = 0`, recipient, sender, unixMillis(now), unixMillis(now), whitelistManual)
+			legitimate_email_count = 0`, recipient, sender, unixMillis(now), unixMillis(now), stores.CorrespondentKindManual)
 		return err
 	})
 	return created, err
 }
 
-func (store *correspondentStore) deleteManual(ctx context.Context, sender, recipient string) (int, error) {
+func (store *correspondentStore) DeleteManual(ctx context.Context, sender string, scope stores.RecipientScope) (int, error) {
 	if store == nil || store.db == nil || !store.cfg.UseAllowlist {
 		return 0, fmt.Errorf("correspondent allowlisting is disabled or unavailable")
 	}
@@ -46,8 +48,11 @@ func (store *correspondentStore) deleteManual(ctx context.Context, sender, recip
 	}
 	query := `DELETE FROM correspondents WHERE correspondent = ?`
 	args := []any{sender}
-	if recipient != "*" {
-		recipient = normalizeEmailAddress(recipient)
+	if err := scope.Validate(); err != nil {
+		return 0, err
+	}
+	if !scope.All {
+		recipient := normalizeEmailAddress(scope.Address)
 		if recipient == "" {
 			return 0, fmt.Errorf("recipient must be a valid email address or *")
 		}

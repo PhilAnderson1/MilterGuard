@@ -22,6 +22,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 const internalMessageHeader = "X-MilterGuard-Internal"
@@ -438,13 +439,20 @@ func (p *CommandProcessor) executeCommand(parent context.Context, command emailC
 	case "help":
 		return textCommandResult(func() string { return commandHelp(admin, actor.DefaultRecipient) }), nil
 	case "rejections":
-		entries, err := s.rejectionHistory.list(ctx, command.recipient, cutoff)
+		page, err := p.rejections.ListRejections(ctx, stores.RejectionListQuery{
+			Recipients: commandRecipientScope(command.recipient), RejectedSince: cutoff, Limit: maxEmailCommandListRows,
+		})
+		entries := page.Entries
 		if actor.NewestLast {
 			reverseSlice(entries)
 		}
-		return textCommandResult(func() string { return formatRejectionHistory(entries) }), err
+		return textCommandResult(func() string { return formatRejectionHistory(entries, page.Truncated) }), err
 	case "rejection":
-		entry, found, err := s.rejectionHistory.getByID(ctx, command.rejectionID, actor.DefaultRecipient, admin)
+		scope := stores.RecipientScope{Address: actor.DefaultRecipient}
+		if admin {
+			scope = stores.RecipientScope{All: true}
+		}
+		entry, found, err := p.rejections.RejectionByID(ctx, command.rejectionID, scope)
 		if err != nil {
 			return nil, err
 		}
@@ -453,20 +461,25 @@ func (p *CommandProcessor) executeCommand(parent context.Context, command emailC
 		}
 		return func() commandReplyContent { return s.rejectionDetail(entry) }, nil
 	case "whitelist_list":
-		entries, err := s.correspondents.listAllowlist(ctx, command.recipient, cutoff)
+		page, err := p.correspondents.ListCorrespondents(ctx, stores.CorrespondentListQuery{
+			Recipients: commandRecipientScope(command.recipient), ActiveSince: cutoff, Limit: maxEmailCommandListRows,
+		})
 		if err != nil {
 			return nil, err
 		}
+		entries := page.Entries
 		if actor.NewestLast {
 			reverseSlice(entries)
 		}
-		return textCommandResult(func() string { return formatAllowlist(entries, includeAllowlistRecipient(admin, command.recipient)) }), nil
+		return textCommandResult(func() string {
+			return formatAllowlist(entries, includeAllowlistRecipient(admin, command.recipient), page.Truncated)
+		}), nil
 	case "ip_list", "ip_list_lookup":
-		entries, err := s.ipReputation.listActive(ctx, cutoff)
+		page, err := p.ipReputation.ListActiveBlocks(ctx, stores.IPBlockListQuery{ActiveSince: cutoff, Limit: maxEmailCommandListRows})
 		if err != nil {
 			return nil, err
 		}
-		entries, truncated := limitEmailCommandRows(entries)
+		entries, truncated := page.Entries, page.Truncated
 		if actor.NewestLast {
 			reverseSlice(entries)
 		}
@@ -478,11 +491,11 @@ func (p *CommandProcessor) executeCommand(parent context.Context, command emailC
 			return formatActiveIPBlocks(entries, lookup, truncated)
 		}), nil
 	case "ip_add":
-		block, err := s.ipReputation.manualAdd(ctx, command.ip)
-		outcome := fmt.Sprintf("blocked %s until %s", block.IP, block.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+		block, err := p.ipReputation.AddManualBlock(ctx, command.ip)
+		outcome := fmt.Sprintf("blocked %s until %s", block.Address, block.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 		return textCommandResult(func() string { return outcome + ".\n" }), err
 	case "ip_delete":
-		removed, err := s.ipReputation.manualDelete(ctx, command.ip)
+		removed, err := p.ipReputation.Delete(ctx, command.ip)
 		outcome := "IP address was not present"
 		if removed {
 			outcome = "IP reputation record deleted"
@@ -491,7 +504,7 @@ func (p *CommandProcessor) executeCommand(parent context.Context, command emailC
 	case "whitelist":
 		var outcome string
 		if command.verb == "ADD" {
-			created, err := s.correspondents.addManual(ctx, command.sender, command.recipient)
+			created, err := p.correspondents.AddManual(ctx, command.sender, command.recipient)
 			if created {
 				outcome = "allowlist entry added"
 			} else {
@@ -499,7 +512,7 @@ func (p *CommandProcessor) executeCommand(parent context.Context, command emailC
 			}
 			return textCommandResult(func() string { return outcome + ".\n" }), err
 		}
-		removed, err := s.correspondents.deleteManual(ctx, command.sender, command.recipient)
+		removed, err := p.correspondents.DeleteManual(ctx, command.sender, commandRecipientScope(command.recipient))
 		outcome = fmt.Sprintf("removed %d allowlist entries", removed)
 		return textCommandResult(func() string { return outcome + ".\n" }), err
 	default:
@@ -526,7 +539,14 @@ func commandHelp(admin bool, defaultRecipient ...string) string {
 	return text
 }
 
-func (s *Server) rejectionDetail(entry rejectionHistoryEntry) commandReplyContent {
+func commandRecipientScope(recipient string) stores.RecipientScope {
+	if recipient == "*" {
+		return stores.RecipientScope{All: true}
+	}
+	return stores.RecipientScope{Address: recipient}
+}
+
+func (s *Server) rejectionDetail(entry stores.Rejection) commandReplyContent {
 	processedBody := "Saved message is not available."
 	var attachments []commandReplyAttachment
 	if s.rejectedMail != nil {
@@ -559,7 +579,7 @@ func (s *Server) rejectionDetail(entry rejectionHistoryEntry) commandReplyConten
 	return commandReplyContent{Text: formatRejectionDetail(entry, processedBody), Attachments: attachments}
 }
 
-func formatRejectionDetail(entry rejectionHistoryEntry, processedBody string) string {
+func formatRejectionDetail(entry stores.Rejection, processedBody string) string {
 	subject := entry.Subject
 	if subject == "" {
 		subject = "Unavailable"
@@ -573,11 +593,12 @@ func formatRejectionDetail(entry rejectionHistoryEntry, processedBody string) st
 		entry.RejectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), reason, processedBody)
 }
 
-func formatAllowlist(entries []correspondentEntry, includeRecipient bool) string {
+func formatAllowlist(entries []stores.Correspondent, includeRecipient, truncated bool) string {
 	if len(entries) == 0 {
 		return "No whitelisted correspondent addresses were found.\n"
 	}
-	entries, truncated := limitEmailCommandRows(entries)
+	entries, additionallyTruncated := limitEmailCommandRows(entries)
+	truncated = truncated || additionallyTruncated
 	var body strings.Builder
 	for _, entry := range entries {
 		var record strings.Builder
@@ -600,20 +621,20 @@ func includeAllowlistRecipient(admin bool, recipient string) bool {
 	return admin && recipient == "*"
 }
 
-func allowlistAddedDescription(whitelistType string) string {
+func allowlistAddedDescription(whitelistType stores.CorrespondentKind) string {
 	switch whitelistType {
-	case whitelistManual:
+	case stores.CorrespondentKindManual:
 		return "manually"
-	case whitelistAuthenticatedOutbound:
+	case stores.CorrespondentKindAuthenticatedOutbound:
 		return "learned from authenticated outbound email"
-	case whitelistRepeatedLegitimate:
+	case stores.CorrespondentKindRepeatedLegitimateInbound:
 		return "learned from repeated legitimate inbound emails"
 	default:
 		return "unknown"
 	}
 }
 
-func formatActiveIPBlocks(entries []activeIPBlock, includeHostname, truncated bool) string {
+func formatActiveIPBlocks(entries []stores.IPBlock, includeHostname, truncated bool) string {
 	if len(entries) == 0 {
 		return "No active IP blocks were found.\n"
 	}
@@ -625,9 +646,9 @@ func formatActiveIPBlocks(entries []activeIPBlock, includeHostname, truncated bo
 			if hostname == "" {
 				hostname = "not found"
 			}
-			record = fmt.Sprintf("IP: %s (%s) Type: %s Expires: %s\n", entry.IP, hostname, entry.Level, entry.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+			record = fmt.Sprintf("IP: %s (%s) Type: %s Expires: %s\n", entry.Address, hostname, entry.Level, entry.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 		} else {
-			record = fmt.Sprintf("IP: %s Type: %s Expires: %s\n", entry.IP, entry.Level, entry.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+			record = fmt.Sprintf("IP: %s Type: %s Expires: %s\n", entry.Address, entry.Level, entry.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 		}
 		if !appendBoundedCommandReply(&body, record) {
 			return body.String()
@@ -639,11 +660,12 @@ func formatActiveIPBlocks(entries []activeIPBlock, includeHostname, truncated bo
 	return body.String()
 }
 
-func formatRejectionHistory(entries []rejectionHistoryEntry) string {
+func formatRejectionHistory(entries []stores.Rejection, truncated bool) string {
 	if len(entries) == 0 {
 		return "No retained rejected-email records were found.\n"
 	}
-	entries, truncated := limitEmailCommandRows(entries)
+	entries, additionallyTruncated := limitEmailCommandRows(entries)
+	truncated = truncated || additionallyTruncated
 	var body strings.Builder
 	for _, entry := range entries {
 		subject := entry.Subject

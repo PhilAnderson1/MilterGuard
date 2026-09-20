@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 // CommandActor describes the authority and default local address of a command
@@ -36,11 +37,18 @@ type CommandResponse struct {
 // CommandProcessor is the shared parser and executor used by email and
 // interactive administration commands.
 type CommandProcessor struct {
-	server *Server
+	server         *Server
+	correspondents stores.CorrespondentAdminRepository
+	rejections     stores.RejectionRepository
+	ipReputation   stores.IPReputationRepository
 }
 
 func newCommandProcessor(server *Server) *CommandProcessor {
-	return &CommandProcessor{server: server}
+	if server == nil {
+		return &CommandProcessor{}
+	}
+	return &CommandProcessor{server: server, correspondents: server.correspondents,
+		rejections: server.rejectionHistory, ipReputation: server.ipReputation.repository}
 }
 
 // OpenCommandProcessor opens the configured persistent state without starting
