@@ -1622,6 +1622,49 @@ func TestKnownCorrespondentIsSuppliedAsAIEvidence(t *testing.T) {
 	}
 }
 
+func TestMultipleFromHeadersCannotBypassOrTeachSenderTrust(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
+	server, conn, done := testServer(t, analyzer)
+	cfg := config.CorrespondentsConfig{
+		LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true,
+		UseAllowlist: true, BypassAI: true, Scope: "per_sender", RecipientMatch: "all",
+		LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99,
+		MaxEntries: 100,
+	}
+	setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
+	setTestFiltering(server, func(cfg *config.FilteringConfig) {
+		cfg.SenderDomainAllowlist = []string{"example.com"}
+	})
+	if err := server.sessions.policy.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "alice@example.com"),
+		envelopeFrame(commandRecipient, "philip@invades.net"),
+		headerFrame("From", "Alice <alice@example.com>"),
+		headerFrame("From", "Bob <bob@example.net>"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	_ = conn.Close()
+	<-done
+	if got := analyzer.calls.Load(); got != 1 {
+		t.Fatalf("ambiguous sender AI analyses = %d, want 1", got)
+	}
+	if match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "bob@example.net", []string{"philip@invades.net"}); match.Known {
+		t.Fatal("ambiguous sender was learned as a correspondent")
+	}
+	if got := len(server.sessions.policy.correspondents.(*correspondentStore).snapshot()); got != 1 {
+		t.Fatalf("correspondent records after ambiguous sender = %d, want the original record only", got)
+	}
+}
+
 func TestKnownCorrespondentBypassAuthenticationPolicy(t *testing.T) {
 	for _, test := range []struct {
 		name            string

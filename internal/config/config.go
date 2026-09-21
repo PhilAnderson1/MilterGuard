@@ -94,6 +94,7 @@ type AttachmentsConfig struct {
 	MaxArchiveUncompressedBytes int64    `yaml:"archive_max_uncompressed_bytes"`
 	EncryptedArchiveAction      string   `yaml:"encrypted_archive_action"`
 	UnscannableAction           string   `yaml:"unscannable_action"`
+	InvalidMIMEAction           string   `yaml:"invalid_mime_action"`
 	RejectMessage               string   `yaml:"reject_message"`
 }
 type MilterConfig struct {
@@ -236,7 +237,7 @@ func defaults() Config {
 			BlockedExtensions: []string{"exe", "com", "scr", "pif", "bat", "cmd", "ps1", "vbs", "js", "jse", "msi", "dll", "jar", "lnk", "iso", "7z", "rar"},
 			InspectSignatures: true, InspectArchives: true, MaxAttachmentBytes: 10 << 20,
 			MaxArchiveDepth: 2, MaxArchiveFiles: 100, MaxArchiveUncompressedBytes: 50 << 20,
-			EncryptedArchiveAction: "reject", UnscannableAction: "accept",
+			EncryptedArchiveAction: "reject", UnscannableAction: "accept", InvalidMIMEAction: "reject",
 			RejectMessage: "Message rejected because it contains a prohibited executable attachment",
 		},
 		EmailCommands: EmailCommandsConfig{
@@ -373,6 +374,9 @@ func (c Config) Validate() error {
 	}
 	if !validAttachmentAction(attachments.UnscannableAction) {
 		return fmt.Errorf("attachments.unscannable_action must be accept, reject, or tempfail")
+	}
+	if attachments.InvalidMIMEAction != "accept" && attachments.InvalidMIMEAction != "reject" {
+		return fmt.Errorf("attachments.invalid_mime_action must be accept or reject")
 	}
 	if strings.TrimSpace(attachments.RejectMessage) == "" {
 		return fmt.Errorf("attachments.reject_message must not be empty")

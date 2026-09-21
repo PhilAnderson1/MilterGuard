@@ -93,7 +93,7 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 			}
 			return textResponse(command.canonical, func() string { return outcome + ".\n" }), err
 		}
-		removed, err := p.correspondents.DeleteManual(ctx, command.sender, recipientScope(command.recipient))
+		removed, err := p.correspondents.DeleteCorrespondent(ctx, command.sender, recipientScope(command.recipient))
 		outcome := fmt.Sprintf("removed %d allowlist entries", removed)
 		return textResponse(command.canonical, func() string { return outcome + ".\n" }), err
 	default:

@@ -20,10 +20,12 @@ type Message struct {
 	TrustedAuthservIDs      []string
 	Truncated               bool
 	BodyTruncated           bool
+	MIMEHeadersTruncated    bool
 	MaxBytes                int64
 	bodySize                int64
 	headerSize              int64
 	headerBytesByName       map[string]int64
+	fromHeaderCount         int
 	toHeaderSeen            bool
 	archiveHeaders          bytes.Buffer
 	archiveHeaderBytes      int64
@@ -89,6 +91,7 @@ const (
 	maxRetainedHeaderBytesPerName = 16 << 10
 	maxAuthenticationHeaderBytes  = 32 << 10
 	maxHeaderValueBytes           = 8 << 10
+	maxMIMEHeaderValueBytes       = 64 << 10
 	archiveTruncationHeader       = "X-MilterGuard-Archive-Truncated: yes\r\n"
 )
 
@@ -144,6 +147,9 @@ func New(maxBytes int64) *Message {
 func (m *Message) AddHeader(name, value string) {
 	m.addArchiveHeader(name, value)
 	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "from" {
+		m.fromHeaderCount++
+	}
 	if name == "to" {
 		m.toHeaderSeen = true
 	}
@@ -155,21 +161,33 @@ func (m *Message) AddHeader(name, value string) {
 	}
 	value = strings.TrimSpace(value)
 	value = strings.ToValidUTF8(value, "�")
-	if len(value) > maxHeaderValueBytes {
-		end := maxHeaderValueBytes
+	valueLimit := maxHeaderValueBytes
+	if structuralMIMEHeaders[name] {
+		valueLimit = maxMIMEHeaderValueBytes
+	}
+	if len(value) > valueLimit {
+		end := valueLimit
 		for end > 0 && !utf8.RuneStart(value[end]) {
 			end--
 		}
 		value = value[:end]
 		m.Truncated = true
+		if structuralMIMEHeaders[name] {
+			m.MIMEHeadersTruncated = true
+		}
 	}
 	entrySize := int64(len(name) + len(value) + 2)
 	limit := int64(maxRetainedHeaderBytesPerName)
-	if name == "authentication-results" {
+	if structuralMIMEHeaders[name] {
+		limit = maxMIMEHeaderValueBytes + 256
+	} else if name == "authentication-results" {
 		limit = maxAuthenticationHeaderBytes
 	}
 	if m.headerBytesByName[name]+entrySize > limit {
 		m.Truncated = true
+		if structuralMIMEHeaders[name] {
+			m.MIMEHeadersTruncated = true
+		}
 		return
 	}
 	m.headerSize += entrySize
@@ -180,11 +198,21 @@ func (m *Message) AddHeader(name, value string) {
 	}
 }
 
+var structuralMIMEHeaders = map[string]bool{
+	"content-disposition":       true,
+	"content-transfer-encoding": true,
+	"content-type":              true,
+}
+
 // HeaderOccurrences returns the number of security-sensitive headers received,
 // including occurrences omitted from Headers by the retained-header byte limit.
 func (m *Message) HeaderOccurrences(name string) int {
 	return m.headerOccurrences[strings.ToLower(strings.TrimSpace(name))]
 }
+
+// FromHeaderCount includes fields omitted by retention limits, so sender
+// ambiguity cannot be hidden by an oversized earlier From field.
+func (m *Message) FromHeaderCount() int { return m.fromHeaderCount }
 
 func (m *Message) addArchiveHeader(name, value string) {
 	name = strings.TrimSpace(name)

@@ -113,6 +113,31 @@ func TestDomainRegistrationLookupUsesRegistrableDomainAndCachesSuccess(t *testin
 	}
 }
 
+func TestDomainRegistrationWithoutExpiryUsesTwoWeekCacheDeadline(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	lookup := &fakeDomainRegistrationLookup{registered: now.Add(-3 * 24 * time.Hour)}
+	store := newTestDomainRegistrationStore(t, now, lookup)
+	current := now
+	store.now = func() time.Time { return current }
+
+	first, err := store.evidence(context.Background(), "example.com")
+	if err != nil || !first.Available || !first.RegisteredAt.Equal(lookup.registered) {
+		t.Fatalf("initial evidence = %+v, %v", first, err)
+	}
+	stored, found, err := store.repository.DomainRegistration(context.Background(), "example.com")
+	if err != nil || !found || !stored.ExpiresAt.Equal(now.Add(domainRegistrationMissingExpiryCache)) {
+		t.Fatalf("cached registration = %+v, found=%v, err=%v", stored, found, err)
+	}
+	current = now.Add(domainRegistrationMissingExpiryCache - time.Second)
+	if _, err := store.evidence(context.Background(), "example.com"); err != nil || lookup.calls.Load() != 1 {
+		t.Fatalf("unexpired fallback cache: calls=%d, err=%v", lookup.calls.Load(), err)
+	}
+	current = now.Add(domainRegistrationMissingExpiryCache)
+	if _, err := store.evidence(context.Background(), "example.com"); err != nil || lookup.calls.Load() != 2 {
+		t.Fatalf("expired fallback cache: calls=%d, err=%v", lookup.calls.Load(), err)
+	}
+}
+
 func TestDomainRegistrationExpiredRecordRefreshesLazily(t *testing.T) {
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	lookup := &fakeDomainRegistrationLookup{registered: now.Add(-400 * 24 * time.Hour), expires: now.Add(330 * 24 * time.Hour)}

@@ -19,7 +19,7 @@ type CorrespondentPolicyRepository interface {
 type CorrespondentAdminRepository interface {
 	ListCorrespondents(context.Context, CorrespondentListQuery) (CorrespondentPage, error)
 	AddManual(context.Context, string, string) (bool, error)
-	DeleteManual(context.Context, string, RecipientScope) (int, error)
+	DeleteCorrespondent(context.Context, string, RecipientScope) (int, error)
 }
 
 // RejectionRepository records rejection events and provides recipient-scoped

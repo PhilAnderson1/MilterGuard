@@ -111,6 +111,17 @@ func (output *lexicalOutput) WriteString(value string) {
 	output.text.WriteString(value)
 }
 
+func (output *lexicalOutput) writeQuoteMarker(value string) {
+	if output.anchor != nil {
+		// Quote markers are structural text, but square brackets inside an
+		// anchor label must not create nested Markdown link syntax.
+		output.anchor.label.WriteString(markdownLabelText(value))
+		output.anchor.plainLabel.WriteString(value)
+		return
+	}
+	output.text.WriteString(value)
+}
+
 func (output *lexicalOutput) appendByte(value byte) {
 	output.visible.WriteByte(value)
 	if output.anchor != nil {
@@ -218,6 +229,18 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 			text.appendByte(' ')
 			continue
 		}
+		if !isClosing && lexicalExactOpeningTag(rawTag, name) && lexicalVisiblyHidden(rawTag) {
+			// Remove unambiguously hidden HTML from both the AI body and the
+			// visible-text count used to decide whether images need analysis.
+			// The closing tag and its contents are skipped as one subtree.
+			blockEnd, found := lexicalHiddenSubtreeEnd(source, lower, closing+1, name)
+			if !found {
+				break
+			}
+			offset = blockEnd
+			text.appendByte(' ')
+			continue
+		}
 		if !isClosing && lexicalExactOpeningTag(rawTag, name) && name == "plaintext" {
 			// The HTML plaintext state has no closing tag: every remaining byte is
 			// text through EOF, including strings that resemble HTML markup.
@@ -259,9 +282,9 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 				}
 			}
 		case name == "blockquote" && !isClosing:
-			text.WriteString("\n[quoted content begins]\n")
+			text.writeQuoteMarker("\n[quoted content begins]\n")
 		case name == "blockquote" && isClosing:
-			text.WriteString("\n[quoted content ends]\n")
+			text.writeQuoteMarker("\n[quoted content ends]\n")
 		case name == "a" && !isClosing:
 			// HTML does not nest anchors; a new opening anchor implicitly ends
 			// the previous one.
@@ -383,25 +406,100 @@ func lexicalASCIILetter(value byte) bool {
 }
 
 func lexicalTagEnd(source string, offset int) (end int, found, unterminatedQuote bool) {
+	const (
+		lexicalTagName = iota
+		lexicalBeforeAttributeName
+		lexicalAttributeName
+		lexicalAfterAttributeName
+		lexicalBeforeAttributeValue
+		lexicalQuotedAttributeValue
+		lexicalUnquotedAttributeValue
+	)
+	state := lexicalTagName
 	var quote byte
+	quotedTagEnd := -1
+	quotedTagContainsMarkup := false
 	for offset < len(source) {
 		value := source[offset]
-		if quote != 0 {
+		switch state {
+		case lexicalQuotedAttributeValue:
 			if value == quote {
+				// Some malformed email HTML ends a quoted value only after
+				// swallowing subsequent tags. If the purported closing quote is
+				// itself followed by invalid attribute syntax, recover at the first
+				// '>' instead of promoting following CSS/markup to visible text.
+				// A valid quoted value containing '>' and '<' remains untouched.
+				if quotedTagEnd >= 0 && quotedTagContainsMarkup && offset+1 < len(source) &&
+					!lexicalSpace(source[offset+1]) && source[offset+1] != '>' && source[offset+1] != '/' {
+					return quotedTagEnd, true, false
+				}
 				quote = 0
+				quotedTagEnd = -1
+				quotedTagContainsMarkup = false
+				state = lexicalAfterAttributeName
+			} else if value == '>' && quotedTagEnd < 0 {
+				quotedTagEnd = offset
+			} else if value == '<' && quotedTagEnd >= 0 && lexicalMarkupStart(source, offset) {
+				quotedTagContainsMarkup = true
 			}
-			offset++
-			continue
-		}
-		switch value {
-		case '\'', '"':
-			quote = value
-		case '>':
-			return offset, true, false
+		case lexicalTagName:
+			switch {
+			case value == '>':
+				return offset, true, false
+			case lexicalSpace(value):
+				state = lexicalBeforeAttributeName
+			}
+		case lexicalBeforeAttributeName:
+			switch {
+			case value == '>':
+				return offset, true, false
+			case lexicalSpace(value), value == '/':
+			default:
+				state = lexicalAttributeName
+			}
+		case lexicalAttributeName:
+			switch {
+			case value == '>':
+				return offset, true, false
+			case lexicalSpace(value):
+				state = lexicalAfterAttributeName
+			case value == '=':
+				state = lexicalBeforeAttributeValue
+			case value == '/':
+				state = lexicalAfterAttributeName
+			}
+		case lexicalAfterAttributeName:
+			switch {
+			case value == '>':
+				return offset, true, false
+			case lexicalSpace(value), value == '/':
+			case value == '=':
+				state = lexicalBeforeAttributeValue
+			default:
+				state = lexicalAttributeName
+			}
+		case lexicalBeforeAttributeValue:
+			switch {
+			case lexicalSpace(value):
+			case value == '\'', value == '"':
+				quote = value
+				state = lexicalQuotedAttributeValue
+			case value == '>':
+				return offset, true, false
+			default:
+				state = lexicalUnquotedAttributeValue
+			}
+		case lexicalUnquotedAttributeValue:
+			switch {
+			case value == '>':
+				return offset, true, false
+			case lexicalSpace(value):
+				state = lexicalBeforeAttributeName
+			}
 		}
 		offset++
 	}
-	return 0, false, quote != 0
+	return 0, false, state == lexicalQuotedAttributeValue
 }
 
 func lexicalExactOpeningTag(rawTag, name string) bool {

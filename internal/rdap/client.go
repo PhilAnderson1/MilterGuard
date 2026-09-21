@@ -21,6 +21,7 @@ const (
 	bootstrapURL               = "https://data.iana.org/rdap/dns.json"
 	maximumResponseBytes int64 = 1 << 20
 	failureRetry               = time.Hour
+	deadlineRetry              = time.Minute
 )
 
 // Client is safe for concurrent domain lookups.
@@ -110,7 +111,7 @@ func (c *Client) dialContext(ctx context.Context, network, endpoint string) (net
 }
 
 // Lookup discovers the authoritative RDAP services for domain and returns its
-// registration and expiration events.
+// registration event and, when provided, its expiration event.
 func (c *Client) Lookup(ctx context.Context, domain string) (time.Time, time.Time, error) {
 	services, err := c.rdapServices(ctx)
 	if err != nil {
@@ -143,8 +144,8 @@ func (c *Client) Lookup(ctx context.Context, domain string) (time.Time, time.Tim
 				expiresAt = event.Date
 			}
 		}
-		if registeredAt.IsZero() || expiresAt.IsZero() {
-			lastErr = errors.New("RDAP response lacks registration or expiration event")
+		if registeredAt.IsZero() {
+			lastErr = errors.New("RDAP response lacks registration event")
 			continue
 		}
 		return registeredAt, expiresAt, nil
@@ -184,6 +185,9 @@ func (c *Client) rdapServices(ctx context.Context) (map[string][]string, error) 
 			c.services = services
 			c.bootstrapErr = nil
 			c.bootstrapRetryAt = time.Time{}
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			c.bootstrapErr = err
+			c.bootstrapRetryAt = c.now().Add(deadlineRetry)
 		} else if !errors.Is(err, context.Canceled) {
 			c.bootstrapErr = err
 			c.bootstrapRetryAt = c.now().Add(failureRetry)

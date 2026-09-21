@@ -16,11 +16,18 @@ func writeAuthenticationInformation(b *strings.Builder, msg *Message) {
 		b.WriteString("Authenticated SMTP submission: yes\n")
 		return
 	}
-	fromDomain := visibleFromDomain(msg.Header("From"))
+	fromDomain := ""
+	if msg.FromHeaderCount() == 1 {
+		fromDomain = visibleFromDomain(msg.Header("From"))
+	}
 	results := msg.AuthenticationResults(msg.TrustedAuthservIDs)
 
 	b.WriteString("\nAUTHENTICATION INFORMATION:\n")
-	fmt.Fprintf(b, "Visible From domain: %s\n", availableValue(fromDomain))
+	if msg.FromHeaderCount() > 1 {
+		b.WriteString("Visible From domain: ambiguous (multiple From headers)\n")
+	} else {
+		fmt.Fprintf(b, "Visible From domain: %s\n", availableValue(fromDomain))
+	}
 	for _, method := range []mailauth.Method{mailauth.MethodDKIM, mailauth.MethodSPF, mailauth.MethodDMARC} {
 		written := 0
 		for _, result := range results {

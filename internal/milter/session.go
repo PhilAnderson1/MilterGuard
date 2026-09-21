@@ -299,8 +299,12 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		}
 		return false
 	}
-	ss.visibleSender = mailaddr.Normalize(ss.message.Header("From"))
-	ss.visibleSenderDomain = emailAddressDomain(ss.visibleSender)
+	if count := ss.message.FromHeaderCount(); count > 1 {
+		ss.deps.log.WarnContext(ctx, "message has ambiguous sender identity", "message_id", ss.message.Header("Message-ID"), "from_header_count", count)
+	} else {
+		ss.visibleSender = mailaddr.Normalize(ss.message.Header("From"))
+		ss.visibleSenderDomain = emailAddressDomain(ss.visibleSender)
+	}
 	if ss.isInternalMessage() {
 		return ss.finishInternalMessage(ctx)
 	}
@@ -462,6 +466,12 @@ type inboundEvidence struct {
 func (ss *session) prepareInboundEvidence(ctx context.Context) inboundEvidence {
 	evidence := inboundEvidence{recipientsComplete: ss.recipientSetComplete()}
 	if ss.authentication.Authenticated {
+		return evidence
+	}
+	if ss.message.FromHeaderCount() > 1 {
+		// No sender-based bypass or learning can rely on an ambiguous visible
+		// identity, even if a parser happens to accept one of the fields.
+		ss.message.Correspondent = message.CorrespondentInfo{Enabled: ss.deps.policy.correspondentCfg.UseAllowlist, Scope: ss.deps.policy.correspondentCfg.Scope}
 		return evidence
 	}
 	authentication := trustedSenderAuthentication(ss.message, ss.trustedAuthservIDs(), ss.visibleSenderDomain)

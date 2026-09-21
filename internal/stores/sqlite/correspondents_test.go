@@ -45,8 +45,8 @@ func (s *correspondentStore) cleanup(ctx context.Context) (int64, error) { retur
 func (s *correspondentStore) addManual(ctx context.Context, sender, recipient string) (bool, error) {
 	return s.AddManual(ctx, sender, recipient)
 }
-func (s *correspondentStore) deleteManual(ctx context.Context, sender, recipient string) (int, error) {
-	return s.DeleteManual(ctx, sender, stores.RecipientScope{Address: recipient})
+func (s *correspondentStore) deleteCorrespondent(ctx context.Context, sender, recipient string) (int, error) {
+	return s.DeleteCorrespondent(ctx, sender, stores.RecipientScope{Address: recipient})
 }
 func (s *correspondentStore) listAllowlist(ctx context.Context, recipient string, since time.Time) ([]stores.Correspondent, error) {
 	scope := stores.RecipientScope{Address: recipient}
@@ -137,7 +137,7 @@ func TestManualCorrespondentOperationsRequireAvailableAllowlist(t *testing.T) {
 			if _, err := test.store.addManual(context.Background(), "sender@example.net", "owner@example.com"); err == nil || !strings.Contains(err.Error(), "disabled or unavailable") {
 				t.Fatalf("add error = %v", err)
 			}
-			if _, err := test.store.deleteManual(context.Background(), "sender@example.net", "owner@example.com"); err == nil || !strings.Contains(err.Error(), "disabled or unavailable") {
+			if _, err := test.store.deleteCorrespondent(context.Background(), "sender@example.net", "owner@example.com"); err == nil || !strings.Contains(err.Error(), "disabled or unavailable") {
 				t.Fatalf("delete error = %v", err)
 			}
 		})

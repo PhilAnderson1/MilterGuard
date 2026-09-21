@@ -46,12 +46,27 @@ func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
 	writeRecipientInformation(&b, m)
 	writeAuthenticationInformation(&b, m)
 	b.WriteString("\nSELECTED HEADERS:\n")
+	if m.FromHeaderCount() > 1 {
+		fmt.Fprintf(&b, "Multiple From headers found: %d (sender identity ambiguous)\n", m.FromHeaderCount())
+	}
 	for _, key := range keys {
 		for _, value := range m.decodedHeaderValues(key) {
 			fmt.Fprintf(&b, "%s: %s\n", canonicalHeaderName(key), promptHeaderValue(value))
 		}
 	}
 	content := m.processedContent()
+	if m.BodyTruncated || content.MIMEIncomplete || content.TransferIncomplete {
+		b.WriteString("\nANALYSIS LIMITATIONS:\n")
+		if m.BodyTruncated {
+			b.WriteString("- Message body exceeded the retained-byte limit; only its initial portion was available.\n")
+		}
+		if content.MIMEIncomplete {
+			b.WriteString("- Multipart content could not be fully parsed; later parts may be missing.\n")
+		}
+		if content.TransferIncomplete {
+			b.WriteString("- A MIME part could not be fully transfer-decoded; some content may be missing.\n")
+		}
+	}
 	body := sampleBody(content.Text, maxChars)
 	b.WriteString("\nBODY:\n")
 	b.WriteString(body)

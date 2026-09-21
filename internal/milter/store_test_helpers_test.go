@@ -169,11 +169,11 @@ func (s *correspondentStore) addManual(ctx context.Context, sender, recipient st
 	return s.AddManual(ctx, sender, recipient)
 }
 
-func (s *correspondentStore) deleteManual(ctx context.Context, sender, recipient string) (int, error) {
+func (s *correspondentStore) deleteCorrespondent(ctx context.Context, sender, recipient string) (int, error) {
 	if s == nil || s.CorrespondentRepository == nil {
 		return 0, fmt.Errorf("correspondent allowlist is disabled or unavailable")
 	}
-	return s.DeleteManual(ctx, sender, testRecipientScope(recipient))
+	return s.DeleteCorrespondent(ctx, sender, testRecipientScope(recipient))
 }
 
 func (s *correspondentStore) cleanup(ctx context.Context) (int64, error) { return s.Cleanup(ctx) }

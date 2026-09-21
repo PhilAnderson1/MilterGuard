@@ -186,6 +186,11 @@ attachments:
   encrypted_archive_action: reject
   unscannable_action: accept
 
+  # Action for messages with permanently invalid or ambiguous MIME structure:
+  # accept or reject. Retrying cannot repair the message, so tempfail is not
+  # supported. When accepted, normal AI analysis continues.
+  invalid_mime_action: reject
+
   # Text returned with SMTP status 550 5.7.1 when attachment policy rejects mail.
   reject_message: Message rejected because it contains a prohibited executable attachment
 

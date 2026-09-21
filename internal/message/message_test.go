@@ -50,10 +50,53 @@ func TestTransferDecodingRecoversMalformedInput(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := string(decodeTransfer(test.encoding, []byte(test.input))); got != test.want {
+			decoded, _ := decodeTransfer(test.encoding, []byte(test.input))
+			if got := string(decoded); got != test.want {
 				t.Fatalf("decodeTransfer(%q, %q) = %q, want %q", test.encoding, test.input, got, test.want)
 			}
 		})
+	}
+}
+
+func TestPromptReportsIncompleteTransferDecoding(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/plain")
+	m.AddHeader("Content-Transfer-Encoding", "base64")
+	m.AddBody([]byte("aGVsbG8=!!"))
+	prompt := m.Prompt(1000)
+	if !strings.Contains(prompt, "A MIME part could not be fully transfer-decoded") || !strings.Contains(prompt, "hello") {
+		t.Fatalf("partial transfer decode was not reported: %s", prompt)
+	}
+}
+
+func TestUnpaddedBase64DoesNotReportIncompleteTransfer(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/plain")
+	m.AddHeader("Content-Transfer-Encoding", "base64")
+	m.AddBody([]byte("aGVsbG8"))
+	prompt := m.Prompt(1000)
+	if strings.Contains(prompt, "ANALYSIS LIMITATIONS") || !strings.Contains(prompt, "hello") {
+		t.Fatalf("recoverable unpadded Base64 was marked incomplete: %s", prompt)
+	}
+}
+
+func TestAlternativePreservesIncompleteTransferNoticeFromUnselectedPart(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", `multipart/alternative; boundary="x"`)
+	m.AddBody([]byte("--x\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8=!!\r\n--x\r\nContent-Type: text/html\r\n\r\n<p>Visible HTML</p>\r\n--x--\r\n"))
+	prompt := m.Prompt(1000)
+	if !strings.Contains(prompt, "A MIME part could not be fully transfer-decoded") || !strings.Contains(prompt, "Visible HTML") {
+		t.Fatalf("alternative lost extraction limitation: %s", prompt)
+	}
+}
+
+func TestPromptReportsIncompleteMultipartParsing(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", `multipart/mixed; boundary="x"`)
+	m.AddBody([]byte("--x\r\nContent-Type: text/plain\r\n\r\nFirst part\r\n--x\r\ninvalid header\r\n\r\nSecond part\r\n--x--\r\n"))
+	prompt := m.Prompt(1000)
+	if !strings.Contains(prompt, "Multipart content could not be fully parsed") || !strings.Contains(prompt, "First part") {
+		t.Fatalf("partial multipart parse was not reported: %s", prompt)
 	}
 }
 
@@ -103,6 +146,46 @@ func TestMIMEExtractionDecodesDeclaredBodyCharset(t *testing.T) {
 				t.Fatalf("extracted text = %q, want it to contain %q", content.Text, test.want)
 			}
 		})
+	}
+}
+
+func TestHTMLCharsetSniffingWithoutUsableMIMECharset(t *testing.T) {
+	for _, contentType := range []string{"text/html", "text/html; charset=unknown-charset"} {
+		t.Run(contentType, func(t *testing.T) {
+			m := New(10000)
+			m.AddHeader("Content-Type", contentType)
+			m.AddBody([]byte("<meta charset=shift_jis><p>\x82\xb1\x82\xf1\x82\xc9\x82\xbf\x82\xcd</p>"))
+			if got := m.ProcessedBody(1000); got != "こんにちは" {
+				t.Fatalf("HTML with internal charset = %q, want こんにちは", got)
+			}
+		})
+	}
+}
+
+func TestHTMLCharsetSniffingHonorsBOM(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/html")
+	m.AddBody([]byte("\xff\xfe<\x00p\x00>\x00H\x00i\x00<\x00/\x00p\x00>\x00"))
+	if got := m.ProcessedBody(1000); strings.TrimSpace(got) != "Hi" {
+		t.Fatalf("BOM-encoded HTML = %q, want Hi", got)
+	}
+}
+
+func TestValidMIMECharsetTakesPrecedenceOverHTMLMeta(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/html; charset=iso-8859-1")
+	m.AddBody([]byte("<meta charset=shift_jis><p>caf\xe9</p>"))
+	if got := m.ProcessedBody(1000); got != "café" {
+		t.Fatalf("MIME-declared HTML charset was overridden: %q", got)
+	}
+}
+
+func TestPlainTextDoesNotSniffHTMLMetaCharset(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/plain")
+	m.AddBody([]byte("<meta charset=windows-1252>caf\xe9"))
+	if got := m.ProcessedBody(1000); got != "<meta charset=windows-1252>caf�" {
+		t.Fatalf("plain text unexpectedly used HTML charset sniffing: %q", got)
 	}
 }
 
@@ -228,6 +311,42 @@ func TestPromptOmitsRecipientHeader(t *testing.T) {
 	}
 	if strings.Contains(prompt, "RECIPIENT INFORMATION:") {
 		t.Fatalf("ordinary recipient header produced derived recipient evidence:\n%s", prompt)
+	}
+}
+
+func TestPromptReportsMultipleFromHeadersWithoutCombiningThem(t *testing.T) {
+	m := New(20000)
+	m.AddHeader("From", "Alice <alice@example.com>")
+	m.AddHeader("From", "Bob <bob@example.net>")
+	prompt := m.Prompt(1000)
+	for _, wanted := range []string{
+		"Multiple From headers found: 2 (sender identity ambiguous)",
+		"Visible From domain: ambiguous (multiple From headers)",
+		"From: Alice <alice@example.com>\n",
+		"From: Bob <bob@example.net>\n",
+	} {
+		if !strings.Contains(prompt, wanted) {
+			t.Fatalf("missing %q from prompt: %s", wanted, prompt)
+		}
+	}
+	if strings.Contains(prompt, "From: Alice <alice@example.com>, Bob <bob@example.net>") {
+		t.Fatalf("separate From headers were combined: %s", prompt)
+	}
+}
+
+func TestFromHeaderCountIncludesFieldsBeyondRetentionBudget(t *testing.T) {
+	m := New(20000)
+	for range 3 {
+		m.AddHeader("From", strings.Repeat("x", maxHeaderValueBytes))
+	}
+	if got := m.FromHeaderCount(); got != 3 {
+		t.Fatalf("From header count = %d, want 3", got)
+	}
+	if len(m.Headers["from"]) >= 3 {
+		t.Fatal("test did not exceed the From retention budget")
+	}
+	if prompt := m.Prompt(1000); !strings.Contains(prompt, "Multiple From headers found: 3") {
+		t.Fatalf("retention concealed sender ambiguity: %s", prompt)
 	}
 }
 
@@ -469,6 +588,9 @@ func TestBodyIsTruncatedToRemainingCombinedMessageBudget(t *testing.T) {
 	}
 	if got := retainedBytes(m); got != m.MaxBytes {
 		t.Fatalf("retained bytes = %d, want %d", got, m.MaxBytes)
+	}
+	if prompt := m.Prompt(1000); !strings.Contains(prompt, "Message body exceeded the retained-byte limit") {
+		t.Fatalf("body truncation was not reported to AI: %s", prompt)
 	}
 }
 
@@ -739,6 +861,14 @@ func TestHTMLMarksQuotedContentAndPreservesItsLinks(t *testing.T) {
 	}
 }
 
+func TestHTMLQuoteMarkersInsideAnchorDoNotBreakMarkdownLink(t *testing.T) {
+	got := htmlToText(`<a href="https://example.invalid/"><blockquote>Quoted message</blockquote></a>`)
+	want := `[\[quoted content begins\] Quoted message \[quoted content ends\]](https://example.invalid/)`
+	if got.Text != want {
+		t.Fatalf("quoted anchor = %q, want %q", got.Text, want)
+	}
+}
+
 func TestHTMLExcludesScriptAndStyle(t *testing.T) {
 	m := New(10000)
 	m.AddHeader("Content-Type", "text/html")
@@ -749,6 +879,65 @@ func TestHTMLExcludesScriptAndStyle(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Visible") {
 		t.Fatalf("visible text missing: %s", prompt)
+	}
+}
+
+func TestHTMLExcludesExplicitlyHiddenSubtrees(t *testing.T) {
+	for _, tag := range []string{
+		`<div hidden>`,
+		`<div style="display:none">`,
+		`<div style="visibility: hidden">`,
+		`<div style="visibility:collapse">`,
+		`<div style="content:'display:none;'; display: none !important; display:block">`,
+	} {
+		t.Run(tag, func(t *testing.T) {
+			got := htmlToText(`Before ` + tag + `<div>Forged conversation <a href="https://hidden.example/">trusted sender</a></div></div> After`)
+			if got.Text != "Before After" || got.VisibleText != "Before After" || len(got.Links) != 0 {
+				t.Fatalf("hidden subtree leaked: text=%q visible=%q links=%v", got.Text, got.VisibleText, got.Links)
+			}
+		})
+	}
+}
+
+func TestHTMLVisibilityUsesExactStylesAndCSSPrecedence(t *testing.T) {
+	for _, tag := range []string{
+		`<p data-hidden style="content:'display:none'; display:block">`,
+		`<p style="display:none; display:block">`,
+		`<p style="display:none; display:block !important">`,
+	} {
+		got := htmlToText(tag + `Visible</p>`)
+		if got.Text != "Visible" {
+			t.Fatalf("visible element omitted for %q: %q", tag, got.Text)
+		}
+	}
+	got := htmlToText(`<p style="display:none !important; display:block">Hidden</p>Visible`)
+	if got.Text != "Visible" {
+		t.Fatalf("important hidden style lost precedence: %q", got.Text)
+	}
+}
+
+func TestHTMLHiddenVoidElementDoesNotHideFollowingText(t *testing.T) {
+	got := htmlToText(`<img hidden src="https://hidden.example/image.png" alt="Forgery">Visible`)
+	if got.Text != "Visible" || got.VisibleText != "Visible" || len(got.Links) != 0 {
+		t.Fatalf("hidden void element leaked or hid tail: %+v", got)
+	}
+}
+
+func TestHTMLUnclosedHiddenSubtreeDoesNotLeakIntoAIText(t *testing.T) {
+	got := htmlToText(`Visible<div style="display:none">Forged correspondence`)
+	if got.Text != "Visible" || got.VisibleText != "Visible" {
+		t.Fatalf("unclosed hidden subtree leaked: %+v", got)
+	}
+}
+
+func TestHiddenHTMLDoesNotSuppressFallbackImageAnalysis(t *testing.T) {
+	m := multipartRelatedMessage("Fallback", `<p>Short notice</p><div style="display:none">`+strings.Repeat("forged history ", 30)+`</div><img src="cid:scam-image" alt="Notice">`, "<scam-image>")
+	analysis := m.BuildAnalysis(1000, VisionOptions{
+		Mode: "fallback", MinTextChars: 200, MaxImages: 2,
+		MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if len(analysis.Images) != 1 || strings.Contains(analysis.Prompt, "forged history") {
+		t.Fatalf("hidden text affected fallback image selection: images=%d prompt=%s", len(analysis.Images), analysis.Prompt)
 	}
 }
 
@@ -849,6 +1038,40 @@ func TestHTMLTagEndHonorsQuotedAttributeValues(t *testing.T) {
 		if got.Text != `[click](https://example.test/path)` {
 			t.Errorf("quoted tag extracted as %q", got.Text)
 		}
+	}
+}
+
+func TestHTMLQuotedAttributeWithMarkupAndValidClosingRemainsAttribute(t *testing.T) {
+	got := htmlToText(`<div title="x><script>hidden text</script>">Visible</div>`)
+	if got.Text != "Visible" {
+		t.Fatalf("valid quoted attribute emitted markup as text: %q", got.Text)
+	}
+}
+
+func TestHTMLTagEndDoesNotTreatQuotesInsideUnquotedValuesAsDelimiters(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "double quote",
+			source: `<a href=http://evil.example/" x>Show me</a>URGENT WIRE TRANSFER https://phish.example/login`,
+			want:   `[Show me](http://evil.example/")URGENT WIRE TRANSFER https://phish.example/login`,
+		},
+		{
+			name:   "apostrophe",
+			source: `<img alt=It's>Visible after image`,
+			want:   "Visible after image",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := htmlToText(test.source)
+			if got.Text != test.want {
+				t.Fatalf("extracted text = %q, want %q", got.Text, test.want)
+			}
+		})
 	}
 }
 
@@ -1316,19 +1539,23 @@ func TestHTMLIncludesNoscriptContent(t *testing.T) {
 }
 
 func TestHTMLExcludesStyleElementAfterQuotedPrintableDecoding(t *testing.T) {
-	m := New(10000)
-	m.AddHeader("Content-Type", "text/html")
-	m.AddHeader("Content-Transfer-Encoding", "quoted-printable")
-	m.AddBody([]byte(`<h2>End of Summer Offers</h2><img src="tracker" style="display:none;><object><title><style=
+	for _, encoding := range []string{"quoted-printable", "8bit"} {
+		t.Run(encoding, func(t *testing.T) {
+			m := New(10000)
+			m.AddHeader("Content-Type", "text/html")
+			m.AddHeader("Content-Transfer-Encoding", encoding)
+			m.AddBody([]byte(`<h2>End of Summer Offers</h2><img src="tracker" style="display:none;><object><title><style=
  type=3D"text/css"> @media screen and (min-width: 480px) { .product { font-size: 18px !important; } } </style><p>Visible offer</p>`))
-	prompt := m.Prompt(1000)
-	for _, unwanted := range []string{"<style", "@media", ".product", "font-size", "!important"} {
-		if strings.Contains(prompt, unwanted) {
-			t.Fatalf("malformed style content leaked into prompt: %s", prompt)
-		}
-	}
-	if !strings.Contains(prompt, "End of Summer Offers") {
-		t.Fatalf("visible HTML text before malformed markup is missing: %s", prompt)
+			prompt := m.Prompt(1000)
+			for _, unwanted := range []string{"<style", "@media", ".product", "font-size", "!important"} {
+				if strings.Contains(prompt, unwanted) {
+					t.Fatalf("malformed style content leaked into prompt: %s", prompt)
+				}
+			}
+			if !strings.Contains(prompt, "End of Summer Offers") {
+				t.Fatalf("visible HTML text before malformed markup is missing: %s", prompt)
+			}
+		})
 	}
 }
 
@@ -1759,6 +1986,26 @@ func TestRetainedHeaderTruncationPreservesUTF8(t *testing.T) {
 	}
 	if !m.Truncated {
 		t.Fatal("message was not marked truncated")
+	}
+}
+
+func TestStructuralMIMEHeaderUsesLargerRetentionLimit(t *testing.T) {
+	m := New(1 << 20)
+	value := `multipart/mixed; note="` + strings.Repeat("x", maxHeaderValueBytes) + `"; boundary="parts"`
+	m.AddHeader("Content-Type", value)
+	if got := m.FirstHeader("Content-Type"); got != value {
+		t.Fatalf("Content-Type was truncated: got %d bytes, want %d", len(got), len(value))
+	}
+	if m.MIMEHeadersTruncated {
+		t.Fatal("ordinary structural MIME header was marked truncated")
+	}
+}
+
+func TestOversizedStructuralMIMEHeaderIsMarkedUnsafe(t *testing.T) {
+	m := New(1 << 20)
+	m.AddHeader("Content-Type", strings.Repeat("x", maxMIMEHeaderValueBytes+1))
+	if !m.MIMEHeadersTruncated {
+		t.Fatal("oversized structural MIME header was not marked truncated")
 	}
 }
 

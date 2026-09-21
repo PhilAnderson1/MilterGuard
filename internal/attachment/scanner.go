@@ -47,6 +47,7 @@ type Finding struct {
 type ScanError struct {
 	Path      string
 	Encrypted bool
+	Malformed bool
 	Err       error
 }
 
@@ -121,15 +122,15 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 		mediaType = "text/plain"
 		params = nil
 	} else if err != nil {
-		return nil, &ScanError{Path: location, Err: fmt.Errorf("invalid Content-Type: %w", err)}
+		return nil, &ScanError{Path: location, Malformed: true, Err: fmt.Errorf("invalid Content-Type: %w", err)}
 	} else if mediaType == "" {
-		return nil, &ScanError{Path: location, Err: errors.New("empty Content-Type")}
+		return nil, &ScanError{Path: location, Malformed: true, Err: errors.New("empty Content-Type")}
 	}
 	mediaType = strings.ToLower(mediaType)
 	if strings.HasPrefix(mediaType, "multipart/") {
 		boundary := params["boundary"]
 		if boundary == "" {
-			return nil, &ScanError{Path: location, Err: errors.New("multipart content has no boundary")}
+			return nil, &ScanError{Path: location, Malformed: true, Err: errors.New("multipart content has no boundary")}
 		}
 		reader := multipart.NewReader(bytes.NewReader(data), boundary)
 		var firstError error
@@ -145,7 +146,7 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 				if firstError != nil {
 					return nil, firstError
 				}
-				return nil, &ScanError{Path: location, Err: fmt.Errorf("cannot read MIME part: %w", partErr)}
+				return nil, &ScanError{Path: location, Malformed: true, Err: fmt.Errorf("cannot read MIME part: %w", partErr)}
 			}
 			// The complete message has already been bounded by milter.max_message_size.
 			// Keep encoded multipart data intact here so base64 overhead does not count
@@ -199,6 +200,14 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 		return nil, &ScanError{Path: location, Err: err}
 	}
 	if filename == "" && (mediaType == "text/plain" || mediaType == "text/html") {
+		// A nested MIME entity without any Content-Type defaults to text/plain,
+		// but it may still contain an executable or archive. Scan that nested
+		// part as a file before applying the shortcut for visible text. Keep
+		// the top-level body exempt so a script sample in ordinary mail is not
+		// treated as an attachment.
+		if mimeDepth > 0 && strings.TrimSpace(contentType) == "" {
+			return s.scanFile(location, "", mediaType, decoded, 0, state)
+		}
 		return nil, nil
 	}
 	if mediaType == "message/rfc822" || strings.HasSuffix(strings.ToLower(filename), ".eml") {
@@ -216,7 +225,7 @@ func (s *Scanner) scanRFC822(data []byte, location string, mimeDepth int, state 
 	}
 	attached, err := mail.ReadMessage(bytes.NewReader(data))
 	if err != nil {
-		return nil, &ScanError{Path: location, Err: fmt.Errorf("invalid attached email: %w", err)}
+		return nil, &ScanError{Path: location, Malformed: true, Err: fmt.Errorf("invalid attached email: %w", err)}
 	}
 	body, err := io.ReadAll(contextReader{ctx: state.ctx, reader: attached.Body})
 	if err != nil {
@@ -531,9 +540,11 @@ func attachmentFilename(contentDisposition, contentType string) string {
 			continue
 		}
 		for _, key := range []string{"filename", "name"} {
-			if value := decodeFilename(params[key]); value != "" {
-				return value
+			raw := strings.TrimSpace(params[key])
+			if raw == "" {
+				continue
 			}
+			return decodeFilename(raw)
 		}
 	}
 	return ""

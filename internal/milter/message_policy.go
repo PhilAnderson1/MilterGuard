@@ -33,7 +33,7 @@ func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, cur
 	if result.selected == actionAccept && current.authenticated {
 		s.learnAuthenticatedRecipients(ctx, current.envelopeSender, current.envelopeRecipients)
 	}
-	if !current.authenticated && result.err == nil {
+	if !current.authenticated && result.err == nil && current.visibleSender != "" {
 		s.recordInboundClassification(ctx, current, result, inbound.trustedDKIM)
 	}
 }

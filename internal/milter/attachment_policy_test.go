@@ -18,7 +18,7 @@ func enableTestAttachments(server *Server) {
 		BlockExecutables: true, BlockedExtensions: []string{"exe"}, InspectSignatures: true,
 		InspectArchives: true, MaxAttachmentBytes: 1 << 20, MaxArchiveDepth: 2,
 		MaxArchiveFiles: 10, MaxArchiveUncompressedBytes: 2 << 20,
-		EncryptedArchiveAction: "reject", UnscannableAction: "accept",
+		EncryptedArchiveAction: "reject", UnscannableAction: "accept", InvalidMIMEAction: "reject",
 		RejectMessage: "executable attachment blocked",
 	}
 	server.sessions.attachments.cfg = cfg
@@ -252,6 +252,55 @@ func TestUnscannableAttachmentCanTempfail(t *testing.T) {
 	expectFrame(t, conn, string([]byte{responseTempfail}))
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)
+	}
+}
+
+func TestMalformedMIMEIsPermanentlyRejected(t *testing.T) {
+	analyzer := &countingAnalyzer{}
+	server, conn, done := testServer(t, analyzer)
+	enableTestAttachments(server)
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		[]byte{commandMail},
+		headerFrame("Content-Type", `multipart/mixed; boundary=first; boundary=second`),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("message")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectAttachmentProgress(t, conn)
+	expectFrame(t, conn, "y550 5.7.1 "+invalidMIMERejectMessage+"\x00")
+	if got := analyzer.calls.Load(); got != 0 {
+		t.Fatalf("AI analysis calls = %d, want 0", got)
+	}
+}
+
+func TestMalformedMIMECanContinueToAIAnalysis(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+	server, conn, done := testServer(t, analyzer)
+	enableTestAttachments(server)
+	server.sessions.attachments.cfg.InvalidMIMEAction = "accept"
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		[]byte{commandMail},
+		headerFrame("Content-Type", `multipart/mixed; boundary=first; boundary=second`),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("message")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectAttachmentProgress(t, conn)
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if got := analyzer.calls.Load(); got != 1 {
+		t.Fatalf("AI analysis calls = %d, want 1", got)
 	}
 }
 

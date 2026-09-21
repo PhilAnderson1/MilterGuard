@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	domainRegistrationExpiryGrace  = 14 * 24 * time.Hour
-	domainRegistrationFailureRetry = time.Hour
+	domainRegistrationExpiryGrace        = 14 * 24 * time.Hour
+	domainRegistrationMissingExpiryCache = 14 * 24 * time.Hour
+	domainRegistrationFailureRetry       = time.Hour
 )
 
 type domainRegistrationStore struct {
@@ -113,8 +114,14 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 	case <-lookupCtx.Done():
 		err = lookupCtx.Err()
 	}
-	if err == nil && (!registeredAt.Before(expiresAt) || registeredAt.After(now) || !expiresAt.After(now)) {
-		err = fmt.Errorf("RDAP returned invalid or expired registration dates for %s", domain)
+	missingExpiry := err == nil && expiresAt.IsZero()
+	if err == nil {
+		if registeredAt.IsZero() || registeredAt.After(now) || (!missingExpiry && (!registeredAt.Before(expiresAt) || !expiresAt.After(now))) {
+			err = fmt.Errorf("RDAP returned invalid or expired registration dates for %s", domain)
+		} else if missingExpiry {
+			// This is a cache refresh deadline, not a domain expiration date.
+			expiresAt = now.Add(domainRegistrationMissingExpiryCache)
+		}
 	}
 	refreshed := stores.DomainRegistration{Domain: domain, RegisteredAt: registeredAt.UTC(), ExpiresAt: expiresAt.UTC()}
 	if err == nil {
@@ -134,7 +141,8 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 		return message.DomainRegistrationInfo{}, err
 	}
 	if s.log != nil {
-		s.log.DebugContext(ctx, "domain registration cached", "domain", domain, "registered_at", refreshed.RegisteredAt, "expires_at", refreshed.ExpiresAt)
+		s.log.DebugContext(ctx, "domain registration cached", "domain", domain, "registered_at", refreshed.RegisteredAt,
+			"cache_expires_at", refreshed.ExpiresAt, "expiry_fallback", missingExpiry)
 	}
 	return domainRegistrationEvidence(refreshed), nil
 }

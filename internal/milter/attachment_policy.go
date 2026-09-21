@@ -10,13 +10,16 @@ import (
 )
 
 type attachmentPolicyResult struct {
-	handled   bool
-	cancelled bool
-	proposed  action
-	path      string
-	detection string
-	err       error
+	handled       bool
+	cancelled     bool
+	proposed      action
+	path          string
+	detection     string
+	err           error
+	rejectMessage string
 }
+
+const invalidMIMERejectMessage = "Message rejected because it has an invalid MIME structure and cannot be safely inspected"
 
 func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 	result := ss.deps.attachments.evaluate(ctx, ss.message)
@@ -31,7 +34,7 @@ func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 			"message_id", ss.message.Header("Message-ID"), "error", result.err)
 		return false, true
 	}
-	return true, ss.finishAttachmentDecision(ctx, result.proposed, result.path, result.detection, result.err)
+	return true, ss.finishAttachmentDecision(ctx, result.proposed, result.path, result.detection, result.err, result.rejectMessage)
 }
 
 // evaluate runs the attachment scanner under its concurrency limit and maps
@@ -39,6 +42,13 @@ func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 func (s *attachmentPolicyService) evaluate(ctx context.Context, msg *message.Message) attachmentPolicyResult {
 	if s == nil || s.scanner == nil {
 		return attachmentPolicyResult{}
+	}
+	if msg.MIMEHeadersTruncated {
+		return attachmentPolicyResult{
+			handled: true, proposed: invalidMIMEConfiguredAction(s.cfg.InvalidMIMEAction), path: "message",
+			detection: "invalid MIME structure", err: errors.New("structural MIME header exceeds the safe parsing limit"),
+			rejectMessage: invalidMIMERejectMessage,
+		}
 	}
 	select {
 	case s.slots <- struct{}{}:
@@ -64,8 +74,17 @@ func (s *attachmentPolicyService) evaluate(ctx context.Context, msg *message.Mes
 	}
 	actionName := s.cfg.UnscannableAction
 	var typedError *attachment.ScanError
-	if errors.As(scanErr, &typedError) && typedError.Encrypted {
-		actionName = s.cfg.EncryptedArchiveAction
+	if errors.As(scanErr, &typedError) {
+		if typedError.Malformed {
+			return attachmentPolicyResult{
+				handled: true, proposed: invalidMIMEConfiguredAction(s.cfg.InvalidMIMEAction), path: attachmentErrorPath(scanErr),
+				detection: "invalid MIME structure", err: scanErr,
+				rejectMessage: invalidMIMERejectMessage,
+			}
+		}
+		if typedError.Encrypted {
+			actionName = s.cfg.EncryptedArchiveAction
+		}
 	}
 	proposed := attachmentConfiguredAction(actionName)
 	return attachmentPolicyResult{
@@ -76,9 +95,12 @@ func (s *attachmentPolicyService) evaluate(ctx context.Context, msg *message.Mes
 
 // finishAttachmentDecision applies operating mode, writes any accepted-message
 // headers, records deterministic rejections, and sends the Milter response.
-func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action, path, detection string, scanErr error) bool {
+func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action, path, detection string, scanErr error, rejectMessage string) bool {
 	selected := selectActionForMode(proposed, ss.deps.attachments.mode)
-	response := responseForAction(selected, ss.deps.attachments.cfg.RejectMessage)
+	if rejectMessage == "" {
+		rejectMessage = ss.deps.attachments.cfg.RejectMessage
+	}
+	response := responseForAction(selected, rejectMessage)
 	var err error
 	if selected == actionAccept {
 		if proposed != actionAccept && (ss.deps.attachments.filtering.AddEmailHeaders || ss.deps.attachments.mode == "tag") {
@@ -135,6 +157,13 @@ func attachmentConfiguredAction(value string) action {
 	default:
 		return actionAccept
 	}
+}
+
+func invalidMIMEConfiguredAction(value string) action {
+	if value == "accept" {
+		return actionAccept
+	}
+	return actionReject
 }
 
 func attachmentErrorPath(err error) string {

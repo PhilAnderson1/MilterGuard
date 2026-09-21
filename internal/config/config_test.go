@@ -641,6 +641,13 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 			wantError: "unscannable_action",
 		},
 		{
+			name: "invalid MIME action",
+			configure: func(cfg *Config) {
+				cfg.Attachments.InvalidMIMEAction = "tempfail"
+			},
+			wantError: "invalid_mime_action",
+		},
+		{
 			name: "invalid correspondent scope",
 			configure: func(cfg *Config) {
 				cfg.Correspondents.Scope = "user"

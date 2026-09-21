@@ -36,6 +36,18 @@ func TestClientReadsRegistrationAndExpirationEvents(t *testing.T) {
 	}
 }
 
+func TestClientAcceptsRegistrationWithoutExpirationEvent(t *testing.T) {
+	client := New(time.Second)
+	client.services = map[string][]string{"com": {"https://rdap.example"}}
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return response(http.StatusOK, `{"events":[{"eventAction":"registration","eventDate":"2026-09-01T00:00:00Z"}]}`), nil
+	})
+	registered, expires, err := client.Lookup(context.Background(), "example.com")
+	if err != nil || registered.Format("2006-01-02") != "2026-09-01" || !expires.IsZero() {
+		t.Fatalf("RDAP dates = %v, %v, %v; want registration and no expiry", registered, expires, err)
+	}
+}
+
 func TestClientTriesServicesAndReportsInvalidResponses(t *testing.T) {
 	var calls atomic.Int32
 	client := New(time.Second)
@@ -47,7 +59,7 @@ func TestClientTriesServicesAndReportsInvalidResponses(t *testing.T) {
 		}
 		return response(http.StatusOK, `{"events":[]}`), nil
 	})
-	if _, _, err := client.Lookup(context.Background(), "example.com"); err == nil || !strings.Contains(err.Error(), "lacks registration or expiration") {
+	if _, _, err := client.Lookup(context.Background(), "example.com"); err == nil || !strings.Contains(err.Error(), "lacks registration") {
 		t.Fatalf("lookup error = %v", err)
 	}
 	if calls.Load() != 2 {
@@ -149,6 +161,32 @@ func TestClientCachesBootstrapFailure(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("bootstrap requests after retry interval = %d, want 2", got)
+	}
+}
+
+func TestClientRetriesTimedOutBootstrapAfterShortCooldown(t *testing.T) {
+	var calls atomic.Int32
+	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	client := New(time.Second)
+	client.now = func() time.Time { return now }
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, context.DeadlineExceeded
+	})
+	for range 2 {
+		if _, err := client.rdapServices(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("bootstrap error = %v, want deadline exceeded", err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("bootstrap requests during short cooldown = %d, want 1", got)
+	}
+	now = now.Add(deadlineRetry)
+	if _, err := client.rdapServices(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("bootstrap retry error = %v, want deadline exceeded", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("bootstrap requests after short cooldown = %d, want 2", got)
 	}
 }
 

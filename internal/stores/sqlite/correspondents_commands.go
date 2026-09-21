@@ -42,7 +42,7 @@ func (r *correspondentRepository) AddManual(ctx context.Context, sender, recipie
 	return created, nil
 }
 
-func (r *correspondentRepository) DeleteManual(ctx context.Context, sender string, scope stores.RecipientScope) (int, error) {
+func (r *correspondentRepository) DeleteCorrespondent(ctx context.Context, sender string, scope stores.RecipientScope) (int, error) {
 	if r == nil || r.db == nil || !r.options.UseAllowlist {
 		return 0, fmt.Errorf("correspondent allowlisting is disabled or unavailable")
 	}
