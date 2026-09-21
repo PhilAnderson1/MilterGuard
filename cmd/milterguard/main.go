@@ -22,6 +22,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/milter"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/mattn/go-isatty"
+	"github.com/peterh/liner"
 )
 
 // version is replaced at build time with -ldflags "-X main.version=<version>".
@@ -105,8 +106,16 @@ func run() int {
 			return 1
 		}
 		defer closeProcessor()
-		if err := runCommandMode(ctx, os.Stdin, os.Stdout, processor, inputIsTerminal(os.Stdin)); err != nil {
-			fmt.Fprintln(os.Stderr, "command mode failed:", err)
+		var commandErr error
+		if inputIsTerminal(os.Stdin) && inputIsTerminal(os.Stdout) {
+			line := liner.NewLiner()
+			defer line.Close()
+			commandErr = runTerminalCommandMode(ctx, os.Stdout, processor, line)
+		} else {
+			commandErr = runCommandMode(ctx, os.Stdin, os.Stdout, processor)
+		}
+		if commandErr != nil {
+			fmt.Fprintln(os.Stderr, "command mode failed:", commandErr)
 			return 1
 		}
 		return 0
@@ -152,60 +161,90 @@ type interactiveCommandProcessor interface {
 	ExecuteLine(context.Context, string, admincmd.Actor) (admincmd.Response, error)
 }
 
+type commandLineEditor interface {
+	Prompt(string) (string, error)
+	AppendHistory(string)
+}
+
 func inputIsTerminal(input *os.File) bool {
 	fd := input.Fd()
 	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 }
 
-func runCommandMode(ctx context.Context, input io.Reader, output io.Writer, processor interactiveCommandProcessor, interactive bool) error {
-	if interactive {
-		fmt.Fprintln(output, "MilterGuard command mode. Type HELP for commands; EXIT to quit.")
+// runTerminalCommandMode provides in-memory command history on a real terminal.
+func runTerminalCommandMode(ctx context.Context, output io.Writer, processor interactiveCommandProcessor, editor commandLineEditor) error {
+	fmt.Fprintln(output, "MilterGuard command mode. Type HELP for commands; EXIT to quit.")
+	actor := admincmd.Actor{Administrator: true, DefaultRecipient: "*", NewestLast: true}
+	for {
+		line, err := editor.Prompt("milterguard> ")
+		if errors.Is(err, io.EOF) {
+			fmt.Fprintln(output)
+			return nil
+		}
+		if errors.Is(err, liner.ErrPromptAborted) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		line = strings.TrimSpace(line)
+		if line != "" {
+			editor.AppendHistory(line)
+		}
+		if executeCommandModeLine(ctx, output, processor, actor, line) {
+			return nil
+		}
 	}
+}
+
+// runCommandMode processes redirected input without terminal prompts or history.
+func runCommandMode(ctx context.Context, input io.Reader, output io.Writer, processor interactiveCommandProcessor) error {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
 	actor := admincmd.Actor{Administrator: true, DefaultRecipient: "*", NewestLast: true}
 	for {
-		if interactive {
-			fmt.Fprint(output, "milterguard> ")
-		}
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
 				return err
 			}
-			if interactive {
-				fmt.Fprintln(output)
-			}
 			return nil
 		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		if strings.EqualFold(line, "EXIT") || strings.EqualFold(line, "QUIT") {
+		if executeCommandModeLine(ctx, output, processor, actor, scanner.Text()) {
 			return nil
-		}
-		response, err := processor.ExecuteLine(ctx, line, actor)
-		if err != nil {
-			fmt.Fprintf(output, "Error: %v\n", err)
-			continue
-		}
-		if response.Text != "" {
-			fmt.Fprint(output, response.Text)
-			if !strings.HasSuffix(response.Text, "\n") {
-				fmt.Fprintln(output)
-			}
-		}
-		if len(response.Attachments) > 0 && response.Text != "" {
-			fmt.Fprintln(output)
-		}
-		for _, attachment := range response.Attachments {
-			if attachment.SourcePath != "" {
-				fmt.Fprintf(output, "Saved message: %s (%d bytes)\n", attachment.SourcePath, len(attachment.Contents))
-				continue
-			}
-			fmt.Fprintf(output, "Attachment available: %s (%d bytes; not written to the terminal)\n", attachment.Filename, len(attachment.Contents))
 		}
 	}
+}
+
+func executeCommandModeLine(ctx context.Context, output io.Writer, processor interactiveCommandProcessor, actor admincmd.Actor, line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	if strings.EqualFold(line, "EXIT") || strings.EqualFold(line, "QUIT") {
+		return true
+	}
+	response, err := processor.ExecuteLine(ctx, line, actor)
+	if err != nil {
+		fmt.Fprintf(output, "Error: %v\n", err)
+		return false
+	}
+	if response.Text != "" {
+		fmt.Fprint(output, response.Text)
+		if !strings.HasSuffix(response.Text, "\n") {
+			fmt.Fprintln(output)
+		}
+	}
+	if len(response.Attachments) > 0 && response.Text != "" {
+		fmt.Fprintln(output)
+	}
+	for _, attachment := range response.Attachments {
+		if attachment.SourcePath != "" {
+			fmt.Fprintf(output, "Saved message: %s (%d bytes)\n", attachment.SourcePath, len(attachment.Contents))
+			continue
+		}
+		fmt.Fprintf(output, "Attachment available: %s (%d bytes; not written to the terminal)\n", attachment.Filename, len(attachment.Contents))
+	}
+	return false
 }
 
 type listenFunc func(network, address string) (net.Listener, error)

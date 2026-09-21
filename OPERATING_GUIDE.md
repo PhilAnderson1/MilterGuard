@@ -507,6 +507,8 @@ sudo milterguard --config /path/to/milterguard.yaml --command-mode
 
 Command mode permits administrative operations on the live database, so the
 MilterGuard service does not need to be stopped.
+Use the Up and Down arrow keys to revisit commands from the current session;
+history is not saved to disk.
 
 Available commands are:
 

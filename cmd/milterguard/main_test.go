@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
+	"github.com/peterh/liner"
 )
 
 func TestPersistentStateStartupErrorMessage(t *testing.T) {
@@ -47,7 +49,7 @@ func (p *scriptedCommandProcessor) ExecuteLine(_ context.Context, line string, a
 func TestRunCommandMode(t *testing.T) {
 	processor := &scriptedCommandProcessor{}
 	var output strings.Builder
-	err := runCommandMode(context.Background(), strings.NewReader("HELP\nBAD\nEXIT\nIGNORED\n"), &output, processor, true)
+	err := runCommandMode(context.Background(), strings.NewReader("HELP\nBAD\nEXIT\nIGNORED\n"), &output, processor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +70,7 @@ func TestRunCommandMode(t *testing.T) {
 func TestRunCommandModeRedirectedInputSuppressesPrompts(t *testing.T) {
 	processor := &scriptedCommandProcessor{}
 	var output strings.Builder
-	err := runCommandMode(context.Background(), strings.NewReader("HELP\n"), &output, processor, false)
+	err := runCommandMode(context.Background(), strings.NewReader("HELP\n"), &output, processor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +80,54 @@ func TestRunCommandModeRedirectedInputSuppressesPrompts(t *testing.T) {
 	}
 	if !strings.Contains(text, "result for HELP") {
 		t.Fatalf("redirected command output = %q", text)
+	}
+}
+
+type scriptedLineEditor struct {
+	lines   []string
+	errors  []error
+	index   int
+	prompts []string
+	history []string
+}
+
+func (editor *scriptedLineEditor) Prompt(prompt string) (string, error) {
+	editor.prompts = append(editor.prompts, prompt)
+	if editor.index >= len(editor.lines) {
+		return "", io.EOF
+	}
+	index := editor.index
+	editor.index++
+	return editor.lines[index], editor.errors[index]
+}
+
+func (editor *scriptedLineEditor) AppendHistory(line string) {
+	editor.history = append(editor.history, line)
+}
+
+func TestTerminalCommandModeKeepsSessionHistory(t *testing.T) {
+	processor := &scriptedCommandProcessor{}
+	editor := &scriptedLineEditor{
+		lines:  []string{"HELP", "", "ignored", "BAD", "EXIT"},
+		errors: []error{nil, nil, liner.ErrPromptAborted, nil, nil},
+	}
+	var output strings.Builder
+	if err := runTerminalCommandMode(context.Background(), &output, processor, editor); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(processor.lines, ","); got != "HELP,BAD" {
+		t.Fatalf("executed commands = %q, want HELP,BAD", got)
+	}
+	if got := strings.Join(editor.history, ","); got != "HELP,BAD,EXIT" {
+		t.Fatalf("session history = %q, want HELP,BAD,EXIT", got)
+	}
+	for _, prompt := range editor.prompts {
+		if prompt != "milterguard> " {
+			t.Fatalf("terminal prompt = %q", prompt)
+		}
+	}
+	if !strings.Contains(output.String(), "Error: bad command") {
+		t.Fatalf("terminal output = %q", output.String())
 	}
 }
 
