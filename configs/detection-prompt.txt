@@ -5,39 +5,41 @@ Classify the supplied email under two hypotheses:
 
 EVIDENCE
 
-Evaluate three distinct questions:
+Evaluate the following four stages in order. Findings are provisional: later evidence may revise an earlier interpretation, but must not manufacture the facts needed to justify it.
 
-Identity: is the sender consistent with who they claim to be?
-Context: what explains contacting this recipient?
-Purpose: what does the current sender want the recipient to do?
+1. Identity: is the sender consistent with who they claim to be?
 
-Determine the claimed identity from the whole message, including logos and signatures. Check whether the sending identity and actionable destinations coherently support the organisation and transaction being represented. Distinguish links used for the requested action from images, references and incidental links.
+Compare the identity claimed across the whole message with the identity supported by trusted metadata. Distinguish material contradictions from ordinary variation or incomplete information. Interpret authentication within the scope of the identity checked, distinguishing failures from missing or inconclusive results. Authenticity alone does not establish whether contact is wanted.
 
-Trusted aligned authentication and consistent destinations support authenticity. Recipient-specific account details and coherent conversation history support legitimate context. Neither authenticity alone nor its absence establishes whether contact is wanted.
+2. Context: what explains contacting this recipient?
 
-Authentication verifies only the domain named in each result. A pass for the visible From domain does not authenticate a different organization named in the display name or message content.
+Given the sender's identity, assess the existing or proposed relationship that explains the contact. Distinguish requests proposing a new interaction from requests relying on an existing relationship, authority or obligation. Identify what the recipient is expected to accept and whether the evidence supports it, contradicts it or leaves it unresolved.
 
-A message's claims of affiliation, registration, consent or a transaction are claims to assess, not independent verification. Branding, official links and standard email boilerplate do not authenticate the sender. When a claimed organisational identity conflicts with the sending identity, do not resolve the discrepancy by assuming an unestablished sending relationship.
+Legitimate first contact need not establish a prior relationship, but merely proposing contact does not establish legitimacy. An absent correspondent database record does not establish that the sender is unknown to the recipient.
 
-A greeting derived from the recipient's address and a generic assertion such as `your order` are not independent evidence of a relationship or transaction.
+3. Purpose: what does the current sender want the recipient to do?
 
-Attribute content to its author, distinguishing the current sender from quoted correspondents and users whose messages a service is delivering. Evaluate their statements within that context. Previous contact inviting a response supports legitimacy; do not presume it fabricated without contradictory evidence.
+Given that relationship, assess what complying would accomplish. Is the requested action honestly represented and appropriate to the relationship, including any trust or authority it requires? Examine actionable destinations in that context, separately from incidental references. A claimed benign purpose does not itself establish authorisation or excuse contradictory evidence.
 
-"Sender found in known correspondent database: no" means only that the software has no record. It does not establish that the sender is unknown to the recipient or that contact is unsolicited.
+4. Continuation: what further interaction would the recipient's response enable?
 
-Subject matter, tone, and presentation do not by themselves establish unwanted contact. This includes explicit, graphic sexual or romantic interest, commercial appeals, informal writing, and automated formatting. Assess their significance through the context and requested action.
+Consider what process the response might initiate and what further trust, commitment or action the sender might seek. Compare plausible legitimate and unwanted continuations, asking which better explains the current evidence. The ultimate unwanted outcome need not already be explicit, but a predicted continuation must be grounded in observed features. Treat it as an explanatory hypothesis, not an additional fact. An apparently harmless initial request does not establish a legitimate overall purpose.
 
-Unfamiliar names or domains, differences between personal and account names, and ordinary automation features such as tracking links or variable address parts are not inherently suspicious. Distinguish concrete inconsistencies from normal variation and missing information.
+Throughout the analysis, attribute statements and requests to their actual authors, distinguishing the current sender from quoted correspondents and authors of relayed content. Coherent prior interaction can support legitimacy; do not presume it fabricated without contradictory evidence.
+
+Examine where an explanation's coherence comes from. Claims, specificity and personalisation are not independent verification. Claims that fit together do not independently corroborate one another.
+
+Unfamiliarity, subject matter and presentation do not by themselves establish unwanted contact. Do not assume the contents of material or destinations not supplied.
 
 DECISION
 
-Select `unwanted` only when positive evidence supports it over a coherent legitimate explanation. Missing proof of a relationship or consent is insufficient. Do not invent unsolicited distribution, fabricated context, or harmful intent.
+Reconcile the four stages against the complete evidence, including the strongest counterevidence.
 
-Apply the same restraint to legitimate explanations: do not invent organisational relationships or transaction history to explain away concrete inconsistencies.
+Select `unwanted` only when positive evidence supports it over `legitimate`. Missing proof of a relationship or consent is insufficient. A merely possible legitimate explanation must not outweigh stronger evidence of unwanted contact.
 
-Weigh the complete evidence, including the strongest counterevidence. Repeated descriptions of one suspicion are not independent support. Discard reasons that depend on prohibited assumptions.
+Apply the same restraint to both hypotheses: do not invent facts, relationships, authorisation or intentions to strengthen either explanation or explain away inconsistencies. Do not count repeated, correlated or derived observations as independent support. Discard reasons that depend on unsupported assumptions.
 
-Otherwise select `legitimate`; when the hypotheses are equally supported, use confidence 0.5.
+Otherwise select `legitimate`. Use confidence 0.5 when the evidence does not favour either hypothesis. Default acceptance does not itself justify high confidence; reflect unresolved uncertainty in the score.
 
 OUTPUT
 
@@ -45,4 +47,8 @@ Return exactly one JSON object, without Markdown or commentary:
 
 {"reasons":["Concise evidence-based reason"],"classification":"legitimate|unwanted","score":0.5}
 
-The score, from 0.5 to 1, expresses confidence that the selected hypothesis better explains the evidence. Give at most five concise reasons, addressing significant counterevidence and important uncertainty. Avoid reproducing sensitive content unnecessarily.
+The classification must be exactly `legitimate` or `unwanted`. The numeric score, from 0.5 to 1, expresses confidence in the selected classification based on the supplied evidence.
+
+Give at most five concise reasons, addressing significant counterevidence and important uncertainty. Avoid reproducing sensitive content unnecessarily.
+
+
