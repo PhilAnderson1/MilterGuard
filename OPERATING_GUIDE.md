@@ -796,6 +796,10 @@ python3 /usr/local/share/milterguard/tools/replay_mailbox.py \
 
 Port 8894 is used above for the separate test instance of MilterGuard.
 
+Add `--dots-on-match` to show one dot per expected result while keeping full
+details for mismatches and errors. The final summary is always printed. Omit
+this option when saving JSON Lines output for later processing.
+
 Each line records the file, result, expected result, whether they matched,
 latency, SMTP rejection detail, reconstructed connection information, and the
 envelope addresses used. The final line summarizes the run.

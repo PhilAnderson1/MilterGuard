@@ -263,6 +263,9 @@ def replay(sock, parsed, body, mail_from, rcpt_to):
     added_headers = {}
     while True:
         response = receive_frame(sock)
+        if response == b"p":
+            # SMFIR_PROGRESS is a keepalive, not the EOM decision.
+            continue
         if response.startswith(b"h"):
             fields = response[1:].split(b"\x00")
             if len(fields) != 3 or fields[-1] != b"":
@@ -304,6 +307,31 @@ def message_files(directory):
             yield path
 
 
+class ReplayOutput:
+    def __init__(self, dots_on_match=False, stream=None):
+        self.dots_on_match = dots_on_match
+        self.stream = stream if stream is not None else sys.stdout
+        self.dots_pending = False
+
+    def result(self, record):
+        if self.dots_on_match and record.get("matched") is True:
+            self.stream.write(".")
+            self.dots_pending = True
+        else:
+            if self.dots_pending:
+                self.stream.write("\n")
+                self.dots_pending = False
+            self.stream.write(json.dumps(record) + "\n")
+        self.stream.flush()
+
+    def summary(self, record):
+        if self.dots_pending:
+            self.stream.write("\n")
+            self.dots_pending = False
+        self.stream.write(json.dumps(record) + "\n")
+        self.stream.flush()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Replay a directory of .eml files through a test MilterGuard instance."
@@ -327,6 +355,10 @@ def main():
     parser.add_argument("--mail-from", help="override Return-Path/From envelope-sender reconstruction")
     parser.add_argument("--rcpt-to", help="override X-Original-To/Delivered-To/To recipient reconstruction")
     parser.add_argument("--expected", choices=("accept", "reject"))
+    parser.add_argument(
+        "--dots-on-match", action="store_true",
+        help="print a dot for each match; show full results only for mismatches and errors",
+    )
     parser.add_argument("--timeout", type=float, default=90, help="socket timeout in seconds")
     args = parser.parse_args()
 
@@ -335,6 +367,7 @@ def main():
 
     totals = {"accept": 0, "reject": 0, "tempfail": 0, "unknown": 0, "error": 0}
     mismatches = 0
+    output = ReplayOutput(args.dots_on_match)
     files = list(message_files(args.directory))
     if not files:
         parser.error("no .eml files found")
@@ -355,37 +388,26 @@ def main():
                 totals[result] += 1
                 matched = args.expected is None or result == args.expected
                 mismatches += int(not matched)
-                print(
-                    json.dumps(
-                        {
-                            "file": str(path),
-                            "result": result,
-                            "expected": args.expected,
-                            "matched": matched,
-                            "latency_ms": latency,
-                            "detail": detail,
-                            "added_headers": added_headers,
-                            "connection": connection,
-                            "mail_from": mail_from,
-                            "rcpt_to": rcpt_to,
-                        }
-                    ),
-                    flush=True,
+                output.result(
+                    {
+                        "file": str(path),
+                        "result": result,
+                        "expected": args.expected,
+                        "matched": matched,
+                        "latency_ms": latency,
+                        "detail": detail,
+                        "added_headers": added_headers,
+                        "connection": connection,
+                        "mail_from": mail_from,
+                        "rcpt_to": rcpt_to,
+                    }
                 )
         except Exception as exc:
             totals["error"] += 1
             mismatches += int(args.expected is not None)
-            print(
-                json.dumps({"file": str(path), "result": "error", "error": str(exc)}),
-                flush=True,
-            )
+            output.result({"file": str(path), "result": "error", "error": str(exc)})
 
-    print(
-        json.dumps(
-            {"summary": totals, "expected": args.expected, "mismatches": mismatches}
-        ),
-        flush=True,
-    )
+    output.summary({"summary": totals, "expected": args.expected, "mismatches": mismatches})
     return 1 if mismatches or totals["error"] else 0
 
 

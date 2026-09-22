@@ -1,9 +1,26 @@
 import argparse
 import email.parser
 import email.policy
+import io
+import json
+import struct
 import unittest
 
 from tools import replay_mailbox
+
+
+class ScriptedSocket:
+    def __init__(self, responses):
+        self.pending = b"".join(
+            struct.pack("!I", len(response)) + response for response in responses
+        )
+
+    def sendall(self, data):
+        pass
+
+    def recv(self, length):
+        chunk, self.pending = self.pending[:length], self.pending[length:]
+        return chunk
 
 
 def headers(value):
@@ -79,6 +96,53 @@ class EnvelopeTests(unittest.TestCase):
             replay_mailbox.envelope_addresses(parsed, args),
             ("override@example.net", "override@example.org"),
         )
+
+
+class ProgressFrameTests(unittest.TestCase):
+    def test_replay_waits_for_decision_after_progress_and_header_frames(self):
+        sock = ScriptedSocket(
+            [b"c"] * 5
+            + [b"p", b"hX-MilterGuard-Classification\x00legitimate\x00", b"p", b"a"]
+        )
+        result, _, added_headers = replay_mailbox.replay(
+            sock, headers("Subject: test"), b"body", "sender@example.net", "user@example.net"
+        )
+        self.assertEqual(result, ("accept", ""))
+        self.assertEqual(added_headers, {"X-MilterGuard-Classification": "legitimate"})
+
+
+class ReplayOutputTests(unittest.TestCase):
+    def test_dots_on_match_preserves_full_mismatches_errors_and_summary(self):
+        stream = io.StringIO()
+        output = replay_mailbox.ReplayOutput(dots_on_match=True, stream=stream)
+        output.result({"file": "a.eml", "matched": True})
+        output.result({"file": "b.eml", "matched": True})
+        output.result({"file": "c.eml", "matched": False})
+        output.result({"file": "d.eml", "matched": True})
+        output.result({"file": "e.eml", "result": "error"})
+        output.result({"file": "f.eml", "matched": True})
+        output.summary({"summary": {"accept": 3}, "mismatches": 1})
+        self.assertEqual(
+            stream.getvalue(),
+            "..\n"
+            + json.dumps({"file": "c.eml", "matched": False}) + "\n"
+            + ".\n"
+            + json.dumps({"file": "e.eml", "result": "error"}) + "\n"
+            + ".\n"
+            + json.dumps({"summary": {"accept": 3}, "mismatches": 1}) + "\n",
+        )
+
+    def test_default_output_remains_json_lines(self):
+        stream = io.StringIO()
+        output = replay_mailbox.ReplayOutput(stream=stream)
+        output.result({"file": "a.eml", "matched": True})
+        output.summary({"summary": {"accept": 1}})
+        self.assertEqual(
+            stream.getvalue(),
+            json.dumps({"file": "a.eml", "matched": True}) + "\n"
+            + json.dumps({"summary": {"accept": 1}}) + "\n",
+        )
+
 
 
 if __name__ == "__main__":
