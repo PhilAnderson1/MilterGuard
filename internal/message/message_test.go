@@ -431,6 +431,7 @@ func TestConnectionInformationPrecedesHeadersAndReportsDNSPrecisely(t *testing.T
 		RemoteIP:            "92.205.185.174",
 		MTAReportedHostname: "174.185.205.92.host.secureserver.net",
 		HELOIdentity:        "mx.example.com",
+		EnvelopeSender:      "bounce@example.net",
 		ReverseDNSStatus:    ReverseDNSAvailable,
 		ReverseDNS: []ReverseDNSName{
 			{Hostname: "174.185.205.92.host.secureserver.net", Confirmation: ForwardConfirmed},
@@ -447,6 +448,7 @@ func TestConnectionInformationPrecedesHeadersAndReportsDNSPrecisely(t *testing.T
 		"Reverse DNS: 174.185.205.92.host.secureserver.net (forward-confirmed), other.example (unconfirmed), unresolved.example (forward lookup failed)",
 		"Forward-confirmed reverse DNS: yes",
 		"SMTP HELO/EHLO identity: mx.example.com",
+		"SMTP envelope sender: bounce@example.net",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q:\n%s", want, prompt)
@@ -473,6 +475,17 @@ func TestConnectionInformationDistinguishesAbsentFailureAndUnavailable(t *testin
 		if !strings.Contains(prompt, "Remote IP: unavailable") || !strings.Contains(prompt, test.want) {
 			t.Errorf("status %q formatted incorrectly:\n%s", test.status, prompt)
 		}
+		if !strings.Contains(prompt, "SMTP envelope sender: unavailable") {
+			t.Errorf("missing envelope sender was not marked unavailable:\n%s", prompt)
+		}
+	}
+}
+
+func TestConnectionInformationPreservesNullEnvelopeSender(t *testing.T) {
+	m := New(100)
+	m.Connection.EnvelopeSender = "<>"
+	if prompt := m.Prompt(10); !strings.Contains(prompt, "SMTP envelope sender: <>") {
+		t.Fatalf("null envelope sender was not preserved:\n%s", prompt)
 	}
 }
 
@@ -693,6 +706,7 @@ func TestPromptDescribesAuthenticatedSubmissionWithoutInboundAuthenticationResul
 		"Remote IP:",
 		"Reverse DNS:",
 		"SMTP HELO/EHLO identity:",
+		"SMTP envelope sender:",
 		"Visible From domain:",
 		"DKIM:",
 		"SPF:",

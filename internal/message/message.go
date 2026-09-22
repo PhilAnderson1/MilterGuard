@@ -36,6 +36,7 @@ type ConnectionInfo struct {
 	RemoteIP            string
 	MTAReportedHostname string
 	HELOIdentity        string
+	EnvelopeSender      string
 	ReverseDNSStatus    string
 	ReverseDNS          []ReverseDNSName
 }

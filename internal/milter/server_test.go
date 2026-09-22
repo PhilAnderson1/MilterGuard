@@ -1619,10 +1619,35 @@ func TestEndOfBodyPayloadIsIncludedInAnalysis(t *testing.T) {
 	}
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	input := <-analyzer.inputs
+	if !strings.Contains(input.Text, "SMTP envelope sender: sender@example.net") {
+		t.Fatalf("AI input missing SMTP envelope sender:\n%s", input.Text)
+	}
 	first := strings.Index(input.Text, "first body section")
 	final := strings.Index(input.Text, "final body section")
 	if first < 0 || final <= first {
 		t.Fatalf("AI input does not contain the complete ordered body:\n%s", input.Text)
+	}
+}
+
+func TestNullEnvelopeSenderIsSuppliedAsAIEvidence(t *testing.T) {
+	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 1)}
+	_, conn, done := testServer(t, analyzer)
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, ""),
+		envelopeFrame(commandRecipient, "recipient@example.com"),
+		headerFrame("From", "sender@example.net"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if input := <-analyzer.inputs; !strings.Contains(input.Text, "SMTP envelope sender: <>") {
+		t.Fatalf("AI input missing null SMTP envelope sender:\n%s", input.Text)
 	}
 }
 

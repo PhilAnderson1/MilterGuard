@@ -26,8 +26,43 @@ func TestValidate(t *testing.T) {
 			t.Fatalf("expected classification %q to be invalid", classification)
 		}
 	}
-	if err := validate(Decision{Classification: "unwanted", Score: 1.1}); err == nil {
-		t.Fatal("expected invalid score")
+	for _, score := range []float64{0, 0.49, 1.1} {
+		if err := validate(Decision{Classification: "unwanted", Score: score}); err == nil {
+			t.Fatalf("expected score %v to be invalid", score)
+		}
+	}
+}
+
+func TestDecisionRequiresScoreInPromptRange(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		content string
+		valid   bool
+	}{
+		{"missing", `{"classification":"unwanted","reasons":[]}`, false},
+		{"null", `{"classification":"unwanted","score":null,"reasons":[]}`, false},
+		{"zero", `{"classification":"unwanted","score":0,"reasons":[]}`, false},
+		{"below minimum", `{"classification":"unwanted","score":0.49,"reasons":[]}`, false},
+		{"minimum", `{"classification":"unwanted","score":0.5,"reasons":[]}`, true},
+		{"maximum", `{"classification":"unwanted","score":1,"reasons":[]}`, true},
+		{"above maximum", `{"classification":"unwanted","score":1.1,"reasons":[]}`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := retryTestClient(roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return decisionResponse(test.content), nil
+			}), 0)
+			_, err := client.Analyze(context.Background(), Input{Text: "test"})
+			if test.valid {
+				if err != nil {
+					t.Fatalf("valid decision rejected: %v", err)
+				}
+				return
+			}
+			var endpointErr *EndpointError
+			if !errors.As(err, &endpointErr) || endpointErr.Kind != ErrorDecision {
+				t.Fatalf("error = %v, want invalid decision", err)
+			}
+		})
 	}
 }
 
@@ -72,7 +107,7 @@ func TestDisableThinkingUsesEndpointSpecificRequestField(t *testing.T) {
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Header:     make(http.Header),
-					Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"classification\":\"legitimate\",\"score\":0,\"reasons\":[]}"}}]}`)),
+					Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"classification\":\"legitimate\",\"score\":0.5,\"reasons\":[]}"}}]}`)),
 				}, nil
 			})
 			client := NewClient(config.AIConfig{

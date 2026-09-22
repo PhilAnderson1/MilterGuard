@@ -654,6 +654,11 @@ func (ss *session) connectionInformation(ctx context.Context) message.Connection
 		ReverseDNSStatus:    ss.connectionDNS.status,
 		ReverseDNS:          append([]message.ReverseDNSName(nil), ss.connectionDNS.names...),
 	}
+	if ss.envelopeSender == "<>" {
+		info.EnvelopeSender = "<>"
+	} else {
+		info.EnvelopeSender = mailaddr.Normalize(ss.envelopeSender)
+	}
 	if ss.peerIP.IsValid() {
 		info.RemoteIP = ss.peerIP.String()
 	}

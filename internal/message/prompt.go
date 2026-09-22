@@ -257,6 +257,7 @@ func writeConnectionInformation(b *strings.Builder, info ConnectionInfo) {
 		b.WriteString("Reverse DNS: not applicable\nForward-confirmed reverse DNS: not applicable\n")
 	}
 	fmt.Fprintf(b, "SMTP HELO/EHLO identity: %s\n", connectionValue(info.HELOIdentity))
+	fmt.Fprintf(b, "SMTP envelope sender: %s\n", connectionValue(info.EnvelopeSender))
 }
 
 func connectionValue(value string) string {

@@ -220,16 +220,24 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, 
 			Err:  fmt.Errorf("endpoint returned no choices: response_body=%q", responseExcerpt(raw)),
 		}
 	}
-	var d Decision
+	var parsed struct {
+		Classification string   `json:"classification"`
+		Score          *float64 `json:"score"`
+		Reasons        []string `json:"reasons"`
+	}
 	dec := json.NewDecoder(strings.NewReader(envelope.Choices[0].Message.Content))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&d); err != nil {
+	if err := dec.Decode(&parsed); err != nil {
 		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: fmt.Errorf("invalid decision JSON: %w", err)}
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
 		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: fmt.Errorf("invalid decision JSON: trailing content")}
 	}
+	if parsed.Score == nil {
+		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: fmt.Errorf("invalid decision JSON: score is required")}
+	}
+	d := Decision{Classification: parsed.Classification, Score: *parsed.Score, Reasons: parsed.Reasons}
 	if err := validate(d); err != nil {
 		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: err}
 	}
@@ -349,8 +357,8 @@ func validate(d Decision) error {
 	default:
 		return fmt.Errorf("invalid classification %q", d.Classification)
 	}
-	if d.Score < 0 || d.Score > 1 {
-		return fmt.Errorf("score must be between 0 and 1")
+	if d.Score < 0.5 || d.Score > 1 {
+		return fmt.Errorf("score must be between 0.5 and 1")
 	}
 	if len(d.Reasons) > 10 {
 		return fmt.Errorf("too many reasons")
