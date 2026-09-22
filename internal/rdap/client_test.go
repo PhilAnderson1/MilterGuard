@@ -27,6 +27,7 @@ func TestClientReadsRegistrationAndExpirationEvents(t *testing.T) {
 	client := New(time.Second)
 	client.http.Transport = transport
 	client.services = map[string][]string{"com": {"https://rdap.example"}}
+	client.bootstrapLoadedAt = client.now()
 	registered, expires, err := client.Lookup(context.Background(), "example.com")
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +40,7 @@ func TestClientReadsRegistrationAndExpirationEvents(t *testing.T) {
 func TestClientAcceptsRegistrationWithoutExpirationEvent(t *testing.T) {
 	client := New(time.Second)
 	client.services = map[string][]string{"com": {"https://rdap.example"}}
+	client.bootstrapLoadedAt = client.now()
 	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return response(http.StatusOK, `{"events":[{"eventAction":"registration","eventDate":"2026-09-01T00:00:00Z"}]}`), nil
 	})
@@ -52,6 +54,7 @@ func TestClientTriesServicesAndReportsInvalidResponses(t *testing.T) {
 	var calls atomic.Int32
 	client := New(time.Second)
 	client.services = map[string][]string{"com": {"https://first.example", "https://second.example"}}
+	client.bootstrapLoadedAt = client.now()
 	client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		if r.URL.Host == "first.example" {
@@ -111,6 +114,99 @@ func TestClientLoadsBootstrapOnceForConcurrentLookups(t *testing.T) {
 	}
 }
 
+func TestClientRefreshesBootstrapLazilyAfterOneDay(t *testing.T) {
+	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	client := New(time.Second)
+	client.now = func() time.Time { return now }
+	var calls int
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return response(http.StatusOK, `{"services":[[["com"],["https://old.example/"]]]}`), nil
+		}
+		return response(http.StatusOK, `{"services":[[["com"],["https://new.example/"]]]}`), nil
+	})
+	if _, err := client.rdapServices(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(bootstrapRefreshInterval - time.Second)
+	if services, err := client.rdapServices(context.Background()); err != nil || services["com"][0] != "https://old.example/" || calls != 1 {
+		t.Fatalf("fresh bootstrap = %v, %v; calls = %d", services, err, calls)
+	}
+	now = now.Add(time.Second)
+	if services, err := client.rdapServices(context.Background()); err != nil || services["com"][0] != "https://new.example/" || calls != 2 {
+		t.Fatalf("refreshed bootstrap = %v, %v; calls = %d", services, err, calls)
+	}
+}
+
+func TestClientKeepsStaleBootstrapWhenRefreshFails(t *testing.T) {
+	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	client := New(time.Second)
+	client.now = func() time.Time { return now }
+	var calls int
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return response(http.StatusOK, `{"services":[[["com"],["https://old.example/"]]]}`), nil
+		}
+		if calls == 2 {
+			return response(http.StatusOK, `{"services":[]}`), nil
+		}
+		return response(http.StatusOK, `{"services":[[["com"],["https://new.example/"]]]}`), nil
+	})
+	if _, err := client.rdapServices(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(bootstrapRefreshInterval)
+	if services, err := client.rdapServices(context.Background()); err != nil || services["com"][0] != "https://old.example/" {
+		t.Fatalf("stale bootstrap after invalid refresh = %v, %v", services, err)
+	}
+	if _, err := client.rdapServices(context.Background()); err != nil || calls != 2 {
+		t.Fatalf("retry cooldown: calls = %d, error = %v", calls, err)
+	}
+	now = now.Add(failureRetry)
+	if services, err := client.rdapServices(context.Background()); err != nil || services["com"][0] != "https://new.example/" || calls != 3 {
+		t.Fatalf("retry refresh = %v, %v; calls = %d", services, err, calls)
+	}
+}
+
+func TestClientServesStaleBootstrapDuringRefresh(t *testing.T) {
+	client := New(time.Second)
+	client.services = map[string][]string{"com": {"https://old.example/"}}
+	client.bootstrapLoadedAt = client.now().Add(-bootstrapRefreshInterval)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		close(started)
+		<-release
+		return response(http.StatusOK, `{"services":[[["com"],["https://new.example/"]]]}`), nil
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.rdapServices(context.Background())
+		done <- err
+	}()
+	<-started
+	services, err := client.rdapServices(context.Background())
+	if err != nil || services["com"][0] != "https://old.example/" {
+		t.Fatalf("bootstrap during refresh = %v, %v", services, err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientRejectsEmptyInitialBootstrap(t *testing.T) {
+	client := New(time.Second)
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return response(http.StatusOK, `{"services":[]}`), nil
+	})
+	if _, err := client.rdapServices(context.Background()); err == nil || client.services != nil {
+		t.Fatalf("empty initial bootstrap accepted: services = %v, error = %v", client.services, err)
+	}
+}
+
 func TestClientBootstrapWaitRespectsContext(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -118,7 +214,7 @@ func TestClientBootstrapWaitRespectsContext(t *testing.T) {
 	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 		close(started)
 		<-release
-		return response(http.StatusOK, `{"services":[]}`), nil
+		return response(http.StatusOK, `{"services":[[["com"],["https://rdap.example/"]]]}`), nil
 	})
 	leaderDone := make(chan error, 1)
 	go func() {

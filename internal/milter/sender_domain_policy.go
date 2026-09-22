@@ -96,8 +96,17 @@ func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, doma
 	}
 	ss.deps.log.InfoContext(ctx, "authenticated-only sender domain policy decision", attrs...)
 	if selected == actionReject {
-		ss.deps.policy.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, authenticatedOnlySenderDomainSource)
-		ss.deps.policy.ipReputation.add(ctx, ss.peerIP, ss.awaitConnectionDNS(ctx))
+		persistCtx, cancel := postDecisionContext(ctx)
+		ss.deps.policy.recordRejection(persistCtx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, authenticatedOnlySenderDomainSource)
+		cancel()
+		// DNS can take the full wait budget, so keep it separate from the
+		// subsequent reputation write's persistence deadline.
+		dnsCtx, cancelDNS := postDecisionContext(ctx)
+		dns := ss.awaitConnectionDNS(dnsCtx)
+		cancelDNS()
+		strikeCtx, cancelStrike := postDecisionContext(ctx)
+		ss.deps.policy.ipReputation.add(strikeCtx, ss.peerIP, dns)
+		cancelStrike()
 	}
 	ss.resetMessage(phaseConnection)
 	return true

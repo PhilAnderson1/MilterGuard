@@ -21,8 +21,11 @@ func senderOwnedViaAliases(path, envelopeSender, identity, commandRecipient stri
 	if sender == "" || command == "" {
 		return fmt.Errorf("invalid sender or command address")
 	}
-	senderAddress, _ := mail.ParseAddress(sender)
-	commandAddress, _ := mail.ParseAddress(command)
+	senderAddress, senderErr := mail.ParseAddress(sender)
+	commandAddress, commandErr := mail.ParseAddress(command)
+	if senderErr != nil || commandErr != nil || senderAddress == nil || commandAddress == nil {
+		return fmt.Errorf("invalid sender or command address")
+	}
 	senderParts := strings.Split(senderAddress.Address, "@")
 	commandParts := strings.Split(commandAddress.Address, "@")
 	if len(senderParts) != 2 || len(commandParts) != 2 || !strings.EqualFold(senderParts[1], commandParts[1]) {

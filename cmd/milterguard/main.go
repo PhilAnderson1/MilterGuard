@@ -132,7 +132,11 @@ func run() int {
 	}
 	client := ai.NewClient(cfg.AI, string(prompt), logger)
 	server := milter.NewServer(cfg, client, logger)
-	defer server.Close()
+	defer func() {
+		if err := server.Close(); err != nil {
+			logger.Error("cannot close MilterGuard database", "error", err)
+		}
+	}()
 	if err := server.StartupError(); err != nil {
 		message := persistentStateStartupErrorMessage(err)
 		if errors.Is(err, milter.ErrInternalTokenGeneration) {

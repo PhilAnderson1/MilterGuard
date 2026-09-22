@@ -405,7 +405,7 @@ func (ss *session) evaluateMessage(ctx context.Context, inbound inboundEvidence)
 	if inbound.authenticatedDomain != "" {
 		info, err := ss.deps.policy.domainRegistration.evidence(ctx, inbound.authenticatedDomain)
 		if err != nil {
-			ss.deps.log.DebugContext(ctx, "domain registration lookup unavailable", "domain", registrableDomain(inbound.authenticatedDomain), "error", err)
+			ss.deps.log.DebugContext(ctx, "domain registration evidence unavailable", "domain", registrableDomain(inbound.authenticatedDomain), "error", err)
 		} else {
 			ss.message.DomainRegistration = info
 		}

@@ -83,9 +83,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}
 	sessionCtx, cancelSessions := context.WithCancel(ctx)
 	defer cancelSessions()
-	if err := s.maintenance.cleanupPersistentStores(sessionCtx, "startup"); err != nil {
-		return err
-	}
+	s.maintenance.runMaintenance("startup persistence cleanup", func() {
+		if err := s.maintenance.cleanupPersistentStores(sessionCtx, "startup"); err != nil {
+			s.log.Warn("SQLite cleanup failed", "trigger", "startup", "error", err)
+		}
+	})
 	s.maintenance.startRejectedMailCleanup(sessionCtx)
 	if cleanupInterval := s.maintenance.cleanupInterval; cleanupInterval > 0 {
 		maintenanceCtx, stopMaintenance := context.WithCancel(sessionCtx)

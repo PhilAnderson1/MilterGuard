@@ -450,4 +450,12 @@ func TestSenderOwnershipViaAliases(t *testing.T) {
 			t.Errorf("%s unexpectedly accepted", sender)
 		}
 	}
+	for _, sender := range []string{"broken <>", "not an address"} {
+		if err := senderOwnedViaAliases(path, sender, "pamail", "milterguard@invades.net"); err == nil {
+			t.Errorf("malformed sender %q unexpectedly accepted", sender)
+		}
+	}
+	if err := senderOwnedViaAliases(path, "pamail@invades.net", "pamail", "broken <>"); err == nil {
+		t.Error("malformed command recipient unexpectedly accepted")
+	}
 }

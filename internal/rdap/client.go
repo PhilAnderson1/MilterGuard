@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	bootstrapURL               = "https://data.iana.org/rdap/dns.json"
-	maximumResponseBytes int64 = 1 << 20
-	failureRetry               = time.Hour
-	deadlineRetry              = time.Minute
+	bootstrapURL                   = "https://data.iana.org/rdap/dns.json"
+	maximumResponseBytes     int64 = 1 << 20
+	failureRetry                   = time.Hour
+	deadlineRetry                  = time.Minute
+	bootstrapRefreshInterval       = 24 * time.Hour
 )
 
 // Client is safe for concurrent domain lookups.
@@ -33,6 +34,7 @@ type Client struct {
 	bootstrapURL      string
 	mu                sync.Mutex
 	services          map[string][]string
+	bootstrapLoadedAt time.Time
 	bootstrapInflight chan struct{}
 	bootstrapErr      error
 	bootstrapRetryAt  time.Time
@@ -156,12 +158,16 @@ func (c *Client) Lookup(ctx context.Context, domain string) (time.Time, time.Tim
 func (c *Client) rdapServices(ctx context.Context) (map[string][]string, error) {
 	for {
 		c.mu.Lock()
-		if c.services != nil {
+		now := c.now()
+		// A stale map remains usable while a refresh is in flight or waiting
+		// for its retry window. Never discard the last successful bootstrap.
+		if c.services != nil && (now.Before(c.bootstrapLoadedAt.Add(bootstrapRefreshInterval)) ||
+			c.bootstrapRetryAt.After(now) || c.bootstrapInflight != nil) {
 			services := c.services
 			c.mu.Unlock()
 			return services, nil
 		}
-		if c.bootstrapRetryAt.After(c.now()) {
+		if c.bootstrapRetryAt.After(now) {
 			err := c.bootstrapErr
 			c.mu.Unlock()
 			return nil, err
@@ -183,6 +189,7 @@ func (c *Client) rdapServices(ctx context.Context) (map[string][]string, error) 
 		c.mu.Lock()
 		if err == nil {
 			c.services = services
+			c.bootstrapLoadedAt = c.now()
 			c.bootstrapErr = nil
 			c.bootstrapRetryAt = time.Time{}
 		} else if errors.Is(err, context.DeadlineExceeded) {
@@ -194,7 +201,11 @@ func (c *Client) rdapServices(ctx context.Context) (map[string][]string, error) 
 		}
 		c.bootstrapInflight = nil
 		close(pending)
+		cached := c.services
 		c.mu.Unlock()
+		if err != nil && cached != nil {
+			return cached, nil
+		}
 		return services, err
 	}
 }
@@ -220,6 +231,9 @@ func (c *Client) fetchRDAPServices(ctx context.Context) (map[string][]string, er
 				}
 			}
 		}
+	}
+	if len(services) == 0 {
+		return nil, errors.New("RDAP bootstrap contains no usable services")
 	}
 	return services, nil
 }

@@ -89,6 +89,51 @@ func TestMaintenancePanicIsRecovered(t *testing.T) {
 	}
 }
 
+type failingStartupCleanupIPRepository struct {
+	stores.PersistentIPReputationRepository
+	err   error
+	panic bool
+}
+
+func (r failingStartupCleanupIPRepository) Cleanup(context.Context) (int64, error) {
+	if r.panic {
+		panic("startup cleanup panic")
+	}
+	return 0, r.err
+}
+
+func TestServeContinuesAfterStartupCleanupFailure(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		cleanup failingStartupCleanupIPRepository
+		logText string
+	}{
+		{name: "error", cleanup: failingStartupCleanupIPRepository{err: errors.New("database busy")}, logText: "SQLite cleanup failed"},
+		{name: "panic", cleanup: failingStartupCleanupIPRepository{panic: true}, logText: "startup cleanup panic"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logs, nil))
+			server := NewServer(config.Config{
+				AI:     config.AIConfig{MaxConcurrent: 1},
+				Milter: config.MilterConfig{MaxConnections: 1},
+			}, fixedAnalyzer{}, logger)
+			server.maintenance.ip = test.cleanup
+			listenerError := errors.New("listener reached")
+			listener := &scriptedListener{errors: []error{listenerError}}
+			if err := server.Serve(context.Background(), listener); !errors.Is(err, listenerError) {
+				t.Fatalf("Serve error = %v, want listener error", err)
+			}
+			if listener.accepts != 1 {
+				t.Fatalf("listener accepts = %d, want 1", listener.accepts)
+			}
+			if !strings.Contains(logs.String(), test.logText) {
+				t.Fatalf("startup cleanup failure was not logged: %s", logs.String())
+			}
+		})
+	}
+}
+
 type recordingAnalyzer struct {
 	inputs chan ai.Input
 }

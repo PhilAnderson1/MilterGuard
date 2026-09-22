@@ -109,7 +109,7 @@ func (s *maintenanceService) runRejectedMailCleanup() {
 	})
 }
 
-// runMaintenance contains panics from a background maintenance operation so a
+// runMaintenance contains panics from startup or background maintenance so a
 // cleanup defect cannot terminate the mail-filtering service.
 func (s *maintenanceService) runMaintenance(name string, operation func()) {
 	defer func() {

@@ -142,7 +142,9 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 		if path != "" {
 			reason += ": " + path
 		}
-		ss.deps.attachments.policy.recordRejection(ctx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, "attachment_policy")
+		persistCtx, cancel := postDecisionContext(ctx)
+		ss.deps.attachments.policy.recordRejection(persistCtx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, "attachment_policy")
+		cancel()
 	}
 	ss.resetMessage(phaseConnection)
 	return true

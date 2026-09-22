@@ -10,11 +10,17 @@ import (
 
 const postDecisionUpdateTimeout = 5 * time.Second
 
+// postDecisionContext gives persistence work its own bounded lifetime after
+// the final Milter response, independent of the message's analysis deadline.
+func postDecisionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), postDecisionUpdateTimeout)
+}
+
 // applyPostDecisionUpdates records adaptive trust and reputation evidence only
 // after a completed enforce-mode decision. Analysis failures never count as
 // legitimate evidence.
 func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, current messageContext, result evaluationResult, inbound inboundEvidence) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), postDecisionUpdateTimeout)
+	ctx, cancel := postDecisionContext(ctx)
 	defer cancel()
 	if s.mode != "enforce" {
 		return
@@ -93,6 +99,10 @@ func (s *messagePolicyService) saveRejectedMailCopy(ctx context.Context, msg *me
 	}
 	if err != nil {
 		s.log.WarnContext(ctx, "cannot save rejected message copy", "message_id", msg.Header("Message-ID"), "source", source, "rejection_id", recordID, "error", err)
+		return
+	}
+	if recordID == 0 {
+		s.log.WarnContext(ctx, "rejected message copy saved without rejection history record", "message_id", msg.Header("Message-ID"), "source", source, "file", path)
 		return
 	}
 	s.log.DebugContext(ctx, "rejected message copy saved", "message_id", msg.Header("Message-ID"), "source", source, "rejection_id", recordID, "file", path)

@@ -2,6 +2,7 @@ package milter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -17,7 +18,8 @@ import (
 const (
 	domainRegistrationExpiryGrace        = 14 * 24 * time.Hour
 	domainRegistrationMissingExpiryCache = 14 * 24 * time.Hour
-	domainRegistrationFailureRetry       = time.Hour
+	domainRegistrationFailureRetry       = 5 * time.Minute
+	domainRegistrationDeadlineRetry      = time.Minute
 )
 
 type domainRegistrationStore struct {
@@ -124,14 +126,21 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 		}
 	}
 	refreshed := stores.DomainRegistration{Domain: domain, RegisteredAt: registeredAt.UTC(), ExpiresAt: expiresAt.UTC()}
+	lookupErr := err
 	if err == nil {
 		err = s.repository.PutDomainRegistration(ctx, refreshed)
 	}
 	s.mu.Lock()
 	delete(s.inflight, domain)
-	if err != nil {
-		s.pruneFailuresLocked(now)
-		s.failures[domain] = now.Add(domainRegistrationFailureRetry)
+	if lookupErr != nil {
+		if ctx.Err() == nil {
+			retry := domainRegistrationFailureRetry
+			if errors.Is(lookupErr, context.DeadlineExceeded) {
+				retry = domainRegistrationDeadlineRetry
+			}
+			s.pruneFailuresLocked(now)
+			s.failures[domain] = now.Add(retry)
+		}
 	} else {
 		delete(s.failures, domain)
 	}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 type fakeDomainRegistrationLookup struct {
@@ -20,6 +21,20 @@ type fakeDomainRegistrationLookup struct {
 	expires    time.Time
 	err        error
 	calls      atomic.Int32
+}
+
+type flakyDomainRegistrationRepository struct {
+	stores.DomainRegistrationRepository
+	writes int
+	err    error
+}
+
+func (r *flakyDomainRegistrationRepository) PutDomainRegistration(ctx context.Context, record stores.DomainRegistration) error {
+	r.writes++
+	if r.writes == 1 {
+		return r.err
+	}
+	return r.DomainRegistrationRepository.PutDomainRegistration(ctx, record)
 }
 
 var domainTestDatabases sync.Map
@@ -164,6 +179,72 @@ func TestDomainRegistrationFailureIsTemporarilySuppressed(t *testing.T) {
 	}
 	if lookup.calls.Load() != 1 {
 		t.Fatalf("RDAP calls = %d, want 1 during retry suppression", lookup.calls.Load())
+	}
+	if got := store.failures["example.com"]; !got.Equal(now.Add(domainRegistrationFailureRetry)) {
+		t.Fatalf("retry at = %s, want %s", got, now.Add(domainRegistrationFailureRetry))
+	}
+}
+
+func TestDomainRegistrationWriteFailureDoesNotSuppressLookup(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	lookup := &fakeDomainRegistrationLookup{registered: now.Add(-24 * time.Hour), expires: now.Add(364 * 24 * time.Hour)}
+	store := newTestDomainRegistrationStore(t, now, lookup)
+	writeErr := errors.New("database busy")
+	repository := &flakyDomainRegistrationRepository{DomainRegistrationRepository: store.repository, err: writeErr}
+	store.repository = repository
+	if _, err := store.evidence(context.Background(), "example.com"); !errors.Is(err, writeErr) {
+		t.Fatalf("first lookup error = %v, want database error", err)
+	}
+	if retryAt := store.failures["example.com"]; !retryAt.IsZero() {
+		t.Fatalf("database write failure suppressed RDAP until %s", retryAt)
+	}
+	if info, err := store.evidence(context.Background(), "example.com"); err != nil || !info.Available {
+		t.Fatalf("retry after database recovery = %+v, %v", info, err)
+	}
+	if got := lookup.calls.Load(); got != 2 {
+		t.Fatalf("RDAP calls = %d, want 2", got)
+	}
+}
+
+func TestDomainRegistrationCallerCancellationDoesNotSuppressRetries(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	lookup := &blockingDomainRegistrationLookup{
+		registered: now.Add(-24 * time.Hour), expires: now.Add(364 * 24 * time.Hour),
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+	store := newTestDomainRegistrationStore(t, now, lookup)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := store.evidence(ctx, "example.com")
+		result <- err
+	}()
+	<-lookup.started
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled lookup error = %v, want context cancellation", err)
+	}
+	if retryAt := store.failures["example.com"]; !retryAt.IsZero() {
+		t.Fatalf("canceled lookup suppressed retries until %s", retryAt)
+	}
+	close(lookup.release)
+	if info, err := store.evidence(context.Background(), "example.com"); err != nil || !info.Available {
+		t.Fatalf("retry after cancellation = %+v, %v", info, err)
+	}
+}
+
+func TestDomainRegistrationLookupDeadlineHasShortRetry(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	lookup := &blockingDomainRegistrationLookup{
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+	store := newTestDomainRegistrationStore(t, now, lookup)
+	store.timeout = time.Millisecond
+	if _, err := store.evidence(context.Background(), "example.com"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lookup error = %v, want deadline exceeded", err)
+	}
+	if got := store.failures["example.com"]; !got.Equal(now.Add(domainRegistrationDeadlineRetry)) {
+		t.Fatalf("retry at = %s, want %s", got, now.Add(domainRegistrationDeadlineRetry))
 	}
 }
 
