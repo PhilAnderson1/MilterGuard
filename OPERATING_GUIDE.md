@@ -451,6 +451,9 @@ an address in one of these domains therefore does not bypass filtering.
 For authenticated sender domains that still require scanning, the optional
 `domain_registration` feature obtains the registrable domain's creation and
 expiry dates through RDAP and supplies its age to the AI as supporting evidence.
+An uncached lookup sends the sender's registrable domain name to an external
+RDAP service, but not the email address or message content. Set
+`domain_registration.enabled: false` to disable these lookups.
 Results are cached locally; expired entries are refreshed only if the domain is
 seen again, and entries more than two weeks past expiry are removed. Lookup
 failures never reject or defer mail.

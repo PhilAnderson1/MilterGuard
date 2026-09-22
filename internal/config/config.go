@@ -212,6 +212,9 @@ func Load(path string) (Config, error) {
 	if err := c.Validate(); err != nil {
 		return Config{}, err
 	}
+	if c.EmailCommands.Enabled && c.EmailCommands.AllowAuthenticatedUsers && !c.EmailCommands.VerifySenderViaAliases {
+		c.Warnings = append(c.Warnings, "email_commands allows ordinary authenticated users without alias verification; configure Postfix smtpd_sender_login_maps and reject_authenticated_sender_login_mismatch to enforce envelope-sender ownership")
+	}
 	return c, nil
 }
 
@@ -290,6 +293,11 @@ func defaults() Config {
 func (c Config) Validate() error {
 	if c.Mode != "monitor" && c.Mode != "tag" && c.Mode != "enforce" {
 		return fmt.Errorf("mode must be monitor, tag, or enforce")
+	}
+	switch strings.ToLower(c.Logging.Level) {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("logging.level must be debug, info, warn, or error")
 	}
 	if c.Milter.Socket == "" {
 		return fmt.Errorf("milter.socket must not be empty")
@@ -429,11 +437,14 @@ func (c Config) Validate() error {
 			return fmt.Errorf("rejection_history.message_max_total_bytes must be at least milter.max_message_size")
 		}
 	}
-	if c.Filtering.RejectScore < 0 || c.Filtering.RejectScore > 1 {
-		return fmt.Errorf("filtering.reject_score must be between 0 and 1")
+	if c.Filtering.RejectScore < 0.5 || c.Filtering.RejectScore > 1 {
+		return fmt.Errorf("filtering.reject_score must be between 0.5 and 1")
 	}
-	if c.Filtering.LegitimateLowConfidenceScore < 0 || c.Filtering.LegitimateLowConfidenceScore > 1 {
-		return fmt.Errorf("filtering.legitimate_low_confidence_score must be between 0 and 1")
+	if c.Filtering.LegitimateLowConfidenceScore < 0.5 || c.Filtering.LegitimateLowConfidenceScore > 1 {
+		return fmt.Errorf("filtering.legitimate_low_confidence_score must be between 0.5 and 1")
+	}
+	if strings.TrimSpace(c.Filtering.RejectMessage) == "" {
+		return fmt.Errorf("filtering.reject_message must not be empty")
 	}
 	if c.Filtering.AIErrorAction != "accept" && c.Filtering.AIErrorAction != "tempfail" {
 		return fmt.Errorf("filtering.ai_error_action must be accept or tempfail")

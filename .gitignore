@@ -1,6 +1,7 @@
 /bin/
 /.cache/
 /dist/
+/.release-build.*/
 *.swp
 /local-testing/
 __pycache__/

@@ -36,6 +36,8 @@ milter:
     - ::1/128
 
   # Maximum time for DNS lookups (DNS evidence is used by the AI to classify emails).
+  # Set to 0s to disable reverse-DNS lookups; this also disables reverse-DNS
+  # domain exclusions from IP reputation.
   connection_dns_timeout: 5s
 
   # Maximum email size retained for analysis, in bytes; 1 to 104857600.

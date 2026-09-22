@@ -215,12 +215,33 @@ func TestValidateLegitimateLowConfidenceScore(t *testing.T) {
 	if got := defaults().Filtering.LegitimateLowConfidenceScore; got != 0.8 {
 		t.Fatalf("default legitimate low-confidence score = %v", got)
 	}
-	cfg := validConfig()
-	for _, score := range []float64{-0.01, 1.01} {
-		cfg.Filtering.LegitimateLowConfidenceScore = score
-		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "filtering.legitimate_low_confidence_score") {
-			t.Fatalf("invalid score %v error = %v", score, err)
+	for _, field := range []struct {
+		name string
+		set  func(*Config, float64)
+	}{
+		{"filtering.reject_score", func(cfg *Config, score float64) { cfg.Filtering.RejectScore = score }},
+		{"filtering.legitimate_low_confidence_score", func(cfg *Config, score float64) { cfg.Filtering.LegitimateLowConfidenceScore = score }},
+	} {
+		for _, score := range []float64{0, 0.49, 1.01} {
+			cfg := validConfig()
+			field.set(&cfg, score)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), field.name) {
+				t.Errorf("invalid %s %v error = %v", field.name, score, err)
+			}
 		}
+		for _, score := range []float64{0.5, 1} {
+			cfg := validConfig()
+			field.set(&cfg, score)
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("valid %s %v rejected: %v", field.name, score, err)
+			}
+		}
+	}
+	cfg := validConfig()
+	cfg.Filtering.RejectScore = 0.5
+	cfg.Filtering.LegitimateLowConfidenceScore = 1
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("independent threshold ordering rejected: %v", err)
 	}
 }
 
@@ -312,6 +333,38 @@ func TestValidateEmailCommandTLSMode(t *testing.T) {
 	cfg.EmailCommands.SMTPTLS = "optional"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "email_commands.smtp_tls") {
 		t.Fatalf("invalid SMTP TLS mode error = %v", err)
+	}
+}
+
+func TestValidateLoggingLevel(t *testing.T) {
+	for _, level := range []string{"debug", "info", "warn", "error", "DEBUG"} {
+		cfg := validConfig()
+		cfg.Logging.Level = level
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("logging level %q rejected: %v", level, err)
+		}
+	}
+	for _, level := range []string{"", "verbose", "warning"} {
+		cfg := validConfig()
+		cfg.Logging.Level = level
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "logging.level") {
+			t.Errorf("invalid logging level %q error = %v", level, err)
+		}
+	}
+}
+
+func TestValidateFilteringRejectMessage(t *testing.T) {
+	for _, message := range []string{"", " \t "} {
+		cfg := validConfig()
+		cfg.Filtering.RejectMessage = message
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "filtering.reject_message") {
+			t.Errorf("blank reject message %q error = %v", message, err)
+		}
+	}
+	cfg := validConfig()
+	cfg.Filtering.RejectMessage = "Message rejected"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid reject message rejected: %v", err)
 	}
 }
 
@@ -447,6 +500,35 @@ func TestLoadSenderDomainAllowlistFile(t *testing.T) {
 		if cfg.Filtering.SenderDomainAllowlist[index] != want[index] {
 			t.Fatalf("loaded domains = %q, want %q", cfg.Filtering.SenderDomainAllowlist, want)
 		}
+	}
+}
+
+func TestLoadWarnsWhenEmailCommandSenderOwnershipDependsOnPostfix(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		commands    string
+		wantWarning bool
+	}{
+		{"ordinary users without alias verification", "enabled: true\n  allow_authenticated_users: true\n  verify_sender_via_aliases: false", true},
+		{"ordinary users with alias verification", "enabled: true\n  allow_authenticated_users: true\n  verify_sender_via_aliases: true", false},
+		{"administrators only", "enabled: true\n  administrators: [admin]\n  allow_authenticated_users: false\n  verify_sender_via_aliases: false", false},
+		{"commands disabled", "enabled: false\n  allow_authenticated_users: true\n  verify_sender_via_aliases: false", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "milterguard.yaml")
+			content := "ai:\n  api_key: test-key\nfiltering:\n  sender_domain_allowlist: ''\nemail_commands:\n  " + test.commands + "\n"
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotWarning := len(cfg.Warnings) == 1 && strings.Contains(cfg.Warnings[0], "smtpd_sender_login_maps")
+			if gotWarning != test.wantWarning || len(cfg.Warnings) > 1 {
+				t.Fatalf("warnings = %q, want Postfix warning = %t", cfg.Warnings, test.wantWarning)
+			}
+		})
 	}
 }
 
