@@ -102,8 +102,8 @@ stage_archive() {
 }
 
 # Native packages do not use the interactive tarball installer/uninstaller.
-# Package managers preserve /etc conffiles; maintainer scripts leave SQLite
-# state and the system account intact when removing a package.
+# Debian removal preserves configuration and state, while Debian purge and
+# final RPM removal delete all MilterGuard configuration, state and accounts.
 stage_native_payload() {
     payload="$work_dir/native"
     install -d "$payload/usr/sbin" "$payload/usr/lib/systemd/system" \
@@ -134,11 +134,17 @@ tarball's `/usr/local/sbin/milterguard`. Check the endpoint before starting:
     sudo /usr/sbin/milterguard --config /etc/milterguard/milterguard.yaml --check-config --check-port --check-endpoint
     sudo systemctl enable --now milterguard
 
-Configuration is preserved on upgrade. Removing the package does not delete
-the SQLite database or archived mail under `/var/lib/milterguard`. Avoid
-installing a package over the tarball installation without first migrating
-the latter: its `/etc/systemd/system/milterguard.service` overrides the
-package's unit, and its `/usr/local/sbin/milterguard` remains separately installed.
+Configuration is preserved on upgrade. On Debian and Ubuntu, `apt remove`
+preserves configuration, the SQLite database, archived mail and the service
+account; `apt purge` permanently deletes them. RPM has no separate purge
+operation, so final removal with `dnf remove` permanently deletes configuration,
+state and the service account. Back up `/etc/milterguard` and
+`/var/lib/milterguard` before a destructive removal if their contents are needed.
+
+Avoid installing a package over the tarball installation without first
+migrating the latter: its `/etc/systemd/system/milterguard.service` overrides
+the package's unit, and its `/usr/local/sbin/milterguard` remains separately
+installed.
 EOF
 }
 
@@ -212,7 +218,15 @@ set -e
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
 fi
-# Database files and the milterguard system account are intentionally retained.
+if [ "$1" = purge ]; then
+    rm -rf -- /etc/milterguard /var/lib/milterguard
+    if id milterguard >/dev/null 2>&1; then
+        userdel milterguard || echo "WARNING: Could not remove the milterguard user." >&2
+    fi
+    if getent group milterguard >/dev/null; then
+        groupdel milterguard || echo "WARNING: Could not remove the milterguard group." >&2
+    fi
+fi
 exit 0
 EOF
     chmod 0755 "$deb_root/DEBIAN/preinst" "$deb_root/DEBIAN/postinst" \
@@ -279,7 +293,15 @@ fi
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
 fi
-# Database files and the milterguard system account are intentionally retained.
+if [ "\$1" -eq 0 ]; then
+    rm -rf -- /etc/milterguard /var/lib/milterguard
+    if id milterguard >/dev/null 2>&1; then
+        userdel milterguard || echo "WARNING: Could not remove the milterguard user." >&2
+    fi
+    if getent group milterguard >/dev/null; then
+        groupdel milterguard || echo "WARNING: Could not remove the milterguard group." >&2
+    fi
+fi
 
 %files
 %defattr(-,root,root,-)
