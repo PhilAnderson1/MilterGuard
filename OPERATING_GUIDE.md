@@ -31,6 +31,7 @@ For initial installation and activation, follow the
 10. [Running AI locally](#running-ai-locally)
 11. [Routine operation](#routine-operation)
 12. [Replay saved email](#replay-saved-email)
+13. [Remove MilterGuard](#remove-milterguard)
 
 ## Configure the AI service
 
@@ -312,7 +313,7 @@ them to the AI endpoint:
   before MilterGuard receives the body. Because the complete message is not
   available, this rejection cannot be added to rejection history or the saved
   message archive. Administrators can list, add, and remove these IP blocks
-  through the [email command interface](#email-commands).
+  through the [administration command interfaces](#administration-commands).
 - To prevent outsiders from impersonating your own domains, list domains for
   which this server is the only legitimate mail source under
   `filtering.authenticated_only_sender_domains`. MilterGuard then rejects
@@ -326,6 +327,9 @@ them to the AI endpoint:
   reject encrypted or unscannable attachments when their configured actions are
   `reject`. These decisions use local attachment inspection and are recorded
   and archived.
+- Messages with permanently invalid or ambiguous MIME structure are rejected
+  when `attachments.invalid_mime_action` is `reject`, as it is in the supplied
+  configuration. Set it to `accept` to continue with normal AI analysis instead.
 
 The above checks take place before AI analysis.
 
@@ -409,18 +413,21 @@ The `attachments` configuration controls what happens when an archive is
 encrypted or content cannot be completely inspected. Each condition may be
 accepted, rejected, or temporarily deferred with `tempfail`. In the supplied
 configuration, encrypted archives are rejected while other unscannable content
-is accepted and continues to AI analysis. Monitor mode records the proposed
-attachment action but still accepts the message.
+is accepted and continues to AI analysis. The separate `invalid_mime_action`
+setting controls permanently invalid or ambiguous MIME structure; it defaults
+to rejection because retrying cannot repair the message. Monitor mode records
+the proposed attachment action but still accepts the message.
 
 ## Rejection history and saved messages
 
 The `rejection_history` configuration records the sender address, envelope
-recipients, rejection time, subject, and reason for messages rejected by AI or
-attachment inspection in enforce mode. It can also save the corresponding
-original message as an `.eml` file when `save_messages` is enabled. Copies are
-organized beneath `message_directory` as `YYYY/MM/DD`, with the rejection ID as
-the filename. Cached IP rejections happen before the email is received and
-therefore cannot be recorded or saved.
+recipients, rejection time, subject, and reason for messages rejected by AI,
+attachment or MIME inspection, or the authenticated-only sender-domain policy
+in enforce mode. It can also save the corresponding original message as an
+`.eml` file when `save_messages` is enabled. Copies are organized beneath
+`message_directory` as `YYYY/MM/DD`, with the rejection ID as the filename.
+Cached IP rejections happen before the email is received and therefore cannot
+be recorded or saved.
 
 The archive may contain private correspondence and dangerous attachments, so
 restrict access to it. Retention cleanup runs at startup and every 24 hours;
@@ -448,9 +455,10 @@ The supplied file contains a curated low-risk sender list whose messages bypass
 scanning only when trusted, aligned DKIM authentication passes. Merely forging
 an address in one of these domains therefore does not bypass filtering.
 
-For authenticated sender domains that still require scanning, the optional
-`domain_registration` feature obtains the registrable domain's creation and
-expiry dates through RDAP and supplies its age to the AI as supporting evidence.
+For visible `From:` domains supported by a trusted DKIM, SPF, or DMARC pass, the
+optional `domain_registration` feature obtains the registrable domain's creation
+and expiry dates through RDAP and supplies its age to the AI as supporting
+evidence.
 An uncached lookup sends the sender's registrable domain name to an external
 RDAP service, but not the email address or message content. Set
 `domain_registration.enabled: false` to disable these lookups.
@@ -549,13 +557,15 @@ point in the past; `all` removes that additional date filter while retaining
 configured expiry rules. Whitelist and active-IP listings use last activity;
 rejection history uses rejection time. Interactive lists are printed from
 oldest to newest so the latest entries appear immediately above the prompt.
+Each listing returns at most 1,000 matching records and reports when that limit
+has been reached; use a shorter date period or a recipient filter to narrow a
+large result.
 
 `REJECTION <id>` displays the rejection information and processed body. When
 the original saved message is available, command mode reports its full archive
 path and size. The processed body is regenerated with the current MIME and HTML
-path and size. The processed body displayed by this command is regenerated with
-the current MIME and HTML parser, so it may differ from the text originally
-supplied to the AI. Connection and authentication analysis is not reconstructed.
+parser, so it may differ from the text originally supplied to the AI. Connection
+and authentication analysis is not reconstructed.
 
 For bulk additions or deletions to the contact or IP databases, commands can
 also be read from a file or pipeline:
@@ -728,6 +738,13 @@ writes the complete textual AI input - including message content, links, and
 personal data - to the system journal. Use it only temporarily for diagnostics;
 inline image bytes are not logged.
 
+Successful decision logs include the email subject when
+`logging.include_subject` is `true`, as it is in the supplied configuration.
+Subjects may contain personal or sensitive information; set this option to
+`false` if they should not be written to the system journal. Set
+`logging.include_connections` to `true` only when connection-open and
+connection-close debug messages are useful for troubleshooting.
+
 Validate configuration changes and test the configured AI endpoint before
 applying them:
 
@@ -755,8 +772,7 @@ response times without processing the messages as live mail.
 
 The release includes `tools/replay_mailbox.py`, which requires Python 3 and
 submits every `.eml` file in a directory directly to a test MilterGuard
-instance. The installer places it at
-`/usr/local/share/milterguard/tools/replay_mailbox.py`.
+instance.
 
 Run a separate test instance of MilterGuard in `enforce` mode on an unused port.
 Give its configuration a separate `persistence.database_file` so testing cannot
@@ -781,18 +797,34 @@ detail, unavailable values are reported rather than guessed. Use
 `--connection-info synthetic` for the previous deterministic loopback identity,
 or the individual override options shown by `--help`.
 
-Test representative directories and save the JSON Lines results:
+Test representative directories and save the JSON Lines results using the
+installed mailbox replay script. First set `REPLAY_SCRIPT` to the appropriate
+path for the installation method.
+
+For a `.deb` or `.rpm` installation:
 
 ```sh
-python3 /usr/local/share/milterguard/tools/replay_mailbox.py \
+REPLAY_SCRIPT=/usr/share/milterguard/tools/replay_mailbox.py
+```
+
+For a `.tar.gz` installation:
+
+```sh
+REPLAY_SCRIPT=/usr/local/share/milterguard/tools/replay_mailbox.py
+```
+
+Then run the required tests:
+
+```sh
+python3 "$REPLAY_SCRIPT" \
   /path/to/legitimate --host 127.0.0.1 --port 8894 --expected accept \
   | tee legitimate-results.jsonl
 
-python3 /usr/local/share/milterguard/tools/replay_mailbox.py \
+python3 "$REPLAY_SCRIPT" \
   /path/to/spam --host 127.0.0.1 --port 8894 --expected reject \
   | tee spam-results.jsonl
 
-python3 /usr/local/share/milterguard/tools/replay_mailbox.py \
+python3 "$REPLAY_SCRIPT" \
   /path/to/scam --host 127.0.0.1 --port 8894 --expected reject \
   | tee scam-results.jsonl
 ```
@@ -806,3 +838,63 @@ this option when saving JSON Lines output for later processing.
 Each line records the file, result, expected result, whether they matched,
 latency, SMTP rejection detail, reconstructed connection information, and the
 envelope addresses used. The final line summarizes the run.
+
+## Remove MilterGuard
+
+Back up `/etc/milterguard` and `/var/lib/milterguard` before removal if their
+configuration, learned state, rejection history, or archived messages may be
+needed again.
+
+Before uninstalling MilterGuard, remove its socket from `smtpd_milters` in
+`/etc/postfix/main.cf`, then check and reload Postfix:
+
+```sh
+sudo postfix check
+sudo postfix reload
+```
+
+Leaving the removed Milter in Postfix's chain can defer mail when
+`milter_default_action` is `tempfail`, or cause repeated connection errors when
+it is `accept`.
+
+On Debian and Ubuntu, remove the software while preserving its configuration,
+data, and service account with:
+
+```sh
+sudo apt remove milterguard
+```
+
+To remove the software, configuration, data, and service account permanently,
+use:
+
+```sh
+sudo apt purge milterguard
+```
+
+RPM has no separate purge operation. On Red Hat-based systems, including
+AlmaLinux, remove the packaged software while preserving generated state under
+`/var/lib/milterguard` and the service account with:
+
+```sh
+sudo dnf remove milterguard
+```
+
+RPM may retain modified configuration as `.rpmsave` files. To remove all
+remaining configuration, state, and the service account after `dnf remove`,
+inspect any retained files and then run:
+
+```sh
+sudo rm -rf /etc/milterguard /var/lib/milterguard
+sudo userdel milterguard
+sudo groupdel milterguard
+```
+
+For a portable `.tar.gz` installation, enter the extracted release directory
+and run:
+
+```sh
+sudo ./uninstall.sh
+```
+
+The portable uninstaller displays the files and data it will delete, requires
+explicit confirmation, and then asks whether to remove the service account.

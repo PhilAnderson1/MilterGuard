@@ -20,7 +20,7 @@ with any MTA that supports the Sendmail Milter protocol.
 - Works with locally hosted AI models and popular AI API services.
 - Provides a safe monitor mode that logs classifications and proposed actions without blocking email.
 - Installs as a single, statically linked binary with no runtime dependencies.
-- Includes install and uninstall scripts for painless installation and removal.
+- Includes native packages and install and uninstall scripts for painless installation and removal.
 
 ## Requirements
 
@@ -34,18 +34,31 @@ MilterGuard requires:
 
 OpenDKIM and OpenDMARC are optional but improve the authentication evidence
 available to MilterGuard and enable its DKIM-dependent trust features. Prebuilt
-static binaries are available for AMD64, ARM64, 32-bit x86, and ARMv7 Linux.
+packages and a portable archive are available for 64-bit x86 Linux systems.
 
 ## Install
 
-Download the archive for your system from the
-[latest release](https://github.com/PhilAnderson1/MilterGuard/releases/latest),
-extract it, and run the installer as root. For an AMD64 release, replace
-`VERSION` with the downloaded version number:
+Download the appropriate installation file from the
+[latest release](https://github.com/PhilAnderson1/MilterGuard/releases/latest).
+Replace `VERSION` below with the release number without its leading `v`.
+
+On Red Hat-based systems, including AlmaLinux:
 
 ```sh
-tar -xzf milterguard-VERSION-linux-amd64.tar.gz
-cd milterguard-VERSION-linux-amd64
+sudo dnf install ./milterguard-VERSION-1.x86_64.rpm
+```
+
+On Debian and Ubuntu:
+
+```sh
+sudo apt install ./milterguard_VERSION_amd64.deb
+```
+
+On other Linux systems, use the portable archive:
+
+```sh
+tar -xzf milterguard-vVERSION-linux-amd64.tar.gz
+cd milterguard-vVERSION-linux-amd64
 sudo ./install.sh
 ```
 

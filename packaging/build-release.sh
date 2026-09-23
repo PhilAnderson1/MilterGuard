@@ -92,7 +92,7 @@ stage_archive() {
     archive_dir="$work_dir/$archive_root"
     mkdir -p "$archive_dir/packaging/systemd"
     install -m 0755 "$work_dir/milterguard" "$archive_dir/milterguard"
-    install -m 0755 packaging/install.sh packaging/uninstall.sh "$archive_dir/packaging/"
+    install -m 0755 packaging/install.sh packaging/uninstall.sh "$archive_dir/"
     install -m 0644 packaging/systemd/milterguard.service "$archive_dir/packaging/systemd/"
     cp -R configs THIRD_PARTY_LICENSES "$archive_dir/"
     install -d "$archive_dir/tools"
@@ -102,8 +102,8 @@ stage_archive() {
 }
 
 # Native packages do not use the interactive tarball installer/uninstaller.
-# Debian removal preserves configuration and state, while Debian purge and
-# final RPM removal delete all MilterGuard configuration, state and accounts.
+# Debian purge deletes all MilterGuard configuration, state and accounts.
+# RPM removal follows RPM convention by retaining generated state and accounts.
 stage_native_payload() {
     payload="$work_dir/native"
     install -d "$payload/usr/sbin" "$payload/usr/lib/systemd/system" \
@@ -137,9 +137,11 @@ tarball's `/usr/local/sbin/milterguard`. Check the endpoint before starting:
 Configuration is preserved on upgrade. On Debian and Ubuntu, `apt remove`
 preserves configuration, the SQLite database, archived mail and the service
 account; `apt purge` permanently deletes them. RPM has no separate purge
-operation, so final removal with `dnf remove` permanently deletes configuration,
-state and the service account. Back up `/etc/milterguard` and
-`/var/lib/milterguard` before a destructive removal if their contents are needed.
+operation: `dnf remove` removes the packaged software while preserving generated
+state under `/var/lib/milterguard` and the service account. RPM may preserve
+modified configuration as `.rpmsave` files. To remove every trace after RPM
+removal, explicitly delete `/etc/milterguard` and `/var/lib/milterguard`, then
+remove the `milterguard` user and group.
 
 Avoid installing a package over the tarball installation without first
 migrating the latter: its `/etc/systemd/system/milterguard.service` overrides
@@ -292,15 +294,6 @@ fi
 %postun
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
-fi
-if [ "\$1" -eq 0 ]; then
-    rm -rf -- /etc/milterguard /var/lib/milterguard
-    if id milterguard >/dev/null 2>&1; then
-        userdel milterguard || echo "WARNING: Could not remove the milterguard user." >&2
-    fi
-    if getent group milterguard >/dev/null; then
-        groupdel milterguard || echo "WARNING: Could not remove the milterguard group." >&2
-    fi
 fi
 
 %files

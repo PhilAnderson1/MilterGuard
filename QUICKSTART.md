@@ -4,20 +4,31 @@ This guide takes you from downloading MilterGuard to a working Postfix
 integration in monitor mode. See the Operating Guide for detailed
 configuration, security, testing, and maintenance information.
 
-1. Download the archive for your Linux architecture from the latest MilterGuard
-   release, then extract it and enter the resulting directory, replacing
-   `VERSION` and the architecture as appropriate:
+1. Download the appropriate installation file from the latest MilterGuard
+   release:
 
    https://github.com/PhilAnderson1/MilterGuard/releases/latest
 
+2. Install MilterGuard using the appropriate method below. Replace `VERSION`
+   with the release number without its leading `v`.
+
+   **Red Hat-based systems, including AlmaLinux:**
+
    ```sh
-   tar -xzf milterguard-VERSION-linux-amd64.tar.gz
-   cd milterguard-VERSION-linux-amd64
+   sudo dnf install ./milterguard-VERSION-1.x86_64.rpm
    ```
 
-2. Install MilterGuard as root:
+   **Debian and Ubuntu:**
 
    ```sh
+   sudo apt install ./milterguard_VERSION_amd64.deb
+   ```
+
+   **Other Linux systems:**
+
+   ```sh
+   tar -xzf milterguard-vVERSION-linux-amd64.tar.gz
+   cd milterguard-vVERSION-linux-amd64
    sudo ./install.sh
    ```
 
@@ -37,7 +48,7 @@ configuration, security, testing, and maintenance information.
 5. Validate the configuration:
 
    ```sh
-   sudo /usr/local/sbin/milterguard \
+   sudo milterguard \
      --config /etc/milterguard/milterguard.yaml \
      --check-config --check-port --check-endpoint
    ```
