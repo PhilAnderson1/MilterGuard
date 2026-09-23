@@ -13,6 +13,20 @@ func readFrame(reader io.Reader) ([]byte, error) {
 	return frame, err
 }
 
+func TestReadFrameRejectsZeroLengthDeclaration(t *testing.T) {
+	header := make([]byte, 4)
+	frame, bytesRead, err := readFrameProgress(bytes.NewReader(header))
+	if err == nil || !strings.Contains(err.Error(), "invalid frame length 0") {
+		t.Fatalf("zero-length frame error = %v", err)
+	}
+	if frame != nil {
+		t.Fatalf("zero-length frame returned %d bytes", len(frame))
+	}
+	if bytesRead != len(header) {
+		t.Fatalf("bytes read = %d, want %d-byte header only", bytesRead, len(header))
+	}
+}
+
 func TestReadFrameRejectsOversizedDeclarationBeforeReadingPayload(t *testing.T) {
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], maxFrameBytes+1)

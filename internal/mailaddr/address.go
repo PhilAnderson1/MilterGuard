@@ -12,7 +12,14 @@ import (
 // separately rather than discarding the usable address with the display name.
 func Mailbox(value string) (string, bool) {
 	value = strings.TrimSpace(value)
-	if address, err := mail.ParseAddress(value); err == nil && address.Address != "" {
+	parse := func(candidate string) (*mail.Address, error) {
+		address, err := mail.ParseAddress(candidate)
+		if err != nil && strings.HasSuffix(candidate, ".") {
+			address, err = mail.ParseAddress(strings.TrimSuffix(candidate, "."))
+		}
+		return address, err
+	}
+	if address, err := parse(value); err == nil && address.Address != "" {
 		return address.Address, true
 	}
 	if strings.Count(value, "<") != 1 || strings.Count(value, ">") != 1 {
@@ -24,7 +31,7 @@ func Mailbox(value string) (string, bool) {
 		return "", false
 	}
 	enclosed := strings.TrimSpace(value[start+1 : end])
-	address, err := mail.ParseAddress(enclosed)
+	address, err := parse(enclosed)
 	if err != nil || address.Address == "" || address.Name != "" {
 		return "", false
 	}

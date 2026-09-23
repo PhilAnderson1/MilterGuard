@@ -299,8 +299,9 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("logging.level must be debug, info, warn, or error")
 	}
-	if c.Milter.Socket == "" {
-		return fmt.Errorf("milter.socket must not be empty")
+	listener, err := ParseMilterSocket(c.Milter.Socket)
+	if err != nil {
+		return err
 	}
 	if c.Milter.MaxMessageSize < 1 || c.Milter.MaxMessageSize > maxMilterMessageSize {
 		return fmt.Errorf("milter.max_message_size must be between 1 and %d bytes", maxMilterMessageSize)
@@ -314,7 +315,7 @@ func (c Config) Validate() error {
 	if c.Milter.MaxConnections < 1 {
 		return fmt.Errorf("milter.max_connections must be positive")
 	}
-	if strings.HasPrefix(c.Milter.Socket, "tcp:") && len(c.Milter.AllowedPeerIPs) == 0 {
+	if listener.Network == "tcp" && len(c.Milter.AllowedPeerIPs) == 0 {
 		return fmt.Errorf("milter.allowed_peer_ips must contain at least one address for a TCP listener")
 	}
 	for _, entry := range c.Milter.AllowedPeerIPs {

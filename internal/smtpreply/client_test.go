@@ -3,6 +3,7 @@ package smtpreply
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -79,9 +80,19 @@ func TestClientHonorsTimeout(t *testing.T) {
 	defer serverConn.Close()
 	client := New(Options{Address: "127.0.0.1:25", TLSMode: "off", Timeout: 25 * time.Millisecond})
 	client.dial = func(context.Context, string, string) (net.Conn, error) { return clientConn, nil }
+	started := time.Now()
 	err := client.Send(context.Background(), Message{To: "recipient@example.com"})
 	if err == nil {
 		t.Fatal("unresponsive SMTP server did not time out")
+	}
+	var netErr net.Error
+	timedOut := errors.As(err, &netErr) && netErr.Timeout()
+	closedAtDeadline := errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
+	if !timedOut && !closedAtDeadline {
+		t.Fatalf("unresponsive SMTP server error = %v, want deadline or timeout-triggered close", err)
+	}
+	if elapsed := time.Since(started); elapsed < 10*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("SMTP timeout elapsed after %s, want 10ms through 1s", elapsed)
 	}
 }
 

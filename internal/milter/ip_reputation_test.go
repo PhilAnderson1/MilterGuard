@@ -119,7 +119,7 @@ func TestRejectedIPCleanupEvictsOldestShortBlock(t *testing.T) {
 	cache.add(context.Background(), second, connectionDNSResult{})
 	now = now.Add(time.Minute)
 	cache.add(context.Background(), third, connectionDNSResult{})
-	if cache.size(context.Background()) != 3 {
+	if cache.size(t, context.Background()) != 3 {
 		t.Fatal("capacity was enforced before periodic cleanup")
 	}
 	if _, err := cache.cleanup(context.Background()); err != nil {
@@ -132,6 +132,65 @@ func TestRejectedIPCleanupEvictsOldestShortBlock(t *testing.T) {
 		if _, ok := cache.lookup(context.Background(), addr); !ok {
 			t.Errorf("expected %s to remain cached", addr)
 		}
+	}
+}
+
+func TestRejectedIPCleanupEvictionPrioritizesBlockLevel(t *testing.T) {
+	tests := []struct {
+		name           string
+		maxEntries     int
+		wantShortBlock bool
+		wantDeleted    int64
+	}{
+		{name: "unblocked history evicted first", maxEntries: 2, wantShortBlock: true, wantDeleted: 1},
+		{name: "short block evicted before repeat block", maxEntries: 1, wantShortBlock: false, wantDeleted: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+			cache := newTestIPReputationStore(t, config.IPReputationConfig{
+				BlockDuration:       config.Duration(10 * time.Minute),
+				RepeatThreshold:     2,
+				RepeatWindow:        config.Duration(24 * time.Hour),
+				RepeatBlockDuration: config.Duration(24 * time.Hour),
+				MaxEntries:          test.maxEntries,
+			}, nil)
+			setIPTestClock(cache, func() time.Time { return now })
+
+			inactive := netip.MustParseAddr("192.0.2.1")
+			short := netip.MustParseAddr("192.0.2.2")
+			repeat := netip.MustParseAddr("192.0.2.3")
+			if !cache.add(context.Background(), inactive, connectionDNSResult{}) {
+				t.Fatal("inactive-history IP was not recorded")
+			}
+			now = now.Add(11 * time.Minute)
+			if !cache.add(context.Background(), short, connectionDNSResult{}) {
+				t.Fatal("short-block IP was not recorded")
+			}
+			now = now.Add(time.Minute)
+			if !cache.add(context.Background(), repeat, connectionDNSResult{}) ||
+				!cache.add(context.Background(), repeat, connectionDNSResult{}) {
+				t.Fatal("repeat-block IP was not recorded")
+			}
+
+			deleted, err := cache.cleanup(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if deleted != test.wantDeleted {
+				t.Fatalf("cleanup deleted %d records, want %d", deleted, test.wantDeleted)
+			}
+			records := cache.snapshot()
+			if _, exists := records[inactive]; exists {
+				t.Fatal("unblocked strike history survived capacity cleanup")
+			}
+			if _, exists := records[short]; exists != test.wantShortBlock {
+				t.Fatalf("short block retained = %t, want %t", exists, test.wantShortBlock)
+			}
+			if record, exists := records[repeat]; !exists || record.BlockLevel != string(rejectedIPBlockRepeat) {
+				t.Fatalf("repeat block was not preserved: %+v", record)
+			}
+		})
 	}
 }
 
@@ -252,7 +311,7 @@ func TestLegitimateIPWithoutReputationDoesNotWaitForWriter(t *testing.T) {
 
 	recordDone := make(chan struct{})
 	go func() {
-		cache.recordLegitimate(context.Background(), netip.MustParseAddr("192.0.2.201"))
+		cache.recordLegitimate(t, context.Background(), netip.MustParseAddr("192.0.2.201"))
 		close(recordDone)
 	}()
 	select {
@@ -576,13 +635,13 @@ func TestRejectedIPCacheLegitimateMessagesRemoveOldestStrike(t *testing.T) {
 	now = now.Add(2 * time.Minute)
 	cache.lookup(context.Background(), addr)
 
-	cache.recordLegitimate(context.Background(), addr)
-	cache.recordLegitimate(context.Background(), addr)
+	cache.recordLegitimate(t, context.Background(), addr)
+	cache.recordLegitimate(t, context.Background(), addr)
 	if got := cache.snapshot()[addr]; got.LegitimateCount != 2 || len(got.Strikes) != 2 {
 		t.Fatalf("credits before threshold = %d, strikes = %d", got.LegitimateCount, len(got.Strikes))
 	}
 	oldest := cache.snapshot()[addr].Strikes[0]
-	cache.recordLegitimate(context.Background(), addr)
+	cache.recordLegitimate(t, context.Background(), addr)
 	got := cache.snapshot()[addr]
 	if got.LegitimateCount != 0 || len(got.Strikes) != 1 || !got.Strikes[0].After(oldest) {
 		t.Fatalf("legitimate threshold did not remove oldest strike: %+v", got)
@@ -604,8 +663,8 @@ func TestRejectedIPCacheNewStrikeResetsLegitimateCredit(t *testing.T) {
 	cache.add(context.Background(), addr, connectionDNSResult{})
 	now = now.Add(2 * time.Minute)
 	cache.lookup(context.Background(), addr)
-	cache.recordLegitimate(context.Background(), addr)
-	cache.recordLegitimate(context.Background(), addr)
+	cache.recordLegitimate(t, context.Background(), addr)
+	cache.recordLegitimate(t, context.Background(), addr)
 	cache.add(context.Background(), addr, connectionDNSResult{})
 	if got := cache.snapshot()[addr]; got.LegitimateCount != 0 || len(got.Strikes) != 2 {
 		t.Fatalf("new rejection did not reset credit: %+v", got)
@@ -625,7 +684,7 @@ func TestRejectedIPCacheLegitimateDecayDoesNotCancelActiveBlock(t *testing.T) {
 	setIPTestClock(cache, func() time.Time { return now })
 	addr := netip.MustParseAddr("192.0.2.47")
 	cache.add(context.Background(), addr, connectionDNSResult{})
-	cache.recordLegitimate(context.Background(), addr)
+	cache.recordLegitimate(t, context.Background(), addr)
 	entry, ok := cache.lookup(context.Background(), addr)
 	if !ok || entry.Level != rejectedIPBlockShort || entry.StrikeCount != 0 {
 		t.Fatalf("legitimate decay cancelled an active block: %+v, found=%v", entry, ok)

@@ -314,6 +314,31 @@ func TestNestedZIPEntryBlocked(t *testing.T) {
 	}
 }
 
+func TestTARDetectedByMagicWithGenericMetadata(t *testing.T) {
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	payload := []byte("alert('bad')")
+	if err := writer.WriteHeader(&tar.Header{Name: "assets/run.js", Mode: 0o600, Size: int64(len(payload))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	finding, err := testScanner().Scan(
+		"application/octet-stream", "", `attachment; filename="document.bin"`, archive.Bytes(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Path != "document.bin/run.js" || finding.Detection != "blocked extension .js" {
+		t.Fatalf("finding = %#v", finding)
+	}
+}
+
 func TestGzippedTARIsInspected(t *testing.T) {
 	var tarData bytes.Buffer
 	tarWriter := tar.NewWriter(&tarData)
@@ -576,13 +601,28 @@ func TestPartialZIPUnderstatedSizesCannotBypassActualByteBudget(t *testing.T) {
 	}
 }
 
-func TestDeclaredArchiveLimitRejectedBeforeReading(t *testing.T) {
+func TestDeclaredArchiveEntryLimitRejectedBeforeReading(t *testing.T) {
 	scanner := testScanner()
-	state := &scanState{archiveBytes: scanner.options.MaxArchiveUncompressedBytes - 1}
+	scanner.options.MaxAttachmentBytes = 1
+	scanner.options.MaxArchiveUncompressedBytes = 100
+	state := &scanState{archiveBytes: 10}
+	if err := scanner.beginArchiveFile(2, state); err == nil || !strings.Contains(err.Error(), "archive entry size limit exceeded") {
+		t.Fatalf("error = %v", err)
+	}
+	if state.archiveFiles != 0 || state.archiveBytes != 10 {
+		t.Fatalf("state changed after rejected declaration: %#v", state)
+	}
+}
+
+func TestDeclaredArchiveCumulativeLimitRejectedBeforeReading(t *testing.T) {
+	scanner := testScanner()
+	scanner.options.MaxAttachmentBytes = 100
+	scanner.options.MaxArchiveUncompressedBytes = 20
+	state := &scanState{archiveBytes: 19}
 	if err := scanner.beginArchiveFile(2, state); err == nil || !strings.Contains(err.Error(), "archive uncompressed-size limit exceeded") {
 		t.Fatalf("error = %v", err)
 	}
-	if state.archiveFiles != 0 || state.archiveBytes != scanner.options.MaxArchiveUncompressedBytes-1 {
+	if state.archiveFiles != 0 || state.archiveBytes != 19 {
 		t.Fatalf("state changed after rejected declaration: %#v", state)
 	}
 }

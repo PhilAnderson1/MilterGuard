@@ -2,7 +2,9 @@ package admincmd
 
 import (
 	"context"
+	"errors"
 	"io/fs"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,54 @@ type rejectionRepositoryStub struct {
 	entry     stores.Rejection
 	listQuery stores.RejectionListQuery
 	getScope  stores.RecipientScope
+	listErr   error
+}
+
+type correspondentAdminRepositoryStub struct {
+	addSender, addRecipient string
+	deleteSender            string
+	deleteScope             stores.RecipientScope
+	created                 bool
+	removed                 int
+	err                     error
+}
+
+func (*correspondentAdminRepositoryStub) ListCorrespondents(context.Context, stores.CorrespondentListQuery) (stores.CorrespondentPage, error) {
+	return stores.CorrespondentPage{}, nil
+}
+func (r *correspondentAdminRepositoryStub) AddManual(_ context.Context, sender, recipient string) (bool, error) {
+	r.addSender, r.addRecipient = sender, recipient
+	return r.created, r.err
+}
+func (r *correspondentAdminRepositoryStub) DeleteCorrespondent(_ context.Context, sender string, scope stores.RecipientScope) (int, error) {
+	r.deleteSender, r.deleteScope = sender, scope
+	return r.removed, r.err
+}
+
+type ipReputationRepositoryStub struct {
+	address netip.Addr
+	block   stores.IPBlock
+	removed bool
+	err     error
+}
+
+func (*ipReputationRepositoryStub) RecordRejection(context.Context, netip.Addr) (stores.IPBlock, error) {
+	return stores.IPBlock{}, nil
+}
+func (*ipReputationRepositoryStub) RecordLegitimate(context.Context, netip.Addr) error { return nil }
+func (*ipReputationRepositoryStub) ActiveBlock(context.Context, netip.Addr) (stores.IPBlock, bool, error) {
+	return stores.IPBlock{}, false, nil
+}
+func (r *ipReputationRepositoryStub) AddManualBlock(_ context.Context, address netip.Addr) (stores.IPBlock, error) {
+	r.address = address
+	return r.block, r.err
+}
+func (r *ipReputationRepositoryStub) Delete(_ context.Context, address netip.Addr) (bool, error) {
+	r.address = address
+	return r.removed, r.err
+}
+func (*ipReputationRepositoryStub) ListActiveBlocks(context.Context, stores.IPBlockListQuery) (stores.IPBlockPage, error) {
+	return stores.IPBlockPage{}, nil
 }
 
 func (*rejectionRepositoryStub) AddRejection(context.Context, stores.NewRejection) (uint64, error) {
@@ -21,7 +71,7 @@ func (*rejectionRepositoryStub) AddRejection(context.Context, stores.NewRejectio
 }
 func (r *rejectionRepositoryStub) ListRejections(_ context.Context, q stores.RejectionListQuery) (stores.RejectionPage, error) {
 	r.listQuery = q
-	return stores.RejectionPage{Entries: []stores.Rejection{r.entry}}, nil
+	return stores.RejectionPage{Entries: []stores.Rejection{r.entry}}, r.listErr
 }
 func (r *rejectionRepositoryStub) RejectionByID(_ context.Context, _ uint64, s stores.RecipientScope) (stores.Rejection, bool, error) {
 	r.getScope = s
@@ -89,5 +139,138 @@ func TestMissingArchiveIsNotAnError(t *testing.T) {
 	}
 	if !strings.Contains(response.Text, "Saved message is not available") || len(response.Attachments) != 0 {
 		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestExecuteWhitelistMutations(t *testing.T) {
+	repository := &correspondentAdminRepositoryStub{created: true, removed: 2}
+	p := New(Dependencies{Correspondents: repository})
+	actor := Actor{Administrator: true, DefaultRecipient: "admin@example.com"}
+
+	response, err := p.ExecuteLine(context.Background(), "WHITELIST ADD News@Example.NET Owner@Example.COM", actor)
+	if err != nil || response.Text != "allowlist entry added.\n" {
+		t.Fatalf("add response=%#v err=%v", response, err)
+	}
+	if repository.addSender != "news@example.net" || repository.addRecipient != "owner@example.com" {
+		t.Fatalf("add arguments=%q, %q", repository.addSender, repository.addRecipient)
+	}
+
+	repository.created = false
+	response, err = p.ExecuteLine(context.Background(), "WHITELIST ADD news@example.net owner@example.com", actor)
+	if err != nil || response.Text != "allowlist entry already existed and was refreshed.\n" {
+		t.Fatalf("refresh response=%#v err=%v", response, err)
+	}
+
+	response, err = p.ExecuteLine(context.Background(), "WHITELIST DELETE News@Example.NET Owner@Example.COM", actor)
+	if err != nil || response.Text != "removed 2 allowlist entries.\n" {
+		t.Fatalf("recipient-scoped delete response=%#v err=%v", response, err)
+	}
+	if repository.deleteSender != "news@example.net" || repository.deleteScope.All || repository.deleteScope.Address != "owner@example.com" {
+		t.Fatalf("recipient-scoped delete arguments=%q, %+v", repository.deleteSender, repository.deleteScope)
+	}
+
+	response, err = p.ExecuteLine(context.Background(), "WHITELIST DELETE news@example.net *", actor)
+	if err != nil || response.Text != "removed 2 allowlist entries.\n" {
+		t.Fatalf("wildcard delete response=%#v err=%v", response, err)
+	}
+	if repository.deleteSender != "news@example.net" || !repository.deleteScope.All || repository.deleteScope.Address != "" {
+		t.Fatalf("wildcard delete arguments=%q, %+v", repository.deleteSender, repository.deleteScope)
+	}
+}
+
+func TestExecuteIPMutations(t *testing.T) {
+	expires := time.Date(2026, 10, 20, 12, 34, 56, 0, time.UTC)
+	address := netip.MustParseAddr("192.0.2.10")
+	repository := &ipReputationRepositoryStub{
+		block: stores.IPBlock{Address: address, ExpiresAt: expires}, removed: true,
+	}
+	p := New(Dependencies{IPReputation: repository})
+	actor := Actor{Administrator: true, DefaultRecipient: "admin@example.com"}
+
+	response, err := p.ExecuteLine(context.Background(), "IP ADD ::ffff:192.0.2.10", actor)
+	if err != nil || response.Text != "blocked 192.0.2.10 until 2026-10-20 12:34:56 UTC.\n" {
+		t.Fatalf("add response=%#v err=%v", response, err)
+	}
+	if repository.address != address {
+		t.Fatalf("add address=%v, want %v", repository.address, address)
+	}
+
+	response, err = p.ExecuteLine(context.Background(), "IP DELETE 192.0.2.10", actor)
+	if err != nil || response.Text != "IP reputation record deleted.\n" {
+		t.Fatalf("delete response=%#v err=%v", response, err)
+	}
+	repository.removed = false
+	response, err = p.ExecuteLine(context.Background(), "IP DELETE 192.0.2.10", actor)
+	if err != nil || response.Text != "IP address was not present.\n" {
+		t.Fatalf("missing delete response=%#v err=%v", response, err)
+	}
+}
+
+func TestExecuteReturnsNoResponseWhenRepositoryOperationFails(t *testing.T) {
+	failure := errors.New("database unavailable")
+	actor := Actor{Administrator: true, DefaultRecipient: "admin@example.com"}
+	tests := []struct {
+		name      string
+		line      string
+		processor *Processor
+	}{
+		{
+			name: "rejection list", line: "REJECTIONS *",
+			processor: New(Dependencies{Rejections: &rejectionRepositoryStub{listErr: failure}}),
+		},
+		{
+			name: "IP add", line: "IP ADD 192.0.2.10",
+			processor: New(Dependencies{IPReputation: &ipReputationRepositoryStub{err: failure}}),
+		},
+		{
+			name: "IP delete", line: "IP DELETE 192.0.2.10",
+			processor: New(Dependencies{IPReputation: &ipReputationRepositoryStub{err: failure}}),
+		},
+		{
+			name: "allowlist add", line: "WHITELIST ADD sender@example.net recipient@example.com",
+			processor: New(Dependencies{Correspondents: &correspondentAdminRepositoryStub{err: failure}}),
+		},
+		{
+			name: "allowlist delete", line: "WHITELIST DELETE sender@example.net *",
+			processor: New(Dependencies{Correspondents: &correspondentAdminRepositoryStub{err: failure}}),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command, err := test.processor.Parse(test.line, actor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := test.processor.Execute(context.Background(), command, actor)
+			if !errors.Is(err, failure) {
+				t.Fatalf("operation error = %v, want %v", err, failure)
+			}
+			if response != nil {
+				t.Fatal("repository failure returned a success response renderer")
+			}
+		})
+	}
+}
+
+func TestExecuteMutationErrorsAreReturned(t *testing.T) {
+	wantErr := errors.New("database unavailable")
+	actor := Actor{Administrator: true, DefaultRecipient: "admin@example.com"}
+	tests := []struct {
+		name string
+		line string
+		deps Dependencies
+	}{
+		{"whitelist add", "WHITELIST ADD news@example.net owner@example.com", Dependencies{Correspondents: &correspondentAdminRepositoryStub{err: wantErr}}},
+		{"whitelist delete", "WHITELIST DELETE news@example.net owner@example.com", Dependencies{Correspondents: &correspondentAdminRepositoryStub{err: wantErr}}},
+		{"IP add", "IP ADD 192.0.2.10", Dependencies{IPReputation: &ipReputationRepositoryStub{err: wantErr}}},
+		{"IP delete", "IP DELETE 192.0.2.10", Dependencies{IPReputation: &ipReputationRepositoryStub{err: wantErr}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := New(test.deps).ExecuteLine(context.Background(), test.line, actor)
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("error=%v, want %v", err, wantErr)
+			}
+		})
 	}
 }

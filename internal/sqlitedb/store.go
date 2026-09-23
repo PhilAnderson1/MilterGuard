@@ -286,7 +286,11 @@ func isBusy(err error) bool {
 	if !errors.As(err, &sqliteErr) {
 		return false
 	}
-	code := sqliteErr.Code() & 0xff
+	return isBusyCode(sqliteErr.Code())
+}
+
+func isBusyCode(code int) bool {
+	code &= 0xff
 	return code == lib.SQLITE_BUSY || code == lib.SQLITE_LOCKED
 }
 

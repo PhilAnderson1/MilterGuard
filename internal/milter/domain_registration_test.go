@@ -39,6 +39,38 @@ func (r *flakyDomainRegistrationRepository) PutDomainRegistration(ctx context.Co
 
 var domainTestDatabases sync.Map
 
+func TestDomainRegistrationFailurePruningExpiresAndBoundsEntries(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	store := &domainRegistrationStore{
+		maxSize: 3,
+		failures: map[string]time.Time{
+			"expired.example": now.Add(-time.Second),
+			"one.example":     now.Add(time.Minute),
+			"two.example":     now.Add(time.Minute),
+			"three.example":   now.Add(time.Minute),
+			"four.example":    now.Add(time.Minute),
+		},
+	}
+
+	store.mu.Lock()
+	store.pruneFailuresLocked(now)
+	if _, found := store.failures["expired.example"]; found {
+		store.mu.Unlock()
+		t.Fatal("expired domain-registration failure was retained")
+	}
+	if got, want := len(store.failures), store.maxSize-1; got != want {
+		store.mu.Unlock()
+		t.Fatalf("failures after pruning = %d, want %d to leave insertion capacity", got, want)
+	}
+	store.failures["new.example"] = now.Add(domainRegistrationFailureRetry)
+	got := len(store.failures)
+	store.mu.Unlock()
+
+	if got != store.maxSize {
+		t.Fatalf("failures after insertion = %d, want configured maximum %d", got, store.maxSize)
+	}
+}
+
 func TestDomainRegistrationCleanupHonorsCanceledContext(t *testing.T) {
 	store := newTestDomainRegistrationStore(t, time.Now().UTC(), &fakeDomainRegistrationLookup{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -367,7 +399,7 @@ func TestDomainRegistrationCapacityKeepsLatestExpirations(t *testing.T) {
 	for i, domain := range []string{"soon.example", "middle.example", "late.example"} {
 		putTestDomainRegistration(t, store, domainRegistrationRecord{Domain: domain, RegisteredAt: now.Add(-24 * time.Hour), ExpiresAt: now.Add(time.Duration(i+1) * 24 * time.Hour)})
 	}
-	if store.size(context.Background()) != 3 {
+	if store.size(t, context.Background()) != 3 {
 		t.Fatal("capacity was enforced before periodic cleanup")
 	}
 	if deleted, err := store.cleanup(context.Background()); err != nil {

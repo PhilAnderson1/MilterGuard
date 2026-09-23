@@ -1,6 +1,7 @@
 package milter
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -67,14 +68,29 @@ func TestProtectedSenderDomainRejectionHonorsIPAllowlist(t *testing.T) {
 
 func TestProtectedSenderDomainRejectionIsRecordedAndArchived(t *testing.T) {
 	analyzer := &countingAnalyzer{}
-	server, conn, done := testServer(t, analyzer)
-	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
-	rejections, _ := newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{
-		Expiry: config.Duration(24 * time.Hour), MaxEntries: 10,
+	root := filepath.Join(t.TempDir(), "rejected-mail")
+	cfg := config.Config{
+		Mode: "enforce",
+		Milter: config.MilterConfig{
+			Timeout: config.Duration(200 * time.Millisecond), MaxMessageSize: 1024, MaxConnections: 1,
+		},
+		AI: config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
+		Filtering: config.FilteringConfig{
+			RejectScore: 0.9, LegitimateLowConfidenceScore: 0.8, AIErrorAction: "accept", RejectMessage: "blocked",
+			AuthenticatedOnlySenderDomains: []string{"invades.net"},
+		},
+		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db")},
+		RejectionHistory: config.RejectionHistoryConfig{
+			Expiry: config.Duration(24 * time.Hour), MaxEntries: 10, SaveMessages: true,
+			MessageDirectory: root, MessageMaxTotalBytes: 1 << 20,
+		},
+	}
+	server, conn, done := testServerWithConfig(t, cfg, analyzer)
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("close configured test server: %v", err)
+		}
 	})
-	server.sessions.policy.rejectionHistory = rejections
-	server.maintenance.rejections = rejections
-	root := enableTestRejectedMail(t, server)
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -94,7 +110,7 @@ func TestProtectedSenderDomainRejectionIsRecordedAndArchived(t *testing.T) {
 	if files := archivedMessages(t, root); len(files) != 1 {
 		t.Fatalf("archived files = %v", files)
 	}
-	entries := rejectionEntries(t, rejections, "local@example.net")
+	entries := rejectionEntries(t, server.sessions.policy.rejectionHistory, "local@example.net")
 	if len(entries) != 1 || entries[0].Sender != "support@invades.net" || entries[0].Subject != "Forged local sender" {
 		t.Fatalf("rejection history = %#v", entries)
 	}

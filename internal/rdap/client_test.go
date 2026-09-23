@@ -357,6 +357,34 @@ func TestDialRejectsNonPublicAddresses(t *testing.T) {
 	}
 }
 
+func TestDialRejectsUnsafeHostnamesBeforeResolution(t *testing.T) {
+	for _, endpoint := range []string{"127.0.0.1:443", "localhost:443"} {
+		t.Run(endpoint, func(t *testing.T) {
+			client := New(time.Second)
+			resolved := false
+			client.resolve = func(context.Context, string) ([]net.IPAddr, error) {
+				resolved = true
+				return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, nil
+			}
+			dialed := false
+			client.dial = func(context.Context, string, string) (net.Conn, error) {
+				dialed = true
+				return nil, errors.New("unexpected dial")
+			}
+
+			if _, err := client.dialContext(context.Background(), "tcp", endpoint); err == nil || !strings.Contains(err.Error(), "unsafe RDAP endpoint hostname") {
+				t.Fatalf("unsafe endpoint %q error = %v", endpoint, err)
+			}
+			if resolved {
+				t.Fatal("unsafe RDAP endpoint was resolved")
+			}
+			if dialed {
+				t.Fatal("unsafe RDAP endpoint was dialed")
+			}
+		})
+	}
+}
+
 func TestDialRejectsMixedSafeAndUnsafeAnswers(t *testing.T) {
 	client := New(time.Second)
 	client.resolve = func(context.Context, string) ([]net.IPAddr, error) {

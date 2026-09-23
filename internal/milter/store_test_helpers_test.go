@@ -131,8 +131,12 @@ const (
 	rejectedIPBlockRepeat          = stores.IPBlockLevelRepeat
 )
 
-func testCorrespondentMatch(repository stores.CorrespondentRepository, ctx context.Context, correspondent string, recipients []string) stores.CorrespondentMatch {
-	result, _ := repository.Match(ctx, correspondent, recipients)
+func testCorrespondentMatch(t *testing.T, repository stores.CorrespondentRepository, ctx context.Context, correspondent string, recipients []string) stores.CorrespondentMatch {
+	t.Helper()
+	result, err := repository.Match(ctx, correspondent, recipients)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return result
 }
 
@@ -152,8 +156,12 @@ func (s *correspondentStore) recordInboundClassification(ctx context.Context, co
 		RecipientsComplete: complete, Classification: classification, Score: score, UnwantedMinScore: minimum, DKIMAligned: aligned})
 }
 
-func (s *correspondentStore) match(ctx context.Context, correspondent string, recipients []string) stores.CorrespondentMatch {
-	result, _ := s.Match(ctx, correspondent, recipients)
+func (s *correspondentStore) match(t *testing.T, ctx context.Context, correspondent string, recipients []string) stores.CorrespondentMatch {
+	t.Helper()
+	result, err := s.Match(ctx, correspondent, recipients)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return result
 }
 
@@ -200,19 +208,30 @@ func (s *rejectionHistoryStore) getByID(ctx context.Context, id uint64, recipien
 }
 
 func (s *rejectionHistoryStore) cleanup(ctx context.Context) (int64, error) { return s.Cleanup(ctx) }
-func (s *rejectionHistoryStore) size(ctx context.Context) int {
-	count, _ := s.Count(ctx)
+func (s *rejectionHistoryStore) size(t *testing.T, ctx context.Context) int {
+	t.Helper()
+	count, err := s.Count(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return count
 }
 
-func (s *ipReputationStore) recordLegitimate(ctx context.Context, addr netip.Addr) {
-	_ = s.RecordLegitimate(ctx, addr)
+func (s *ipReputationStore) recordLegitimate(t *testing.T, ctx context.Context, addr netip.Addr) {
+	t.Helper()
+	if err := s.RecordLegitimate(ctx, addr); err != nil {
+		t.Fatal(err)
+	}
 }
 func (s *ipReputationStore) cleanup(ctx context.Context) (int64, error) {
 	return s.repository.(stores.PersistentIPReputationRepository).Cleanup(ctx)
 }
-func (s *ipReputationStore) size(ctx context.Context) int {
-	count, _ := s.repository.(stores.PersistentIPReputationRepository).Count(ctx)
+func (s *ipReputationStore) size(t *testing.T, ctx context.Context) int {
+	t.Helper()
+	count, err := s.repository.(stores.PersistentIPReputationRepository).Count(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return count
 }
 func (s *ipReputationStore) manualAdd(ctx context.Context, addr netip.Addr) (stores.IPBlock, error) {
@@ -235,8 +254,12 @@ func (s *domainRegistrationStore) put(ctx context.Context, record stores.DomainR
 }
 
 func (s *domainRegistrationStore) cleanup(ctx context.Context) (int64, error) { return s.Cleanup(ctx) }
-func (s *domainRegistrationStore) size(ctx context.Context) int {
-	count, _ := s.Count(ctx)
+func (s *domainRegistrationStore) size(t *testing.T, ctx context.Context) int {
+	t.Helper()
+	count, err := s.Count(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return count
 }
 

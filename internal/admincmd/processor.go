@@ -27,11 +27,14 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 		return textResponse(command.canonical, func() string { return Help(admin, actor.DefaultRecipient) }), nil
 	case "rejections":
 		page, err := p.rejections.ListRejections(ctx, stores.RejectionListQuery{Recipients: recipientScope(command.recipient), RejectedSince: cutoff, Limit: MaxListRows})
+		if err != nil {
+			return nil, err
+		}
 		entries := page.Entries
 		if actor.NewestLast {
 			reverse(entries)
 		}
-		return textResponse(command.canonical, func() string { return formatRejectionHistory(entries, page.Truncated) }), err
+		return textResponse(command.canonical, func() string { return formatRejectionHistory(entries, page.Truncated) }), nil
 	case "rejection":
 		scope := stores.RecipientScope{Address: normalizeRecipient(actor.DefaultRecipient)}
 		if admin {
@@ -75,27 +78,39 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 		return textResponse(command.canonical, func() string { return formatActiveIPBlocks(entries, lookup, page.Truncated) }), nil
 	case "ip_add":
 		block, err := p.ipReputation.AddManualBlock(ctx, command.ip)
+		if err != nil {
+			return nil, err
+		}
 		outcome := fmt.Sprintf("blocked %s until %s", block.Address, block.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
-		return textResponse(command.canonical, func() string { return outcome + ".\n" }), err
+		return textResponse(command.canonical, func() string { return outcome + ".\n" }), nil
 	case "ip_delete":
 		removed, err := p.ipReputation.Delete(ctx, command.ip)
+		if err != nil {
+			return nil, err
+		}
 		outcome := "IP address was not present"
 		if removed {
 			outcome = "IP reputation record deleted"
 		}
-		return textResponse(command.canonical, func() string { return outcome + ".\n" }), err
+		return textResponse(command.canonical, func() string { return outcome + ".\n" }), nil
 	case "whitelist":
 		if command.verb == "ADD" {
 			created, err := p.correspondents.AddManual(ctx, command.sender, command.recipient)
+			if err != nil {
+				return nil, err
+			}
 			outcome := "allowlist entry already existed and was refreshed"
 			if created {
 				outcome = "allowlist entry added"
 			}
-			return textResponse(command.canonical, func() string { return outcome + ".\n" }), err
+			return textResponse(command.canonical, func() string { return outcome + ".\n" }), nil
 		}
 		removed, err := p.correspondents.DeleteCorrespondent(ctx, command.sender, recipientScope(command.recipient))
+		if err != nil {
+			return nil, err
+		}
 		outcome := fmt.Sprintf("removed %d allowlist entries", removed)
-		return textResponse(command.canonical, func() string { return outcome + ".\n" }), err
+		return textResponse(command.canonical, func() string { return outcome + ".\n" }), nil
 	default:
 		return nil, fmt.Errorf("unsupported command")
 	}

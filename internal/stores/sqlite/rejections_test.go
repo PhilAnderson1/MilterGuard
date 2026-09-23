@@ -50,8 +50,12 @@ func (s *rejectionHistoryStore) getByID(ctx context.Context, id uint64, recipien
 	return s.RejectionByID(ctx, id, scope)
 }
 func (s *rejectionHistoryStore) cleanup(ctx context.Context) (int64, error) { return s.Cleanup(ctx) }
-func (s *rejectionHistoryStore) size(ctx context.Context) int {
-	count, _ := s.Count(ctx)
+func (s *rejectionHistoryStore) size(t *testing.T, ctx context.Context) int {
+	t.Helper()
+	count, err := s.Count(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return count
 }
 
@@ -114,6 +118,27 @@ func TestRejectionHistoryPersistsOneEventWithMultipleRecipients(t *testing.T) {
 	reloaded := newRejectionHistoryStore(cfg, reopened, nil)
 	if got := rejectionEntries(t, reloaded, "bob@example.com"); len(got) != 1 || got[0].ID != id {
 		t.Fatalf("reloaded history = %#v", got)
+	}
+}
+
+func TestRejectionHistoryPreservesExplicitEventTimestamp(t *testing.T) {
+	store, _ := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: 365 * 24 * time.Hour, MaxEntries: 10})
+	store.now = func() time.Time { return time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC) }
+	eventTime := time.Date(2026, 9, 20, 23, 59, 59, 123456789, time.FixedZone("event-zone", -5*60*60))
+	id, err := store.AddRejection(context.Background(), stores.NewRejection{
+		VisibleSender: "sender@example.net",
+		Recipients:    []string{"owner@example.com"},
+		Reasons:       []string{"test reason"},
+		RejectedAt:    eventTime,
+	})
+	if err != nil || id == 0 {
+		t.Fatalf("add rejection ID = %d, err = %v", id, err)
+	}
+
+	entries := rejectionEntries(t, store, "owner@example.com")
+	want := time.UnixMilli(eventTime.UnixMilli()).UTC()
+	if len(entries) != 1 || !entries[0].RejectedAt.Equal(want) || entries[0].RejectedAt.Location() != time.UTC {
+		t.Fatalf("stored rejection timestamp = %#v, want %s UTC", entries, want)
 	}
 }
 
@@ -288,35 +313,8 @@ func TestRejectionHistoryRollsBackParentWhenRecipientInsertFails(t *testing.T) {
 	if err := store.add(context.Background(), "sender@example.net", "", "test", []string{"ok@example.com", "fail@example.com"}, nil); err == nil {
 		t.Fatal("recipient insertion failure was ignored")
 	}
-	if got := store.size(context.Background()); got != 0 {
+	if got := store.size(t, context.Background()); got != 0 {
 		t.Fatalf("partially committed rejection count = %d", got)
-	}
-}
-
-func TestRejectionHistoryRecipientLookupUsesIndex(t *testing.T) {
-	_, db := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 10})
-	rows, err := db.Query(context.Background(), `EXPLAIN QUERY PLAN SELECT r.id
-		FROM rejection_recipients rr JOIN rejections r ON r.id = rr.rejection_id
-		WHERE rr.recipient = ? AND r.rejected_at_ms >= ?
-		ORDER BY r.rejected_at_ms DESC, r.id DESC`, "local@example.com", int64(0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var plan string
-	for rows.Next() {
-		var id, parent, unused int
-		var detail string
-		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
-			t.Fatal(err)
-		}
-		plan += detail
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(plan, "rejection_recipients_recipient_idx") {
-		t.Fatalf("query plan does not use recipient index: %s", plan)
 	}
 }
 

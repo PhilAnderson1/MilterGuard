@@ -89,3 +89,33 @@ func TestIPRepositoryManualOperationsAndCleanup(t *testing.T) {
 		t.Fatalf("delete = %v, err=%v", deleted, err)
 	}
 }
+
+func TestIPRepositoryListsActiveBlocksInAddressOrder(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	repository := testIPRepository(t, IPReputationOptions{
+		BlockDuration: time.Hour, RepeatBlockDuration: 24 * time.Hour,
+		MaxEntries: 10, Now: func() time.Time { return now },
+	})
+	for _, address := range []string{"192.0.2.30", "192.0.2.10", "192.0.2.20"} {
+		if _, err := repository.AddManualBlock(context.Background(), netip.MustParseAddr(address)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := repository.ListActiveBlocks(context.Background(), stores.IPBlockListQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []netip.Addr{
+		netip.MustParseAddr("192.0.2.10"),
+		netip.MustParseAddr("192.0.2.20"),
+		netip.MustParseAddr("192.0.2.30"),
+	}
+	if len(page.Entries) != len(want) {
+		t.Fatalf("active block count = %d, want %d", len(page.Entries), len(want))
+	}
+	for i := range want {
+		if page.Entries[i].Address != want[i] {
+			t.Fatalf("active block %d = %s, want %s; page=%+v", i, page.Entries[i].Address, want[i], page)
+		}
+	}
+}

@@ -111,9 +111,80 @@ func TestAuthenticatedUserEmailCommandAddsOwnRelationshipAndDiscards(t *testing.
 	if analyzer.calls.Load() != 0 {
 		t.Fatal("command message was sent to AI")
 	}
-	match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "news@example.net", []string{"phil@example.com"})
+	match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.net", []string{"phil@example.com"})
 	if !match.Known {
 		t.Fatal("command did not add live correspondent relationship")
+	}
+}
+
+func TestAuthenticatedOrdinaryUserEmailCommandRequiresPermission(t *testing.T) {
+	server, analyzer, conn, done := commandTestServer(t, false, nil)
+	defer func() { _ = conn.Close(); <-done }()
+	response := submitCommand(t, conn, "philip", "phil@example.com", []string{"milterguard@example.com"}, "WHITELIST ADD news@example.net")
+	if len(response) == 0 || response[0] != responseReply || !strings.Contains(string(response), "not authorized") {
+		t.Fatalf("response = %q, want authorization rejection", response)
+	}
+	if analyzer.calls.Load() != 0 {
+		t.Fatal("rejected command was sent to AI")
+	}
+	if testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.net", []string{"phil@example.com"}).Known {
+		t.Fatal("unauthorized command modified the correspondent database")
+	}
+}
+
+func TestAdministratorEmailCommandAllowedWhenOrdinaryUsersDisabled(t *testing.T) {
+	server, analyzer, conn, done := commandTestServer(t, false, []string{"PHILIP"})
+	defer func() { _ = conn.Close(); <-done }()
+	response := submitCommand(t, conn, "philip", "phil@example.com", []string{"milterguard@example.com"}, "WHITELIST ADD news@example.net")
+	if len(response) != 1 || response[0] != responseDiscard {
+		t.Fatalf("response = %q, want discard", response)
+	}
+	if analyzer.calls.Load() != 0 {
+		t.Fatal("administrator command was sent to AI")
+	}
+	if !testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.net", []string{"phil@example.com"}).Known {
+		t.Fatal("administrator command did not modify the correspondent database")
+	}
+}
+
+func TestEmailCommandAliasOwnershipAuthorization(t *testing.T) {
+	aliases := filepath.Join(t.TempDir(), "aliases")
+	if err := os.WriteFile(aliases, []byte("phil.anderson: pamail\nshared: pamail, other\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name       string
+		sender     string
+		wantAccept bool
+	}{
+		{name: "owned alias", sender: "phil.anderson@invades.net", wantAccept: true},
+		{name: "shared alias", sender: "shared@invades.net", wantAccept: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, analyzer, conn, done := commandTestServer(t, true, nil)
+			defer func() { _ = conn.Close(); <-done }()
+			server.sessions.commands.cfg.VerifySenderViaAliases = true
+			server.sessions.commands.cfg.AliasesFile = aliases
+			server.sessions.commands.cfg.Recipient = "milterguard@invades.net"
+			server.sessions.commands.recipient = "milterguard@invades.net"
+
+			response := submitCommand(t, conn, "pamail", test.sender, []string{"milterguard@invades.net"}, "WHITELIST ADD news@example.net")
+			accepted := len(response) == 1 && response[0] == responseDiscard
+			if accepted != test.wantAccept {
+				t.Fatalf("response = %q, accepted = %t, want %t", response, accepted, test.wantAccept)
+			}
+			if !test.wantAccept && (len(response) == 0 || response[0] != responseReply || !strings.Contains(string(response), "not owned")) {
+				t.Fatalf("response = %q, want sender-ownership rejection", response)
+			}
+			if analyzer.calls.Load() != 0 {
+				t.Fatal("command message was sent to AI")
+			}
+			known := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.net", []string{test.sender}).Known
+			if known != test.wantAccept {
+				t.Fatalf("correspondent database changed = %t, want %t", known, test.wantAccept)
+			}
+		})
 	}
 }
 
@@ -128,11 +199,66 @@ func TestEmailCommandBatchRunsSequentiallyAndStopsAtText(t *testing.T) {
 	if analyzer.calls.Load() != 0 {
 		t.Fatal("command message was sent to AI")
 	}
-	if testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "old@example.net", []string{"phil@example.com"}).Known {
+	if testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "old@example.net", []string{"phil@example.com"}).Known {
 		t.Fatal("deleted batch entry remains")
 	}
-	if !testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "current@example.net", []string{"phil@example.com"}).Known {
+	if !testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "current@example.net", []string{"phil@example.com"}).Known {
 		t.Fatal("later batch command was not executed")
+	}
+}
+
+func TestEmailCommandBatchReportsMalformedCommandButStopsSilentlyAtProse(t *testing.T) {
+	tests := []struct {
+		name       string
+		middleLine string
+		wantReply  string
+		rejectText string
+	}{
+		{
+			name:       "recognized malformed command",
+			middleLine: "WHITELIST BOGUS ignored@example.net",
+			wantReply:  "operation must be ADD or DELETE",
+		},
+		{
+			name:       "ordinary trailing prose",
+			middleLine: "Thanks for your help",
+			rejectText: "Thanks for your help",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, analyzer, conn, done := commandTestServer(t, true, nil)
+			defer func() { _ = conn.Close(); <-done }()
+			sender := &fakeReplySender{messages: make(chan smtpreply.Message, 1)}
+			server.sessions.commands.cfg.SendReplies = true
+			server.sessions.commands.sender = sender
+
+			body := "WHITELIST ADD first@example.net\n" + test.middleLine + "\nWHITELIST ADD later@example.net"
+			response := submitCommand(t, conn, "philip", "phil@example.com", []string{"milterguard@example.com"}, body)
+			if len(response) != 1 || response[0] != responseDiscard {
+				t.Fatalf("response = %q, want discard", response)
+			}
+			if analyzer.calls.Load() != 0 {
+				t.Fatal("command message was sent to AI")
+			}
+			select {
+			case reply := <-sender.messages:
+				if test.wantReply != "" && !strings.Contains(reply.Text, test.wantReply) {
+					t.Fatalf("reply does not report malformed command: %q", reply.Text)
+				}
+				if test.rejectText != "" && strings.Contains(reply.Text, test.rejectText) {
+					t.Fatalf("ordinary trailing prose appeared in reply: %q", reply.Text)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("command reply was not submitted")
+			}
+			if !testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "first@example.net", []string{"phil@example.com"}).Known {
+				t.Fatal("command preceding terminator was not executed")
+			}
+			if testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "later@example.net", []string{"phil@example.com"}).Known {
+				t.Fatal("command following terminator was executed")
+			}
+		})
 	}
 }
 

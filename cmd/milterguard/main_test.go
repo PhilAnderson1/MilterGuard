@@ -174,6 +174,30 @@ func TestUnixSocketPermissionFailureClosesAndRemovesSocket(t *testing.T) {
 	}
 }
 
+func TestListenRefusesToReplaceOrdinaryFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "milterguard.sock")
+	const original = "must not be removed"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	listener, cleanup, err := listen("unix:" + path)
+	if err == nil || !strings.Contains(err.Error(), "refusing to replace non-socket path") {
+		t.Fatalf("listen error = %v, want refusal to replace ordinary file", err)
+	}
+	if listener != nil {
+		t.Fatal("listener returned after refusing ordinary file")
+	}
+	cleanup()
+	content, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("ordinary file was removed: %v", readErr)
+	}
+	if string(content) != original {
+		t.Fatalf("ordinary file content = %q, want %q", content, original)
+	}
+}
+
 func TestCheckMilterListenerAvailable(t *testing.T) {
 	listener := &trackedListener{}
 	listen := func(network, address string) (net.Listener, error) {

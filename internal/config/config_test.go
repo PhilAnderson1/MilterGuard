@@ -127,6 +127,42 @@ func TestValidateMilterTimeout(t *testing.T) {
 	}
 }
 
+func TestValidateMilterSocket(t *testing.T) {
+	for _, socket := range []string{
+		"tcp:127.0.0.1:8895",
+		"tcp:localhost:8895",
+		"tcp:[::1]:8895",
+		"tcp::8895",
+		"unix:/run/milterguard/milterguard.sock",
+	} {
+		cfg := validConfig()
+		cfg.Milter.Socket = socket
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("valid socket %q rejected: %v", socket, err)
+		}
+	}
+
+	for _, socket := range []string{
+		"",
+		"127.0.0.1:8895",
+		"tcp:",
+		"tcp:127.0.0.1",
+		"tcp:127.0.0.1:not-a-port",
+		"tcp:127.0.0.1:0",
+		"tcp:127.0.0.1:65536",
+		"tcp:::1:8895",
+		"tcp:bad host:8895",
+		"unix:",
+		"unix:/run/milterguard/invalid\x00socket",
+	} {
+		cfg := validConfig()
+		cfg.Milter.Socket = socket
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "milter.socket") {
+			t.Errorf("invalid socket %q error = %v", socket, err)
+		}
+	}
+}
+
 func TestValidateMilterMaxMessageSize(t *testing.T) {
 	for _, test := range []struct {
 		value   int64

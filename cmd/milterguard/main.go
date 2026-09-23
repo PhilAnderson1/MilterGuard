@@ -254,32 +254,34 @@ func executeCommandModeLine(ctx context.Context, output io.Writer, processor int
 type listenFunc func(network, address string) (net.Listener, error)
 
 func checkMilterListenerAvailable(address string, listen listenFunc) (string, error) {
-	switch {
-	case strings.HasPrefix(address, "tcp:"):
-		target := strings.TrimPrefix(address, "tcp:")
-		listener, err := listen("tcp", target)
+	target, err := config.ParseMilterSocket(address)
+	if err != nil {
+		return "", err
+	}
+	switch target.Network {
+	case "tcp":
+		listener, err := listen(target.Network, target.Address)
 		if err != nil {
 			return "", err
 		}
 		if err := listener.Close(); err != nil {
 			return "", fmt.Errorf("close test listener: %w", err)
 		}
-		_, port, err := net.SplitHostPort(target)
+		_, port, err := net.SplitHostPort(target.Address)
 		if err != nil {
 			return "Milter port is available", nil
 		}
 		return "Milter port " + port + " is available", nil
-	case strings.HasPrefix(address, "unix:"):
-		path := strings.TrimPrefix(address, "unix:")
+	case "unix":
+		path := target.Address
 		if _, err := os.Lstat(path); err == nil {
 			return "", syscall.EADDRINUSE
 		} else if !os.IsNotExist(err) {
 			return "", err
 		}
 		return "Milter Unix socket path is available", nil
-	default:
-		return "", fmt.Errorf("unsupported Milter listener %q", address)
 	}
+	return "", fmt.Errorf("unsupported Milter listener %q", address)
 }
 
 func portCheckErrorMessage(address, configPath string, err error) string {
@@ -387,8 +389,12 @@ func persistentStateStartupErrorMessage(err error) string {
 }
 
 func listen(address string) (net.Listener, func(), error) {
-	if strings.HasPrefix(address, "unix:") {
-		path := strings.TrimPrefix(address, "unix:")
+	target, err := config.ParseMilterSocket(address)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	if target.Network == "unix" {
+		path := target.Address
 		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 			return nil, func() {}, err
 		}
@@ -411,15 +417,15 @@ func listen(address string) (net.Listener, func(), error) {
 		}
 		return ln, func() { _ = ln.Close(); _ = os.Remove(path) }, nil
 	}
-	if strings.HasPrefix(address, "tcp:") {
-		ln, err := net.Listen("tcp", strings.TrimPrefix(address, "tcp:"))
+	if target.Network == "tcp" {
+		ln, err := net.Listen(target.Network, target.Address)
 		return ln, func() {
 			if ln != nil {
 				_ = ln.Close()
 			}
 		}, err
 	}
-	return nil, func() {}, fmt.Errorf("socket must begin with unix: or tcp:")
+	return nil, func() {}, fmt.Errorf("unsupported Milter listener network %q", target.Network)
 }
 
 func setUnixSocketPermissions(ln net.Listener, path string, chmod func(string, os.FileMode) error) error {

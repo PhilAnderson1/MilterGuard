@@ -33,6 +33,8 @@ func TestAddressRoutable(t *testing.T) {
 		"127.0.0.1": false, "10.0.0.1": false, "169.254.1.1": false,
 		"192.0.2.1": false, "100.64.0.1": false, "198.18.0.1": false,
 		"224.0.0.1": false, "::1": false, "2001:db8::1": false, "fe80::1": false,
+		"2001::1": false, "2001:0000:4136:e378:8000:63bf:3fff:fdd2": false,
+		"2002:7f00:1::": false, "2002:0808:0808::": false,
 	}
 	for value, want := range tests {
 		if got := AddressRoutable(netip.MustParseAddr(value)); got != want {

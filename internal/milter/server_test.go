@@ -89,6 +89,28 @@ func TestMaintenancePanicIsRecovered(t *testing.T) {
 	}
 }
 
+func TestRejectedMailCleanupRunsImmediatelyAtStartup(t *testing.T) {
+	root := t.TempDir()
+	expiredDirectory := filepath.Join(root, "2000", "01", "01")
+	if err := os.MkdirAll(expiredDirectory, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(expiredDirectory, "1.eml"), []byte("expired message"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	service := &maintenanceService{archive: rejectedmail.New(rejectedmail.Options{
+		Directory: root, Retention: 24 * time.Hour, MaxTotalBytes: 1 << 20,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	service.startRejectedMailCleanup(ctx)
+
+	if _, err := os.Lstat(filepath.Join(root, "2000")); !os.IsNotExist(err) {
+		t.Fatalf("expired archive tree remains after startup cleanup: %v", err)
+	}
+}
+
 type failingStartupCleanupIPRepository struct {
 	stores.PersistentIPReputationRepository
 	err   error
@@ -438,13 +460,18 @@ func TestPostDecisionUpdatesDoNotInheritExpiredAnalysisContext(t *testing.T) {
 
 func testServer(t *testing.T, analyzer Analyzer) (*Server, net.Conn, <-chan struct{}) {
 	t.Helper()
-	serverConn, clientConn := net.Pipe()
 	cfg := config.Config{
 		Mode:      "enforce",
 		Milter:    config.MilterConfig{Timeout: config.Duration(200 * time.Millisecond), MaxMessageSize: 1024},
 		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
 		Filtering: config.FilteringConfig{RejectScore: 0.9, LegitimateLowConfidenceScore: 0.8, AIErrorAction: "accept", RejectMessage: "blocked"},
 	}
+	return testServerWithConfig(t, cfg, analyzer)
+}
+
+func testServerWithConfig(t *testing.T, cfg config.Config, analyzer Analyzer) (*Server, net.Conn, <-chan struct{}) {
+	t.Helper()
+	serverConn, clientConn := net.Pipe()
 	s := NewServer(cfg, analyzer, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	done := make(chan struct{})
 	go func() {
@@ -1554,7 +1581,7 @@ func TestAuthenticatedAcceptedMessageLearnsEnvelopeRecipients(t *testing.T) {
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	deadline := time.Now().Add(time.Second)
 	for {
-		match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"})
+		match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"})
 		if match.Known && match.AllRecipientsMatched {
 			break
 		}
@@ -1592,7 +1619,7 @@ func TestAbortedAuthenticatedMessageDoesNotLearnRecipients(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectNoFrame(t, conn)
-	if match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
+	if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
 		t.Fatalf("aborted recipient was learned: %#v", match)
 	}
 }
@@ -1727,7 +1754,7 @@ func TestMultipleFromHeadersCannotBypassOrTeachSenderTrust(t *testing.T) {
 	if got := analyzer.calls.Load(); got != 1 {
 		t.Fatalf("ambiguous sender AI analyses = %d, want 1", got)
 	}
-	if match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "bob@example.net", []string{"philip@invades.net"}); match.Known {
+	if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "bob@example.net", []string{"philip@invades.net"}); match.Known {
 		t.Fatal("ambiguous sender was learned as a correspondent")
 	}
 	if got := len(server.sessions.policy.correspondents.(*correspondentStore).snapshot()); got != 1 {
@@ -1935,7 +1962,7 @@ func TestAIResultLearnsInboundSender(t *testing.T) {
 	}
 	<-done
 	_ = conn.Close()
-	if match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); !match.Known {
+	if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); !match.Known {
 		t.Fatal("qualifying AI result did not create a known correspondent")
 	}
 }
@@ -1976,7 +2003,7 @@ func TestNonEnforceModesDoNotLearnFromAIResultsOrDecayIPReputation(t *testing.T)
 			_ = conn.Close()
 			<-done
 
-			if match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); match.Known {
+			if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); match.Known {
 				t.Fatalf("%s mode learned an inbound correspondent", mode)
 			}
 			strikes := len(server.sessions.policy.ipReputation.snapshot()[addr].Strikes)
@@ -2016,7 +2043,7 @@ func TestNonEnforceModesDoNotLearnAuthenticatedRecipients(t *testing.T) {
 			expectFrame(t, conn, string([]byte{responseAccept}))
 			_ = conn.Close()
 			<-done
-			if match := testCorrespondentMatch(server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
+			if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
 				t.Fatalf("%s mode learned an authenticated recipient", mode)
 			}
 		})

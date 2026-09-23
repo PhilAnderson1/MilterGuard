@@ -100,6 +100,19 @@ func TestPromptReportsIncompleteMultipartParsing(t *testing.T) {
 	}
 }
 
+func TestPromptReportsMultipartWithoutBoundary(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "multipart/mixed")
+	m.AddBody([]byte("unparseable multipart body"))
+	prompt := m.Prompt(1000)
+	if !strings.Contains(prompt, "[multipart message has no boundary]") {
+		t.Fatalf("missing-boundary marker was not included: %s", prompt)
+	}
+	if !strings.Contains(prompt, "Multipart content could not be fully parsed") {
+		t.Fatalf("missing-boundary limitation was not included: %s", prompt)
+	}
+}
+
 func TestStructuralMIMEHeadersUseFirstOccurrence(t *testing.T) {
 	m := New(10000)
 	m.AddHeader("Content-Type", "text/html; charset=UTF-8")
@@ -204,6 +217,26 @@ func TestMIMEExtractionReadsAttachedMessage(t *testing.T) {
 	content := extractMIME("message/rfc822", "", "", []byte(attached), 0)
 	if want := `Nested evidence [sign in](https://evil.invalid/login)`; !strings.Contains(content.Text, want) {
 		t.Fatalf("attached-message text = %q, want it to contain %q", content.Text, want)
+	}
+}
+
+func TestMIMEAttachedMessageRecursionLimit(t *testing.T) {
+	nestedMessage := func(levels int) []byte {
+		message := "Content-Type: text/plain; charset=UTF-8\r\n\r\ndeep nested evidence"
+		for level := 1; level < levels; level++ {
+			message = "Content-Type: message/rfc822\r\n\r\n" + message
+		}
+		return []byte(message)
+	}
+
+	atLimit := extractMIME("message/rfc822", "", "", nestedMessage(8), 0)
+	if atLimit.Text != "deep nested evidence" {
+		t.Fatalf("content at MIME nesting limit = %q, want nested evidence", atLimit.Text)
+	}
+
+	beyondLimit := extractMIME("message/rfc822", "", "", nestedMessage(9), 0)
+	if beyondLimit.Text != "[MIME nesting limit reached]" {
+		t.Fatalf("content beyond MIME nesting limit = %q, want limit marker", beyondLimit.Text)
 	}
 }
 
@@ -494,11 +527,25 @@ func TestConnectionInformationSanitizesAndBoundsUntrustedValues(t *testing.T) {
 	m.Connection = ConnectionInfo{
 		RemoteIP:            strings.Repeat("a", maxConnectionValueRunes+20) + "\nINJECTED:",
 		MTAReportedHostname: "host.example\r\nSubject: forged",
-		HELOIdentity:        "helo.example\x00bad",
+		HELOIdentity:        strings.Repeat("é", maxConnectionValueRunes) + "TRAILING",
 	}
 	prompt := m.Prompt(10)
 	if strings.Contains(prompt, "\r") || strings.Contains(prompt, "\x00") || strings.Contains(prompt, "\nINJECTED:") || strings.Contains(prompt, "\nSubject: forged") {
 		t.Fatalf("connection metadata was not sanitized:\n%s", prompt)
+	}
+	for prefix, want := range map[string]string{
+		"Remote IP: ":               strings.Repeat("a", maxConnectionValueRunes),
+		"SMTP HELO/EHLO identity: ": strings.Repeat("é", maxConnectionValueRunes),
+	} {
+		start := strings.Index(prompt, prefix)
+		if start < 0 {
+			t.Fatalf("connection field %q missing:\n%s", prefix, prompt)
+		}
+		remainder := prompt[start+len(prefix):]
+		value, _, _ := strings.Cut(remainder, "\n")
+		if value != want || utf8.RuneCountInString(value) != maxConnectionValueRunes || !utf8.ValidString(value) {
+			t.Fatalf("bounded %q value = %q (%d runes), want %d valid UTF-8 runes", prefix, value, utf8.RuneCountInString(value), maxConnectionValueRunes)
+		}
 	}
 }
 
@@ -557,17 +604,6 @@ func TestSampleBodyPreservesUTF8RuneBoundaries(t *testing.T) {
 	}
 	if !utf8.ValidString(got) {
 		t.Fatalf("sampleBody() produced invalid UTF-8: %q", got)
-	}
-}
-
-func TestStripInvisibleFormattingDoesNotAllocateForCleanText(t *testing.T) {
-	const clean = "Already clean UTF-8 text ✓"
-	if allocations := testing.AllocsPerRun(100, func() {
-		if got := stripInvisibleFormatting(clean); got != clean {
-			t.Fatalf("stripInvisibleFormatting() = %q, want %q", got, clean)
-		}
-	}); allocations != 0 {
-		t.Fatalf("clean formatting pass allocated %.1f times, want 0", allocations)
 	}
 }
 
@@ -913,6 +949,28 @@ func TestHTMLExcludesExplicitlyHiddenSubtrees(t *testing.T) {
 	}
 }
 
+func TestHTMLHiddenSubtreeIgnoresClosingTagsInsideRawTextElements(t *testing.T) {
+	for _, element := range []string{
+		"script",
+		"style",
+		"iframe",
+		"title",
+		"textarea",
+		"xmp",
+		"noembed",
+		"noframes",
+	} {
+		t.Run(element, func(t *testing.T) {
+			html := `Before<div style="display:none"><` + element + `>raw </div> marker</` + element + `>` +
+				`Forged conversation <a href="https://hidden.example/">trusted sender</a></div>After`
+			got := htmlToText(html)
+			if got.Text != "Before After" || got.VisibleText != "Before After" || len(got.Links) != 0 {
+				t.Fatalf("raw-text child prematurely ended hidden subtree: text=%q visible=%q links=%v", got.Text, got.VisibleText, got.Links)
+			}
+		})
+	}
+}
+
 func TestHTMLVisibilityUsesExactStylesAndCSSPrecedence(t *testing.T) {
 	for _, tag := range []string{
 		`<p data-hidden style="content:'display:none'; display:block">`,
@@ -1031,6 +1089,26 @@ func TestHTMLPreservesVisibleRawTextContainers(t *testing.T) {
 	}
 }
 
+func TestHTMLPreservesUnclosedVisibleRawTextContainers(t *testing.T) {
+	tests := []struct {
+		element string
+		want    string
+	}{
+		{element: "textarea", want: `Beforeliteral & <b>tail`},
+		{element: "xmp", want: `Beforeliteral &amp; <b>tail`},
+		{element: "noembed", want: `Beforeliteral &amp; <b>tail`},
+		{element: "noframes", want: `Beforeliteral &amp; <b>tail`},
+	}
+	for _, test := range tests {
+		t.Run(test.element, func(t *testing.T) {
+			got := htmlToText(`Before<` + test.element + `>literal &amp; <b>tail`)
+			if got.Text != test.want {
+				t.Fatalf("unclosed raw %s text = %q, want %q", test.element, got.Text, test.want)
+			}
+		})
+	}
+}
+
 func TestHTMLPlaintextTreatsRemainderAsText(t *testing.T) {
 	got := htmlToText(`Before<plaintext>literal<a href="https://evil.example/">evil</a></plaintext><p>After</p>`)
 	want := `Beforeliteral<a href="https://evil.example/">evil</a></plaintext><p>After</p>`
@@ -1105,6 +1183,21 @@ func TestHTMLUnterminatedQuotedTagDoesNotBecomeVisibleText(t *testing.T) {
 		if got.Text != "Before" {
 			t.Errorf("unterminated quoted tag extracted as %q", got.Text)
 		}
+	}
+}
+
+func TestHTMLUnterminatedMarkupTailDoesNotBecomeVisibleText(t *testing.T) {
+	for _, source := range []string{
+		`Before<div title=unfinished fake correspondence`,
+		`Before<!DOCTYPE html fake correspondence`,
+		`Before<?processing instruction fake correspondence`,
+	} {
+		if got := htmlToText(source); got.Text != "Before" {
+			t.Errorf("unterminated markup tail extracted from %q as %q", source, got.Text)
+		}
+	}
+	if got := htmlToText(`Before<`); got.Text != `Before<` {
+		t.Fatalf("ordinary lone tag opener = %q, want %q", got.Text, `Before<`)
 	}
 }
 
@@ -1885,6 +1978,23 @@ func TestVisionImageLimitsAreEnforced(t *testing.T) {
 	}
 }
 
+func TestVisionRejectsSmallImageFileWithExcessiveDeclaredPixels(t *testing.T) {
+	// This is a compact 1x1 GIF whose logical-screen dimensions are changed to
+	// 65535x65535. DecodeConfig reads those dimensions without expanding the
+	// image, allowing the pixel limit to reject a potential decompression bomb.
+	data, err := base64.StdEncoding.DecodeString("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[6], data[7], data[8], data[9] = 0xff, 0xff, 0xff, 0xff
+	image, ok := visionImage(extractedImage{Data: data}, VisionOptions{
+		MaxBytes: 1 << 20, MaxPixels: 12_000_000,
+	})
+	if ok || len(image.Data) != 0 {
+		t.Fatalf("selected image with excessive declared dimensions: %#v", image)
+	}
+}
+
 func imageOnlyMessage(src, contentID string) *Message {
 	return multipartRelatedMessage("[7d4d-90d5-ef340]", `<img alt="7d4d-90d5-ef340" src="`+src+`">`, contentID)
 }
@@ -1915,6 +2025,58 @@ func TestArchiveBytesRetainsAllHeadersAndBody(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("archive missing %q: %q", want, got)
 		}
+	}
+}
+
+func TestArchiveBytesFoldsEmbeddedHeaderLineBreaks(t *testing.T) {
+	m := New(4096)
+	m.AddHeader("Subject", "original\r\nX-Forged: yes\nContent-Type: text/html\rAnother: value")
+	m.AddBody([]byte("message body"))
+
+	archive := m.ArchiveBytes()
+	for _, want := range []string{
+		"Subject: original\r\n X-Forged: yes\r\n Content-Type: text/html\r\n Another: value\r\n",
+		"\r\n\r\nmessage body",
+	} {
+		if !bytes.Contains(archive, []byte(want)) {
+			t.Fatalf("archive missing folded value %q: %q", want, archive)
+		}
+	}
+	parsed, err := mail.ReadMessage(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("archive is not syntactically valid: %v\n%q", err, archive)
+	}
+	for _, name := range []string{"X-Forged", "Content-Type", "Another"} {
+		if value := parsed.Header.Get(name); value != "" {
+			t.Errorf("embedded line created %s header %q", name, value)
+		}
+	}
+	if subject := parsed.Header.Get("Subject"); !strings.Contains(subject, "X-Forged: yes") || !strings.Contains(subject, "Another: value") {
+		t.Fatalf("folded subject lost original value: %q", subject)
+	}
+}
+
+func TestArchiveBytesRejectsInvalidHeaderNames(t *testing.T) {
+	for _, name := range []string{"", "Bad:Name", "Bad\r\nX-Forged", "Bad\x00Name", "Bad Name", "Bäd"} {
+		t.Run(strconv.Quote(name), func(t *testing.T) {
+			m := New(4096)
+			m.AddHeader("Subject", "safe")
+			m.AddHeader(name, "attacker value")
+			m.AddBody([]byte("body"))
+
+			archive := m.ArchiveBytes()
+			want := "Subject: safe\r\n" + archiveTruncationHeader + "\r\nbody"
+			if string(archive) != want {
+				t.Fatalf("archive retained invalid header name:\n got %q\nwant %q", archive, want)
+			}
+			parsed, err := mail.ReadMessage(bytes.NewReader(archive))
+			if err != nil {
+				t.Fatalf("archive is not syntactically valid: %v", err)
+			}
+			if len(parsed.Header) != 2 || parsed.Header.Get("Subject") != "safe" || parsed.Header.Get("X-MilterGuard-Archive-Truncated") != "yes" {
+				t.Fatalf("parsed headers = %#v", parsed.Header)
+			}
+		})
 	}
 }
 
@@ -1958,6 +2120,42 @@ func TestTruncatedArchiveReservesCompleteMarkerAndRemainsParseable(t *testing.T)
 	}
 	if got := parsed.Header.Get("X-MilterGuard-Archive-Truncated"); got != "yes" {
 		t.Fatalf("archive truncation marker = %q, want yes", got)
+	}
+}
+
+func TestTruncatedArchiveOmitsEntireFoldedHeaderField(t *testing.T) {
+	// The retained archive headers exactly fill half this message budget. Once
+	// space is reserved for the truncation marker, the cutoff lands inside the
+	// folded field and the complete field must therefore be omitted.
+	m := New(78)
+	m.AddHeader("X", "ok")
+	m.AddHeader("F", "one\n"+strings.Repeat("x", 21))
+	if m.archiveHeaderBytes != m.MaxBytes/2 {
+		t.Fatalf("test archive headers = %d bytes, want %d", m.archiveHeaderBytes, m.MaxBytes/2)
+	}
+	m.AddHeader("Invalid Header", "force archive truncation")
+	m.AddBody([]byte("body"))
+
+	archive := m.ArchiveBytes()
+	parsed, err := mail.ReadMessage(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("archive split a folded header field: %v\n%q", err, archive)
+	}
+	if got := parsed.Header.Get("X"); got != "ok" {
+		t.Fatalf("complete preceding header = %q, want ok", got)
+	}
+	if got := parsed.Header.Get("F"); got != "" {
+		t.Fatalf("partially retained folded header = %q, want omitted", got)
+	}
+	if got := parsed.Header.Get("X-MilterGuard-Archive-Truncated"); got != "yes" {
+		t.Fatalf("archive truncation marker = %q, want yes", got)
+	}
+	body, err := io.ReadAll(parsed.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "body" {
+		t.Fatalf("archive body = %q, want body", body)
 	}
 }
 

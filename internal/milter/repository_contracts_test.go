@@ -91,15 +91,19 @@ type recordingIPReputationRepository struct {
 
 type cachedDomainRegistrationRepository struct {
 	record stores.DomainRegistration
+	found  bool
 	reads  int
+	writes int
 }
 
 func (r *cachedDomainRegistrationRepository) DomainRegistration(context.Context, string) (stores.DomainRegistration, bool, error) {
 	r.reads++
-	return r.record, true, nil
+	return r.record, r.found, nil
 }
 
-func (r *cachedDomainRegistrationRepository) PutDomainRegistration(context.Context, stores.DomainRegistration) error {
+func (r *cachedDomainRegistrationRepository) PutDomainRegistration(_ context.Context, record stores.DomainRegistration) error {
+	r.record, r.found = record, true
+	r.writes++
 	return nil
 }
 
@@ -125,11 +129,12 @@ func TestIPAllowlistPreventsRepositoryMutation(t *testing.T) {
 
 func TestDomainRegistrationEvidenceUsesRepositoryCache(t *testing.T) {
 	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
-	repository := &cachedDomainRegistrationRepository{record: stores.DomainRegistration{
+	repository := &cachedDomainRegistrationRepository{found: true, record: stores.DomainRegistration{
 		Domain: "example.com", RegisteredAt: now.AddDate(-10, 0, 0), ExpiresAt: now.AddDate(1, 0, 0),
 	}}
+	lookup := &fakeDomainRegistrationLookup{}
 	service := &domainRegistrationStore{
-		repository: repository, lookup: &fakeDomainRegistrationLookup{}, now: func() time.Time { return now },
+		repository: repository, lookup: lookup, now: func() time.Time { return now },
 	}
 
 	evidence, err := service.evidence(context.Background(), "mail.example.com")
@@ -141,5 +146,40 @@ func TestDomainRegistrationEvidenceUsesRepositoryCache(t *testing.T) {
 	}
 	if repository.reads != 1 {
 		t.Fatalf("repository reads = %d, want 1", repository.reads)
+	}
+	if lookup.calls.Load() != 0 || repository.writes != 0 {
+		t.Fatalf("cache hit performed lookup or write: lookups=%d writes=%d", lookup.calls.Load(), repository.writes)
+	}
+}
+
+func TestDomainRegistrationEvidenceRefreshesRepositoryCacheMiss(t *testing.T) {
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	repository := &cachedDomainRegistrationRepository{}
+	lookup := &fakeDomainRegistrationLookup{
+		registered: now.AddDate(-10, 0, 0), expires: now.AddDate(1, 0, 0),
+	}
+	service := &domainRegistrationStore{
+		repository: repository, lookup: lookup, timeout: time.Second,
+		slots: make(chan struct{}, 1), now: func() time.Time { return now },
+		failures: make(map[string]time.Time), inflight: make(map[string]chan struct{}),
+	}
+
+	evidence, err := service.evidence(context.Background(), "mail.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !evidence.Available || evidence.Domain != "example.com" {
+		t.Fatalf("refreshed evidence = %+v", evidence)
+	}
+	if lookup.calls.Load() != 1 || repository.writes != 1 || !repository.found || repository.record.Domain != "example.com" {
+		t.Fatalf("cache miss handling: lookups=%d writes=%d found=%t record=%+v",
+			lookup.calls.Load(), repository.writes, repository.found, repository.record)
+	}
+
+	if _, err := service.evidence(context.Background(), "example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if lookup.calls.Load() != 1 || repository.writes != 1 {
+		t.Fatalf("refreshed cache was not reused: lookups=%d writes=%d", lookup.calls.Load(), repository.writes)
 	}
 }

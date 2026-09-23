@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	lib "modernc.org/sqlite/lib"
 )
 
 func TestOpenCreatesAndReopensSchema(t *testing.T) {
@@ -219,5 +221,74 @@ func TestBusyWriteHonorsContextDeadline(t *testing.T) {
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBusyResultCodesIncludeExtendedBusyAndLockedErrors(t *testing.T) {
+	for _, code := range []int{
+		lib.SQLITE_BUSY,
+		lib.SQLITE_BUSY | 1<<8,
+		lib.SQLITE_LOCKED,
+		lib.SQLITE_LOCKED | 1<<8,
+	} {
+		if !isBusyCode(code) {
+			t.Errorf("SQLite result code %d was not recognized as busy", code)
+		}
+	}
+	for _, code := range []int{lib.SQLITE_OK, lib.SQLITE_ERROR, lib.SQLITE_CONSTRAINT} {
+		if isBusyCode(code) {
+			t.Errorf("SQLite result code %d was incorrectly recognized as busy", code)
+		}
+	}
+}
+
+func TestRetryRepeatsBusyErrorsOnly(t *testing.T) {
+	options := DefaultOptions()
+	options.BusyTimeout = time.Millisecond
+	options.BusyRetries = 2
+	options.RetryDelay = time.Millisecond
+	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "retry.db"), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	tx, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO rejections (sender, subject, rejected_at_ms, reason)
+		VALUES ('lock@example.net', '', 1, '')`); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	_, busyErr := store.db.ExecContext(context.Background(), `INSERT INTO rejections
+		(sender, subject, rejected_at_ms, reason) VALUES ('blocked@example.net', '', 2, '')`)
+	if rollbackErr := tx.Rollback(); rollbackErr != nil {
+		t.Fatal(rollbackErr)
+	}
+	if busyErr == nil || !isBusy(busyErr) {
+		t.Fatalf("contended write error = %v, want SQLite busy error", busyErr)
+	}
+
+	attempts := 0
+	if err := store.retry(context.Background(), func() error {
+		attempts++
+		if attempts == 1 {
+			return busyErr
+		}
+		return nil
+	}); err != nil || attempts != 2 {
+		t.Fatalf("busy retry error = %v, attempts = %d, want success after 2 attempts", err, attempts)
+	}
+
+	wantErr := errors.New("permanent failure")
+	attempts = 0
+	err = store.retry(context.Background(), func() error {
+		attempts++
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) || attempts != 1 {
+		t.Fatalf("permanent error = %v, attempts = %d, want one attempt", err, attempts)
 	}
 }

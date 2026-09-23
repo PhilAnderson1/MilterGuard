@@ -46,6 +46,30 @@ func TestTerminalWhitelistAddExplainsMissingRecipient(t *testing.T) {
 	}
 }
 
+func TestRecognizedLineMatchesOnlyCommandKeywords(t *testing.T) {
+	tests := []struct {
+		line string
+		want bool
+	}{
+		{"HELP", true},
+		{"  help  ", true},
+		{"Ip ADD 192.0.2.1", true},
+		{"rejection 7", true},
+		{"REJECTIONS all", true},
+		{"Whitelist add sender@example.net", true},
+		{"", false},
+		{"ordinary reply text", false},
+		{"HELPFUL", false},
+		{"WHITELISTED sender@example.net", false},
+		{"X-WHITELIST ADD sender@example.net", false},
+	}
+	for _, test := range tests {
+		if got := RecognizedLine(test.line); got != test.want {
+			t.Errorf("RecognizedLine(%q)=%t, want %t", test.line, got, test.want)
+		}
+	}
+}
+
 func TestPeriodCutoffs(t *testing.T) {
 	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
 	tests := []struct {

@@ -200,14 +200,12 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 			continue
 		}
 
-		closing, found, unterminatedQuote := lexicalTagEnd(source, opening+1)
+		closing, found, _ := lexicalTagEnd(source, opening+1)
 		if !found {
-			// A lone '<' is more useful as text than silently dropping the tail.
-			// An unfinished quoted tag, however, remains markup through EOF in
-			// HTML tokenizers and must not become AI-only visible text.
-			if !unterminatedQuote {
-				lexicalWriteDecodedText(&text, source[opening:])
-			}
+			// lexicalMarkupStart already excluded an ordinary lone '<'. A
+			// plausible tag that runs through EOF remains markup in HTML
+			// tokenizers, whether or not an attribute quote was opened, so its
+			// tail must not become AI-only visible text.
 			break
 		}
 		rawTag := source[opening+1 : closing]

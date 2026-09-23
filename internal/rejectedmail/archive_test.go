@@ -105,6 +105,39 @@ func TestCleanupEnforcesTotalByteLimit(t *testing.T) {
 	}
 }
 
+func TestCapacityCleanupIgnoresMessagesOutsideDateHierarchy(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	archive := New(Options{Directory: root, Retention: 24 * time.Hour, MaxTotalBytes: 3}, nil)
+	archive.now = func() time.Time { return now }
+
+	validPath, err := archive.Save([]byte("123"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	strayPath := filepath.Join(root, "stray.eml")
+	if err := os.WriteFile(strayPath, []byte(strings.Repeat("x", 1024)), 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := archive.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(validPath); err != nil {
+		t.Fatalf("valid archived message was removed: %v", err)
+	}
+	if _, err := os.Stat(strayPath); err != nil {
+		t.Fatalf("stray message outside date hierarchy was removed: %v", err)
+	}
+	total, err := archive.archiveSize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 {
+		t.Fatalf("accounted archive size = %d, want 3", total)
+	}
+}
+
 func TestSaveWithRecordIDAtUsesRecordIDAndDoesNotOverwrite(t *testing.T) {
 	root := t.TempDir()
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
