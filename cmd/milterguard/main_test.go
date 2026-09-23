@@ -171,6 +171,16 @@ func (*trackedListener) Accept() (net.Conn, error) { return nil, errors.New("not
 func (listener *trackedListener) Close() error     { listener.closed = true; return nil }
 func (*trackedListener) Addr() net.Addr            { return &net.TCPAddr{} }
 
+func shortUnixSocketPath(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("/tmp", "mg-sock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	return filepath.Join(directory, "m.sock")
+}
+
 func TestUnixSocketPermissionsAreRestricted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "milterguard.sock")
 	if err := os.WriteFile(path, nil, 0777); err != nil {
@@ -253,7 +263,7 @@ func TestCheckMilterListenerAvailable(t *testing.T) {
 }
 
 func TestCheckMilterUnixSocketPath(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "milterguard.sock")
+	path := shortUnixSocketPath(t)
 	got, err := checkMilterListenerAvailable("unix:"+path, nil)
 	if err != nil || got != "Milter Unix socket path is available" {
 		t.Fatalf("available path result = %q, error = %v", got, err)
@@ -286,7 +296,7 @@ func TestCheckMilterUnixSocketPath(t *testing.T) {
 }
 
 func TestUnixSocketChecksRejectActiveListener(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "milterguard.sock")
+	path := shortUnixSocketPath(t)
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
