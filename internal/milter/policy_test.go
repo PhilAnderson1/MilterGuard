@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -62,8 +63,8 @@ func TestApplyPolicy(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			service := &analysisService{mode: test.mode, filtering: config.FilteringConfig{RejectScore: 0.9}}
-			proposed, selected := service.applyPolicy(test.decision)
+			service := &analysisService{}
+			proposed, selected := service.applyPolicy(test.decision, test.mode, 0.9)
 			if proposed != test.proposed || selected != test.selected {
 				t.Fatalf("actions = (%s, %s), want (%s, %s)", proposed, selected, test.proposed, test.selected)
 			}
@@ -90,7 +91,7 @@ func TestEncodeAction(t *testing.T) {
 func TestLogOutcomeRecordsResponseDelivery(t *testing.T) {
 	var output bytes.Buffer
 	service := &analysisService{
-		mode: "enforce", ai: config.AIConfig{Model: "test-model"},
+		ai:  config.AIConfig{Model: "test-model"},
 		log: slog.New(slog.NewJSONHandler(&output, nil)),
 	}
 	msg := message.New(1024)
@@ -100,12 +101,64 @@ func TestLogOutcomeRecordsResponseDelivery(t *testing.T) {
 		classification: "unwanted", score: 1, reasons: []string{"test"},
 		latency: time.Millisecond,
 	}
-	service.logOutcome(context.Background(), msg, result, false, errors.New("write failed"))
+	service.logOutcome(context.Background(), msg, result, "enforce", false, false, errors.New("write failed"))
 	logLine := output.String()
 	for _, wanted := range []string{`"actual_action":"reject"`, `"response_sent":false`, `"response_error":"write failed"`} {
 		if !strings.Contains(logLine, wanted) {
 			t.Errorf("log output does not contain %s: %s", wanted, logLine)
 		}
+	}
+}
+
+func TestFinishBypassedMessageSubjectLogging(t *testing.T) {
+	tests := []struct {
+		name           string
+		includeSubject bool
+		wantSubject    bool
+	}{
+		{name: "enabled", includeSubject: true, wantSubject: true},
+		{name: "disabled", includeSubject: false, wantSubject: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&output, nil))
+			serverConn, clientConn := net.Pipe()
+			defer serverConn.Close()
+			defer clientConn.Close()
+
+			ss := newSession(&sessionDependencies{
+				mode: "enforce", protocol: protocolOptions{maxMessageSize: 1024},
+				filtering: config.FilteringConfig{RejectMessage: "blocked"},
+				logging:   config.LoggingConfig{IncludeSubject: test.includeSubject},
+				analysis:  &analysisService{},
+				policy:    &messagePolicyService{},
+				log:       logger,
+			}, serverConn)
+			ss.message.AddHeader("Message-ID", "<bypass@example.invalid>")
+			ss.message.AddHeader("Subject", "Bypassed subject")
+
+			done := make(chan bool, 1)
+			go func() {
+				done <- ss.finishBypassedMessage(context.Background(), "test_bypass", false, false)
+			}()
+			response, err := readFrame(clientConn)
+			if err != nil {
+				t.Fatalf("read bypass response: %v", err)
+			}
+			if len(response) != 1 || response[0] != responseAccept {
+				t.Fatalf("bypass response = %q, want accept", response)
+			}
+			if !<-done {
+				t.Fatal("finishBypassedMessage reported failure")
+			}
+
+			hasSubject := strings.Contains(output.String(), `"subject":"Bypassed subject"`)
+			if hasSubject != test.wantSubject {
+				t.Fatalf("subject present = %t, want %t; log: %s", hasSubject, test.wantSubject, output.String())
+			}
+		})
 	}
 }
 
@@ -124,8 +177,7 @@ func TestLogOutcomeIdentifiesPermanentEndpointFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			var output bytes.Buffer
 			service := &analysisService{
-				mode: "enforce",
-				log:  slog.New(slog.NewJSONHandler(&output, nil)),
+				log: slog.New(slog.NewJSONHandler(&output, nil)),
 			}
 			msg := message.New(1024)
 			msg.AddHeader("Message-ID", "<test@example.invalid>")
@@ -135,7 +187,7 @@ func TestLogOutcomeIdentifiesPermanentEndpointFailures(t *testing.T) {
 					Kind: test.kind, StatusCode: test.statusCode,
 					Err: errors.New("endpoint failure"),
 				},
-			}, true, nil)
+			}, "enforce", false, true, nil)
 			logLine := output.String()
 			for _, wanted := range []string{
 				`"msg":"` + test.message + `"`,

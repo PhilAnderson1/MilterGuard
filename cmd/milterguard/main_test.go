@@ -28,6 +28,40 @@ func TestPersistentStateStartupErrorMessage(t *testing.T) {
 	}
 }
 
+func TestCommandModeLoggerEmitsWarningsButNotRoutineLogs(t *testing.T) {
+	var output strings.Builder
+	logger := commandModeLogger(&output)
+	logger.Debug("debug detail")
+	logger.Info("routine detail")
+	logger.Warn("important warning")
+	logger.Error("important error")
+	text := output.String()
+	if strings.Contains(text, "debug detail") || strings.Contains(text, "routine detail") {
+		t.Fatalf("command logger emitted routine output: %s", text)
+	}
+	for _, want := range []string{"important warning", "important error"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("command logger omitted %q: %s", want, text)
+		}
+	}
+}
+
+func TestReportCommandModeCompletionPreservesExecutionAndShutdownErrors(t *testing.T) {
+	var output strings.Builder
+	if code := reportCommandModeCompletion(&output, errors.New("execution failed"), errors.New("close failed")); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	for _, want := range []string{"command mode failed: execution failed", "command database shutdown failed: close failed"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("completion output missing %q: %s", want, output.String())
+		}
+	}
+	output.Reset()
+	if code := reportCommandModeCompletion(&output, nil, nil); code != 0 || output.Len() != 0 {
+		t.Fatalf("successful completion code=%d output=%q", code, output.String())
+	}
+}
+
 type scriptedCommandProcessor struct {
 	lines  []string
 	actors []admincmd.Actor
@@ -224,11 +258,65 @@ func TestCheckMilterUnixSocketPath(t *testing.T) {
 	if err != nil || got != "Milter Unix socket path is available" {
 		t.Fatalf("available path result = %q, error = %v", got, err)
 	}
+
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err = checkMilterListenerAvailable("unix:"+path, nil)
+	if err != nil || got != "Milter Unix socket path is available" {
+		t.Fatalf("stale socket result = %q, error = %v", got, err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("preflight altered stale socket: %v", err)
+	}
+
+	bound, cleanup, err := listen("unix:" + path)
+	if err != nil {
+		t.Fatalf("startup did not replace stale socket: %v", err)
+	}
+	cleanup()
+	if bound == nil {
+		t.Fatal("startup returned no listener after replacing stale socket")
+	}
+}
+
+func TestUnixSocketChecksRejectActiveListener(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "milterguard.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	if _, err := checkMilterListenerAvailable("unix:"+path, nil); !errors.Is(err, syscall.EADDRINUSE) {
+		t.Fatalf("active preflight error = %v, want EADDRINUSE", err)
+	}
+	if replacement, cleanup, err := listen("unix:" + path); !errors.Is(err, syscall.EADDRINUSE) {
+		cleanup()
+		if replacement != nil {
+			_ = replacement.Close()
+		}
+		t.Fatalf("active startup error = %v, want EADDRINUSE", err)
+	}
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("active listener path was disturbed: %v", err)
+	}
+	_ = conn.Close()
+}
+
+func TestCheckMilterUnixSocketRefusesOrdinaryFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "milterguard.sock")
 	if err := os.WriteFile(path, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := checkMilterListenerAvailable("unix:"+path, nil); !errors.Is(err, syscall.EADDRINUSE) {
-		t.Fatalf("existing path error = %v, want EADDRINUSE", err)
+	if _, err := checkMilterListenerAvailable("unix:"+path, nil); err == nil || !strings.Contains(err.Error(), "refusing to replace non-socket path") {
+		t.Fatalf("ordinary path error = %v, want non-socket refusal", err)
 	}
 }
 

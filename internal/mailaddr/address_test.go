@@ -76,3 +76,18 @@ func TestNormalizeCanonicalizesSingleTrailingDomainDot(t *testing.T) {
 		t.Fatalf("repeated trailing dots accepted as %q", got)
 	}
 }
+
+func TestDomainUsesCanonicalMailboxValidation(t *testing.T) {
+	tests := map[string]string{
+		`Sender <User@Example.COM.>`:                                    "example.com",
+		strings.Repeat("Long display name ", 25) + `<user@example.org>`: "example.org",
+		"user@example.net":                                              "example.net",
+		"user@under_score.example":                                      "",
+		"not a mailbox":                                                 "",
+	}
+	for input, want := range tests {
+		if got := Domain(input); got != want {
+			t.Errorf("Domain(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

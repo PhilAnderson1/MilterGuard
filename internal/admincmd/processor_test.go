@@ -129,6 +129,23 @@ func TestRejectionArchiveReadIsDeferred(t *testing.T) {
 	}
 }
 
+func TestRejectionDetailWarnsWhenSavedMessageWasTruncated(t *testing.T) {
+	entry := stores.Rejection{ID: 7, Sender: "sender@example.net", Recipients: []string{"user@example.com"}, RejectedAt: time.Now()}
+	repository := &rejectionRepositoryStub{entry: entry}
+	source := &messageSourceStub{contents: []byte("X-MilterGuard-Archive-Truncated: yes\r\nContent-Type: text/plain\r\n\r\nPartial body\r\n")}
+	p := New(Dependencies{Rejections: repository, MessageSource: source, MaxMessageSize: 1 << 20})
+
+	response, err := p.ExecuteLine(context.Background(), "REJECTION 7", Actor{DefaultRecipient: "user@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Saved message was truncated during archiving", "Partial body"} {
+		if !strings.Contains(response.Text, want) {
+			t.Fatalf("response missing %q: %s", want, response.Text)
+		}
+	}
+}
+
 func TestMissingArchiveIsNotAnError(t *testing.T) {
 	repository := &rejectionRepositoryStub{entry: stores.Rejection{ID: 8, Recipients: []string{"user@example.com"}}}
 	source := &messageSourceStub{err: fs.ErrNotExist}
@@ -138,6 +155,20 @@ func TestMissingArchiveIsNotAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(response.Text, "Saved message is not available") || len(response.Attachments) != 0 {
+		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestMalformedArchiveRemainsAttached(t *testing.T) {
+	repository := &rejectionRepositoryStub{entry: stores.Rejection{ID: 7, Recipients: []string{"user@example.com"}}}
+	source := &messageSourceStub{contents: []byte("not a valid header\r\n\r\nbody")}
+	p := New(Dependencies{Rejections: repository, MessageSource: source, MaxMessageSize: 1 << 20})
+	response, err := p.ExecuteLine(context.Background(), "REJECTION 7", Actor{DefaultRecipient: "user@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.Text, "Saved message is attached, but its body could not be processed") ||
+		strings.Contains(response.Text, "Saved message is not available") || len(response.Attachments) != 1 {
 		t.Fatalf("response=%#v", response)
 	}
 }

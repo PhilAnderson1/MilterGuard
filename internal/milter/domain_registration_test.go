@@ -339,6 +339,31 @@ func TestDomainRegistrationCleanupRemovesRecordsTwoWeeksPastExpiry(t *testing.T)
 	}
 }
 
+func TestDisabledDomainRegistrationStillCleansExistingRecords(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	db, err := sqlitedb.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlitedb.DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	cfg := config.DomainRegistrationConfig{Enabled: false, Timeout: config.Duration(time.Second), MaxEntries: 10}
+	store := newDomainRegistrationStore(cfg, newDomainRepository(cfg, db, func() time.Time { return now }), nil, slog.Default())
+	putTestDomainRegistration(t, store, domainRegistrationRecord{
+		Domain: "expired.example", RegisteredAt: now.Add(-400 * 24 * time.Hour), ExpiresAt: now.Add(-15 * 24 * time.Hour),
+	})
+
+	deleted, err := store.cleanup(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted records = %d, want 1", deleted)
+	}
+	if _, found, err := store.get(context.Background(), "expired.example"); err != nil || found {
+		t.Fatalf("disabled domain-registration cleanup retained expired record: found=%t err=%v", found, err)
+	}
+}
+
 func TestDomainRegistrationPersistsAndUpsertsInPlace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "milterguard.db")
 	db, err := sqlitedb.Open(context.Background(), path, sqlitedb.DefaultOptions())
@@ -356,14 +381,16 @@ func TestDomainRegistrationPersistsAndUpsertsInPlace(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("initial record: found=%v, err=%v", found, err)
 	}
-	firstID := stored.ID
 	updated := domainRegistrationRecord{Domain: "example.com", RegisteredAt: now.Add(-730 * 24 * time.Hour), ExpiresAt: now.Add(365 * 24 * time.Hour)}
 	if err := store.put(context.Background(), updated); err != nil {
 		t.Fatal(err)
 	}
 	stored, found, err = store.get(context.Background(), "example.com")
-	if err != nil || !found || stored.ID != firstID || !stored.RegisteredAt.Equal(updated.RegisteredAt) || !stored.ExpiresAt.Equal(updated.ExpiresAt) {
+	if err != nil || !found || !stored.RegisteredAt.Equal(updated.RegisteredAt) || !stored.ExpiresAt.Equal(updated.ExpiresAt) {
 		t.Fatalf("updated record = %+v, found=%v, err=%v", stored, found, err)
+	}
+	if count, err := store.Count(context.Background()); err != nil || count != 1 {
+		t.Fatalf("records after upsert = %d, err=%v", count, err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -374,7 +401,8 @@ func TestDomainRegistrationPersistsAndUpsertsInPlace(t *testing.T) {
 	}
 	defer reopened.Close()
 	reloaded := newDomainRegistrationStore(cfg, newDomainRepository(cfg, reopened, time.Now), &fakeDomainRegistrationLookup{}, nil)
-	if record, found, err := reloaded.get(context.Background(), "example.com"); err != nil || !found || record.ID != firstID {
+	if record, found, err := reloaded.get(context.Background(), "example.com"); err != nil || !found ||
+		!record.RegisteredAt.Equal(updated.RegisteredAt) || !record.ExpiresAt.Equal(updated.ExpiresAt) {
 		t.Fatalf("reloaded record = %+v, found=%v, err=%v", record, found, err)
 	}
 }

@@ -15,7 +15,7 @@ func (ss *session) applyAuthenticatedOnlySenderDomain(ctx context.Context) (bool
 	if ss.authentication.Authenticated {
 		return false, true
 	}
-	domain := authenticatedOnlyFromDomain(ss.message, ss.deps.policy.filtering.AuthenticatedOnlySenderDomains)
+	domain := authenticatedOnlyFromDomain(ss.message, ss.deps.filtering.AuthenticatedOnlySenderDomains)
 	if domain == "" {
 		return false, true
 	}
@@ -62,33 +62,31 @@ func recoverFromAddresses(value string) []*mail.Address {
 }
 
 func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, domain string) bool {
-	selected := selectActionForMode(actionReject, ss.deps.policy.mode)
+	selected := selectActionForMode(actionReject, ss.deps.mode)
 
 	var err error
 	if selected == actionAccept {
-		if ss.deps.policy.filtering.AddEmailHeaders || ss.deps.policy.mode == "tag" {
-			err = ss.writeTagHeaders("unwanted", nil, acceptedModeLabel(ss.deps.policy.mode))
+		if ss.deps.filtering.AddEmailHeaders || ss.deps.mode == "tag" {
+			err = ss.writeTagHeaders("unwanted", nil, acceptedModeLabel(ss.deps.mode))
 		} else {
 			err = ss.writeAcceptedResultHeaders(nil)
 		}
 	}
 	if err == nil {
-		err = writeFrame(ss.conn, responseForAction(selected, ss.deps.policy.filtering.RejectMessage))
+		err = writeFrame(ss.conn, responseForAction(selected, ss.deps.filtering.RejectMessage))
 	}
 
 	reason := "Visible From domain " + domain + " may only be used by authenticated SMTP submissions"
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
-		"mode", ss.deps.policy.mode,
+		"mode", ss.deps.mode,
 		"sender_domain", domain,
 		"proposed_action", actionReject.String(),
 		"actual_action", selected.String(),
 		"source", authenticatedOnlySenderDomainSource,
 		"response_sent", err == nil,
 	}
-	if ss.deps.analysis.logging.IncludeSubject {
-		attrs = append(attrs, "subject", ss.message.DecodedHeader("Subject"))
-	}
+	attrs = ss.appendDecisionSubject(attrs)
 	if err != nil {
 		attrs = append(attrs, "response_error", err)
 		ss.deps.log.ErrorContext(ctx, "authenticated-only sender domain policy response failed", attrs...)

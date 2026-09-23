@@ -27,6 +27,7 @@ policy or persistence queries.
 | `internal/ai` | Builds chat-completions requests, applies endpoint retries, and validates AI decisions. |
 | `internal/attachment` | Detects prohibited executable attachments and inspects supported archives. |
 | `internal/config` | Loads defaults, strictly decodes YAML, and validates cross-setting requirements. |
+| `internal/mailaddr` | Provides canonical mailbox parsing and normalization shared by message processing, policy, administration, and persistence. |
 | `internal/mailauth` | Parses trusted Authentication-Results data and evaluates domain alignment. |
 | `internal/message` | Accumulates SMTP message data and produces bounded, decoded text, links, images, and authentication evidence. |
 | `internal/milter` | Implements the Milter protocol, session state, filtering policy, service orchestration, and Postfix responses. |

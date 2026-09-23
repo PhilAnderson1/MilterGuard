@@ -21,6 +21,10 @@ type attachmentPolicyResult struct {
 
 const invalidMIMERejectMessage = "Message rejected because it has an invalid MIME structure and cannot be safely inspected"
 
+func (s *attachmentPolicyService) enabled() bool {
+	return s != nil && s.scanner != nil
+}
+
 func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 	result := ss.deps.attachments.evaluate(ctx, ss.message)
 	if !result.handled {
@@ -40,7 +44,7 @@ func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 // evaluate runs the attachment scanner under its concurrency limit and maps
 // findings or incomplete inspection to the configured deterministic action.
 func (s *attachmentPolicyService) evaluate(ctx context.Context, msg *message.Message) attachmentPolicyResult {
-	if s == nil || s.scanner == nil {
+	if !s.enabled() {
 		return attachmentPolicyResult{}
 	}
 	if msg.MIMEHeadersTruncated {
@@ -96,19 +100,19 @@ func (s *attachmentPolicyService) evaluate(ctx context.Context, msg *message.Mes
 // finishAttachmentDecision applies operating mode, writes any accepted-message
 // headers, records deterministic rejections, and sends the Milter response.
 func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action, path, detection string, scanErr error, rejectMessage string) bool {
-	selected := selectActionForMode(proposed, ss.deps.attachments.mode)
+	selected := selectActionForMode(proposed, ss.deps.mode)
 	if rejectMessage == "" {
 		rejectMessage = ss.deps.attachments.cfg.RejectMessage
 	}
 	response := responseForAction(selected, rejectMessage)
 	var err error
 	if selected == actionAccept {
-		if proposed != actionAccept && (ss.deps.attachments.filtering.AddEmailHeaders || ss.deps.attachments.mode == "tag") {
+		if proposed != actionAccept && (ss.deps.filtering.AddEmailHeaders || ss.deps.mode == "tag") {
 			classification := "unwanted"
 			if scanErr != nil {
 				classification = "unavailable"
 			}
-			err = ss.writeTagHeaders(classification, nil, acceptedModeLabel(ss.deps.attachments.mode))
+			err = ss.writeTagHeaders(classification, nil, acceptedModeLabel(ss.deps.mode))
 		} else {
 			err = ss.writeAcceptedResultHeaders(nil)
 		}
@@ -118,7 +122,7 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 	}
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
-		"mode", ss.deps.attachments.mode,
+		"mode", ss.deps.mode,
 		"attachment_path", path,
 		"detection", detection,
 		"proposed_action", proposed.String(),
@@ -128,9 +132,7 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 	if scanErr != nil {
 		attrs = append(attrs, "inspection_error", scanErr)
 	}
-	if ss.deps.analysis.logging.IncludeSubject {
-		attrs = append(attrs, "subject", ss.message.DecodedHeader("Subject"))
-	}
+	attrs = ss.appendDecisionSubject(attrs)
 	if err != nil {
 		attrs = append(attrs, "response_error", err)
 		ss.deps.log.ErrorContext(ctx, "attachment policy response failed", attrs...)

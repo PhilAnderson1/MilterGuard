@@ -172,20 +172,8 @@ func (r *rejectionRepository) ListRejections(ctx context.Context, query stores.R
 		return stores.RejectionPage{}, fmt.Errorf("list rejection history: %w", err)
 	}
 	defer rows.Close()
-	entries := make([]stores.Rejection, 0)
-	for rows.Next() {
-		var id, rejectedAt int64
-		var sender, subject, reason, recipient string
-		if err := rows.Scan(&id, &sender, &subject, &rejectedAt, &reason, &recipient); err != nil {
-			return stores.RejectionPage{}, fmt.Errorf("read rejection history: %w", err)
-		}
-		if len(entries) == 0 || entries[len(entries)-1].ID != uint64(id) {
-			entries = append(entries, stores.Rejection{ID: uint64(id), Sender: sender, Subject: subject,
-				RejectedAt: timeFromMillis(rejectedAt), Reason: reason})
-		}
-		entries[len(entries)-1].Recipients = append(entries[len(entries)-1].Recipients, recipient)
-	}
-	if err := rows.Err(); err != nil {
+	entries, err := scanGroupedRejections(rows)
+	if err != nil {
 		return stores.RejectionPage{}, fmt.Errorf("read rejection history: %w", err)
 	}
 	return rejectionPage(entries, query.Limit), nil
@@ -224,28 +212,42 @@ func (r *rejectionRepository) RejectionByID(ctx context.Context, id uint64, scop
 		return stores.Rejection{}, false, fmt.Errorf("look up rejection history record: %w", err)
 	}
 	defer rows.Close()
-	var entry stores.Rejection
-	for rows.Next() {
-		var rowID, rejectedAt int64
-		var sender, subject, reason, recipient string
-		if err := rows.Scan(&rowID, &sender, &subject, &rejectedAt, &reason, &recipient); err != nil {
-			return stores.Rejection{}, false, fmt.Errorf("read rejection history record: %w", err)
-		}
-		if entry.ID == 0 {
-			entry = stores.Rejection{ID: uint64(rowID), Sender: sender, Subject: subject,
-				RejectedAt: timeFromMillis(rejectedAt), Reason: reason}
-		}
-		entry.Recipients = append(entry.Recipients, recipient)
-	}
-	if err := rows.Err(); err != nil {
+	entries, err := scanGroupedRejections(rows)
+	if err != nil {
 		return stores.Rejection{}, false, fmt.Errorf("read rejection history record: %w", err)
 	}
-	return entry, entry.ID != 0, nil
+	if len(entries) == 0 {
+		return stores.Rejection{}, false, nil
+	}
+	return entries[0], true, nil
+}
+
+type rejectionRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}
+
+func scanGroupedRejections(rows rejectionRows) ([]stores.Rejection, error) {
+	entries := make([]stores.Rejection, 0)
+	for rows.Next() {
+		var id, rejectedAt int64
+		var sender, subject, reason, recipient string
+		if err := rows.Scan(&id, &sender, &subject, &rejectedAt, &reason, &recipient); err != nil {
+			return nil, err
+		}
+		if len(entries) == 0 || entries[len(entries)-1].ID != uint64(id) {
+			entries = append(entries, stores.Rejection{ID: uint64(id), Sender: sender, Subject: subject,
+				RejectedAt: timeFromMillis(rejectedAt), Reason: reason})
+		}
+		entries[len(entries)-1].Recipients = append(entries[len(entries)-1].Recipients, recipient)
+	}
+	return entries, rows.Err()
 }
 
 func (r *rejectionRepository) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
-	var excess int
-	if err := tx.QueryRowContext(ctx, `SELECT max(count(*) - ?, 0) FROM rejections`, r.options.MaxEntries).Scan(&excess); err != nil || excess == 0 {
+	excess, err := capacityExcessTx(ctx, tx, "rejections", r.options.MaxEntries)
+	if err != nil || excess == 0 {
 		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM rejections WHERE id IN (

@@ -12,10 +12,10 @@ const (
 var resultHeaderNames = []string{classificationHeader, scoreHeader, confidenceHeader, actionHeader}
 
 // writeAcceptedResultHeaders removes sender-supplied result headers from every
-// accepted message. Genuine values are then added for tag mode, an AI
-// classification, an AI failure, or a bypass.
+// accepted message. When configured to add headers, it replaces them with the
+// AI result, AI failure, or bypass outcome.
 func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
-	if !ss.deps.policy.filtering.AddEmailHeaders && ss.deps.protocol.mode != "tag" {
+	if !ss.deps.filtering.AddEmailHeaders && ss.deps.mode != "tag" {
 		return ss.replaceResultHeaders(nil)
 	}
 	if result == nil {
@@ -30,8 +30,8 @@ func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 		}
 	} else {
 		action := "accepted"
-		if ss.deps.protocol.mode == "tag" || result.proposed == actionReject {
-			action = acceptedModeLabel(ss.deps.protocol.mode)
+		if ss.deps.mode == "tag" || result.proposed == actionReject {
+			action = acceptedModeLabel(ss.deps.mode)
 		} else if result.classification == "unwanted" {
 			action = "accepted-below-threshold"
 		}
@@ -46,7 +46,7 @@ func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 }
 
 func (ss *session) writeAcceptedBypassHeaders() error {
-	if ss.deps.protocol.mode == "tag" {
+	if ss.deps.mode == "tag" {
 		return ss.writeTagHeaders("not-scanned", nil, "accepted-bypass")
 	}
 	return ss.writeAcceptedResultHeaders(nil)
@@ -65,9 +65,9 @@ func (ss *session) writeTagHeaders(classification string, score *float64, action
 }
 
 func (ss *session) confidenceLabel(classification string, score float64) string {
-	threshold := ss.deps.policy.filtering.RejectScore
+	threshold := ss.deps.filtering.RejectScore
 	if classification == "legitimate" {
-		threshold = ss.deps.policy.filtering.LegitimateLowConfidenceScore
+		threshold = ss.deps.filtering.LegitimateLowConfidenceScore
 	}
 	if score < threshold {
 		return "low"

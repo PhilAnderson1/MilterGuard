@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"runtime/debug"
 	"sync"
 	"time"
 
@@ -47,7 +46,7 @@ func (s commandArchiveSource) ReadWithRecordID(id uint64, rejectedAt time.Time, 
 // OpenCommandProcessor opens only the persistence, archive and DNS capabilities
 // required by standalone command mode. It does not construct a Milter server.
 func OpenCommandProcessor(cfg config.Config, log *slog.Logger) (*admincmd.Processor, func() error, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), maintenanceDatabaseTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), databaseOpenTimeout)
 	database, err := sqlitedb.Open(ctx, cfg.Persistence.DatabaseFile, sqlitedb.DefaultOptions())
 	cancel()
 	if err != nil {
@@ -68,13 +67,7 @@ func OpenCommandProcessor(cfg config.Config, log *slog.Logger) (*admincmd.Proces
 	rejections := newRejectionRepository(cfg.RejectionHistory, database, time.Now, log)
 	ipRepository := newIPRepository(cfg.IPReputation, database, time.Now, log)
 	ipPolicy := newIPReputationStore(cfg.IPReputation, ipRepository, log)
-	var archive *rejectedmail.Archive
-	if cfg.RejectionHistory.SaveMessages && rejectionHistoryEnabled(cfg.RejectionHistory) {
-		archive = rejectedmail.New(rejectedmail.Options{
-			Directory: cfg.RejectionHistory.MessageDirectory, Retention: cfg.RejectionHistory.Expiry.Value(),
-			MaxTotalBytes: cfg.RejectionHistory.MessageMaxTotalBytes,
-		}, log)
-	}
+	archive := newRejectedMailArchive(cfg.RejectionHistory, log)
 	return commandProcessor(cfg, correspondents, rejections, ipPolicy, archive, net.DefaultResolver, log), closeProcessor, nil
 }
 
@@ -131,10 +124,7 @@ func (r *commandIPResolver) ResolveActiveIPHostnames(parent context.Context, ent
 func (r *commandIPResolver) reverseLookup(ctx context.Context, addr netip.Addr) (names []string, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			if r.log != nil {
-				r.log.ErrorContext(ctx, "worker panic recovered", "worker", "IP command reverse-DNS lookup",
-					"remote_ip", addr.String(), "panic", recovered, "stack", string(debug.Stack()))
-			}
+			logRecoveredWorkerPanic(r.log, ctx, "IP command reverse-DNS lookup", recovered, "remote_ip", addr.String())
 			err = fmt.Errorf("reverse-DNS lookup panicked")
 		}
 	}()

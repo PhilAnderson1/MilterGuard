@@ -48,32 +48,26 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 		return false, true
 	}
 	if len(ss.envelopeRecipients) != 1 || ss.envelopeRecipientsTruncated {
-		return true, ss.rejectEmailCommand(ctx, "command address must be the sole recipient", false)
+		return true, ss.rejectEmailCommand(ctx, "command address must be the sole recipient")
 	}
 	if !ss.authentication.Authenticated {
-		return true, ss.rejectEmailCommand(ctx, "authentication required", false)
+		return true, ss.rejectEmailCommand(ctx, "authentication required")
 	}
 
 	identity := strings.TrimSpace(ss.authentication.Identity)
-	admin := false
-	for _, configured := range cfg.Administrators {
-		if strings.EqualFold(strings.TrimSpace(configured), identity) {
-			admin = true
-			break
-		}
-	}
+	admin := ss.isCommandAdministrator(identity)
 	if !admin && !cfg.AllowAuthenticatedUsers {
-		return true, ss.rejectEmailCommand(ctx, "authenticated user is not authorized", false)
+		return true, ss.rejectEmailCommand(ctx, "authenticated user is not authorized")
 	}
 	if !admin && cfg.VerifySenderViaAliases {
 		if err := senderOwnedViaAliases(cfg.AliasesFile, ss.envelopeSender, identity, cfg.Recipient); err != nil {
 			ss.deps.log.WarnContext(ctx, "email command sender ownership verification failed", "authenticated_identity", identity, "envelope_sender", ss.envelopeSender, "error", err)
-			return true, ss.rejectEmailCommand(ctx, "envelope sender is not owned by the authenticated user", false)
+			return true, ss.rejectEmailCommand(ctx, "envelope sender is not owned by the authenticated user")
 		}
 	}
 	replyTo := mailaddr.Normalize(ss.envelopeSender)
 	if replyTo == "" {
-		return true, ss.rejectEmailCommand(ctx, "authenticated envelope sender is invalid", false)
+		return true, ss.rejectEmailCommand(ctx, "authenticated envelope sender is invalid")
 	}
 
 	lines, err := commandMessageLines(ss.message, cfg.MaxMessageBytes)
@@ -183,11 +177,12 @@ func commandMessageLines(m *message.Message, maxBytes int64) ([]string, error) {
 }
 
 func (ss *session) completeInvalidEmailCommand(ctx context.Context, identity, replyTo, reason string) bool {
-	queued := ss.deps.commands.queueReply(replyTo, "MilterGuard command rejected", reason+".\n\n"+admincmd.Help(ss.isCommandAdministrator(identity)))
+	queued := ss.deps.commands.queueReply(replyTo, "MilterGuard command rejected", reason+".\n\n"+admincmd.Help(ss.isCommandAdministrator(identity), false))
 	return ss.discardEmailCommand(ctx, identity, "invalid", reason, replyTo, "", queued)
 }
 
 func (ss *session) isCommandAdministrator(identity string) bool {
+	identity = strings.TrimSpace(identity)
 	for _, configured := range ss.deps.commands.cfg.Administrators {
 		if strings.EqualFold(strings.TrimSpace(configured), identity) {
 			return true
@@ -196,9 +191,9 @@ func (ss *session) isCommandAdministrator(identity string) bool {
 	return false
 }
 
-func (ss *session) rejectEmailCommand(ctx context.Context, reason string, replyQueued bool) bool {
+func (ss *session) rejectEmailCommand(ctx context.Context, reason string) bool {
 	err := writeFrame(ss.conn, replyCode("550", "5.7.1", "MilterGuard command rejected: "+reason))
-	ss.deps.log.WarnContext(ctx, "email command rejected", "message_id", ss.message.Header("Message-ID"), "authenticated_identity", ss.authentication.Identity, "result", reason, "discarded", false, "confirmation_queued", replyQueued, "response_sent", err == nil)
+	ss.deps.log.WarnContext(ctx, "email command rejected", "message_id", ss.message.Header("Message-ID"), "authenticated_identity", ss.authentication.Identity, "result", reason, "discarded", false, "confirmation_queued", false, "response_sent", err == nil)
 	if err != nil {
 		return false
 	}

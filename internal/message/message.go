@@ -12,7 +12,7 @@ type Message struct {
 	decodedHeaders          map[string][]string
 	headerOccurrences       map[string]int
 	analysisTime            time.Time
-	Body                    bytes.Buffer
+	body                    bytes.Buffer
 	Connection              ConnectionInfo
 	AuthenticatedSubmission bool
 	Correspondent           CorrespondentInfo
@@ -21,9 +21,9 @@ type Message struct {
 	Truncated               bool
 	BodyTruncated           bool
 	MIMEHeadersTruncated    bool
-	MaxBytes                int64
+	ArchiveTruncated        bool
+	maxBytes                int64
 	bodySize                int64
-	headerSize              int64
 	headerBytesByName       map[string]int64
 	fromHeaderCount         int
 	toHeaderSeen            bool
@@ -139,7 +139,7 @@ func New(maxBytes int64) *Message {
 		headerOccurrences: make(map[string]int),
 		headerBytesByName: make(map[string]int64),
 		analysisTime:      time.Now().UTC(),
-		MaxBytes:          maxBytes,
+		maxBytes:          maxBytes,
 	}
 }
 
@@ -191,7 +191,6 @@ func (m *Message) AddHeader(name, value string) {
 		}
 		return
 	}
-	m.headerSize += entrySize
 	m.headerBytesByName[name] += entrySize
 	m.Headers[name] = append(m.Headers[name], value)
 	if humanReadableHeaders[name] {
@@ -234,7 +233,7 @@ func (m *Message) addArchiveHeader(name, value string) {
 	line := name + ": " + value + "\r\n"
 	// Reserve at least half of the configured message budget for the body so
 	// excessive headers cannot suppress all content presented for analysis.
-	headerLimit := m.MaxBytes / 2
+	headerLimit := m.maxBytes / 2
 	if m.archiveHeaderBytes+int64(len(line)) > headerLimit {
 		m.archiveTruncated = true
 		return
@@ -243,10 +242,10 @@ func (m *Message) addArchiveHeader(name, value string) {
 	_, _ = m.archiveHeaders.WriteString(line)
 }
 
-// AddBody appends a body chunk up to the configured message limit while still
-// tracking the full byte count for truncation decisions.
+// AddBody appends as much of a body chunk as fits within the configured
+// message limit and marks the message as truncated when bytes are discarded.
 func (m *Message) AddBody(p []byte) {
-	remaining := m.MaxBytes - m.archiveHeaderBytes - m.bodySize
+	remaining := m.maxBytes - m.archiveHeaderBytes - m.bodySize
 	if remaining <= 0 {
 		m.Truncated = true
 		m.BodyTruncated = true
@@ -258,7 +257,7 @@ func (m *Message) AddBody(p []byte) {
 		m.BodyTruncated = true
 	}
 	m.bodySize += int64(len(p))
-	_, _ = m.Body.Write(p)
+	_, _ = m.body.Write(p)
 }
 func (m *Message) Header(name string) string {
 	return strings.Join(m.Headers[strings.ToLower(name)], ", ")
@@ -295,13 +294,13 @@ func (m *Message) decodedHeaderValues(name string) []string {
 // BodyBytes returns the retained message body without copying it. Callers must
 // treat the returned bytes as read-only and must not retain them after Message
 // processing completes.
-func (m *Message) BodyBytes() []byte { return m.Body.Bytes() }
+func (m *Message) BodyBytes() []byte { return m.body.Bytes() }
 
 // ArchiveBytes returns a syntactically valid bounded RFC 5322/MIME message
 // reconstructed from the retained headers and body for rejected-message
 // storage.
 func (m *Message) ArchiveBytes() []byte {
-	limit := m.MaxBytes
+	limit := m.maxBytes
 	if limit < 2 {
 		return nil
 	}

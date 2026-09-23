@@ -175,11 +175,6 @@ func parseSMTPIdentity(payload []byte) (string, bool) {
 	return string(payload[:len(payload)-1]), true
 }
 
-func parseAuthenticationMacro(payload []byte) (target byte, identity string, found, valid bool) {
-	target, values, valid := parseSessionMacros(payload)
-	return target, values.AuthenticationIdentity, values.AuthenticationFound, valid
-}
-
 func parseSessionMacros(payload []byte) (target byte, values sessionMacroValues, valid bool) {
 	if len(payload) == 0 {
 		return 0, values, false

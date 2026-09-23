@@ -37,7 +37,7 @@ func TestAttachmentScanWaitingForAttachmentSlotStopsWithContext(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	slots := make(chan struct{}, 1)
 	deps := &sessionDependencies{log: log, attachments: &attachmentPolicyService{
-		cfg: config.AttachmentsConfig{BlockExecutables: true}, log: log, slots: slots,
+		cfg: config.AttachmentsConfig{BlockExecutables: true}, slots: slots,
 		scanner: attachment.New(attachment.Options{
 			BlockedExtensions: []string{"exe"},
 		}),
@@ -56,7 +56,7 @@ func TestAttachmentScanWaitingForAttachmentSlotStopsWithContext(t *testing.T) {
 func TestAttachmentScanDoesNotWaitForAISlot(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	deps := &sessionDependencies{log: log, attachments: &attachmentPolicyService{
-		cfg: config.AttachmentsConfig{BlockExecutables: true}, log: log, slots: make(chan struct{}, 1),
+		cfg: config.AttachmentsConfig{BlockExecutables: true}, slots: make(chan struct{}, 1),
 		scanner: attachment.New(attachment.Options{
 			BlockedExtensions: []string{"exe"},
 		}),

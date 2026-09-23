@@ -17,6 +17,7 @@ import (
 )
 
 const commandDatabaseTimeout = 15 * time.Second
+const databaseOpenTimeout = 60 * time.Second
 const defaultMilterProgressInterval = 30 * time.Second
 const initialAcceptRetryDelay = 5 * time.Millisecond
 const maximumAcceptRetryDelay = time.Second
@@ -266,6 +267,9 @@ func (s *Server) recoverSessionPanic(ctx context.Context, conn net.Conn) {
 }
 
 func logRecoveredWorkerPanic(log *slog.Logger, ctx context.Context, worker string, panicValue any, attrs ...any) {
+	if log == nil {
+		return
+	}
 	fields := []any{"worker", worker, "panic", fmt.Sprint(panicValue), "stack", string(debug.Stack())}
 	fields = append(fields, attrs...)
 	log.ErrorContext(ctx, "MilterGuard worker recovered from panic", fields...)

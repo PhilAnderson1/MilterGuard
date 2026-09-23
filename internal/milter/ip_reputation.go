@@ -188,8 +188,12 @@ func (s *ipReputationStore) domainAllowed(dns connectionDNSResult) (string, stri
 	return "", "", false
 }
 
+func (s *ipReputationStore) usesDomainAllowlist() bool {
+	return s != nil && len(s.domainAllowlist) > 0
+}
+
 func normalizeDomain(value string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+	return netsafety.DNSHostname(value)
 }
 
 func domainMatches(hostname, domain string) bool {

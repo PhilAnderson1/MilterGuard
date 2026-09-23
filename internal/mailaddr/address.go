@@ -58,3 +58,13 @@ func Normalize(value string) string {
 	}
 	return local + "@" + domain
 }
+
+// Domain returns the canonical DNS domain from a valid mailbox or mailbox
+// header value without applying Normalize's persistent-record input limit.
+func Domain(value string) string {
+	address, ok := Mailbox(value)
+	if !ok || strings.Count(address, "@") != 1 {
+		return ""
+	}
+	return netsafety.DNSHostname(strings.SplitN(address, "@", 2)[1])
+}

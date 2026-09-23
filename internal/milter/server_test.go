@@ -431,11 +431,11 @@ func TestPostDecisionUpdatesDoNotInheritExpiredAnalysisContext(t *testing.T) {
 		Expiry: config.Duration(24 * time.Hour), MaxEntries: 10,
 	})
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	policy := &messagePolicyService{mode: "enforce", log: log, rejectionHistory: store}
+	policy := &messagePolicyService{log: log, rejectionHistory: store}
 	msg := message.New(1024)
 	msg.AddHeader("Subject", "context test")
 	ss := &session{
-		deps:               &sessionDependencies{protocol: protocolOptions{mode: "enforce"}, policy: policy, log: log},
+		deps:               &sessionDependencies{mode: "enforce", policy: policy, log: log},
 		message:            msg,
 		visibleSender:      "sender@example.net",
 		envelopeSender:     "bounce@example.net",
@@ -483,16 +483,11 @@ func testServerWithConfig(t *testing.T, cfg config.Config, analyzer Analyzer) (*
 }
 
 func setTestMode(server *Server, mode string) {
-	server.sessions.protocol.mode = mode
-	server.sessions.analysis.mode = mode
-	server.sessions.policy.mode = mode
-	server.sessions.attachments.mode = mode
+	server.sessions.mode = mode
 }
 
 func setTestFiltering(server *Server, update func(*config.FilteringConfig)) {
-	update(&server.sessions.analysis.filtering)
-	update(&server.sessions.policy.filtering)
-	update(&server.sessions.attachments.filtering)
+	update(&server.sessions.filtering)
 }
 
 func setTestCorrespondents(server *Server, cfg config.CorrespondentsConfig, repository stores.CorrespondentRepository) {
@@ -668,7 +663,7 @@ func TestRejectedMessageArchiveUsesRejectionRecordIDs(t *testing.T) {
 	msg.AddHeader("From", "Sender <sender@example.net>")
 	msg.AddHeader("Subject", "=?UTF-8?B?44Oc44O844OK44K544KS4oCN5Y+X44GR5Y+W44Gj44Gm44GP4oCN44Gg44GV44GE?=")
 	msg.AddHeader("Message-ID", "<archive-id-test@example.net>")
-	_, _ = msg.Body.WriteString("rejected body")
+	msg.AddBody([]byte("rejected body"))
 
 	server.sessions.policy.recordRejection(context.Background(), msg, "sender@example.net", "bounce@example.net", []string{"one@example.com", "two@example.com"}, []string{"unwanted"}, "ai")
 
@@ -1096,12 +1091,12 @@ func TestAIInputDiagnosticLoggingIsExplicitAndOmitsImageData(t *testing.T) {
 		IPReputation: config.IPReputationConfig{MaxEntries: 1},
 	}, fixedAnalyzer{}, logger)
 
-	server.sessions.analysis.logAIInput(msg, input)
+	server.sessions.analysis.logAIInput(msg, input, server.sessions.logging.IncludeAIInput)
 	if output.Len() != 0 {
 		t.Fatalf("AI input logged while disabled: %s", output.String())
 	}
-	server.sessions.analysis.logging.IncludeAIInput = true
-	server.sessions.analysis.logAIInput(msg, input)
+	server.sessions.logging.IncludeAIInput = true
+	server.sessions.analysis.logAIInput(msg, input, server.sessions.logging.IncludeAIInput)
 	logged := output.String()
 	for _, want := range []string{
 		`"msg":"AI analysis input"`,
@@ -1365,18 +1360,18 @@ func TestParseAndCleanConnectAndHELOIdentities(t *testing.T) {
 	}
 }
 
-func TestParseAuthenticationMacro(t *testing.T) {
-	target, identity, found, valid := parseAuthenticationMacro(macroFrame(commandMail,
+func TestParseAuthenticationSessionMacro(t *testing.T) {
+	target, values, valid := parseSessionMacros(macroFrame(commandMail,
 		"{auth_type}", "PLAIN", "{auth_authen}", "philip@example.com")[1:])
-	if !valid || !found || target != commandMail || identity != "philip@example.com" {
-		t.Fatalf("parsed macro = target %q identity %q found=%v valid=%v", target, identity, found, valid)
+	if !valid || !values.AuthenticationFound || target != commandMail || values.AuthenticationIdentity != "philip@example.com" {
+		t.Fatalf("parsed macro = target %q values=%#v valid=%v", target, values, valid)
 	}
 	for _, payload := range [][]byte{
 		{},
 		{commandMail, '{', 'a', 'u', 't', 'h', '_', 'a', 'u', 't', 'h', 'e', 'n', '}', 0},
 		macroFrame(commandMail, "{auth_authen}", "first", "{auth_authen}", "second")[1:],
 	} {
-		if _, _, _, valid := parseAuthenticationMacro(payload); valid {
+		if _, _, valid := parseSessionMacros(payload); valid {
 			t.Errorf("accepted malformed macro payload %q", payload)
 		}
 	}

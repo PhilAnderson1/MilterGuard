@@ -126,7 +126,11 @@ func lexicalHiddenSubtreeEnd(source, lower string, offset int, name string) (int
 		}
 		rawTag := source[opening+1 : closing]
 		tag, isClosing := lexicalTagName(rawTag)
-		if tag == name {
+		if tag == "plaintext" && !isClosing && lexicalExactOpeningTag(rawTag, tag) {
+			// PLAINTEXT changes the tokenizer state through EOF. Apparent closing
+			// tags after it remain children of the hidden element as text.
+			return 0, false
+		} else if tag == name {
 			if isClosing && lexicalExactClosingTag(rawTag, name) {
 				depth--
 				if depth == 0 {

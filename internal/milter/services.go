@@ -21,15 +21,11 @@ type protocolOptions struct {
 	timeout          time.Duration
 	maxMessageSize   int64
 	progressInterval time.Duration
-	mode             string
 }
 
 type analysisService struct {
 	analyzer            Analyzer
 	ai                  config.AIConfig
-	filtering           config.FilteringConfig
-	logging             config.LoggingConfig
-	mode                string
 	log                 *slog.Logger
 	slots               chan struct{}
 	domainLookupTimeout time.Duration
@@ -37,9 +33,7 @@ type analysisService struct {
 }
 
 type messagePolicyService struct {
-	filtering          config.FilteringConfig
 	correspondentCfg   config.CorrespondentsConfig
-	mode               string
 	log                *slog.Logger
 	ipReputation       *ipReputationStore
 	correspondents     stores.CorrespondentRepository
@@ -61,13 +55,10 @@ type messageContext struct {
 }
 
 type attachmentPolicyService struct {
-	cfg       config.AttachmentsConfig
-	filtering config.FilteringConfig
-	mode      string
-	log       *slog.Logger
-	scanner   *attachment.Scanner
-	slots     chan struct{}
-	policy    *messagePolicyService
+	cfg     config.AttachmentsConfig
+	scanner *attachment.Scanner
+	slots   chan struct{}
+	policy  *messagePolicyService
 }
 
 type emailCommandService struct {
@@ -88,6 +79,9 @@ type connectionDNSService struct {
 }
 
 type sessionDependencies struct {
+	mode        string
+	filtering   config.FilteringConfig
+	logging     config.LoggingConfig
 	protocol    protocolOptions
 	analysis    *analysisService
 	policy      *messagePolicyService

@@ -3,6 +3,7 @@ package admincmd
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
@@ -13,10 +14,13 @@ const (
 	responseTruncatedNotice = "\nCommand reply was truncated at 1 MiB.\n"
 )
 
-func Help(admin bool, defaultRecipient ...string) string {
-	terminalAdmin := admin && len(defaultRecipient) > 0 && defaultRecipient[0] == "*"
+func formatUTC(value time.Time) string {
+	return value.UTC().Format(time.DateTime) + " UTC"
+}
+
+func Help(admin, commandMode bool) string {
 	text := "Send one or more commands, one per line:\n\nWHITELIST ADD sender@example.com\nWHITELIST DELETE sender@example.com\nWHITELIST LIST [day|week|month|year|all]\nREJECTIONS [day|week|month|year|all]\nREJECTION id\nHELP\n\nListing commands default to the previous week. The local address is taken from your authenticated envelope sender.\n"
-	if terminalAdmin {
+	if admin && commandMode {
 		return "Enter one command at a time:\n\nWHITELIST ADD sender@example.com recipient@example.com\nWHITELIST DELETE sender@example.com [recipient@example.com|*]\nWHITELIST LIST [recipient@example.com|*] [day|week|month|year|all]\nREJECTIONS [recipient@example.com|*] [day|week|month|year|all]\nREJECTION id\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\nHELP\nEXIT\n\nListing commands default to the previous week and all local recipients. WHITELIST ADD requires an explicit local recipient.\n"
 	}
 	if admin {
@@ -74,9 +78,9 @@ func formatActiveIPBlocks(entries []stores.IPBlock, includeHostname, truncated b
 			if hostname == "" {
 				hostname = "not found"
 			}
-			record = fmt.Sprintf("IP: %s (%s) Type: %s Expires: %s\n", entry.Address, hostname, entry.Level, entry.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+			record = fmt.Sprintf("IP: %s (%s) Type: %s Expires: %s\n", entry.Address, hostname, entry.Level, formatUTC(entry.ExpiresAt))
 		} else {
-			record = fmt.Sprintf("IP: %s Type: %s Expires: %s\n", entry.Address, entry.Level, entry.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+			record = fmt.Sprintf("IP: %s Type: %s Expires: %s\n", entry.Address, entry.Level, formatUTC(entry.ExpiresAt))
 		}
 		if !AppendBoundedResponse(&body, record) {
 			return body.String()
@@ -98,13 +102,13 @@ func formatRejectionHistory(entries []stores.Rejection, truncated bool) string {
 	for _, entry := range entries {
 		subject := entry.Subject
 		if subject == "" {
-			subject = "Unavailable (record predates subject logging)"
+			subject = "(no subject)"
 		}
 		reason := entry.Reason
 		if reason == "" {
-			reason = "Unavailable (record predates reason logging)"
+			reason = "Unavailable"
 		}
-		record := fmt.Sprintf("From: %s\nTo: %s\nSubject: %s\nDate: %s\nRejection ID: %d\nReason: %s\n\n", entry.Sender, strings.Join(entry.Recipients, ", "), subject, entry.RejectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), entry.ID, reason)
+		record := fmt.Sprintf("From: %s\nTo: %s\nSubject: %s\nDate: %s\nRejection ID: %d\nReason: %s\n\n", entry.Sender, strings.Join(entry.Recipients, ", "), subject, formatUTC(entry.RejectedAt), entry.ID, reason)
 		if !AppendBoundedResponse(&body, record) {
 			return body.String()
 		}
@@ -118,13 +122,13 @@ func formatRejectionHistory(entries []stores.Rejection, truncated bool) string {
 func formatRejectionDetail(entry stores.Rejection, body string) string {
 	subject := entry.Subject
 	if subject == "" {
-		subject = "Unavailable"
+		subject = "(no subject)"
 	}
 	reason := entry.Reason
 	if reason == "" {
 		reason = "Unavailable"
 	}
-	return fmt.Sprintf("Rejection ID: %d\nFrom: %s\nTo: %s\nSubject: %s\nDate: %s\nReason for rejection: %s\n\nProcessed email body text:\n%s\n", entry.ID, entry.Sender, strings.Join(entry.Recipients, ", "), subject, entry.RejectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), reason, body)
+	return fmt.Sprintf("Rejection ID: %d\nFrom: %s\nTo: %s\nSubject: %s\nDate: %s\nReason for rejection: %s\n\nProcessed email body text:\n%s\n", entry.ID, entry.Sender, strings.Join(entry.Recipients, ", "), subject, formatUTC(entry.RejectedAt), reason, body)
 }
 
 func limitRows[T any](entries []T) ([]T, bool) {

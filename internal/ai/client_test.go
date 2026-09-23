@@ -136,6 +136,38 @@ func TestDisableThinkingUsesEndpointSpecificRequestField(t *testing.T) {
 	}
 }
 
+func TestOpenRouterAttributionHeadersAreEndpointSpecific(t *testing.T) {
+	for _, test := range []struct {
+		endpointType string
+		wantHeaders  bool
+	}{
+		{endpointType: "openrouter", wantHeaders: true},
+		{endpointType: "openai"},
+		{endpointType: "llamacpp"},
+	} {
+		t.Run(test.endpointType, func(t *testing.T) {
+			transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if got := r.Header.Get("HTTP-Referer"); (got != "") != test.wantHeaders {
+					t.Errorf("HTTP-Referer = %q, want present=%t", got, test.wantHeaders)
+				}
+				if got := r.Header.Get("X-Title"); (got != "") != test.wantHeaders {
+					t.Errorf("X-Title = %q, want present=%t", got, test.wantHeaders)
+				}
+				return decisionResponse(`{"classification":"legitimate","score":0.5,"reasons":[]}`), nil
+			})
+			client := NewClient(config.AIConfig{
+				Endpoint: "http://endpoint.invalid/v1/chat/completions", EndpointType: test.endpointType,
+				APIKey: "test-key", Model: "test-model", Timeout: config.Duration(time.Second),
+				SiteURL: "https://example.test/milterguard", AppName: "MilterGuard Test",
+			}, "classify")
+			client.http.Transport = transport
+			if _, err := client.Analyze(context.Background(), Input{Text: "test message"}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestNoChoicesIncludesResponseBody(t *testing.T) {
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{

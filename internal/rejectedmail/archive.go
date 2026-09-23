@@ -42,8 +42,8 @@ type storedFile struct {
 	modifiedAt time.Time
 }
 
-// New describes an archive rooted at one configured directory. Directories are
-// created lazily when the first rejected message is saved.
+// New describes an archive rooted at one configured directory. The archive
+// root is created when cleanup first runs or when the first message is saved.
 func New(opts Options, log *slog.Logger) *Archive {
 	return &Archive{opts: opts, log: log, now: time.Now}
 }

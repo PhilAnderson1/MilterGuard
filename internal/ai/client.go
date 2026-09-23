@@ -166,11 +166,13 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, 
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
-	if c.cfg.SiteURL != "" {
-		req.Header.Set("HTTP-Referer", c.cfg.SiteURL)
-	}
-	if c.cfg.AppName != "" {
-		req.Header.Set("X-Title", c.cfg.AppName)
+	if c.cfg.EndpointType == "openrouter" {
+		if c.cfg.SiteURL != "" {
+			req.Header.Set("HTTP-Referer", c.cfg.SiteURL)
+		}
+		if c.cfg.AppName != "" {
+			req.Header.Set("X-Title", c.cfg.AppName)
+		}
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

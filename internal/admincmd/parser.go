@@ -13,12 +13,21 @@ import (
 
 type period string
 
+type recipientAuthorization uint8
+
 const (
 	periodDay   period = "day"
 	periodWeek  period = "week"
 	periodMonth period = "month"
 	periodYear  period = "year"
 	periodAll   period = "all"
+)
+
+const (
+	recipientAuthorized recipientAuthorization = iota
+	recipientInvalid
+	recipientWildcardDenied
+	recipientOtherDenied
 )
 
 type Command struct {
@@ -45,6 +54,23 @@ func normalizeRecipient(value string) string {
 		return "*"
 	}
 	return mailaddr.Normalize(value)
+}
+
+func authorizeRecipient(value, authenticatedSender string, admin bool) (string, recipientAuthorization) {
+	if strings.TrimSpace(value) == "*" {
+		if !admin {
+			return "", recipientWildcardDenied
+		}
+		return "*", recipientAuthorized
+	}
+	recipient := mailaddr.Normalize(value)
+	if recipient == "" {
+		return "", recipientInvalid
+	}
+	if !admin && recipient != authenticatedSender {
+		return "", recipientOtherDenied
+	}
+	return recipient, recipientAuthorized
 }
 
 func (p *Processor) Parse(line string, actor Actor) (Command, error) {
@@ -130,19 +156,15 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 			}
 		}
 		if end == 2 {
-			recipient = fields[1]
-			if recipient == "*" {
-				if !admin {
-					return Command{}, fmt.Errorf("wildcard rejection history is restricted to administrators")
-				}
-			} else {
-				recipient = mailaddr.Normalize(recipient)
-				if recipient == "" {
-					return Command{}, fmt.Errorf("rejection-history recipient must be a valid email address")
-				}
-				if !admin && recipient != authenticatedSender {
-					return Command{}, fmt.Errorf("users may view only their own rejection history")
-				}
+			var authorization recipientAuthorization
+			recipient, authorization = authorizeRecipient(fields[1], authenticatedSender, admin)
+			switch authorization {
+			case recipientInvalid:
+				return Command{}, fmt.Errorf("rejection-history recipient must be a valid email address")
+			case recipientWildcardDenied:
+				return Command{}, fmt.Errorf("wildcard rejection history is restricted to administrators")
+			case recipientOtherDenied:
+				return Command{}, fmt.Errorf("users may view only their own rejection history")
 			}
 		} else if end > 2 {
 			return Command{}, fmt.Errorf("REJECTIONS accepts at most one recipient and one period")
@@ -165,19 +187,15 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 			}
 		}
 		if end == 3 {
-			recipient = fields[2]
-			if recipient == "*" {
-				if !admin {
-					return Command{}, fmt.Errorf("wildcard allowlist listing is restricted to administrators")
-				}
-			} else {
-				recipient = mailaddr.Normalize(recipient)
-				if recipient == "" {
-					return Command{}, fmt.Errorf("allowlist recipient must be a valid email address")
-				}
-				if !admin && recipient != authenticatedSender {
-					return Command{}, fmt.Errorf("users may view only their own allowlist")
-				}
+			var authorization recipientAuthorization
+			recipient, authorization = authorizeRecipient(fields[2], authenticatedSender, admin)
+			switch authorization {
+			case recipientInvalid:
+				return Command{}, fmt.Errorf("allowlist recipient must be a valid email address")
+			case recipientWildcardDenied:
+				return Command{}, fmt.Errorf("wildcard allowlist listing is restricted to administrators")
+			case recipientOtherDenied:
+				return Command{}, fmt.Errorf("users may view only their own allowlist")
 			}
 		} else if end > 3 {
 			return Command{}, fmt.Errorf("WHITELIST LIST accepts at most one recipient and one period")
@@ -207,21 +225,18 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 	if len(fields) == 4 {
 		recipient = fields[3]
 	}
-	if recipient == "*" {
-		if verb == "ADD" {
-			return Command{}, fmt.Errorf("WHITELIST ADD requires an explicit local recipient")
-		}
-		if !admin {
-			return Command{}, fmt.Errorf("wildcard deletion is restricted to administrators")
-		}
-	} else {
-		recipient = mailaddr.Normalize(recipient)
-		if recipient == "" {
-			return Command{}, fmt.Errorf("recipient must be a valid email address")
-		}
-		if !admin && recipient != authenticatedSender {
-			return Command{}, fmt.Errorf("users may modify only their authenticated envelope sender address")
-		}
+	if recipient == "*" && verb == "ADD" {
+		return Command{}, fmt.Errorf("WHITELIST ADD requires an explicit local recipient")
+	}
+	var authorization recipientAuthorization
+	recipient, authorization = authorizeRecipient(recipient, authenticatedSender, admin)
+	switch authorization {
+	case recipientInvalid:
+		return Command{}, fmt.Errorf("recipient must be a valid email address")
+	case recipientWildcardDenied:
+		return Command{}, fmt.Errorf("wildcard deletion is restricted to administrators")
+	case recipientOtherDenied:
+		return Command{}, fmt.Errorf("users may modify only their authenticated envelope sender address")
 	}
 	canonical := fmt.Sprintf("WHITELIST %s %s %s", verb, sender, recipient)
 	return Command{kind: "whitelist", verb: verb, sender: sender, recipient: recipient, canonical: canonical}, nil

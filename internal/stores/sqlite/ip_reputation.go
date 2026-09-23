@@ -19,15 +19,12 @@ const (
 )
 
 // rejectedIPRecord is the internal SQL representation used by transactional
-// reputation operations and test diagnostics.
+// reputation operations.
 type rejectedIPRecord struct {
 	ID              uint64
-	IP              string
-	Strikes         []time.Time
 	BlockLevel      string
 	BlockedUntil    time.Time
 	LegitimateCount int
-	LastActivityAt  time.Time
 }
 
 type ipReputationRepository struct {
@@ -61,7 +58,7 @@ func (r *ipReputationRepository) RecordRejection(ctx context.Context, addr netip
 	}
 	addr = netsafety.CanonicalIP(addr)
 	now := r.now().UTC()
-	record := rejectedIPRecord{IP: addr.String(), LastActivityAt: now}
+	var record rejectedIPRecord
 	strikeCount := 0
 	err := r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		// An expired repeat block starts fresh. Lookup no longer removes expired
@@ -116,8 +113,8 @@ func (r *ipReputationRepository) RecordRejection(ctx context.Context, addr netip
 		if err != nil {
 			return err
 		}
-		record.ID, record.IP = uint64(id), addr.String()
-		record.BlockLevel, record.LegitimateCount, record.LastActivityAt = level.String, 0, now
+		record.ID = uint64(id)
+		record.BlockLevel, record.LegitimateCount = level.String, 0
 		if blockedUntil.Valid {
 			record.BlockedUntil = timeFromMillis(blockedUntil.Int64)
 		}
@@ -176,7 +173,6 @@ func (r *ipReputationRepository) RecordLegitimate(ctx context.Context, addr neti
 			return err
 		}
 		attempt.record.LegitimateCount++
-		attempt.record.LastActivityAt = now
 		if attempt.record.LegitimateCount >= r.legitimatePerStrike {
 			result, err := tx.ExecContext(ctx, `DELETE FROM ip_strikes WHERE id=(SELECT id FROM ip_strikes WHERE ip_reputation_id=? ORDER BY struck_at_ms,id LIMIT 1)`, attempt.record.ID)
 			if err != nil {
@@ -299,17 +295,17 @@ func (r *ipReputationRepository) refreshRepeatBlock(ctx context.Context, ip stri
 
 func (r *ipReputationRepository) getTx(ctx context.Context, tx *sql.Tx, ip string) (rejectedIPRecord, bool, error) {
 	var record rejectedIPRecord
-	var id, activity int64
+	var id int64
 	var level sql.NullString
 	var blocked sql.NullInt64
-	err := tx.QueryRowContext(ctx, `SELECT id,ip,block_level,blocked_until_ms,legitimate_count,last_activity_at_ms FROM ip_reputation WHERE ip=?`, ip).Scan(&id, &record.IP, &level, &blocked, &record.LegitimateCount, &activity)
+	err := tx.QueryRowContext(ctx, `SELECT id,block_level,blocked_until_ms,legitimate_count FROM ip_reputation WHERE ip=?`, ip).Scan(&id, &level, &blocked, &record.LegitimateCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return record, false, nil
 	}
 	if err != nil {
 		return record, false, err
 	}
-	record.ID, record.BlockLevel, record.LastActivityAt = uint64(id), level.String, timeFromMillis(activity)
+	record.ID, record.BlockLevel = uint64(id), level.String
 	if blocked.Valid {
 		record.BlockedUntil = timeFromMillis(blocked.Int64)
 	}
@@ -325,8 +321,8 @@ func (r *ipReputationRepository) pruneStrikesTx(ctx context.Context, tx *sql.Tx,
 	return err
 }
 func (r *ipReputationRepository) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
-	var excess int
-	if err := tx.QueryRowContext(ctx, `SELECT max(count(*)-?,0) FROM ip_reputation`, r.maxSize).Scan(&excess); err != nil || excess == 0 {
+	excess, err := capacityExcessTx(ctx, tx, "ip_reputation", r.maxSize)
+	if err != nil || excess == 0 {
 		return 0, err
 	}
 	var totalRemoved int64
@@ -461,8 +457,8 @@ func (r *ipReputationRepository) ListActiveBlocks(ctx context.Context, list stor
 	return stores.IPBlockPage{Entries: out, Truncated: truncated}, nil
 }
 
-// Cleanup removes inactive strike-less rows, prunes old strikes, clears expired
-// blocks where appropriate, and enforces repository capacity.
+// Cleanup removes rows with neither a block nor retained strikes, prunes old
+// strikes, clears expired blocks where appropriate, and enforces capacity.
 func (r *ipReputationRepository) Cleanup(ctx context.Context) (int64, error) {
 	if !r.enabled() {
 		return 0, nil

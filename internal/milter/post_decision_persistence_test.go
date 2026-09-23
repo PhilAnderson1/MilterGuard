@@ -81,8 +81,8 @@ func TestAttachmentRejectionPersistsAfterMessageContextCancellation(t *testing.T
 	defer serverConn.Close()
 	defer clientConn.Close()
 	ss := newSession(&sessionDependencies{
-		log: log, analysis: &analysisService{}, protocol: protocolOptions{maxMessageSize: 1024},
-		attachments: &attachmentPolicyService{mode: "enforce", cfg: config.AttachmentsConfig{RejectMessage: "blocked"}, policy: policy},
+		mode: "enforce", log: log, analysis: &analysisService{}, protocol: protocolOptions{maxMessageSize: 1024},
+		attachments: &attachmentPolicyService{cfg: config.AttachmentsConfig{RejectMessage: "blocked"}, policy: policy},
 	}, serverConn)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -102,15 +102,15 @@ func TestSenderDomainRejectionPersistsAfterMessageContextCancellation(t *testing
 	rejections := &contextObservingRejectionRepository{contextErrors: make(chan error, 1)}
 	ipRecords := &contextObservingIPRepository{contextErrors: make(chan error, 1)}
 	policy := &messagePolicyService{
-		mode: "enforce", filtering: config.FilteringConfig{RejectMessage: "blocked"}, log: log,
-		rejectionHistory: rejections,
-		ipReputation:     &ipReputationStore{repository: ipRecords, enabledFeature: true, log: log},
+		log: log, rejectionHistory: rejections,
+		ipReputation: &ipReputationStore{repository: ipRecords, enabledFeature: true, log: log},
 	}
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
 	defer clientConn.Close()
 	ss := newSession(&sessionDependencies{
-		log: log, analysis: &analysisService{}, protocol: protocolOptions{maxMessageSize: 1024}, policy: policy,
+		mode: "enforce", filtering: config.FilteringConfig{RejectMessage: "blocked"}, log: log,
+		analysis: &analysisService{}, protocol: protocolOptions{maxMessageSize: 1024}, policy: policy,
 	}, serverConn)
 	ss.peerIP = netip.MustParseAddr("192.0.2.10")
 	ctx, cancel := context.WithCancel(context.Background())

@@ -101,7 +101,10 @@ func TestFormattingBoundsAndAudience(t *testing.T) {
 	if got := formatAllowlist(many, false, false); !strings.Contains(got, listTruncatedNotice) {
 		t.Fatal("row truncation was not reported")
 	}
-	if !strings.Contains(Help(true), "REJECTIONS * year") || strings.Contains(Help(false), "REJECTIONS * year") {
+	if !strings.Contains(Help(true, false), "REJECTIONS * year") || strings.Contains(Help(false, false), "REJECTIONS * year") {
 		t.Fatal("administrator help audience is incorrect")
+	}
+	if !strings.Contains(Help(true, true), "EXIT") {
+		t.Fatal("command-mode help does not include command-line commands")
 	}
 }

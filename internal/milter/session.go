@@ -13,7 +13,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
@@ -248,7 +247,7 @@ func (ss *session) negotiate(payload []byte) bool {
 	// Request result-header capabilities even when result generation is disabled:
 	// sender-supplied X-MilterGuard result headers must still be removable.
 	requestedActions := offeredActions & resultHeaderActions
-	wantsResultHeaders := ss.deps.policy.filtering.AddEmailHeaders || ss.deps.protocol.mode == "tag"
+	wantsResultHeaders := ss.deps.filtering.AddEmailHeaders || ss.deps.mode == "tag"
 	if wantsResultHeaders && offeredActions&actionAddHeaders == 0 {
 		ss.deps.log.Warn("result headers disabled for Milter connection because MTA did not offer add-header support",
 			"offered_actions", offeredActions)
@@ -315,10 +314,10 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if handled, keepConnection := ss.applyAuthenticatedOnlySenderDomain(ctx); handled {
 		return keepConnection
 	}
-	if ss.authentication.Authenticated && !ss.deps.policy.filtering.ScanAuthenticated {
+	if ss.authentication.Authenticated && !ss.deps.filtering.ScanAuthenticated {
 		return ss.finishBypassedMessage(ctx, "authenticated_connection", true, false)
 	}
-	if ss.deps.attachments != nil && ss.deps.attachments.scanner != nil {
+	if ss.deps.attachments.enabled() {
 		if err := writeFrame(ss.conn, []byte{responseProgress}); err != nil {
 			ss.deps.log.WarnContext(ctx, "cannot send Milter progress response before attachment inspection", "error", err)
 			return false
@@ -327,7 +326,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if handled, keepConnection := ss.applyAttachments(ctx); handled {
 		return keepConnection
 	}
-	inbound := ss.prepareInboundEvidence(ctx)
+	inbound := ss.deps.policy.prepareInboundEvidence(ctx, ss.messageContext(ss.recipientSetComplete()), ss.trustedAuthservIDs(), ss.deps.filtering)
 	if inbound.allowedSenderDomain != "" {
 		return ss.finishBypassedMessage(ctx, "sender_domain_allowlist", false, inbound.knownCorrespondent && inbound.trustedDKIM,
 			"sender_domain", inbound.allowedSenderDomain,
@@ -339,7 +338,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	}
 	result, progressErr := ss.evaluateWithProgress(ctx, inbound)
 	if progressErr != nil {
-		ss.deps.log.WarnContext(ctx, "cannot send Milter progress response", "error", progressErr)
+		ss.deps.log.WarnContext(ctx, "message analysis with progress failed", "error", progressErr)
 		return false
 	}
 	var err error
@@ -347,9 +346,9 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		err = ss.writeAcceptedResultHeaders(&result)
 	}
 	if err == nil {
-		err = writeFrame(ss.conn, responseForAction(result.selected, ss.deps.analysis.filtering.RejectMessage))
+		err = writeFrame(ss.conn, responseForAction(result.selected, ss.deps.filtering.RejectMessage))
 	}
-	ss.deps.analysis.logOutcome(ctx, ss.message, result, err == nil, err)
+	ss.deps.analysis.logOutcome(ctx, ss.message, result, ss.deps.mode, ss.deps.logging.IncludeSubject, err == nil, err)
 	if err != nil {
 		return false
 	}
@@ -369,7 +368,7 @@ func (ss *session) evaluateWithProgress(ctx context.Context, inbound inboundEvid
 		defer func() {
 			if panicValue := recover(); panicValue != nil {
 				logRecoveredWorkerPanic(ss.deps.log, workerCtx, "message analysis", panicValue)
-				results <- ss.deps.analysis.analysisFailure(fmt.Errorf("message analysis panic: %v", panicValue), started)
+				results <- ss.deps.analysis.analysisFailure(fmt.Errorf("message analysis panic: %v", panicValue), started, ss.deps.mode, ss.deps.filtering.AIErrorAction)
 			}
 		}()
 		results <- ss.evaluateMessage(workerCtx, inbound)
@@ -388,12 +387,12 @@ func (ss *session) evaluateWithProgress(ctx context.Context, inbound inboundEvid
 		case <-ctx.Done():
 			cancelWorker()
 			<-results
-			return evaluationResult{}, ctx.Err()
+			return evaluationResult{}, fmt.Errorf("message analysis interrupted: %w", ctx.Err())
 		case <-ticker.C:
 			if err := writeFrame(ss.conn, []byte{responseProgress}); err != nil {
 				cancelWorker()
 				<-results
-				return evaluationResult{}, err
+				return evaluationResult{}, fmt.Errorf("send Milter progress response: %w", err)
 			}
 		}
 	}
@@ -403,7 +402,7 @@ func (ss *session) evaluateWithProgress(ctx context.Context, inbound inboundEvid
 // handing the completed message to the analysis service.
 func (ss *session) evaluateMessage(ctx context.Context, inbound inboundEvidence) evaluationResult {
 	if inbound.authenticatedDomain != "" {
-		info, err := ss.deps.policy.domainRegistration.evidence(ctx, inbound.authenticatedDomain)
+		info, err := ss.deps.policy.domainRegistrationEvidence(ctx, inbound.authenticatedDomain)
 		if err != nil {
 			ss.deps.log.DebugContext(ctx, "domain registration evidence unavailable", "domain", registrableDomain(inbound.authenticatedDomain), "error", err)
 		} else {
@@ -412,7 +411,8 @@ func (ss *session) evaluateMessage(ctx context.Context, inbound inboundEvidence)
 	}
 	ss.message.TrustedAuthservIDs = ss.trustedAuthservIDs()
 	ss.message.Connection = ss.connectionInformation(ctx)
-	return ss.deps.analysis.evaluate(ctx, ss.message)
+	return ss.deps.analysis.evaluate(ctx, ss.message, ss.deps.mode, ss.deps.filtering.RejectScore,
+		ss.deps.filtering.AIErrorAction, ss.deps.logging.IncludeAIInput)
 }
 
 func (ss *session) finishInternalMessage(ctx context.Context) bool {
@@ -450,61 +450,7 @@ func (ss *session) knownCorrespondentLogAttrs() []any {
 	return append(attrs, "local_addresses", localAddresses)
 }
 
-type inboundEvidence struct {
-	recipientsComplete  bool
-	trustedDKIM         bool
-	knownCorrespondent  bool
-	bypassAI            bool
-	allowedSenderDomain string
-	authenticatedDomain string
-}
-
 // Authentication, correspondent, and connection evidence
-
-// prepareInboundEvidence derives trusted authentication and correspondent
-// facts and decides whether deterministic sender trust can bypass AI analysis.
-func (ss *session) prepareInboundEvidence(ctx context.Context) inboundEvidence {
-	evidence := inboundEvidence{recipientsComplete: ss.recipientSetComplete()}
-	if ss.authentication.Authenticated {
-		return evidence
-	}
-	if ss.message.FromHeaderCount() > 1 {
-		// No sender-based bypass or learning can rely on an ambiguous visible
-		// identity, even if a parser happens to accept one of the fields.
-		ss.message.Correspondent = message.CorrespondentInfo{Enabled: ss.deps.policy.correspondentCfg.UseAllowlist, Scope: ss.deps.policy.correspondentCfg.Scope}
-		return evidence
-	}
-	authentication := trustedSenderAuthentication(ss.message, ss.trustedAuthservIDs(), ss.visibleSenderDomain)
-	evidence.trustedDKIM = authentication.DKIMAligned
-	if authentication.anyAligned() {
-		evidence.authenticatedDomain = ss.visibleSenderDomain
-	}
-	if domain := allowedSenderDomain(ss.visibleSenderDomain, ss.deps.policy.filtering.SenderDomainAllowlist); domain != "" &&
-		(!ss.deps.policy.filtering.SenderDomainAllowlistRequireDKIM || authentication.DKIMAligned) {
-		evidence.allowedSenderDomain = domain
-	}
-	if !ss.deps.policy.correspondentCfg.UseAllowlist {
-		return evidence
-	}
-	match, err := ss.deps.policy.correspondents.Match(ctx, ss.visibleSender, ss.envelopeRecipients)
-	if err != nil && ss.deps.log != nil {
-		ss.deps.log.ErrorContext(ctx, "correspondent database operation failed", "operation", "match correspondent", "error", err)
-	}
-	known := match.Known
-	if ss.deps.policy.correspondentCfg.Scope == "per_sender" && ss.deps.policy.correspondentCfg.RecipientMatch == "all" {
-		known = evidence.recipientsComplete && match.AllRecipientsMatched
-	}
-	evidence.knownCorrespondent = known
-	ss.message.Correspondent = message.CorrespondentInfo{
-		Enabled:               true,
-		Known:                 known,
-		Scope:                 ss.deps.policy.correspondentCfg.Scope,
-		AuthenticationAligned: known && authentication.anyAligned(),
-	}
-	bypassAuthentication := !ss.deps.policy.correspondentCfg.RequireDKIMForBypass || authentication.DKIMAligned
-	evidence.bypassAI = ss.deps.policy.correspondentCfg.BypassAI && evidence.recipientsComplete && known && bypassAuthentication
-	return evidence
-}
 
 func (ss *session) recipientSetComplete() bool {
 	if ss.envelopeRecipientsTruncated || len(ss.envelopeRecipients) == 0 {
@@ -521,7 +467,10 @@ func (ss *session) recipientSetComplete() bool {
 // Post-decision state updates
 
 func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluationResult, inbound inboundEvidence) {
-	ss.deps.policy.applyPostDecisionUpdates(ctx, ss.messageContext(inbound.recipientsComplete), result, inbound)
+	if ss.deps.mode != "enforce" {
+		return
+	}
+	ss.deps.policy.applyPostDecisionUpdates(ctx, ss.messageContext(inbound.recipientsComplete), result, inbound, ss.deps.filtering.RejectScore)
 }
 
 func (ss *session) captureSessionMacros(payload []byte) {
@@ -546,37 +495,16 @@ func (ss *session) captureSessionMacros(payload []byte) {
 }
 
 func (ss *session) trustedAuthservIDs() []string {
-	configured := ss.deps.policy.correspondentCfg.TrustedAuthservIDs
-	trusted := make([]string, 0, len(configured))
-	for _, authservID := range configured {
-		if authservID == config.MTAHostnameAuthservID {
-			if ss.mtaHostname != "" {
-				trusted = append(trusted, ss.mtaHostname)
-			}
-			continue
-		}
-		trusted = append(trusted, authservID)
-	}
-	return trusted
+	return ss.deps.policy.trustedAuthservIDs(ss.mtaHostname)
 }
 
 func validMTAHostname(value string) string {
-	value = normalizeDomain(value)
-	if value == "" || len(value) > 253 {
+	value = netsafety.DNSHostname(value)
+	if value == "" {
 		return ""
 	}
 	if _, err := netip.ParseAddr(value); err == nil {
 		return ""
-	}
-	for _, label := range strings.Split(value, ".") {
-		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return ""
-		}
-		for _, char := range label {
-			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
-				return ""
-			}
-		}
 	}
 	return value
 }
@@ -584,22 +512,23 @@ func validMTAHostname(value string) string {
 func (ss *session) finishBypassedMessage(ctx context.Context, source string, learn, touchInbound bool, extraAttrs ...any) bool {
 	err := ss.writeAcceptedBypassHeaders()
 	if err == nil {
-		err = writeFrame(ss.conn, responseForAction(actionAccept, ss.deps.analysis.filtering.RejectMessage))
+		err = writeFrame(ss.conn, responseForAction(actionAccept, ss.deps.filtering.RejectMessage))
 	}
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
-		"mode", ss.deps.protocol.mode,
+		"mode", ss.deps.mode,
 		"actual_action", actionAccept.String(),
 		"source", source,
 		"response_sent", err == nil,
 	}
 	attrs = append(attrs, extraAttrs...)
+	attrs = ss.appendDecisionSubject(attrs)
 	if err != nil {
 		attrs = append(attrs, "response_error", err)
 		ss.deps.log.ErrorContext(ctx, "message bypass response failed", attrs...)
 		return false
 	}
-	if ss.deps.protocol.mode == "enforce" {
+	if ss.deps.mode == "enforce" {
 		if learn {
 			ss.learnAuthenticatedRecipients(ctx)
 		}
@@ -634,16 +563,7 @@ func (ss *session) messageContext(recipientsComplete bool) messageContext {
 }
 
 func (ss *session) startConnectionDNS(ctx context.Context) {
-	timeout := ss.deps.dns.timeout
-	if timeout <= 0 || !netsafety.AddressRoutable(ss.peerIP) || ss.deps.dns.resolver == nil {
-		return
-	}
-	pending := make(chan connectionDNSResult, 1)
-	ss.connectionDNSPending = pending
-	addr := ss.peerIP
-	go func() {
-		pending <- ss.deps.dns.resolveSafely(ctx, addr)
-	}()
+	ss.connectionDNSPending = ss.deps.dns.start(ctx, ss.peerIP)
 }
 
 func (ss *session) connectionInformation(ctx context.Context) message.ConnectionInfo {
@@ -698,13 +618,13 @@ func cleanSMTPIdentity(value string) string {
 func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 	ctx, cancel := context.WithTimeout(ctx, ss.deps.protocol.timeout)
 	defer cancel()
-	if ss.deps.protocol.mode != "enforce" || ss.authentication.Authenticated {
+	if ss.deps.mode != "enforce" || ss.authentication.Authenticated {
 		return false, true
 	}
 	if _, allowed := ss.deps.policy.ipReputation.allowed(ss.peerIP); allowed {
 		return false, true
 	}
-	if len(ss.deps.policy.ipReputation.domainAllowlist) > 0 {
+	if ss.deps.policy.ipReputation.usesDomainAllowlist() {
 		dns := ss.awaitConnectionDNS(ctx)
 		if hostname, domain, allowed := ss.deps.policy.ipReputation.domainAllowed(dns); allowed {
 			ss.deps.log.DebugContext(ctx, "sending IP block bypassed by reverse-DNS domain allowlist",
@@ -716,10 +636,10 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 	if !ok {
 		return false, true
 	}
-	err := writeFrame(ss.conn, responseForAction(actionReject, ss.deps.analysis.filtering.RejectMessage))
+	err := writeFrame(ss.conn, responseForAction(actionReject, ss.deps.filtering.RejectMessage))
 	attrs := []any{
 		"remote_ip", ss.peerIP.String(),
-		"mode", ss.deps.protocol.mode,
+		"mode", ss.deps.mode,
 		"proposed_action", actionReject.String(),
 		"actual_action", actionReject.String(),
 		"source", "rejected_ip_reputation",

@@ -22,6 +22,19 @@ type connectionDNSResult struct {
 	names  []message.ReverseDNSName
 }
 
+// start begins one eligible connection lookup and returns its buffered result
+// channel. Per-connection ownership and waiting remain with the session.
+func (s *connectionDNSService) start(ctx context.Context, addr netip.Addr) <-chan connectionDNSResult {
+	if s == nil || s.resolver == nil || s.timeout <= 0 || !netsafety.AddressRoutable(addr) {
+		return nil
+	}
+	pending := make(chan connectionDNSResult, 1)
+	go func() {
+		pending <- s.resolveSafely(ctx, addr)
+	}()
+	return pending
+}
+
 func (s *connectionDNSService) resolveSafely(ctx context.Context, addr netip.Addr) (result connectionDNSResult) {
 	result = connectionDNSResult{status: message.ReverseDNSLookupFailed}
 	defer func() {

@@ -30,16 +30,15 @@ func (r *domainRepository) DomainRegistration(ctx context.Context, domain string
 		return stores.DomainRegistration{}, false, nil
 	}
 	var record stores.DomainRegistration
-	var id, registeredAt, expiresAt int64
-	err := r.db.QueryRow(ctx, `SELECT id, domain, registered_at_ms, expires_at_ms
-		FROM domain_registrations WHERE domain = ?`, domain).Scan(&id, &record.Domain, &registeredAt, &expiresAt)
+	var registeredAt, expiresAt int64
+	err := r.db.QueryRow(ctx, `SELECT domain, registered_at_ms, expires_at_ms
+		FROM domain_registrations WHERE domain = ?`, domain).Scan(&record.Domain, &registeredAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return stores.DomainRegistration{}, false, nil
 	}
 	if err != nil {
 		return stores.DomainRegistration{}, false, fmt.Errorf("look up domain registration: %w", err)
 	}
-	record.ID = uint64(id)
 	record.RegisteredAt = timeFromMillis(registeredAt)
 	record.ExpiresAt = timeFromMillis(expiresAt)
 	return record, true, nil
@@ -64,8 +63,8 @@ func (r *domainRepository) PutDomainRegistration(ctx context.Context, record sto
 }
 
 func (r *domainRepository) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
-	var excess int
-	if err := tx.QueryRowContext(ctx, `SELECT max(count(*) - ?, 0) FROM domain_registrations`, r.options.MaxEntries).Scan(&excess); err != nil || excess == 0 {
+	excess, err := capacityExcessTx(ctx, tx, "domain_registrations", r.options.MaxEntries)
+	if err != nil || excess == 0 {
 		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM domain_registrations WHERE id IN (

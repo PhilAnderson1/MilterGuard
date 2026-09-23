@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
@@ -54,11 +55,10 @@ func run() int {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel()}))
 	if *commandMode {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-	} else {
-		for _, warning := range cfg.Warnings {
-			logger.Warn("configuration warning", "warning", warning)
-		}
+		logger = commandModeLogger(os.Stderr)
+	}
+	for _, warning := range cfg.Warnings {
+		logger.Warn("configuration warning", "warning", warning)
 	}
 	if *check || *checkEndpoint || *checkPort {
 		if *commandMode {
@@ -105,20 +105,15 @@ func run() int {
 			fmt.Fprintln(os.Stderr, "cannot open command database:", err)
 			return 1
 		}
-		defer closeProcessor()
 		var commandErr error
 		if inputIsTerminal(os.Stdin) && inputIsTerminal(os.Stdout) {
 			line := liner.NewLiner()
-			defer line.Close()
 			commandErr = runTerminalCommandMode(ctx, os.Stdout, processor, line)
+			line.Close()
 		} else {
 			commandErr = runCommandMode(ctx, os.Stdin, os.Stdout, processor)
 		}
-		if commandErr != nil {
-			fmt.Fprintln(os.Stderr, "command mode failed:", commandErr)
-			return 1
-		}
-		return 0
+		return reportCommandModeCompletion(os.Stderr, commandErr, closeProcessor())
 	}
 	if len(flag.Args()) != 0 {
 		fmt.Fprintln(os.Stderr, "unexpected positional arguments")
@@ -165,6 +160,23 @@ type interactiveCommandProcessor interface {
 	ExecuteLine(context.Context, string, admincmd.Actor) (admincmd.Response, error)
 }
 
+func commandModeLogger(output io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(output, &slog.HandlerOptions{Level: slog.LevelWarn}))
+}
+
+func reportCommandModeCompletion(output io.Writer, commandErr, closeErr error) int {
+	if commandErr != nil {
+		fmt.Fprintln(output, "command mode failed:", commandErr)
+	}
+	if closeErr != nil {
+		fmt.Fprintln(output, "command database shutdown failed:", closeErr)
+	}
+	if commandErr != nil || closeErr != nil {
+		return 1
+	}
+	return 0
+}
+
 type commandLineEditor interface {
 	Prompt(string) (string, error)
 	AppendHistory(string)
@@ -178,7 +190,7 @@ func inputIsTerminal(input *os.File) bool {
 // runTerminalCommandMode provides in-memory command history on a real terminal.
 func runTerminalCommandMode(ctx context.Context, output io.Writer, processor interactiveCommandProcessor, editor commandLineEditor) error {
 	fmt.Fprintln(output, "MilterGuard command mode. Type HELP for commands; EXIT to quit.")
-	actor := admincmd.Actor{Administrator: true, DefaultRecipient: "*", NewestLast: true}
+	actor := admincmd.Actor{Administrator: true, CommandMode: true, DefaultRecipient: "*", NewestLast: true}
 	for {
 		line, err := editor.Prompt("milterguard> ")
 		if errors.Is(err, io.EOF) {
@@ -205,7 +217,7 @@ func runTerminalCommandMode(ctx context.Context, output io.Writer, processor int
 func runCommandMode(ctx context.Context, input io.Reader, output io.Writer, processor interactiveCommandProcessor) error {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
-	actor := admincmd.Actor{Administrator: true, DefaultRecipient: "*", NewestLast: true}
+	actor := admincmd.Actor{Administrator: true, CommandMode: true, DefaultRecipient: "*", NewestLast: true}
 	for {
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
@@ -274,9 +286,7 @@ func checkMilterListenerAvailable(address string, listen listenFunc) (string, er
 		return "Milter port " + port + " is available", nil
 	case "unix":
 		path := target.Address
-		if _, err := os.Lstat(path); err == nil {
-			return "", syscall.EADDRINUSE
-		} else if !os.IsNotExist(err) {
+		if err := prepareUnixSocketPath(path, false); err != nil {
 			return "", err
 		}
 		return "Milter Unix socket path is available", nil
@@ -398,14 +408,7 @@ func listen(address string) (net.Listener, func(), error) {
 		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 			return nil, func() {}, err
 		}
-		if st, err := os.Lstat(path); err == nil {
-			if st.Mode()&os.ModeSocket == 0 {
-				return nil, func() {}, fmt.Errorf("refusing to replace non-socket path %s", path)
-			}
-			if err := os.Remove(path); err != nil {
-				return nil, func() {}, err
-			}
-		} else if !os.IsNotExist(err) {
+		if err := prepareUnixSocketPath(path, true); err != nil {
 			return nil, func() {}, err
 		}
 		ln, err := net.Listen("unix", path)
@@ -426,6 +429,36 @@ func listen(address string) (net.Listener, func(), error) {
 		}, err
 	}
 	return nil, func() {}, fmt.Errorf("unsupported Milter listener network %q", target.Network)
+}
+
+// prepareUnixSocketPath distinguishes a live listener from a stale socket.
+// Preflight checks leave stale sockets untouched; startup removes only a socket
+// that refused a connection so it can safely bind the configured path.
+func prepareUnixSocketPath(path string, removeStale bool) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("refusing to replace non-socket path %s", path)
+	}
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err == nil {
+		_ = conn.Close()
+		return syscall.EADDRINUSE
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check Unix Milter socket %s: %w", path, err)
+	}
+	if removeStale {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func setUnixSocketPermissions(ln net.Listener, path string, chmod func(string, os.FileMode) error) error {

@@ -40,7 +40,7 @@ func (s *analysisService) analysisTimeout() time.Duration {
 
 // evaluate submits a prepared message to the analyzer and applies configured
 // mode and confidence thresholds to produce the final Milter action.
-func (s *analysisService) evaluate(parent context.Context, msg *message.Message) evaluationResult {
+func (s *analysisService) evaluate(parent context.Context, msg *message.Message, mode string, rejectScore float64, aiErrorAction string, includeAIInput bool) evaluationResult {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(parent, ai.MaximumAnalysisDuration(s.ai))
 	defer cancel()
@@ -49,7 +49,7 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message)
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
 	case <-ctx.Done():
-		return s.analysisFailure(ctx.Err(), started)
+		return s.analysisFailure(ctx.Err(), started, mode, aiErrorAction)
 	}
 
 	analysis := msg.BuildAnalysis(s.ai.MaxBodyChars, message.VisionOptions{
@@ -63,15 +63,15 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message)
 	for _, image := range analysis.Images {
 		input.Images = append(input.Images, ai.Image{MediaType: image.MediaType, Data: image.Data})
 	}
-	s.logAIInput(msg, input)
+	s.logAIInput(msg, input, includeAIInput)
 	decision, err := s.analyzer.Analyze(ctx, input)
 	if err != nil {
-		failure := s.analysisFailure(err, started)
+		failure := s.analysisFailure(err, started, mode, aiErrorAction)
 		failure.visionImages = len(input.Images)
 		return failure
 	}
 
-	proposed, selected := s.applyPolicy(decision)
+	proposed, selected := s.applyPolicy(decision, mode, rejectScore)
 	return evaluationResult{
 		proposed:       proposed,
 		selected:       selected,
@@ -83,8 +83,8 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message)
 	}
 }
 
-func (s *analysisService) logAIInput(msg *message.Message, input ai.Input) {
-	if !s.logging.IncludeAIInput {
+func (s *analysisService) logAIInput(msg *message.Message, input ai.Input, enabled bool) {
+	if !enabled {
 		return
 	}
 	images := make([]map[string]any, 0, len(input.Images))
@@ -101,27 +101,27 @@ func (s *analysisService) logAIInput(msg *message.Message, input ai.Input) {
 		"images", images)
 }
 
-func (s *analysisService) applyPolicy(decision ai.Decision) (action, action) {
+func (s *analysisService) applyPolicy(decision ai.Decision, mode string, rejectScore float64) (action, action) {
 	proposed := actionAccept
-	if decision.Classification == "unwanted" && decision.Score >= s.filtering.RejectScore {
+	if decision.Classification == "unwanted" && decision.Score >= rejectScore {
 		proposed = actionReject
 	}
-	return proposed, selectActionForMode(proposed, s.mode)
+	return proposed, selectActionForMode(proposed, mode)
 }
 
-func (s *analysisService) analysisFailure(err error, started time.Time) evaluationResult {
+func (s *analysisService) analysisFailure(err error, started time.Time, mode, aiErrorAction string) evaluationResult {
 	selected := actionAccept
-	if s.mode == "enforce" && s.filtering.AIErrorAction == "tempfail" {
+	if mode == "enforce" && aiErrorAction == "tempfail" {
 		selected = actionTempfail
 	}
 	return evaluationResult{proposed: selected, selected: selected, err: err, latency: time.Since(started)}
 }
 
-func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, result evaluationResult, sent bool, responseErr error) {
+func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, result evaluationResult, mode string, includeSubject, sent bool, responseErr error) {
 	if result.err != nil {
 		logMessage := "message analysis failed"
 		attrs := []any{
-			"message_id", msg.Header("Message-ID"), "mode", s.mode,
+			"message_id", msg.Header("Message-ID"), "mode", mode,
 			"actual_action", result.selected.String(), "error", result.err,
 			"latency_ms", result.latency.Milliseconds(), "response_sent", sent,
 			"vision_images", result.visionImages,
@@ -147,14 +147,14 @@ func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, 
 	}
 
 	attrs := []any{
-		"message_id", msg.Header("Message-ID"), "mode", s.mode,
+		"message_id", msg.Header("Message-ID"), "mode", mode,
 		"classification", result.classification, "score", result.score,
 		"reasons", result.reasons, "proposed_action", result.proposed.String(),
 		"actual_action", result.selected.String(), "model", s.ai.Model,
 		"latency_ms", result.latency.Milliseconds(), "truncated", msg.Truncated,
 		"response_sent", sent, "vision_images", result.visionImages,
 	}
-	if s.logging.IncludeSubject {
+	if includeSubject {
 		attrs = append(attrs, "subject", msg.DecodedHeader("Subject"))
 	}
 	if responseErr != nil {

@@ -1,6 +1,9 @@
 package sqlite
 
 import (
+	"context"
+	"database/sql"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -9,6 +12,13 @@ import (
 )
 
 type rowScanner interface{ Scan(...any) error }
+
+func capacityExcessTx(ctx context.Context, tx *sql.Tx, table string, maximum int) (int, error) {
+	var excess int
+	query := fmt.Sprintf(`SELECT max(count(*) - ?, 0) FROM %s`, table)
+	err := tx.QueryRowContext(ctx, query, maximum).Scan(&excess)
+	return excess, err
+}
 
 func unixMillis(value time.Time) int64     { return value.UTC().UnixMilli() }
 func timeFromMillis(value int64) time.Time { return time.UnixMilli(value).UTC() }

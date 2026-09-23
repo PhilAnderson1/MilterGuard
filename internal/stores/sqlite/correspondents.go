@@ -62,8 +62,8 @@ func (r *correspondentRepository) LearnAuthenticated(ctx context.Context, localA
 	added := 0
 	err := r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		added = 0
-		if r.options.StaleAfter > 0 {
-			args := append(append([]any{}, targetArgs...), unixMillis(now.Add(-r.options.StaleAfter)))
+		if cutoff, enabled := r.staleCutoff(now); enabled {
+			args := append(append([]any{}, targetArgs...), cutoff)
 			if _, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE `+target+` AND last_activity_at_ms < ?`, args...); err != nil {
 				return err
 			}
@@ -100,7 +100,7 @@ func (r *correspondentRepository) LearnAuthenticated(ctx context.Context, localA
 	return nil
 }
 
-// touchInbound expects the canonical correspondent address derived for the
+// TouchInbound expects the canonical correspondent address derived for the
 // current message; recipient addresses are normalized at the store boundary.
 func (r *correspondentRepository) TouchInbound(ctx context.Context, correspondent string, recipients []string) error {
 	if r == nil || r.db == nil || !r.options.UseAllowlist {
@@ -132,7 +132,7 @@ func (r *correspondentRepository) TouchInbound(ctx context.Context, corresponden
 	return nil
 }
 
-// recordInboundClassification expects the canonical correspondent address
+// RecordInboundClassification expects the canonical correspondent address
 // derived for the current message.
 func (r *correspondentRepository) RecordInboundClassification(ctx context.Context, input stores.InboundClassification) error {
 	if r == nil || r.db == nil || !input.RecipientsComplete {
@@ -199,8 +199,8 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 	}
 	err := r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		events = nil
-		if r.options.StaleAfter > 0 {
-			args := append(append([]any{}, targetArgs...), unixMillis(now.Add(-r.options.StaleAfter)))
+		if cutoff, enabled := r.staleCutoff(now); enabled {
+			args := append(append([]any{}, targetArgs...), cutoff)
 			if _, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE `+target+` AND last_activity_at_ms < ?`, args...); err != nil {
 				return err
 			}
@@ -280,7 +280,7 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 	return nil
 }
 
-// match expects the canonical correspondent address derived for the current
+// Match expects the canonical correspondent address derived for the current
 // message.
 func (r *correspondentRepository) Match(ctx context.Context, correspondent string, recipients []string) (stores.CorrespondentMatch, error) {
 	result := stores.CorrespondentMatch{}
@@ -299,14 +299,10 @@ func (r *correspondentRepository) Match(ctx context.Context, correspondent strin
 		if err := r.db.QueryRow(ctx, query, args...).Scan(&found); err != nil {
 			return result, fmt.Errorf("match correspondent: %w", err)
 		}
-		result.Known, result.AllRecipientsMatched, result.TotalRecipients = found != 0, found != 0, 1
-		if result.Known {
-			result.MatchedRecipients = 1
-		}
+		result.Known, result.AllRecipientsMatched = found != 0, found != 0
 		return result, nil
 	}
 	addresses := sortedSet(normalizedAddressSet(recipients, maxCorrespondentRecipients))
-	result.TotalRecipients = len(addresses)
 	if len(addresses) == 0 {
 		return result, nil
 	}
@@ -317,11 +313,12 @@ func (r *correspondentRepository) Match(ctx context.Context, correspondent strin
 	for _, address := range addresses {
 		args = append(args, address)
 	}
-	if err := r.db.QueryRow(ctx, query, args...).Scan(&result.MatchedRecipients); err != nil {
-		return stores.CorrespondentMatch{TotalRecipients: len(addresses)}, fmt.Errorf("match correspondent recipients: %w", err)
+	var matchedRecipients int
+	if err := r.db.QueryRow(ctx, query, args...).Scan(&matchedRecipients); err != nil {
+		return stores.CorrespondentMatch{}, fmt.Errorf("match correspondent recipients: %w", err)
 	}
-	result.Known = result.MatchedRecipients > 0
-	result.AllRecipientsMatched = result.MatchedRecipients == result.TotalRecipients
+	result.Known = matchedRecipients > 0
+	result.AllRecipientsMatched = matchedRecipients == len(addresses)
 	return result, nil
 }
 
@@ -394,10 +391,18 @@ func (r *correspondentRepository) notStaleSQL() string {
 }
 
 func (r *correspondentRepository) notStaleArgs(now time.Time) []any {
-	if r.options.StaleAfter <= 0 {
+	cutoff, enabled := r.staleCutoff(now)
+	if !enabled {
 		return nil
 	}
-	return []any{unixMillis(now.Add(-r.options.StaleAfter))}
+	return []any{cutoff}
+}
+
+func (r *correspondentRepository) staleCutoff(now time.Time) (int64, bool) {
+	if r.options.StaleAfter <= 0 {
+		return 0, false
+	}
+	return unixMillis(now.Add(-r.options.StaleAfter)), true
 }
 
 func (r *correspondentRepository) activityDueSQL() string {
@@ -426,8 +431,8 @@ func scanCorrespondent(row rowScanner) (stores.Correspondent, error) {
 }
 
 func (r *correspondentRepository) enforceCapacityTx(ctx context.Context, tx *sql.Tx) (int64, error) {
-	var excess int
-	if err := tx.QueryRowContext(ctx, `SELECT max(count(*) - ?, 0) FROM correspondents`, r.options.MaxEntries).Scan(&excess); err != nil || excess == 0 {
+	excess, err := capacityExcessTx(ctx, tx, "correspondents", r.options.MaxEntries)
+	if err != nil || excess == 0 {
 		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE id IN (
@@ -450,8 +455,8 @@ func (r *correspondentRepository) enforceCapacityTx(ctx context.Context, tx *sql
 	return removed + remainingRemoved, err
 }
 
-// Cleanup removes stale records first and then trims the least recently active
-// records until the configured capacity is satisfied.
+// Cleanup removes stale records, then enforces capacity by evicting the oldest
+// unqualified inbound candidates before the least recently active remaining records.
 func (r *correspondentRepository) Cleanup(ctx context.Context) (int64, error) {
 	if r == nil || r.db == nil {
 		return 0, nil
@@ -459,9 +464,9 @@ func (r *correspondentRepository) Cleanup(ctx context.Context) (int64, error) {
 	var deleted int64
 	err := r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		var attemptDeleted int64
-		if r.options.StaleAfter > 0 {
+		if cutoff, enabled := r.staleCutoff(r.now().UTC()); enabled {
 			result, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE last_activity_at_ms < ?`,
-				unixMillis(r.now().UTC().Add(-r.options.StaleAfter)))
+				cutoff)
 			if err != nil {
 				return err
 			}

@@ -160,6 +160,45 @@ func TestConnectionDNSPanicIsRecoveredAsLookupFailure(t *testing.T) {
 	}
 }
 
+func TestConnectionDNSStartOwnsEligibilityAndWorker(t *testing.T) {
+	addr := netip.MustParseAddr("8.8.8.8")
+	resolver := &connectionTestResolver{
+		ptr: []string{"dns.google."},
+		forward: map[string][]net.IPAddr{
+			"dns.google": {{IP: net.ParseIP("8.8.8.8")}},
+		},
+		forwardErr: map[string]error{},
+	}
+	service := &connectionDNSService{resolver: resolver, timeout: time.Second, log: slog.Default()}
+	pending := service.start(context.Background(), addr)
+	if pending == nil {
+		t.Fatal("eligible DNS lookup was not started")
+	}
+	select {
+	case result := <-pending:
+		if result.status != message.ReverseDNSAvailable || len(result.names) != 1 || result.names[0].Confirmation != message.ForwardConfirmed {
+			t.Fatalf("started DNS result = %#v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("started DNS lookup did not complete")
+	}
+
+	for name, disabled := range map[string]*connectionDNSService{
+		"nil service":  nil,
+		"nil resolver": {timeout: time.Second},
+		"zero timeout": {resolver: resolver},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if pending := disabled.start(context.Background(), addr); pending != nil {
+				t.Fatal("disabled DNS lookup returned a pending channel")
+			}
+		})
+	}
+	if pending := service.start(context.Background(), netip.MustParseAddr("127.0.0.1")); pending != nil {
+		t.Fatal("non-routable DNS lookup returned a pending channel")
+	}
+}
+
 func TestResolveConnectionDNSBoundsAndSanitizesPTRNames(t *testing.T) {
 	resolver := &connectionTestResolver{
 		ptr:     []string{"valid.example.", "VALID.EXAMPLE.", "bad\nname.example."},

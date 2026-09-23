@@ -16,7 +16,6 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/rdap"
-	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 )
@@ -42,7 +41,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	var databaseErr error
 	if correspondentFeaturesEnabled(cfg.Correspondents) || ipReputationFeaturesEnabled(cfg.IPReputation) ||
 		rejectionHistoryEnabled(cfg.RejectionHistory) || domainRegistrationEnabled(cfg.DomainRegistration) {
-		ctx, cancel := context.WithTimeout(context.Background(), maintenanceDatabaseTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), databaseOpenTimeout)
 		database, databaseErr = sqlitedb.Open(ctx, cfg.Persistence.DatabaseFile, sqlitedb.DefaultOptions())
 		cancel()
 	}
@@ -58,13 +57,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	}
 	domainRegistration := newDomainRegistrationStore(cfg.DomainRegistration, domainCache, domainLookup, log)
 
-	var archive *rejectedmail.Archive
-	if cfg.RejectionHistory.SaveMessages && rejectionHistoryEnabled(cfg.RejectionHistory) {
-		archive = rejectedmail.New(rejectedmail.Options{
-			Directory: cfg.RejectionHistory.MessageDirectory,
-			Retention: cfg.RejectionHistory.Expiry.Value(), MaxTotalBytes: cfg.RejectionHistory.MessageMaxTotalBytes,
-		}, log)
-	}
+	archive := newRejectedMailArchive(cfg.RejectionHistory, log)
 	commands := commandProcessor(cfg, correspondents, rejections, ipReputation, archive, net.DefaultResolver, log)
 
 	var attachmentScanner *attachment.Scanner
@@ -78,17 +71,17 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	}
 
 	analysis := &analysisService{
-		analyzer: analyzer, ai: cfg.AI, filtering: cfg.Filtering, logging: cfg.Logging,
-		mode: cfg.Mode, log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent),
+		analyzer: analyzer, ai: cfg.AI,
+		log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent),
 		domainLookupTimeout: cfg.DomainRegistration.Timeout.Value(), milterTimeout: cfg.Milter.Timeout.Value(),
 	}
 	policy := &messagePolicyService{
-		filtering: cfg.Filtering, correspondentCfg: cfg.Correspondents, mode: cfg.Mode, log: log,
+		correspondentCfg: cfg.Correspondents, log: log,
 		ipReputation: ipReputation, correspondents: correspondents, rejectionHistory: rejections,
 		domainRegistration: domainRegistration, archive: archive,
 	}
 	attachments := &attachmentPolicyService{
-		cfg: cfg.Attachments, filtering: cfg.Filtering, mode: cfg.Mode, log: log,
+		cfg:     cfg.Attachments,
 		scanner: attachmentScanner, slots: make(chan struct{}, attachmentConcurrency(cfg.Milter.MaxConnections)), policy: policy,
 	}
 	emailCommands := &emailCommandService{
@@ -100,9 +93,10 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		}),
 	}
 	sessions := &sessionDependencies{
+		mode: cfg.Mode, filtering: cfg.Filtering, logging: cfg.Logging,
 		protocol: protocolOptions{
 			timeout: cfg.Milter.Timeout.Value(), maxMessageSize: cfg.Milter.MaxMessageSize,
-			progressInterval: defaultMilterProgressInterval, mode: cfg.Mode,
+			progressInterval: defaultMilterProgressInterval,
 		},
 		analysis: analysis, policy: policy, attachments: attachments, commands: emailCommands,
 		dns: &connectionDNSService{resolver: net.DefaultResolver, timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},

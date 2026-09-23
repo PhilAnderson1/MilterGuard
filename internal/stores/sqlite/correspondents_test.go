@@ -220,6 +220,11 @@ func TestDeleteCorrespondentHonorsRecipientScope(t *testing.T) {
 	if len(records) != 1 || records["first@example.com\x00unrelated@example.net"].Correspondent == "" {
 		t.Fatalf("records after all-recipient deletion=%#v", records)
 	}
+
+	_, err = store.DeleteCorrespondent(context.Background(), "sender@example.net", stores.RecipientScope{})
+	if err == nil || !strings.Contains(err.Error(), "invalid correspondent deletion scope") {
+		t.Fatalf("invalid scope error=%v", err)
+	}
 }
 
 func TestCorrespondentLearningRecipientLimit(t *testing.T) {

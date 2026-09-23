@@ -33,8 +33,6 @@ type Correspondent struct {
 type CorrespondentMatch struct {
 	Known                bool
 	AllRecipientsMatched bool
-	MatchedRecipients    int
-	TotalRecipients      int
 }
 
 type Rejection struct {
@@ -55,7 +53,6 @@ type IPBlock struct {
 }
 
 type DomainRegistration struct {
-	ID           uint64
 	Domain       string
 	RegisteredAt time.Time
 	ExpiresAt    time.Time

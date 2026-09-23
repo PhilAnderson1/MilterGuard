@@ -565,6 +565,10 @@ func lexicalTemplateEnd(source, lower string, offset int) (int, bool) {
 			offset = commentEnd
 			continue
 		}
+		if !lexicalMarkupStart(source, opening) {
+			offset = opening + 1
+			continue
+		}
 		closing, found, _ := lexicalTagEnd(source, opening+1)
 		if !found {
 			return 0, false

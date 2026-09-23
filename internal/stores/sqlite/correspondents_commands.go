@@ -53,7 +53,7 @@ func (r *correspondentRepository) DeleteCorrespondent(ctx context.Context, sende
 	query := `DELETE FROM correspondents WHERE correspondent = ?`
 	args := []any{sender}
 	if err := scope.Validate(); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("invalid correspondent deletion scope: %w", err)
 	}
 	if !scope.All {
 		recipient := mailaddr.Normalize(scope.Address)

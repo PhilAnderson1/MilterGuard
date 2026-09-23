@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"io"
 	"net/mail"
+	"strings"
 )
 
-// ParseArchived parses a bounded RFC 5322 message into the same Message type
-// used by live Milter processing.
-// ParseArchived reconstructs normal Message state from a saved RFC message so
-// retrieval commands use the same processing pipeline as live mail.
+// ParseArchived reconstructs Message state from a bounded saved RFC 5322
+// message so retrieval commands use the same processing pipeline as live mail.
 func ParseArchived(raw []byte, maxBytes int64) (*Message, error) {
 	if maxBytes < 1 || int64(len(raw)) > maxBytes {
 		return nil, fmt.Errorf("archived message exceeds configured size limit")
@@ -20,6 +19,16 @@ func ParseArchived(raw []byte, maxBytes int64) (*Message, error) {
 		return nil, fmt.Errorf("parse archived message: %w", err)
 	}
 	msg := New(maxBytes)
+	for name, values := range parsed.Header {
+		if strings.EqualFold(name, "X-MilterGuard-Archive-Truncated") {
+			for _, value := range values {
+				if strings.EqualFold(strings.TrimSpace(value), "yes") {
+					msg.ArchiveTruncated = true
+					break
+				}
+			}
+		}
+	}
 	for name, values := range parsed.Header {
 		for _, value := range values {
 			msg.AddHeader(name, value)

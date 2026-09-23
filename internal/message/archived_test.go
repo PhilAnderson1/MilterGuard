@@ -41,3 +41,16 @@ func TestParseArchivedRejectsMalformedOuterMessageAndBoundsBody(t *testing.T) {
 		t.Fatalf("bounded processed body = %q", body)
 	}
 }
+
+func TestParseArchivedRestoresArchiveTruncationState(t *testing.T) {
+	original := New(256)
+	original.AddHeader("Content-Type", "text/plain")
+	original.AddBody([]byte(strings.Repeat("x", 512)))
+	msg, err := ParseArchived(original.ArchiveBytes(), 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !msg.ArchiveTruncated {
+		t.Fatal("archive truncation marker was not restored")
+	}
+}

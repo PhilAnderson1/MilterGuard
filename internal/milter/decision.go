@@ -30,3 +30,12 @@ func acceptedModeLabel(mode string) string {
 	}
 	return "accepted-monitor-mode"
 }
+
+// appendDecisionSubject adds the decoded subject to a completed-message
+// decision log when subject logging is enabled.
+func (ss *session) appendDecisionSubject(attrs []any) []any {
+	if ss.deps.logging.IncludeSubject {
+		return append(attrs, "subject", ss.message.DecodedHeader("Subject"))
+	}
+	return attrs
+}

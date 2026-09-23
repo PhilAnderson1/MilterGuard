@@ -16,6 +16,7 @@ const (
 
 type Actor struct {
 	Administrator    bool
+	CommandMode      bool
 	DefaultRecipient string
 	NewestLast       bool
 }
@@ -28,7 +29,6 @@ type Attachment struct {
 }
 
 type Response struct {
-	Canonical   string
 	Text        string
 	Attachments []Attachment
 }

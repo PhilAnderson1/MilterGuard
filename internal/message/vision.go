@@ -10,10 +10,16 @@ import (
 )
 
 func selectVisionImages(content extractedContent, options VisionOptions) []Image {
-	if options.Mode == "off" || options.MaxImages < 1 || options.MaxBytes < 1 || options.MaxPixels < 1 {
+	if options.MaxImages < 1 || options.MaxBytes < 1 || options.MaxPixels < 1 {
 		return nil
 	}
-	if options.Mode == "fallback" && len([]rune(strings.TrimSpace(content.VisibleText))) >= options.MinTextChars {
+	switch options.Mode {
+	case "always":
+	case "fallback":
+		if len([]rune(strings.TrimSpace(content.VisibleText))) >= options.MinTextChars {
+			return nil
+		}
+	default:
 		return nil
 	}
 	referenced := make(map[string]bool, len(content.ImageRefs))

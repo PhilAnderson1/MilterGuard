@@ -18,8 +18,9 @@ milter:
   # A Unix socket may be used instead: unix:/run/milterguard/milterguard.sock
   socket: tcp:127.0.0.1:8895
 
-  # Milter protocol I/O timeout. Uses Go duration syntax, for example 30s,
-  # 2m, or 1m30s.
+  # Maximum time allowed for an in-progress Milter protocol frame. Completely
+  # idle connections remain open for reuse by the MTA. Uses Go duration syntax,
+  # for example 30s, 2m, or 1m30s.
   timeout: 1m
 
   # Maximum number of simultaneous Milter connections; positive integer. Each

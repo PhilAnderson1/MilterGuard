@@ -38,7 +38,7 @@ func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
 	sort.Strings(keys)
 	var b strings.Builder
 	b.WriteString("ANALYSIS TIME:\n")
-	fmt.Fprintf(&b, "Server time: %s\n\n", m.analysisTime.UTC().Format("2006-01-02 15:04:05 UTC"))
+	fmt.Fprintf(&b, "Server time: %s UTC\n\n", m.analysisTime.UTC().Format(time.DateTime))
 	if !m.AuthenticatedSubmission {
 		writeConnectionInformation(&b, m.Connection)
 	}

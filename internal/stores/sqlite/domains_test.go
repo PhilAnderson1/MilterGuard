@@ -20,7 +20,7 @@ func testDomainRepository(t *testing.T, options DomainOptions) (*domainRepositor
 	return NewDomains(db, options).(*domainRepository), db
 }
 
-func TestDomainRepositoryUpsertsWithoutChangingIdentity(t *testing.T) {
+func TestDomainRepositoryUpsertsSingleRecord(t *testing.T) {
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	repository, _ := testDomainRepository(t, DomainOptions{MaxEntries: 10, Now: func() time.Time { return now }})
 	first := stores.DomainRegistration{Domain: "example.com", RegisteredAt: now.AddDate(-1, 0, 0), ExpiresAt: now.AddDate(0, 0, 1)}
@@ -28,17 +28,19 @@ func TestDomainRepositoryUpsertsWithoutChangingIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored, found, err := repository.DomainRegistration(context.Background(), first.Domain)
-	if err != nil || !found || stored.ID == 0 {
+	if err != nil || !found {
 		t.Fatalf("initial record = %+v, found=%v, err=%v", stored, found, err)
 	}
-	id := stored.ID
 	updated := stores.DomainRegistration{Domain: first.Domain, RegisteredAt: now.AddDate(-2, 0, 0), ExpiresAt: now.AddDate(1, 0, 0)}
 	if err := repository.PutDomainRegistration(context.Background(), updated); err != nil {
 		t.Fatal(err)
 	}
 	stored, found, err = repository.DomainRegistration(context.Background(), first.Domain)
-	if err != nil || !found || stored.ID != id || !stored.RegisteredAt.Equal(updated.RegisteredAt) || !stored.ExpiresAt.Equal(updated.ExpiresAt) {
+	if err != nil || !found || !stored.RegisteredAt.Equal(updated.RegisteredAt) || !stored.ExpiresAt.Equal(updated.ExpiresAt) {
 		t.Fatalf("updated record = %+v, found=%v, err=%v", stored, found, err)
+	}
+	if count, err := repository.Count(context.Background()); err != nil || count != 1 {
+		t.Fatalf("records after upsert = %d, err=%v", count, err)
 	}
 }
 

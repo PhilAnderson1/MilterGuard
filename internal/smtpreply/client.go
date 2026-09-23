@@ -37,8 +37,8 @@ func New(options Options) *Client {
 	return &Client{options: options, dial: (&net.Dialer{}).DialContext}
 }
 
-// Send builds message and submits one SMTP transaction using an empty envelope
-// sender, applying the configured opportunistic or required STARTTLS policy.
+// Send builds a message and submits one SMTP transaction using an empty envelope
+// sender and the configured off, opportunistic, or required STARTTLS policy.
 func (c *Client) Send(parent context.Context, message Message) error {
 	payload, err := Build(message)
 	if err != nil {
@@ -101,10 +101,19 @@ func (c *Client) Send(parent context.Context, message Message) error {
 }
 
 func tlsDecision(mode, host string, advertised bool) (bool, error) {
-	if mode == "required" && !advertised {
-		return false, errors.New("SMTP server does not advertise STARTTLS")
+	switch mode {
+	case "off":
+		return false, nil
+	case "opportunistic":
+		return advertised && !hostIsLoopback(host), nil
+	case "required":
+		if !advertised {
+			return false, errors.New("SMTP server does not advertise STARTTLS")
+		}
+		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported SMTP TLS mode %q", mode)
 	}
-	return advertised && (mode == "required" || (mode == "opportunistic" && !hostIsLoopback(host))), nil
 }
 
 func hostIsLoopback(host string) bool {

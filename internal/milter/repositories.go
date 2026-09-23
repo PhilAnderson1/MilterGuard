@@ -2,10 +2,11 @@ package milter
 
 import (
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
+	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 	storesqlite "github.com/PhilAnderson1/MilterGuard/internal/stores/sqlite"
@@ -16,6 +17,15 @@ func correspondentFeaturesEnabled(cfg config.CorrespondentsConfig) bool {
 }
 
 func rejectionHistoryEnabled(cfg config.RejectionHistoryConfig) bool { return cfg.Expiry.Value() > 0 }
+
+func newRejectedMailArchive(cfg config.RejectionHistoryConfig, log *slog.Logger) *rejectedmail.Archive {
+	if !cfg.SaveMessages || !rejectionHistoryEnabled(cfg) {
+		return nil
+	}
+	return rejectedmail.New(rejectedmail.Options{
+		Directory: cfg.MessageDirectory, Retention: cfg.Expiry.Value(), MaxTotalBytes: cfg.MessageMaxTotalBytes,
+	}, log)
+}
 
 func newCorrespondentRepository(cfg config.CorrespondentsConfig, db *sqlitedb.Store, now func() time.Time, log *slog.Logger) stores.CorrespondentRepository {
 	return storesqlite.NewCorrespondents(db, storesqlite.CorrespondentOptions{
@@ -59,8 +69,5 @@ func newIPRepository(cfg config.IPReputationConfig, db *sqlitedb.Store, now func
 }
 
 func emailAddressDomain(address string) string {
-	if separator := strings.LastIndexByte(address, '@'); separator >= 0 {
-		return address[separator+1:]
-	}
-	return ""
+	return mailaddr.Domain(address)
 }

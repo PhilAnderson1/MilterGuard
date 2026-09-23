@@ -83,14 +83,13 @@ func New(options Options) *Scanner {
 	return &Scanner{options: options, blocked: blocked}
 }
 
+// Scan inspects one MIME body using a background context.
 func (s *Scanner) Scan(contentType, transferEncoding, contentDisposition string, body []byte) (*Finding, error) {
 	return s.ScanContext(context.Background(), contentType, transferEncoding, contentDisposition, body)
 }
 
-// ScanContext inspects a message while observing cancellation between MIME and
-// archive entries and during potentially long decode/decompression reads.
-// ScanContext examines one MIME body and recursively inspects supported
-// archives within the configured depth, file-count, and expanded-size limits.
+// ScanContext inspects one MIME body and recursively examines supported
+// archives within configured limits while observing context cancellation.
 func (s *Scanner) ScanContext(ctx context.Context, contentType, transferEncoding, contentDisposition string, body []byte) (*Finding, error) {
 	if ctx == nil {
 		ctx = context.Background()

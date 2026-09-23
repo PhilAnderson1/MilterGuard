@@ -3,8 +3,29 @@ package admincmd
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
+
+func TestRejectionFormattingDescribesEmptySubjectAndReason(t *testing.T) {
+	entry := stores.Rejection{
+		ID: 1, Sender: "sender@example.net", Recipients: []string{"owner@example.com"},
+		RejectedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC),
+	}
+	for name, formatted := range map[string]string{
+		"history": formatRejectionHistory([]stores.Rejection{entry}, false),
+		"detail":  formatRejectionDetail(entry, "body"),
+	} {
+		if !strings.Contains(formatted, "Subject: (no subject)\n") || !strings.Contains(formatted, "Unavailable") {
+			t.Errorf("%s formatting did not describe empty values: %q", name, formatted)
+		}
+		if strings.Contains(formatted, "predates") {
+			t.Errorf("%s formatting invented legacy record provenance: %q", name, formatted)
+		}
+	}
+}
 
 func TestAppendBoundedResponseAppendsTextThatFits(t *testing.T) {
 	var body strings.Builder

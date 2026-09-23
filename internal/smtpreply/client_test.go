@@ -27,6 +27,7 @@ func TestTLSDecision(t *testing.T) {
 		{name: "opportunistic loopback", mode: "opportunistic", host: "127.0.0.1", advertised: true},
 		{name: "opportunistic unavailable", mode: "opportunistic", host: "mail.example.com"},
 		{name: "off", mode: "off", host: "mail.example.com", advertised: true},
+		{name: "invalid", mode: "optional", host: "mail.example.com", advertised: true, wantError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

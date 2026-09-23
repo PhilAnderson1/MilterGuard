@@ -6,9 +6,10 @@ licence texts are reproduced verbatim in `THIRD_PARTY_LICENSES`.
 
 | Software | Version | Licence file |
 | --- | --- | --- |
-| Go standard library | Go 1.26.7 | `go-standard-library.txt` |
+| Go standard library | Go 1.25 or later | `go-standard-library.txt` |
 | github.com/dustin/go-humanize | v1.0.1 | `github.com-dustin-go-humanize.txt` |
 | github.com/google/uuid | v1.6.0 | `github.com-google-uuid.txt` |
+| github.com/mattn/go-isatty | v0.0.24 | `github.com-mattn-go-isatty.txt` |
 | github.com/mattn/go-runewidth | v0.0.3 | `github.com-mattn-go-runewidth.txt` |
 | github.com/peterh/liner | v1.2.2 | `github.com-peterh-liner.txt` |
 | github.com/remyoudompheng/bigfft | v0.0.0-20230129092748-24d4a6f8daec | `github.com-remyoudompheng-bigfft.txt` |
@@ -26,5 +27,5 @@ licence texts are reproduced verbatim in `THIRD_PARTY_LICENSES`.
 | sqlite-vec incorporated by modernc.org/sqlite | bundled with v1.58.0 | `sqlite-vec.txt` |
 
 This inventory covers the external modules compiled into the MilterGuard
-executable at the versions recorded in `go.mod`. It should be reviewed whenever
-dependencies are added or updated.
+executable. Module versions and the minimum supported Go version are recorded
+in `go.mod`. It should be reviewed whenever dependencies are added or updated.

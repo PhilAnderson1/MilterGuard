@@ -86,12 +86,5 @@ func availableValue(value string) string {
 }
 
 func visibleFromDomain(value string) string {
-	if address, ok := mailaddr.Mailbox(value); ok {
-		return emailDomain(address)
-	}
-	return ""
-}
-
-func emailDomain(value string) string {
-	return mailauth.DomainFromIdentity(value)
+	return mailaddr.Domain(value)
 }

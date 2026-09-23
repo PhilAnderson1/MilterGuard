@@ -67,11 +67,18 @@ func (c *Client) validateRedirect(destination *url.URL) error {
 	if destination == nil || destination.Scheme != "https" || destination.User != nil {
 		return errors.New("unsafe RDAP redirect destination")
 	}
-	hostname := netsafety.DNSHostname(destination.Hostname())
-	if hostname == "" || !strings.Contains(hostname, ".") || net.ParseIP(hostname) != nil {
+	if rdapEndpointHostname(destination.Hostname()) == "" {
 		return errors.New("unsafe RDAP redirect hostname")
 	}
 	return nil
+}
+
+func rdapEndpointHostname(value string) string {
+	hostname := netsafety.DNSHostname(value)
+	if hostname == "" || !strings.Contains(hostname, ".") || net.ParseIP(hostname) != nil {
+		return ""
+	}
+	return hostname
 }
 
 // dialContext resolves, validates, and dials an RDAP endpoint in one operation.
@@ -82,8 +89,8 @@ func (c *Client) dialContext(ctx context.Context, network, endpoint string) (net
 	if err != nil {
 		return nil, fmt.Errorf("invalid RDAP endpoint %q: %w", endpoint, err)
 	}
-	hostname := netsafety.DNSHostname(host)
-	if hostname == "" || !strings.Contains(hostname, ".") || net.ParseIP(hostname) != nil {
+	hostname := rdapEndpointHostname(host)
+	if hostname == "" {
 		return nil, fmt.Errorf("unsafe RDAP endpoint hostname %q", host)
 	}
 	addresses, err := c.resolve(ctx, hostname)

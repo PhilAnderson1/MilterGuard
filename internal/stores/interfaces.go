@@ -44,6 +44,8 @@ type IPReputationRepository interface {
 }
 
 // DomainRegistrationRepository stores cached RDAP registration evidence.
+// DomainRegistration may return an expired cached record; callers must check
+// ExpiresAt before using it as current evidence.
 type DomainRegistrationRepository interface {
 	DomainRegistration(context.Context, string) (DomainRegistration, bool, error)
 	PutDomainRegistration(context.Context, DomainRegistration) error

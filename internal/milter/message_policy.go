@@ -4,11 +4,85 @@ import (
 	"context"
 	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 const postDecisionUpdateTimeout = 5 * time.Second
+
+type inboundEvidence struct {
+	recipientsComplete  bool
+	trustedDKIM         bool
+	knownCorrespondent  bool
+	bypassAI            bool
+	allowedSenderDomain string
+	authenticatedDomain string
+}
+
+// prepareInboundEvidence evaluates authentication, configured sender-domain
+// trust, and correspondent state without exposing repository details to the
+// Milter session.
+func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, current messageContext, trustedAuthservIDs []string, filtering config.FilteringConfig) inboundEvidence {
+	evidence := inboundEvidence{recipientsComplete: current.recipientsComplete}
+	if current.authenticated {
+		return evidence
+	}
+	if current.message.FromHeaderCount() > 1 {
+		current.message.Correspondent = message.CorrespondentInfo{Enabled: s.correspondentCfg.UseAllowlist, Scope: s.correspondentCfg.Scope}
+		return evidence
+	}
+	authentication := trustedSenderAuthentication(current.message, trustedAuthservIDs, current.visibleSenderDomain)
+	evidence.trustedDKIM = authentication.DKIMAligned
+	if authentication.anyAligned() {
+		evidence.authenticatedDomain = current.visibleSenderDomain
+	}
+	if domain := allowedSenderDomain(current.visibleSenderDomain, filtering.SenderDomainAllowlist); domain != "" &&
+		(!filtering.SenderDomainAllowlistRequireDKIM || authentication.DKIMAligned) {
+		evidence.allowedSenderDomain = domain
+	}
+	if !s.correspondentCfg.UseAllowlist {
+		return evidence
+	}
+	match, err := s.correspondents.Match(ctx, current.visibleSender, current.envelopeRecipients)
+	if err != nil && s.log != nil {
+		s.log.ErrorContext(ctx, "correspondent database operation failed", "operation", "match correspondent", "error", err)
+	}
+	known := match.Known
+	if s.correspondentCfg.Scope == "per_sender" && s.correspondentCfg.RecipientMatch == "all" {
+		known = evidence.recipientsComplete && match.AllRecipientsMatched
+	}
+	evidence.knownCorrespondent = known
+	current.message.Correspondent = message.CorrespondentInfo{
+		Enabled: true, Known: known, Scope: s.correspondentCfg.Scope,
+		AuthenticationAligned: known && authentication.anyAligned(),
+	}
+	bypassAuthentication := !s.correspondentCfg.RequireDKIMForBypass || authentication.DKIMAligned
+	evidence.bypassAI = s.correspondentCfg.BypassAI && evidence.recipientsComplete && known && bypassAuthentication
+	return evidence
+}
+
+func (s *messagePolicyService) trustedAuthservIDs(mtaHostname string) []string {
+	configured := s.correspondentCfg.TrustedAuthservIDs
+	trusted := make([]string, 0, len(configured))
+	for _, authservID := range configured {
+		if authservID == config.MTAHostnameAuthservID {
+			if mtaHostname != "" {
+				trusted = append(trusted, mtaHostname)
+			}
+			continue
+		}
+		trusted = append(trusted, authservID)
+	}
+	return trusted
+}
+
+func (s *messagePolicyService) domainRegistrationEvidence(ctx context.Context, domain string) (message.DomainRegistrationInfo, error) {
+	if s == nil || s.domainRegistration == nil {
+		return message.DomainRegistrationInfo{}, nil
+	}
+	return s.domainRegistration.evidence(ctx, domain)
+}
 
 // postDecisionContext gives persistence work its own bounded lifetime after
 // the final Milter response, independent of the message's analysis deadline.
@@ -19,12 +93,9 @@ func postDecisionContext(ctx context.Context) (context.Context, context.CancelFu
 // applyPostDecisionUpdates records adaptive trust and reputation evidence only
 // after a completed enforce-mode decision. Analysis failures never count as
 // legitimate evidence.
-func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, current messageContext, result evaluationResult, inbound inboundEvidence) {
+func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, current messageContext, result evaluationResult, inbound inboundEvidence, unwantedMinScore float64) {
 	ctx, cancel := postDecisionContext(ctx)
 	defer cancel()
-	if s.mode != "enforce" {
-		return
-	}
 	if result.selected == actionReject {
 		s.recordRejection(ctx, current.message, current.visibleSender, current.envelopeSender, current.envelopeRecipients, result.reasons, "ai")
 		if !current.authenticated {
@@ -40,15 +111,15 @@ func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, cur
 		s.learnAuthenticatedRecipients(ctx, current.envelopeSender, current.envelopeRecipients)
 	}
 	if !current.authenticated && result.err == nil && current.visibleSender != "" {
-		s.recordInboundClassification(ctx, current, result, inbound.trustedDKIM)
+		s.recordInboundClassification(ctx, current, result, inbound.trustedDKIM, unwantedMinScore)
 	}
 }
 
-func (s *messagePolicyService) recordInboundClassification(ctx context.Context, current messageContext, result evaluationResult, dkimAligned bool) {
+func (s *messagePolicyService) recordInboundClassification(ctx context.Context, current messageContext, result evaluationResult, dkimAligned bool, unwantedMinScore float64) {
 	if err := s.correspondents.RecordInboundClassification(ctx, stores.InboundClassification{
 		Correspondent: current.visibleSender, Recipients: current.envelopeRecipients,
 		RecipientsComplete: current.recipientsComplete, Classification: result.classification,
-		Score: result.score, UnwantedMinScore: s.filtering.RejectScore, DKIMAligned: dkimAligned,
+		Score: result.score, UnwantedMinScore: unwantedMinScore, DKIMAligned: dkimAligned,
 	}); err != nil {
 		s.log.ErrorContext(ctx, "cannot update inbound correspondent learning", "error", err)
 	}

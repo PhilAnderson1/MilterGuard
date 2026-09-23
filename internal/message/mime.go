@@ -58,7 +58,7 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 				mimeIncomplete = true
 				break
 			}
-			// The complete message body has already been bounded by Message.MaxBytes.
+			// The complete message body has already been bounded by Message.maxBytes.
 			// Do not impose a smaller per-part limit here: doing so would silently
 			// discard evidence from otherwise retained messages.
 			body, readErr := io.ReadAll(part)

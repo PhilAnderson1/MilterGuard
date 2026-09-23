@@ -619,8 +619,8 @@ func TestHeadersAndBodyShareMessageBudgetWithoutSuppressingBody(t *testing.T) {
 	if !strings.Contains(prompt, body) {
 		t.Fatalf("header padding suppressed the body: %s", prompt)
 	}
-	if got := retainedBytes(m); got > m.MaxBytes {
-		t.Fatalf("retained bytes = %d, want at most %d", got, m.MaxBytes)
+	if got := retainedBytes(m); got > m.maxBytes {
+		t.Fatalf("retained bytes = %d, want at most %d", got, m.maxBytes)
 	}
 }
 
@@ -629,14 +629,14 @@ func TestBodyIsTruncatedToRemainingCombinedMessageBudget(t *testing.T) {
 	m.AddHeader("Subject", "test")
 	headerBytes := m.archiveHeaderBytes
 	m.AddBody([]byte(strings.Repeat("x", 64)))
-	if got, want := int64(m.Body.Len()), m.MaxBytes-headerBytes; got != want {
+	if got, want := int64(m.body.Len()), m.maxBytes-headerBytes; got != want {
 		t.Fatalf("retained body bytes = %d, want %d", got, want)
 	}
 	if !m.BodyTruncated || !m.Truncated {
 		t.Fatal("message exceeding the combined header and body budget was not marked truncated")
 	}
-	if got := retainedBytes(m); got != m.MaxBytes {
-		t.Fatalf("retained bytes = %d, want %d", got, m.MaxBytes)
+	if got := retainedBytes(m); got != m.maxBytes {
+		t.Fatalf("retained bytes = %d, want %d", got, m.maxBytes)
 	}
 	if prompt := m.Prompt(1000); !strings.Contains(prompt, "Message body exceeded the retained-byte limit") {
 		t.Fatalf("body truncation was not reported to AI: %s", prompt)
@@ -1279,6 +1279,20 @@ func TestHTMLPlaintextInsideTemplateConsumesRemainder(t *testing.T) {
 	}
 }
 
+func TestHTMLPlaintextInsideHiddenElementConsumesRemainder(t *testing.T) {
+	got := htmlToText(`Before<div hidden><plaintext></div><a href="https://hidden.example/">AI-only</a>After`)
+	if got.Text != "Before" || len(got.Links) != 0 {
+		t.Fatalf("hidden plaintext extraction = text %q, links %v", got.Text, got.Links)
+	}
+}
+
+func TestHTMLTemplateScannerIgnoresOrdinaryLessThan(t *testing.T) {
+	got := htmlToText(`<template>1 < 2 and hidden</template><p>Visible</p>`)
+	if got.Text != "Visible" || len(got.Links) != 0 {
+		t.Fatalf("template less-than extraction = text %q, links %v", got.Text, got.Links)
+	}
+}
+
 func TestHTMLNestedAnchorImplicitlyClosesPreviousAnchor(t *testing.T) {
 	got := htmlToText(`<a href="https://one.example/">one <a href="https://two.example/">two</a> tail</a>`)
 	if got.Text != `[one](https://one.example/) [two](https://two.example/) tail` {
@@ -1843,6 +1857,19 @@ func TestVisionPrefersReferencedImageOverStandaloneAttachment(t *testing.T) {
 	}
 }
 
+func TestVisionUnknownModeSelectsNoImages(t *testing.T) {
+	decoded, err := base64.StdEncoding.DecodeString(onePixelPNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	images := selectVisionImages(extractedContent{Images: []extractedImage{{Data: decoded}}}, VisionOptions{
+		Mode: "unknown", MaxImages: 1, MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if len(images) != 0 {
+		t.Fatalf("unknown vision mode selected %d images", len(images))
+	}
+}
+
 func TestVisionFallbackIgnoresGeneratedLinkAndImageEvidenceForTextThreshold(t *testing.T) {
 	longDestination := "https://security.example/review?token=" + strings.Repeat("x", 400)
 	m := multipartRelatedMessage("Fallback", `<a href="`+longDestination+`"><img alt="Long generated image description" src="cid:notice"></a>`, "<notice>")
@@ -2130,8 +2157,8 @@ func TestTruncatedArchiveOmitsEntireFoldedHeaderField(t *testing.T) {
 	m := New(78)
 	m.AddHeader("X", "ok")
 	m.AddHeader("F", "one\n"+strings.Repeat("x", 21))
-	if m.archiveHeaderBytes != m.MaxBytes/2 {
-		t.Fatalf("test archive headers = %d bytes, want %d", m.archiveHeaderBytes, m.MaxBytes/2)
+	if m.archiveHeaderBytes != m.maxBytes/2 {
+		t.Fatalf("test archive headers = %d bytes, want %d", m.archiveHeaderBytes, m.maxBytes/2)
 	}
 	m.AddHeader("Invalid Header", "force archive truncation")
 	m.AddBody([]byte("body"))
