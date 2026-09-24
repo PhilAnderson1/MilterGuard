@@ -104,6 +104,19 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 	s.inflight[domain] = pending
 	s.mu.Unlock()
 
+	// Another lookup may have populated the cache after our initial read but
+	// before we claimed the in-flight slot. Recheck before contacting RDAP so
+	// that scheduling gap cannot produce a duplicate external lookup.
+	record, found, err = s.repository.DomainRegistration(ctx, domain)
+	if err != nil {
+		s.finishInflight(domain, pending)
+		return message.DomainRegistrationInfo{}, err
+	}
+	if found && record.ExpiresAt.After(s.now().UTC()) {
+		s.finishInflight(domain, pending)
+		return domainRegistrationEvidence(record), nil
+	}
+
 	lookupCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	var registeredAt, expiresAt time.Time
@@ -153,6 +166,15 @@ func (s *domainRegistrationStore) evidence(ctx context.Context, domain string) (
 			"cache_expires_at", refreshed.ExpiresAt, "expiry_fallback", missingExpiry)
 	}
 	return domainRegistrationEvidence(refreshed), nil
+}
+
+func (s *domainRegistrationStore) finishInflight(domain string, pending chan struct{}) {
+	s.mu.Lock()
+	if current, found := s.inflight[domain]; found && current == pending {
+		delete(s.inflight, domain)
+		close(pending)
+	}
+	s.mu.Unlock()
 }
 
 func (s *domainRegistrationStore) Cleanup(ctx context.Context) (int64, error) {
