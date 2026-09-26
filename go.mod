@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/mattn/go-isatty v0.0.24
+	github.com/mjl-/mox v0.0.17
 	github.com/peterh/liner v1.2.2
 	golang.org/x/net v0.58.0
 	golang.org/x/text v0.41.0
