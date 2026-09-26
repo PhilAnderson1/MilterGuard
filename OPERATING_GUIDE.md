@@ -208,6 +208,12 @@ or trusted-header reason text. Shadow verification can add up to
 authentication concurrency and exact-message storage limits. Enable it only
 for a planned observation window, inspect every difference, and set it back to
 `false` afterward. It is a diagnostic switch, not a third authentication mode.
+Summarize a systemd observation window without printing per-message identifiers:
+
+```sh
+journalctl -u milterguard --since "2026-09-26 08:53:01" -o cat \
+  | python3 tools/authshadowreport.py
+```
 
 In `trusted_headers` mode, the authentication service identifiers written by
 local filters must be included in `correspondents.trusted_authserv_ids`. The
