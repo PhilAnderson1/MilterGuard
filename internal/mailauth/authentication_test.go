@@ -60,6 +60,35 @@ func TestParseReceivedSPFFallback(t *testing.T) {
 	}
 }
 
+func TestParseNormalizesOpenDMARCSPFTempfail(t *testing.T) {
+	tests := []Input{
+		{
+			AuthenticationResults: []string{`mx.example; spf=tempfail smtp.mailfrom=sender@example.com`},
+			TrustedAuthservIDs:    []string{"mx.example"},
+		},
+		{
+			ReceivedSPF:        []string{`tempfail receiver=mx.example; envelope-from=sender@example.com`},
+			TrustedAuthservIDs: []string{"mx.example"},
+		},
+	}
+	for _, input := range tests {
+		got := Parse(input)
+		want := []Result{{Method: MethodSPF, Outcome: OutcomeTemperror, Domain: "example.com"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("Parse() = %#v, want %#v", got, want)
+		}
+	}
+
+	input := Input{
+		AuthenticationResults: []string{`mx.example; dkim=tempfail header.d=example.com`},
+		TrustedAuthservIDs:    []string{"mx.example"},
+	}
+	want := []Result{{Method: MethodDKIM, Outcome: "tempfail", Domain: "example.com"}}
+	if got := Parse(input); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse() changed non-SPF extension result: %#v, want %#v", got, want)
+	}
+}
+
 func TestDomainNormalizationAndAlignment(t *testing.T) {
 	if got := NormalizeDomain(" Mail.Example.COM. "); got != "mail.example.com" {
 		t.Fatalf("NormalizeDomain() = %q", got)

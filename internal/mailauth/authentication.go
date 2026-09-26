@@ -191,7 +191,8 @@ func Parse(input Input) []Result {
 			if len(match) != 3 {
 				continue
 			}
-			result := Result{Method: Method(strings.ToLower(match[1])), Outcome: Outcome(strings.ToLower(match[2]))}
+			method := Method(strings.ToLower(match[1]))
+			result := Result{Method: method, Outcome: normalizeHeaderOutcome(method, match[2])}
 			switch result.Method {
 			case MethodDKIM:
 				result.Domain = matchedDomain(dkimDomainPattern, clause)
@@ -219,11 +220,23 @@ func Parse(input Input) []Result {
 		}
 		results = appendUnique(results, Result{
 			Method:  MethodSPF,
-			Outcome: Outcome(strings.ToLower(match[1])),
+			Outcome: normalizeHeaderOutcome(MethodSPF, match[1]),
 			Domain:  DomainFromIdentity(matchedValue(receivedSPFEnvelopePattern, header)),
 		})
 	}
 	return results
+}
+
+// normalizeHeaderOutcome translates known implementation-specific aliases at
+// the trusted-header boundary. OpenDMARC's built-in SPF verifier writes
+// "tempfail" where Authentication-Results and internal verification use
+// "temperror". Other extension values remain intact.
+func normalizeHeaderOutcome(method Method, value string) Outcome {
+	value = strings.ToLower(value)
+	if method == MethodSPF && value == "tempfail" {
+		return OutcomeTemperror
+	}
+	return Outcome(value)
 }
 
 // NormalizeDomain normalizes and validates a domain found in authentication

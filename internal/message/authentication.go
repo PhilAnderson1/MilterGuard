@@ -50,14 +50,36 @@ func authenticationResultForPrompt(result mailauth.Result) bool {
 
 func writeAuthenticationResult(b *strings.Builder, result mailauth.Result, fromDomain string) {
 	method := strings.ToUpper(string(result.Method))
+	description := authenticationOutcomeDescription(result)
 	switch result.Method {
 	case mailauth.MethodDKIM:
-		fmt.Fprintf(b, "%s: %s for signing domain %s%s\n", method, result.Outcome, availableValue(result.Domain), passAlignmentText(result, fromDomain))
+		fmt.Fprintf(b, "%s: %s for signing domain %s%s\n", method, description, availableValue(result.Domain), passAlignmentText(result, fromDomain))
 	case mailauth.MethodSPF:
-		fmt.Fprintf(b, "%s: %s for envelope-sender domain %s%s\n", method, result.Outcome, availableValue(result.Domain), passAlignmentText(result, fromDomain))
+		fmt.Fprintf(b, "%s: %s for envelope-sender domain %s%s\n", method, description, availableValue(result.Domain), passAlignmentText(result, fromDomain))
 	case mailauth.MethodDMARC:
-		fmt.Fprintf(b, "%s: %s for visible From domain %s\n", method, result.Outcome, availableValue(result.Domain))
+		fmt.Fprintf(b, "%s: %s for visible From domain %s\n", method, description, availableValue(result.Domain))
 	}
+}
+
+func authenticationOutcomeDescription(result mailauth.Result) string {
+	switch result.Outcome {
+	case mailauth.OutcomeTemperror:
+		return "verification temporarily unavailable"
+	case mailauth.OutcomePermerror:
+		switch result.Method {
+		case mailauth.MethodSPF:
+			return "invalid SPF policy"
+		case mailauth.MethodDKIM:
+			return "no usable signature"
+		case mailauth.MethodDMARC:
+			return "invalid DMARC policy"
+		}
+	case mailauth.OutcomePolicy, mailauth.OutcomeNeutral:
+		if result.Method == mailauth.MethodDKIM {
+			return "no usable signature"
+		}
+	}
+	return string(result.Outcome)
 }
 
 func passAlignmentText(result mailauth.Result, fromDomain string) string {

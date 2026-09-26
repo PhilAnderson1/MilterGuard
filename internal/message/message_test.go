@@ -794,6 +794,41 @@ func TestPromptOmitsAlignmentLanguageFromNonPassResults(t *testing.T) {
 	}
 }
 
+func TestPromptUsesFriendlyAuthenticationErrorDescriptions(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "sender@example.com")
+	m.Authentication = mailauth.NewEvidence([]mailauth.Result{
+		{Method: mailauth.MethodSPF, Outcome: mailauth.OutcomePermerror, Domain: "spf.example.com"},
+		{Method: mailauth.MethodSPF, Outcome: mailauth.OutcomeTemperror, Domain: "temp-spf.example.com"},
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy, Domain: "policy.example.com"},
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomeNeutral, Domain: "neutral.example.com"},
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePermerror, Domain: "permanent.example.com"},
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomeTemperror, Domain: "temp-dkim.example.com"},
+		{Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomePermerror, Domain: "dmarc.example.com"},
+		{Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomeTemperror, Domain: "temp-dmarc.example.com"},
+	}, "example.com")
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"SPF: invalid SPF policy for envelope-sender domain spf.example.com",
+		"SPF: verification temporarily unavailable for envelope-sender domain temp-spf.example.com",
+		"DKIM: no usable signature for signing domain policy.example.com",
+		"DKIM: no usable signature for signing domain neutral.example.com",
+		"DKIM: no usable signature for signing domain permanent.example.com",
+		"DKIM: verification temporarily unavailable for signing domain temp-dkim.example.com",
+		"DMARC: invalid DMARC policy for visible From domain dmarc.example.com",
+		"DMARC: verification temporarily unavailable for visible From domain temp-dmarc.example.com",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("friendly authentication description missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, unwanted := range []string{"permerror", "temperror", "DKIM: policy", "DKIM: neutral"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("protocol result %q leaked into prompt:\n%s", unwanted, prompt)
+		}
+	}
+}
+
 func TestPromptDescribesAuthenticatedSubmissionWithoutInboundAuthenticationResults(t *testing.T) {
 	m := New(1000)
 	m.AuthenticatedSubmission = true
