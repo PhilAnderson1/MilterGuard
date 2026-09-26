@@ -1,4 +1,4 @@
-mode: monitor
+mode: accept
 
 milter:
   socket: tcp:127.0.0.1:18996

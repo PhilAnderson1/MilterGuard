@@ -3,7 +3,7 @@
 This setup runs the trusted-header and internal authentication paths at the
 same time on loopback-only, otherwise unused Milter listeners. It does not
 change Postfix, systemd, or the production MilterGuard service. Both instances
-run in monitor mode, use separate SQLite databases, and call a deterministic
+run in accept mode, use separate SQLite databases, and call a deterministic
 local endpoint so AI output cannot obscure authentication differences.
 
 From the repository root, prepare and validate the setup:

@@ -107,12 +107,12 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 	response := responseForAction(selected, rejectMessage)
 	var err error
 	if selected == actionAccept {
-		if proposed != actionAccept && (ss.deps.filtering.AddEmailHeaders || ss.deps.mode == "tag") {
+		if proposed != actionAccept && ss.deps.filtering.AddEmailHeaders {
 			classification := "unwanted"
 			if scanErr != nil {
 				classification = "unavailable"
 			}
-			err = ss.writeTagHeaders(classification, nil, acceptedModeLabel(ss.deps.mode))
+			err = ss.writeClassificationHeaders(classification, nil, acceptModeAction)
 		} else {
 			err = ss.writeAcceptedResultHeaders(nil)
 		}

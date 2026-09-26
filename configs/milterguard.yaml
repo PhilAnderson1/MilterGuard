@@ -6,11 +6,10 @@
 #
 # Important: preserve the supplied two-space YAML indentation and do not use tabs.
 
-# Operation mode: monitor, tag, or enforce.
-# monitor logs proposed decisions but always accepts mail.
-# tag accepts all mail and adds MilterGuard result headers.
+# Operation mode: accept or enforce.
+# accept analyses and tags mail but does not reject it.
 # enforce can reject unwanted decisions according to policy below.
-mode: monitor
+mode: accept
 
 milter:
   # Listener address. The default is a loopback-only TCP listener. Change the
@@ -154,7 +153,7 @@ filtering:
   sender_domain_allowlist_require_dkim: true
 
   # Action when AI analysis fails: accept or tempfail. tempfail asks the sending
-  # mail server to retry later. Monitor mode always accepts.
+  # mail server to retry later. Accept mode always accepts.
   ai_error_action: accept
 
   # Text returned with SMTP status 550 5.7.1 when a message is rejected.
@@ -201,7 +200,7 @@ attachments:
   archive_max_uncompressed_bytes: 52428800
 
   # Action for encrypted archives and content that cannot be fully inspected:
-  # accept, reject, or tempfail. Monitor mode always accepts.
+  # accept, reject, or tempfail. Accept mode always accepts.
   encrypted_archive_action: reject
   unscannable_action: accept
 

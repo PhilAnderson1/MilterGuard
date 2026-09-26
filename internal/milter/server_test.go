@@ -948,6 +948,7 @@ func TestResultHeaderRemovalSurvivesRetentionLimit(t *testing.T) {
 
 func TestSenderResultHeadersRemovedWhenResultGenerationDisabled(t *testing.T) {
 	server, conn, done := testServer(t, fixedAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}})
+	setTestMode(server, "accept")
 	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = false })
 	defer func() { _ = conn.Close(); <-done }()
 
@@ -1015,18 +1016,20 @@ func TestAcceptedLegitimateAddsTrustedResultHeaders(t *testing.T) {
 	expectFrame(t, conn, string([]byte{responseAccept}))
 }
 
-func TestTagModeAddsHeadersForEveryAIClassification(t *testing.T) {
+func TestAcceptModeAddsConfiguredHeadersForEveryAIClassification(t *testing.T) {
 	for _, test := range []struct {
 		decision       ai.Decision
 		wantScore      string
 		wantConfidence string
+		wantAction     string
 	}{
-		{ai.Decision{Classification: "legitimate", Score: 0.8, Reasons: []string{"test"}}, "0.8", "high"},
-		{ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}, "1", "high"},
+		{ai.Decision{Classification: "legitimate", Score: 0.8, Reasons: []string{"test"}}, "0.8", "high", "accepted"},
+		{ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}, "1", "high", "accepted-accept-mode"},
 	} {
 		t.Run(test.decision.Classification, func(t *testing.T) {
 			server, conn, done := testServer(t, fixedAnalyzer{decision: test.decision})
-			setTestMode(server, "tag")
+			setTestMode(server, "accept")
+			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
 			defer func() { _ = conn.Close(); <-done }()
 
 			negotiateWithActions(t, conn, resultHeaderActions)
@@ -1043,7 +1046,7 @@ func TestTagModeAddsHeadersForEveryAIClassification(t *testing.T) {
 			expectFrame(t, conn, string(addHeaderResponse(classificationHeader, test.decision.Classification)))
 			expectFrame(t, conn, string(addHeaderResponse(scoreHeader, test.wantScore)))
 			expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, test.wantConfidence)))
-			expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-tag-mode")))
+			expectFrame(t, conn, string(addHeaderResponse(actionHeader, test.wantAction)))
 			expectFrame(t, conn, string([]byte{responseAccept}))
 		})
 	}
@@ -2046,86 +2049,78 @@ func TestAIResultLearnsInboundSender(t *testing.T) {
 	}
 }
 
-func TestNonEnforceModesDoNotLearnFromAIResultsOrDecayIPReputation(t *testing.T) {
-	for _, mode := range []string{"monitor", "tag"} {
-		t.Run(mode, func(t *testing.T) {
-			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
-			server, conn, done := testServer(t, analyzer)
-			setTestMode(server, mode)
-			correspondentCfg := config.CorrespondentsConfig{
-				LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-				LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
-				MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
-			}
-			setTestCorrespondents(server, correspondentCfg, newTestCorrespondentStore(t, correspondentCfg, server.log))
-			ipCfg := config.IPReputationConfig{
-				BlockDuration: config.Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: config.Duration(24 * time.Hour), LegitimatePerStrike: 1,
-				MaxEntries: 100,
-			}
-			setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
-			addr := netip.MustParseAddr("192.0.2.90")
-			server.sessions.policy.ipReputation.add(context.Background(), addr, connectionDNSResult{})
+func TestAcceptModeDoesNotLearnFromAIResultsOrDecayIPReputation(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
+	server, conn, done := testServer(t, analyzer)
+	setTestMode(server, "accept")
+	correspondentCfg := config.CorrespondentsConfig{
+		LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+		LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
+		MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
+	}
+	setTestCorrespondents(server, correspondentCfg, newTestCorrespondentStore(t, correspondentCfg, server.log))
+	ipCfg := config.IPReputationConfig{
+		BlockDuration: config.Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: config.Duration(24 * time.Hour), LegitimatePerStrike: 1,
+		MaxEntries: 100,
+	}
+	setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
+	addr := netip.MustParseAddr("192.0.2.90")
+	server.sessions.policy.ipReputation.add(context.Background(), addr, connectionDNSResult{})
 
-			negotiate(t, conn)
-			sendContinueFrames(t, conn,
-				connectFrame('4', addr.String()),
-				envelopeFrame(commandMail, "news@example.com"),
-				envelopeFrame(commandRecipient, "philip@invades.net"),
-				headerFrame("From", "News <news@example.com>"),
-				headerFrame("Authentication-Results", "nl.invades.net; dkim=pass header.d=example.com"),
-				[]byte{commandEndHeaders},
-			)
-			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
-				t.Fatal(err)
-			}
-			expectFrame(t, conn, string([]byte{responseAccept}))
-			_ = conn.Close()
-			<-done
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', addr.String()),
+		envelopeFrame(commandMail, "news@example.com"),
+		envelopeFrame(commandRecipient, "philip@invades.net"),
+		headerFrame("From", "News <news@example.com>"),
+		headerFrame("Authentication-Results", "nl.invades.net; dkim=pass header.d=example.com"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	_ = conn.Close()
+	<-done
 
-			if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); match.Known {
-				t.Fatalf("%s mode learned an inbound correspondent", mode)
-			}
-			strikes := len(server.sessions.policy.ipReputation.snapshot()[addr].Strikes)
-			if strikes != 1 {
-				t.Fatalf("%s mode changed IP strike count to %d", mode, strikes)
-			}
-		})
+	if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); match.Known {
+		t.Fatal("accept mode learned an inbound correspondent")
+	}
+	strikes := len(server.sessions.policy.ipReputation.snapshot()[addr].Strikes)
+	if strikes != 1 {
+		t.Fatalf("accept mode changed IP strike count to %d", strikes)
 	}
 }
 
-func TestNonEnforceModesDoNotLearnAuthenticatedRecipients(t *testing.T) {
-	for _, mode := range []string{"monitor", "tag"} {
-		t.Run(mode, func(t *testing.T) {
-			server, conn, done := testServer(t, &countingAnalyzer{})
-			setTestMode(server, mode)
-			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = false })
-			correspondentCfg := config.CorrespondentsConfig{
-				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-				MaxEntries: 100,
-			}
-			setTestCorrespondents(server, correspondentCfg, newTestCorrespondentStore(t, correspondentCfg, server.log))
+func TestAcceptModeDoesNotLearnAuthenticatedRecipients(t *testing.T) {
+	server, conn, done := testServer(t, &countingAnalyzer{})
+	setTestMode(server, "accept")
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = false })
+	correspondentCfg := config.CorrespondentsConfig{
+		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+		MaxEntries: 100,
+	}
+	setTestCorrespondents(server, correspondentCfg, newTestCorrespondentStore(t, correspondentCfg, server.log))
 
-			negotiate(t, conn)
-			sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
-			if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip")); err != nil {
-				t.Fatal(err)
-			}
-			expectNoFrame(t, conn)
-			sendContinueFrames(t, conn,
-				envelopeFrame(commandMail, "philip@invades.net"),
-				envelopeFrame(commandRecipient, "alice@example.com"),
-				[]byte{commandEndHeaders},
-			)
-			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
-				t.Fatal(err)
-			}
-			expectFrame(t, conn, string([]byte{responseAccept}))
-			_ = conn.Close()
-			<-done
-			if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
-				t.Fatalf("%s mode learned an authenticated recipient", mode)
-			}
-		})
+	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
+	if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn,
+		envelopeFrame(commandMail, "philip@invades.net"),
+		envelopeFrame(commandRecipient, "alice@example.com"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	_ = conn.Close()
+	<-done
+	if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
+		t.Fatal("accept mode learned an authenticated recipient")
 	}
 }
 

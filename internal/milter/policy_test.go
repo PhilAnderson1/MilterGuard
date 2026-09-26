@@ -32,15 +32,8 @@ func TestApplyPolicy(t *testing.T) {
 			selected: actionReject,
 		},
 		{
-			name:     "monitor records rejection but accepts",
-			mode:     "monitor",
-			decision: ai.Decision{Classification: "unwanted", Score: 1},
-			proposed: actionReject,
-			selected: actionAccept,
-		},
-		{
-			name:     "tag records rejection but accepts",
-			mode:     "tag",
+			name:     "accept records rejection but accepts",
+			mode:     "accept",
 			decision: ai.Decision{Classification: "unwanted", Score: 1},
 			proposed: actionReject,
 			selected: actionAccept,

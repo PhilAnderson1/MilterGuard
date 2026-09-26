@@ -73,7 +73,7 @@ Postfix connection
   -> trusted authentication evidence
   -> correspondent and domain-registration evidence
   -> AI classification when no deterministic result applies
-  -> accept, tag, reject or temporary failure response
+  -> accept, reject or temporary failure response
   -> asynchronous reputation and correspondent updates
   -> rejection record and optional original-message archive
 ```
@@ -128,8 +128,8 @@ After the Milter response has been determined, policy updates may:
 - Save the original rejected message.
 
 These updates are bounded by a separate timeout and occur outside the critical
-response path where possible. Monitor and tag modes do not mutate adaptive
-reputation or correspondent state.
+response path where possible. Accept mode does not mutate adaptive reputation
+or correspondent state.
 
 ## Persistence
 

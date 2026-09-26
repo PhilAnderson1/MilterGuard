@@ -1,7 +1,7 @@
 # MilterGuard Operating Guide
 
-Using the supplied default configuration, MilterGuard will initially monitor
-inbound email and report how it would identify unwanted spam, scams, threats
+Using the supplied default configuration, MilterGuard will initially analyse
+inbound email and report how it identifies unwanted spam, scams, threats
 concealed in images, and executable attachments without rejecting anything. It
 will not scan authenticated outbound email. After enforcement is enabled, it
 will provide basic virus protection by blocking executable attachments, learn
@@ -21,9 +21,9 @@ For initial installation and activation, follow the
 1. [Configure the AI service](#configure-the-ai-service)
 2. [Configure email authentication](#configure-email-authentication)
 3. [Connect Postfix to MilterGuard](#connect-postfix-to-milterguard)
-4. [Start MilterGuard in monitor mode](#start-milterguard-in-monitor-mode)
+4. [Start MilterGuard in accept mode](#start-milterguard-in-accept-mode)
 5. [Enable enforcement](#enable-enforcement)
-6. [Use tag mode](#use-tag-mode)
+6. [Use result headers](#use-result-headers)
 7. [Basic virus protection](#basic-virus-protection)
 8. [Rejection history and saved messages](#rejection-history-and-saved-messages)
 9. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
@@ -102,7 +102,7 @@ downloads remote images.
 Before starting MilterGuard, review `/etc/milterguard/detection-prompt.txt` and
 confirm that its rules match the email you want to reject. The supplied prompt
 has been tested with the configured model; test any prompt or model changes in
-monitor mode against representative legitimate and unwanted email before
+accept mode against representative legitimate and unwanted email before
 enabling rejection.
 
 ## Configure email authentication
@@ -312,11 +312,11 @@ sudo postfix check
 sudo postfix reload
 ```
 
-## Start MilterGuard in monitor mode
+## Start MilterGuard in accept mode
 
-The default `monitor` mode analyses email and logs the action MilterGuard
+The default `accept` mode analyses email and logs the action MilterGuard
 would recommend, but allows the message through. Leave it in this mode while you
-send representative test messages and observe real mail traffic. Monitor mode
+send representative test messages and observe real mail traffic. Accept mode
 does not update correspondent allowlists or IP reputation.
 
 Review the journal regularly:
@@ -336,7 +336,7 @@ the results consistently show that a change is needed.
 
 ## Enable enforcement
 
-When monitor-mode results are satisfactory, change the mode to `enforce` and
+When accept-mode results are satisfactory, change the mode to `enforce` and
 restart MilterGuard. It will then reject unwanted messages that meet the
 configured confidence threshold and block prohibited executable attachments.
 
@@ -396,14 +396,13 @@ Continue reviewing decisions after enabling enforcement. AI classification is
 not perfectly deterministic, and changes made by an AI provider can alter a
 model's behaviour even when the configured model name remains unchanged.
 
-## Use tag mode
+## Use result headers
 
-As an alternative to enforcement, setting `mode: tag` accepts all mail while
-adding result headers. Successfully analysed mail includes its classification
-and score. Attachment policy and IP reputation do not reject mail in tag mode,
-and adaptive correspondent and IP reputation data is not changed.
+The supplied configuration enables `filtering.add_email_headers`, so accepted
+mail includes MilterGuard's classification, score, confidence, and action where
+applicable. These headers are available in both `accept` and `enforce` modes.
 
-### Deliver tagged mail to the Junk folder
+### Deliver classified mail to the Junk folder
 
 MilterGuard's result headers can be used by a server-side delivery filter or
 mail client to move flagged messages into a Junk or Spam folder. For example,
@@ -418,7 +417,7 @@ if header :is "X-MilterGuard-Classification" "unwanted" {
 }
 ```
 
-This is particularly useful with `mode: tag`, where MilterGuard accepts all
+This is particularly useful with `mode: accept`, where MilterGuard accepts all
 mail and leaves the final delivery decision to another filter. To move only
 lower-confidence unwanted classifications, use:
 
@@ -449,13 +448,13 @@ if allof (
 }
 ```
 
-Set `filtering.add_email_headers` to `true` unless using `mode: tag`, which
-always adds result headers. Adjust `Junk` if your destination mailbox has a
-different name. Equivalent rules can be configured in a mail client instead of
-Sieve. Before relying on these headers, ensure that forged incoming copies
-cannot survive. MilterGuard replaces existing `X-MilterGuard-*` result headers
-when Postfix offers Milter change-header support. In `trusted_headers` mode, the
-recommended Postfix `header_checks` rules also remove them at the SMTP boundary.
+Set `filtering.add_email_headers` to `false` to disable result headers. Adjust
+`Junk` if your destination mailbox has a different name. Equivalent rules can
+be configured in a mail client instead of Sieve. Before relying on these
+headers, ensure that forged incoming copies cannot survive. MilterGuard replaces
+existing `X-MilterGuard-*` result headers when Postfix offers Milter
+change-header support. In `trusted_headers` mode, the recommended Postfix
+`header_checks` rules also remove them at the SMTP boundary.
 
 ## Basic virus protection
 
@@ -478,7 +477,7 @@ accepted, rejected, or temporarily deferred with `tempfail`. In the supplied
 configuration, encrypted archives are rejected while other unscannable content
 is accepted and continues to AI analysis. The separate `invalid_mime_action`
 setting controls permanently invalid or ambiguous MIME structure; it defaults
-to rejection because retrying cannot repair the message. Monitor mode records
+to rejection because retrying cannot repair the message. Accept mode records
 the proposed attachment action but still accepts the message.
 
 ## Rejection history and saved messages
@@ -792,7 +791,7 @@ empty file and disable any deterministic policies that the test is not intended
 to exercise. The replay tool reports the actual Milter response rather than
 only the AI classification.
 
-A test instance in `monitor` mode will therefore report every message as
+A test instance in `accept` mode will therefore report every message as
 accepted even when MilterGuard recommends rejection. In `enforce` mode, a
 message classified as unwanted will still be reported as accepted when its
 score is below the rejection threshold defined in the configuration file.

@@ -18,7 +18,7 @@ with any MTA that supports the Sendmail Milter protocol.
 - Automatically builds persistent IP reputation to block repeat offenders without repeated AI analysis.
 - Manage allowlists and review rejected mail remotely by email.
 - Works with locally hosted AI models and popular AI API services.
-- Provides a safe monitor mode that logs classifications and proposed actions without blocking email.
+- Provides a safe accept mode that logs and tags classifications without blocking email.
 - Installs as a single, statically linked binary with no runtime dependencies.
 - Includes native packages and install and uninstall scripts for painless installation and removal.
 
@@ -59,7 +59,7 @@ sudo ./install.sh
 ```
 
 Continue with the [Quick Start](QUICKSTART.md) to add an AI API key, connect
-MilterGuard to the MTA, verify its decisions in monitor mode, and enable
+MilterGuard to the MTA, verify its decisions in accept mode, and enable
 filtering.
 
 ## Documentation

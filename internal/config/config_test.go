@@ -380,6 +380,15 @@ func TestAuthenticationDefaultsInternal(t *testing.T) {
 	}
 }
 
+func TestOperationModeDefaultsAccept(t *testing.T) {
+	if defaults().Mode != "accept" {
+		t.Fatal("operation mode must default to accept")
+	}
+	if !defaults().Filtering.AddEmailHeaders {
+		t.Fatal("result headers must be enabled by default")
+	}
+}
+
 func TestConnectionLifecycleLoggingDefaultsDisabled(t *testing.T) {
 	if defaults().Logging.IncludeConnections {
 		t.Fatal("connection lifecycle logging must default to disabled")
@@ -387,17 +396,19 @@ func TestConnectionLifecycleLoggingDefaultsDisabled(t *testing.T) {
 }
 
 func TestValidateOperationModes(t *testing.T) {
-	for _, mode := range []string{"monitor", "tag", "enforce"} {
+	for _, mode := range []string{"accept", "enforce"} {
 		cfg := validConfig()
 		cfg.Mode = mode
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("mode %q rejected: %v", mode, err)
 		}
 	}
-	cfg := validConfig()
-	cfg.Mode = "invalid"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mode must") {
-		t.Fatalf("invalid mode error = %v", err)
+	for _, mode := range []string{"monitor", "tag", "invalid"} {
+		cfg := validConfig()
+		cfg.Mode = mode
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mode must") {
+			t.Fatalf("invalid mode %q error = %v", mode, err)
+		}
 	}
 }
 

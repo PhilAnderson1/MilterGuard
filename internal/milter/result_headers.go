@@ -7,6 +7,7 @@ const (
 	scoreHeader          = "X-MilterGuard-Score"
 	confidenceHeader     = "X-MilterGuard-Confidence"
 	actionHeader         = "X-MilterGuard-Action"
+	acceptModeAction     = "accepted-accept-mode"
 )
 
 var resultHeaderNames = []string{classificationHeader, scoreHeader, confidenceHeader, actionHeader}
@@ -15,11 +16,11 @@ var resultHeaderNames = []string{classificationHeader, scoreHeader, confidenceHe
 // accepted message. When configured to add headers, it replaces them with the
 // AI result, AI failure, or bypass outcome.
 func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
-	if !ss.deps.filtering.AddEmailHeaders && ss.deps.mode != "tag" {
+	if !ss.deps.filtering.AddEmailHeaders {
 		return ss.replaceResultHeaders(nil)
 	}
 	if result == nil {
-		return ss.writeTagHeaders("not-scanned", nil, "accepted-bypass")
+		return ss.writeClassificationHeaders("not-scanned", nil, "accepted-bypass")
 	}
 	var headers [][2]string
 	if result.err != nil && result.selected == actionAccept {
@@ -30,8 +31,8 @@ func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 		}
 	} else {
 		action := "accepted"
-		if ss.deps.mode == "tag" || result.proposed == actionReject {
-			action = acceptedModeLabel(ss.deps.mode)
+		if result.proposed == actionReject {
+			action = acceptModeAction
 		} else if result.classification == "unwanted" {
 			action = "accepted-below-threshold"
 		}
@@ -46,13 +47,10 @@ func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 }
 
 func (ss *session) writeAcceptedBypassHeaders() error {
-	if ss.deps.mode == "tag" {
-		return ss.writeTagHeaders("not-scanned", nil, "accepted-bypass")
-	}
 	return ss.writeAcceptedResultHeaders(nil)
 }
 
-func (ss *session) writeTagHeaders(classification string, score *float64, action string) error {
+func (ss *session) writeClassificationHeaders(classification string, score *float64, action string) error {
 	headers := [][2]string{{classificationHeader, classification}}
 	if score != nil {
 		headers = append(headers, [2]string{scoreHeader, strconv.FormatFloat(*score, 'f', -1, 64)})

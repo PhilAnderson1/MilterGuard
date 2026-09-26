@@ -66,8 +66,8 @@ func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, doma
 
 	var err error
 	if selected == actionAccept {
-		if ss.deps.filtering.AddEmailHeaders || ss.deps.mode == "tag" {
-			err = ss.writeTagHeaders("unwanted", nil, acceptedModeLabel(ss.deps.mode))
+		if ss.deps.filtering.AddEmailHeaders {
+			err = ss.writeClassificationHeaders("unwanted", nil, acceptModeAction)
 		} else {
 			err = ss.writeAcceptedResultHeaders(nil)
 		}

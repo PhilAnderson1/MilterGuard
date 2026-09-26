@@ -233,7 +233,7 @@ func Load(path string) (Config, error) {
 
 func defaults() Config {
 	return Config{
-		Mode: "monitor",
+		Mode: "accept",
 		Milter: MilterConfig{
 			Socket: "tcp:127.0.0.1:8895", Timeout: Duration(time.Minute),
 			ConnectionDNSTimeout: Duration(5 * time.Second), MaxMessageSize: 10 << 20, MaxConnections: 64,
@@ -307,8 +307,8 @@ func defaults() Config {
 // Validate rejects unsafe, contradictory, or incomplete settings that cannot
 // be handled reliably at runtime.
 func (c Config) Validate() error {
-	if c.Mode != "monitor" && c.Mode != "tag" && c.Mode != "enforce" {
-		return fmt.Errorf("mode must be monitor, tag, or enforce")
+	if c.Mode != "accept" && c.Mode != "enforce" {
+		return fmt.Errorf("mode must be accept or enforce")
 	}
 	switch strings.ToLower(c.Logging.Level) {
 	case "debug", "info", "warn", "error":

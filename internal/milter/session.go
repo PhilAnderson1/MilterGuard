@@ -264,7 +264,7 @@ func (ss *session) negotiate(payload []byte) bool {
 	// Request result-header capabilities even when result generation is disabled:
 	// sender-supplied X-MilterGuard result headers must still be removable.
 	requestedActions := offeredActions & resultHeaderActions
-	wantsResultHeaders := ss.deps.filtering.AddEmailHeaders || ss.deps.mode == "tag"
+	wantsResultHeaders := ss.deps.filtering.AddEmailHeaders
 	if wantsResultHeaders && offeredActions&actionAddHeaders == 0 {
 		ss.deps.log.Warn("result headers disabled for Milter connection because MTA did not offer add-header support",
 			"offered_actions", offeredActions)
