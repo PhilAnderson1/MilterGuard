@@ -32,20 +32,14 @@ configuration, security, testing, and maintenance information.
    sudo ./install.sh
    ```
 
-3. Choose the AI service MilterGuard will use. A compatible locally hosted AI
-   server is recommended; see the Operating Guide for more information. If you
-   do not operate one, create an OpenRouter account and API key at
-   https://openrouter.ai. Using the AI model named in the supplied configuration
-   typically costs around US$0.25 per 1,000 scanned emails, although the actual
-   cost varies with message length and provider pricing.
+3. Configure the AI service in `/etc/milterguard/milterguard.yaml`. A compatible
+   locally hosted service is recommended, but the supplied configuration works
+   with OpenRouter after adding an [OpenRouter API key](https://openrouter.ai)
+   to `ai.api_key`. For another hosted service or a local AI server, configure
+   the endpoint URL, endpoint type, model name, and API key. If the local server
+   does not require authentication, use a non-empty placeholder key.
 
-4. Edit `/etc/milterguard/milterguard.yaml`. For OpenRouter, the supplied
-   settings should work after adding your API key to `ai.api_key`. For another
-   hosted service or a local AI server, configure the endpoint URL, endpoint
-   type, model name, and API key. If the local server does not require
-   authentication, use a non-empty placeholder key.
-
-5. Validate the configuration:
+4. Validate the configuration:
 
    ```sh
    sudo milterguard \
@@ -57,58 +51,47 @@ configuration, security, testing, and maintenance information.
    port is available, then sends a synthetic test email to the configured AI
    service and checks its response.
 
-6. Enable and start MilterGuard:
+   If port `8895` is already in use, edit `milter.socket` in the configuration
+   file to use an unused loopback port instead. Use that same replacement port
+   in the Postfix `smtpd_milters` setting in step 6.
+
+5. Enable and start MilterGuard:
 
    ```sh
    sudo systemctl enable --now milterguard
    ```
 
-7. Add MilterGuard to the end of `smtpd_milters` in
-   `/etc/postfix/main.cf`. Use the appropriate example for your server:
+6. Add MilterGuard to the end of `smtpd_milters` in
+   `/etc/postfix/main.cf`:
 
    ```text
    milter_content_timeout = 600s
 
    # MilterGuard only
    smtpd_milters = inet:127.0.0.1:8895
-
-   # OpenDKIM, OpenDMARC and MilterGuard
-   smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
    ```
 
-   If you use OpenDKIM without OpenDMARC, omit the port 8892 entry. Use the
-   actual ports or sockets configured on your server, and keep MilterGuard
-   last in `smtpd_milters`. If `non_smtpd_milters` is already configured, leave
-   its existing filters in place but do not add MilterGuard to it. MilterGuard
-   should process SMTP mail only; filtering locally submitted system mail can
-   cause legitimate notifications to be rejected.
-
-8. Configure Postfix to remove externally supplied authentication and
-   MilterGuard result headers before the Milters run, preventing remote senders
-   from forging trusted evidence. Add this rule to `/etc/postfix/header_checks`:
+   If `smtpd_milters` already contains other filters, append MilterGuard to the
+   existing comma-separated list and keep it last. For example:
 
    ```text
-   /^Authentication-Results:/ IGNORE
-   /^Received-SPF:/ IGNORE
-   /^X-MilterGuard-(Classification|Score|Confidence|Action):/ IGNORE
+   smtpd_milters = unix:/run/existing-filter/filter.sock, inet:127.0.0.1:8895
    ```
 
-   Then enable that table in `/etc/postfix/main.cf`, merging it with any
-   existing `header_checks` configuration:
+   See the [Operating Guide](OPERATING_GUIDE.md) if another filter rewrites
+   message content. Do not add MilterGuard to `non_smtpd_milters`, because that
+   setting also filters locally generated system mail.
 
-   ```text
-   header_checks = regexp:/etc/postfix/header_checks
-   ```
-
-9. Check and reload Postfix:
+7. Check and reload Postfix:
 
    ```sh
    sudo postfix check
    sudo postfix reload
    ```
 
-MilterGuard initially runs in `monitor` mode: it analyses mail and logs its
-decisions without rejecting anything. Review its decisions with:
+MilterGuard should now be processing mail through Postfix. It initially runs in
+`monitor` mode, so it analyses each message and logs its decision without
+rejecting anything. Review its decisions with:
 
 ```sh
 sudo journalctl -u milterguard --since yesterday --no-pager -o cat
@@ -121,10 +104,6 @@ filtering with:
 ```sh
 sudo systemctl restart milterguard
 ```
-
-The supplied configuration accepts messages if AI analysis fails. To defer
-those messages until the sending server retries, set
-`filtering.ai_error_action: tempfail` before enabling enforcement.
 
 See the [Operating Guide](OPERATING_GUIDE.md) for detailed configuration,
 testing, security, and maintenance information.
