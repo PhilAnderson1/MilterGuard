@@ -74,5 +74,21 @@ slots and a common 100 ms deadline. It confirms at most four active DNS
 lookups, prevents expired queued requests from starting resolver work, and
 drains without leaked work under the race detector.
 
-Configured maximum-message/maximum-connection stress and the production
-same-time observation period remain rollout checks.
+## Configured-limit storage stress
+
+`tools/authstress` held 64 stores of 10,485,760 bytes simultaneously, matching
+the distributed `milter.max_connections` and `milter.max_message_size`
+defaults. Both modes retained and read the full 671,088,640 logical bytes.
+
+| Storage | Fill | Close | Peak RSS | Filled Go heap | Open FDs (before/filled/after) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| memory | 1.319 s | <1 ms | 673,996 KiB | 681,725,208 bytes | 8 / 8 / 8 |
+| unlinked file | 1.278 s | 352 ms | 17,744 KiB | 10,676,192 bytes | 8 / 72 / 8 |
+
+The file-mode run used a disk-backed workspace temporary directory rather than
+the host's small tmpfs. It wrote the expected 640 MiB, returned to the baseline
+descriptor count, and left the directory empty. The memory result confirms the
+documented approximately 640 MiB additional worst-case bound; file mode is the
+appropriate setting where that resident-memory headroom is unavailable.
+
+The production same-time observation period remains a rollout check.

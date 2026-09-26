@@ -72,5 +72,6 @@ the ordinary-message memory/latency sample are documented in
 `CORPUS_COMPARISON.md`. A deterministic unavailable-resolver load test covers
 queue deadlines, lookup concurrency and cleanup under the race detector.
 
-Configured maximum-message/maximum-connection stress and the production
-same-time observation period remain rollout checks.
+Configured maximum-message/maximum-connection stress has passed for memory and
+unlinked-file storage. The production same-time observation period remains a
+rollout check.
