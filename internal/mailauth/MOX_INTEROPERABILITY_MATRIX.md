@@ -64,11 +64,13 @@ The adapter preserves Mox's aligned-SPF/aligned-DKIM conclusions, policy
 domain, alignment modes, dispositions, percentage and sampled-policy decision.
 Mox's rejection recommendation is not converted into a Milter action.
 
-## Still required
+## Saved-corpus and load follow-up
 
-- Replay the representative legitimate, spam and scam corpora through both the
-  Mox adapter and the existing OpenDKIM/OpenDMARC path.
-- Investigate and document every disagreement, including expiration,
-  forwarding and mailing-list transformations.
-- Run unavailable-recursive-resolver load tests and final memory, latency and
-  DNS-volume measurements with the adapter selected in internal mode.
+The representative legitimate, spam, scam and deliberately failing corpus has
+been compared with saved OpenDKIM/OpenDMARC-era results. Every disagreement and
+the ordinary-message memory/latency sample are documented in
+`CORPUS_COMPARISON.md`. A deterministic unavailable-resolver load test covers
+queue deadlines, lookup concurrency and cleanup under the race detector.
+
+Configured maximum-message/maximum-connection stress and the production
+same-time observation period remain rollout checks.

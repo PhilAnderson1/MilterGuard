@@ -85,6 +85,9 @@ func (v *Verifier) Verify(parent context.Context, transaction mailauth.Transacti
 	select {
 	case v.slots <- struct{}{}:
 		defer func() { <-v.slots }()
+		if err := ctx.Err(); err != nil {
+			return mailauth.Evidence{}, fmt.Errorf("authentication queue: %w", err)
+		}
 	case <-ctx.Done():
 		return mailauth.Evidence{}, fmt.Errorf("authentication queue: %w", ctx.Err())
 	}
@@ -104,6 +107,9 @@ func (v *Verifier) Verify(parent context.Context, transaction mailauth.Transacti
 func (v *Verifier) verifyTransaction(ctx context.Context, transaction mailauth.Transaction) (mailauth.Evidence, error) {
 	spfResult, spfStatus, spfDomain := v.verifySPF(ctx, transaction)
 	results := []mailauth.Result{spfResult}
+	if err := ctx.Err(); err != nil {
+		return mailauth.Evidence{}, err
+	}
 
 	if transaction.Message == nil || transaction.MessageSize <= 0 {
 		return unavailableMessageEvidence(results, transaction.VisibleFromDomain, "exact message unavailable", nil)
@@ -125,6 +131,9 @@ func (v *Verifier) verifyTransaction(ctx context.Context, transaction mailauth.T
 	}
 	dkimResults, err := dkim.Verify(ctx, slog.New(slog.DiscardHandler), v.resolver,
 		transaction.SMTPUTF8, policy, message, true)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return mailauth.Evidence{}, contextErr
+	}
 	if readErr := observedMessage.Err(); readErr != nil {
 		return unavailableMessageEvidence(results, transaction.VisibleFromDomain, "exact message read failed", readErr)
 	}

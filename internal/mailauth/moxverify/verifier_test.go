@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -375,6 +378,62 @@ func TestVerifyBoundsConcurrentQueue(t *testing.T) {
 	}
 }
 
+func TestUnavailableResolverLoadRemainsBounded(t *testing.T) {
+	const (
+		requests      = 64
+		maxConcurrent = 4
+	)
+	resolver := &unavailableResolver{}
+	verifier, err := New(Options{
+		Timeout: 100 * time.Millisecond, MaxConcurrent: maxConcurrent,
+		Logger: slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier.resolver = resolver
+	transaction := testTransaction([]byte("From: Alice <alice@example.test>\r\n\r\n"))
+	start := make(chan struct{})
+	errorsSeen := make(chan error, requests)
+	var parent context.Context
+	var ready, wait sync.WaitGroup
+	ready.Add(requests)
+	for range requests {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			ready.Done()
+			<-start
+			_, err := verifier.Verify(parent, transaction)
+			errorsSeen <- err
+		}()
+	}
+	ready.Wait()
+	parent, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	close(start)
+	wait.Wait()
+	close(errorsSeen)
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("unavailable-resolver batch took %v, want bounded near verifier timeout", elapsed)
+	}
+	for err := range errorsSeen {
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Verify error = %v, want deadline exceeded", err)
+		}
+	}
+	if max := resolver.maximum.Load(); max > maxConcurrent {
+		t.Fatalf("simultaneous DNS lookups = %d, want at most %d", max, maxConcurrent)
+	}
+	if calls := resolver.calls.Load(); calls != maxConcurrent {
+		t.Fatalf("DNS lookups = %d, want exactly one per active slot", calls)
+	}
+	if current := resolver.current.Load(); current != 0 {
+		t.Fatalf("DNS lookups still active after batch: %d", current)
+	}
+}
+
 func TestTranslateDKIMPreservesBoundedSignatureMetadata(t *testing.T) {
 	localpart := smtp.Localpart(strings.Repeat("é", 200))
 	source := dkim.Result{
@@ -394,6 +453,13 @@ func TestTranslateDKIMPreservesBoundedSignatureMetadata(t *testing.T) {
 	}
 	if len(result.Identity) > 320 || !utf8.ValidString(result.Identity) {
 		t.Fatalf("identity was not safely bounded: %q", result.Identity)
+	}
+}
+
+func TestClassifyDKIMDistinguishesExpiredSignature(t *testing.T) {
+	category, reason := classifyDKIM(dkim.StatusPermerror, fmt.Errorf("verification: %w", dkim.ErrSigExpired))
+	if category != mailauth.ErrorPolicy || reason != "DKIM signature expired" {
+		t.Fatalf("expired signature classification = %q %q", category, reason)
 	}
 }
 
@@ -458,3 +524,20 @@ func readFixture(t *testing.T, name string) []byte {
 type failingReaderAt struct{ err error }
 
 func (r failingReaderAt) ReadAt([]byte, int64) (int, error) { return 0, r.err }
+
+type unavailableResolver struct {
+	dns.MockResolver
+	calls   atomic.Int32
+	current atomic.Int32
+	maximum atomic.Int32
+}
+
+func (r *unavailableResolver) LookupTXT(ctx context.Context, _ string) ([]string, adns.Result, error) {
+	r.calls.Add(1)
+	current := r.current.Add(1)
+	defer r.current.Add(-1)
+	for maximum := r.maximum.Load(); current > maximum && !r.maximum.CompareAndSwap(maximum, current); maximum = r.maximum.Load() {
+	}
+	<-ctx.Done()
+	return nil, adns.Result{}, ctx.Err()
+}

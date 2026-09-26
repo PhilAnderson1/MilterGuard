@@ -105,6 +105,22 @@ func classifyDKIM(status dkim.Status, err error) (mailauth.ErrorCategory, string
 		return mailauth.ErrorLimit, "DKIM signature limit exceeded"
 	case status == dkim.StatusPolicy || errors.Is(err, dkim.ErrPolicy):
 		return mailauth.ErrorPolicy, "signature rejected by DKIM policy"
+	case errors.Is(err, dkim.ErrSigExpired):
+		return mailauth.ErrorPolicy, "DKIM signature expired"
+	case errors.Is(err, dkim.ErrSigAlgMismatch):
+		return mailauth.ErrorPolicy, "DKIM signature algorithm disallowed by key"
+	case errors.Is(err, dkim.ErrHashAlgNotAllowed):
+		return mailauth.ErrorPolicy, "DKIM hash algorithm disallowed by key"
+	case errors.Is(err, dkim.ErrKeyNotForEmail):
+		return mailauth.ErrorPolicy, "DKIM key not permitted for email"
+	case errors.Is(err, dkim.ErrDomainIdentityMismatch):
+		return mailauth.ErrorPolicy, "DKIM identity disallowed by key"
+	case errors.Is(err, dkim.ErrKeyRevoked):
+		return mailauth.ErrorPolicy, "DKIM key revoked"
+	case errors.Is(err, dkim.ErrWeakKey):
+		return mailauth.ErrorPolicy, "DKIM key too weak"
+	case errors.Is(err, dkim.ErrTLD):
+		return mailauth.ErrorPolicy, "DKIM signing domain rejected"
 	case errors.Is(err, dkim.ErrMultipleRecords), errors.Is(err, dkim.ErrSyntax):
 		return mailauth.ErrorSyntax, "invalid DKIM key records"
 	case errors.Is(err, dkim.ErrDNS):
