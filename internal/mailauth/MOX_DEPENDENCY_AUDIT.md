@@ -93,14 +93,14 @@ resolve/validate/pinned-dial sequence. The RDAP path still rejects the entire
 answer set if any returned address is unsafe, then dials a validated IP
 directly.
 
-The dedicated authentication resolver will be `mox/dns.StrictResolver` backed
-by its own `adns.Resolver`. It will not replace any existing MilterGuard
-resolver. `adns` does not implement a persistent DNS response cache or expose
-response TTLs; it coalesces concurrent lookups and briefly caches `/etc/hosts`
-data. Positive and negative TTL caching therefore remains the responsibility
-of the configured recursive DNS resolver. This avoids a permanent application
-cache but means deployments need a suitable local or network recursive
-resolver.
+The dedicated authentication resolver is a `mox/dns.StrictResolver` backed by
+its own strict `adns.Resolver`; it does not replace any existing MilterGuard
+resolver or alias either package's global default. `adns` does not implement a
+persistent DNS response cache or expose response TTLs; it coalesces concurrent
+lookups and briefly caches `/etc/hosts` data. Positive and negative TTL caching
+therefore remains the responsibility of the configured recursive DNS resolver.
+This avoids a permanent application cache but means deployments need a suitable
+local or network recursive resolver.
 
 Other relevant initializers are:
 
@@ -135,3 +135,10 @@ The dependency audit passes subject to these implementation constraints:
    persistence state.
 5. Static size and module/licence inventories are rechecked after the real
    verifier is linked.
+
+The first four conditions are implemented by `internal/mailauth/moxverify`.
+The adapter owns whole-operation timeout and concurrency bounds, caps DKIM
+verification and retained results, translates immediately into MilterGuard
+types, and discards Mox's verbose DNS diagnostics. It is not yet selected by
+the runtime composition root, so the final linked-executable size recheck
+remains pending until internal mode is wired.

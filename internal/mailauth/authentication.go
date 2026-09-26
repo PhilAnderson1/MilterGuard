@@ -76,6 +76,7 @@ type Result struct {
 	HeaderCanonicalization string
 	BodyCanonicalization   string
 	BodyLengthLimited      bool
+	BodyLength             int64
 
 	// SPF details.
 	SPFIdentity  string // "mailfrom" or "helo"
@@ -88,6 +89,7 @@ type Result struct {
 	DKIMAlignmentMode string
 	SPFAlignmentMode  string
 	PolicyPercentage  int
+	PolicyApplied     bool
 	AlignedSPFPass    bool
 	AlignedDKIMPass   bool
 }
@@ -112,6 +114,7 @@ type Transaction struct {
 	ReceiverHostname      string
 	ReceiverIP            netip.Addr
 	VisibleFromDomain     string
+	SMTPUTF8              bool
 	Message               io.ReaderAt
 	MessageSize           int64
 	AuthenticationResults []string

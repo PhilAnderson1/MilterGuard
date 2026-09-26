@@ -1,8 +1,9 @@
 # Mox authentication field inventory
 
-This Stage 1 inventory is based on Mox v0.0.17. Production code does not import
-Mox yet. Stage 2 adapters must translate these values into the bounded
-MilterGuard-owned types in this package.
+This inventory is based on Mox v0.0.17. `internal/mailauth/moxverify` is the
+only production package that imports Mox and translates these values into the
+bounded MilterGuard-owned types in its parent package. The adapter is not yet
+wired into the runtime composition root.
 
 ## SPF
 
@@ -31,7 +32,7 @@ the order and must not collapse results with the same domain.
 | `Sig.Domain`, `Sig.Selector`, `Sig.Identity` | Preserve as domain, selector and bounded identity. Domain is used for alignment. |
 | signing/hash algorithms | Preserve together in `Result.Algorithm`. |
 | header/body canonicalization | Preserve separately. Useful for diagnostics and interoperability. |
-| `Sig.Length >= 0` | Preserve as `BodyLengthLimited`; default policy results remain policy and cannot authenticate. |
+| `Sig.Length >= 0` | Preserve the presence as `BodyLengthLimited` and the declared value as `BodyLength`; default policy results remain policy and cannot authenticate. |
 | `RecordAuthentic` | Preserve as `DNSAuthentic`. |
 | error | Map to bounded `ErrorCategory` and `Reason`. |
 | signed-header names and query methods | Initially discard as parser detail; they can be numerous and are not policy inputs. |
@@ -51,11 +52,18 @@ the order and must not collapse results with the same domain.
 | record `Policy`, `SubdomainPolicy` | Preserve as bounded dispositions. |
 | record `ADKIM`, `ASPF`, `Percentage` | Preserve as alignment modes and policy percentage. |
 | `RecordAuthentic` | Preserve as `DNSAuthentic`. |
+| `dmarc.Verify` `useResult` | Preserve as `PolicyApplied`; this records percentage sampling without turning Mox's rejection recommendation into a Milter action. |
 | error | Map to bounded `ErrorCategory` and `Reason`. |
 | `Reject` | Do not turn directly into a Milter action. Preserve the published/effective policy fields; rejection remains explicit MilterGuard policy. |
 | reporting URIs, intervals, formats and failure options | Discard for initial verification: MilterGuard does not generate DMARC reports and these values can be large. |
 | complete TXT record | Discard after translating its bounded semantics. |
 
-All domain strings are normalized before storage. Provider adapters must cap
-identity, selector, mechanism and reason lengths and must never place raw Mox
-types, DNS records or errors in session, prompt or persistence state.
+All domain strings are normalized before storage. The adapter retains at most
+32 DKIM signature results and adds one resource-limit result if more signatures
+were present. Signatures beyond the limit are rejected by policy before DNS or
+cryptographic verification. Selectors and domains are capped at 253 bytes,
+identities at 320, SPF mechanisms at 256, algorithms at 64, and canonicalization
+names at 16. Reasons come from a fixed local vocabulary rather than raw Mox or
+resolver errors. Raw Mox types, DNS records and errors never enter session,
+prompt or persistence state, and Mox's verbose DNS logging is discarded in
+favor of one bounded service summary.
