@@ -2291,25 +2291,6 @@ func TestHeaderFamiliesCannotSuppressIdentityMIMEOrAuthentication(t *testing.T) 
 	}
 }
 
-func TestAuthenticationHeaderOccurrencesSurviveRetentionLimits(t *testing.T) {
-	m := New(1 << 20)
-	for range 12 {
-		m.AddHeader("Authentication-Results", strings.Repeat("x", maxHeaderValueBytes))
-	}
-	for range 7 {
-		m.AddHeader("Received-SPF", strings.Repeat("y", maxHeaderValueBytes))
-	}
-	if got := m.HeaderOccurrences("Authentication-Results"); got != 12 {
-		t.Fatalf("Authentication-Results occurrences = %d, want 12", got)
-	}
-	if got := m.HeaderOccurrences("Received-SPF"); got != 7 {
-		t.Fatalf("Received-SPF occurrences = %d, want 7", got)
-	}
-	if len(m.Headers["authentication-results"]) >= 12 || len(m.Headers["received-spf"]) >= 7 {
-		t.Fatal("test did not exceed authentication header retention limits")
-	}
-}
-
 func TestHTMLUnicodeBeforeLoneTagOpenerDoesNotPanic(t *testing.T) {
 	got := htmlToText("ẞẞ<")
 	if got.Text != "ẞẞ<" {

@@ -281,6 +281,7 @@ func TestExactMessageClosesOnAbortAndDisconnect(t *testing.T) {
 		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
 		Filtering: config.FilteringConfig{RejectScore: .9, AIErrorAction: "accept"},
 	}, fixedAnalyzer{}, log)
+	server.sessions.authenticationMode = config.AuthenticationModeInternal
 	var storesMu sync.Mutex
 	var stores []*trackedExactMessage
 	server.sessions.newExactMessage = func(string, int64) (mailauth.ExactMessage, error) {
@@ -338,6 +339,7 @@ func TestExactMessageClosesAfterAcceptAndReject(t *testing.T) {
 				AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
 				Filtering: config.FilteringConfig{RejectScore: .9, AIErrorAction: "accept", RejectMessage: "blocked"},
 			}, fixedAnalyzer{decision: test.decision}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			server.sessions.authenticationMode = config.AuthenticationModeInternal
 			server.sessions.newExactMessage = registry.factory
 			done := make(chan struct{})
 			go func() {
@@ -381,6 +383,7 @@ func TestExactMessageClosesOnPartialFrameTimeout(t *testing.T) {
 		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
 		Filtering: config.FilteringConfig{RejectScore: .9, AIErrorAction: "accept"},
 	}, fixedAnalyzer{}, log)
+	server.sessions.authenticationMode = config.AuthenticationModeInternal
 	server.sessions.newExactMessage = registry.factory
 	done := make(chan struct{})
 	go func() {
@@ -413,6 +416,7 @@ func TestExactMessageClosesWhenSessionPanics(t *testing.T) {
 		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
 		Filtering: config.FilteringConfig{RejectScore: .9, AIErrorAction: "accept"},
 	}, fixedAnalyzer{}, log)
+	server.sessions.authenticationMode = config.AuthenticationModeInternal
 	server.sessions.newExactMessage = registry.factory
 	done := make(chan struct{})
 	go func() {

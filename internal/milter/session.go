@@ -837,7 +837,7 @@ func (ss *session) resetMessage(phase protocolPhase) {
 	ss.visibleSenderDomain = ""
 	ss.smtpUTF8 = false
 	ss.phase = phase
-	if phase != phaseEnvelope {
+	if phase != phaseEnvelope || !ss.requiresExactMessage() {
 		ss.exactMessage = nil
 		return
 	}
@@ -850,6 +850,10 @@ func (ss *session) resetMessage(phase protocolPhase) {
 		factory = mailauth.NewExactMessage
 	}
 	ss.exactMessage, ss.exactMessageErr = factory(storage, ss.deps.protocol.maxMessageSize)
+}
+
+func (ss *session) requiresExactMessage() bool {
+	return ss.internalAuthentication() || ss.deps.shadowAuthentication != nil
 }
 
 func (ss *session) captureExact(write func(mailauth.ExactMessage) error) {

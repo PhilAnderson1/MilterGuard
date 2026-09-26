@@ -129,9 +129,8 @@ type Verifier interface {
 	Verify(context.Context, Transaction) (Evidence, error)
 }
 
-// HeaderVerifier is the Stage 1 compatibility provider. It preserves current
-// behavior by trusting only configured local Authentication-Results and
-// Received-SPF producers.
+// HeaderVerifier derives evidence from Authentication-Results and Received-SPF
+// fields written by explicitly trusted local authentication services.
 type HeaderVerifier struct{}
 
 func (HeaderVerifier) Verify(_ context.Context, transaction Transaction) (Evidence, error) {

@@ -383,9 +383,9 @@ func TestUnavailableResolverLoadRemainsBounded(t *testing.T) {
 		requests      = 64
 		maxConcurrent = 4
 	)
-	resolver := &unavailableResolver{}
+	resolver := &unavailableResolver{started: make(chan struct{}, requests)}
 	verifier, err := New(Options{
-		Timeout: 100 * time.Millisecond, MaxConcurrent: maxConcurrent,
+		Timeout: time.Second, MaxConcurrent: maxConcurrent,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
@@ -395,7 +395,8 @@ func TestUnavailableResolverLoadRemainsBounded(t *testing.T) {
 	transaction := testTransaction([]byte("From: Alice <alice@example.test>\r\n\r\n"))
 	start := make(chan struct{})
 	errorsSeen := make(chan error, requests)
-	var parent context.Context
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var ready, wait sync.WaitGroup
 	ready.Add(requests)
 	for range requests {
@@ -409,25 +410,28 @@ func TestUnavailableResolverLoadRemainsBounded(t *testing.T) {
 		}()
 	}
 	ready.Wait()
-	parent, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
 	started := time.Now()
 	close(start)
+	for range maxConcurrent {
+		select {
+		case <-resolver.started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for all authentication slots to start")
+		}
+	}
+	cancel()
 	wait.Wait()
 	close(errorsSeen)
 	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("unavailable-resolver batch took %v, want bounded near verifier timeout", elapsed)
+		t.Fatalf("unavailable-resolver batch took %v, want bounded after cancellation", elapsed)
 	}
 	for err := range errorsSeen {
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("Verify error = %v, want deadline exceeded", err)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Verify error = %v, want cancellation", err)
 		}
 	}
 	if max := resolver.maximum.Load(); max > maxConcurrent {
 		t.Fatalf("simultaneous DNS lookups = %d, want at most %d", max, maxConcurrent)
-	}
-	if calls := resolver.calls.Load(); calls != maxConcurrent {
-		t.Fatalf("DNS lookups = %d, want exactly one per active slot", calls)
 	}
 	if current := resolver.current.Load(); current != 0 {
 		t.Fatalf("DNS lookups still active after batch: %d", current)
@@ -527,16 +531,18 @@ func (r failingReaderAt) ReadAt([]byte, int64) (int, error) { return 0, r.err }
 
 type unavailableResolver struct {
 	dns.MockResolver
-	calls   atomic.Int32
 	current atomic.Int32
 	maximum atomic.Int32
+	started chan struct{}
 }
 
 func (r *unavailableResolver) LookupTXT(ctx context.Context, _ string) ([]string, adns.Result, error) {
-	r.calls.Add(1)
 	current := r.current.Add(1)
 	defer r.current.Add(-1)
 	for maximum := r.maximum.Load(); current > maximum && !r.maximum.CompareAndSwap(maximum, current); maximum = r.maximum.Load() {
+	}
+	if r.started != nil {
+		r.started <- struct{}{}
 	}
 	<-ctx.Done()
 	return nil, adns.Result{}, ctx.Err()

@@ -457,6 +457,7 @@ func TestAuthenticationProviderReceivesExactTransactionAndFeedsPrompt(t *testing
 	}
 	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 1)}
 	server, conn, done := testServer(t, analyzer)
+	server.sessions.authenticationMode = config.AuthenticationModeInternal
 	server.sessions.authentication = verifier
 	defer func() { _ = conn.Close(); <-done }()
 

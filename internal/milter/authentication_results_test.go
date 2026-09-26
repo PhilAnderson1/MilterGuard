@@ -126,6 +126,38 @@ func TestInternalAuthenticationRuntimeComposition(t *testing.T) {
 	}
 }
 
+func TestExactMessageCaptureMatchesAuthenticationProviderNeeds(t *testing.T) {
+	tests := []struct {
+		name   string
+		mode   string
+		shadow mailauth.Verifier
+		want   bool
+	}{
+		{name: "trusted headers", mode: config.AuthenticationModeTrustedHeaders},
+		{name: "internal", mode: config.AuthenticationModeInternal, want: true},
+		{name: "shadow internal", mode: config.AuthenticationModeTrustedHeaders, shadow: &fixedAuthenticationVerifier{}, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			created := false
+			ss := &session{deps: &sessionDependencies{
+				authenticationMode:   test.mode,
+				shadowAuthentication: test.shadow,
+				protocol:             protocolOptions{maxMessageSize: 1024, exactStorage: "memory"},
+				newExactMessage: func(string, int64) (mailauth.ExactMessage, error) {
+					created = true
+					return mailauth.NewExactMessage("memory", 1024)
+				},
+			}}
+			ss.resetMessage(phaseEnvelope)
+			defer ss.closeExactMessage()
+			if created != test.want {
+				t.Fatalf("exact-message store created = %t, want %t", created, test.want)
+			}
+		})
+	}
+}
+
 func TestInternalModeIgnoresAuthenticationHeadersWithoutMutatingThem(t *testing.T) {
 	verifier := &recordingVerifier{observations: make(chan authenticationObservation, 1)}
 	server, conn, done := testServer(t, fixedAnalyzer{})
