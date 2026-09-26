@@ -240,7 +240,7 @@ func defaults() Config {
 			AllowedPeerIPs: []string{"127.0.0.0/8", "::1/128"},
 		},
 		Authentication: AuthenticationConfig{
-			Mode: AuthenticationModeTrustedHeaders, Timeout: Duration(10 * time.Second), MaxConcurrent: 8, MessageStorage: "memory",
+			Mode: AuthenticationModeInternal, Timeout: Duration(10 * time.Second), MaxConcurrent: 8, MessageStorage: "memory",
 		},
 		AI: AIConfig{
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",

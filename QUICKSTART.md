@@ -90,7 +90,8 @@ configuration, security, testing, and maintenance information.
 
 MilterGuard should now be processing mail through Postfix. It initially runs in
 `monitor` mode, so it analyses each message and logs its decision without
-rejecting anything. Review its decisions with:
+rejecting anything. Review its decisions by looking at the MilterGuard-added
+headers in received emails or with:
 
 ```sh
 sudo journalctl -u milterguard --since yesterday --no-pager -o cat

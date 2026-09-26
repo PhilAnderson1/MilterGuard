@@ -46,10 +46,10 @@ milter:
   max_message_size: 10485760
 
 authentication:
-  # Authentication source: trusted_headers or internal. trusted_headers keeps
-  # compatibility with OpenDKIM/OpenDMARC during migration. internal makes
-  # MilterGuard calculate SPF, DKIM, and DMARC directly.
-  mode: trusted_headers
+  # Authentication source: internal or trusted_headers. internal makes
+  # MilterGuard calculate SPF, DKIM, and DMARC directly and is recommended for
+  # new installations. trusted_headers reuses results from existing filters.
+  mode: internal
 
   # Whole-operation timeout for internal SPF/DKIM/DMARC verification.
   timeout: 10s
@@ -280,17 +280,17 @@ rejection_history:
   message_max_total_bytes: 1073741824
 
 ip_reputation:
-  # Temporarily blacklist the sending IP after rejecting an email, avoiding further
+  # Temporarily block the sending IP after rejecting an email, avoiding further
   # AI requests. Uses Go duration syntax; 0s disables.
   block_duration: 60m
 
-  # Rejections within the rolling window required for longer IP blacklisting.
+  # Rejections within the rolling window required for longer IP blocking.
   # Set to 0 to disable escalation.
   repeat_threshold: 3
   repeat_window: 720h
   repeat_block_duration: 720h
 
-  # Extend the repeat-offender blacklisting timeout after each delivery attempt.
+  # Extend the repeat-offender block after each delivery attempt.
   repeat_refresh_on_attempt: true
 
   # Legitimate emails required to remove one IP strike. Set to 0 to disable.
@@ -308,7 +308,7 @@ ip_reputation:
     - 127.0.0.0/8
     - ::1/128
 
-  # Never blacklist IPs with forward-confirmed reverse DNS matching these domains
+  # Never block IPs with forward-confirmed reverse DNS matching these domains
   # or their subdomains.
   domain_allowlist:
     - google.com
@@ -339,7 +339,7 @@ domain_registration:
   # Registration data persists in persistence.database_file.
 
 correspondents:
-  # Automatically whitelist external addresses that authenticated local users
+  # Automatically allowlist external addresses that authenticated local users
   # send email to.
   learn_authenticated_recipients: true
 
@@ -352,7 +352,7 @@ correspondents:
   legitimate_sender_min_score: 0.95
 
   # Boolean: require trusted aligned DKIM before an inbound legitimate result
-  # contributes toward automatic whitelisting.
+  # contributes toward automatic allowlisting.
   legitimate_sender_require_dkim: true
 
   # Boolean: use saved relationships when assessing inbound mail. When false,

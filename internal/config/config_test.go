@@ -374,6 +374,12 @@ func TestAuthenticatedMailScanningDefaultsDisabled(t *testing.T) {
 	}
 }
 
+func TestAuthenticationDefaultsInternal(t *testing.T) {
+	if defaults().Authentication.Mode != AuthenticationModeInternal {
+		t.Fatal("authentication must default to internal verification")
+	}
+}
+
 func TestConnectionLifecycleLoggingDefaultsDisabled(t *testing.T) {
 	if defaults().Logging.IncludeConnections {
 		t.Fatal("connection lifecycle logging must default to disabled")
@@ -554,6 +560,7 @@ func TestValidateSenderDomainAllowlist(t *testing.T) {
 		{
 			name: "DKIM requirement needs trusted authentication service",
 			configure: func(cfg *Config) {
+				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Filtering.SenderDomainAllowlist = []string{"amazon.com"}
 				cfg.Filtering.SenderDomainAllowlistRequireDKIM = true
 				cfg.Correspondents.TrustedAuthservIDs = nil
@@ -898,6 +905,7 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 		{
 			name: "correspondent bypass without trusted authentication service",
 			configure: func(cfg *Config) {
+				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Correspondents.UseAllowlist = true
 				cfg.Correspondents.BypassAI = true
 				cfg.Correspondents.RequireDKIMForBypass = true
@@ -908,6 +916,7 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 		{
 			name: "DKIM-required legitimate sender learning without trusted authentication service",
 			configure: func(cfg *Config) {
+				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Correspondents.BypassAI = false
 				cfg.Correspondents.LearnLegitimateSenders = true
 				cfg.Correspondents.LegitimateSenderRequireDKIM = true
@@ -918,6 +927,7 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 		{
 			name: "disabled legitimate sender learning does not require trusted authentication service",
 			configure: func(cfg *Config) {
+				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Correspondents.BypassAI = false
 				cfg.Correspondents.LearnLegitimateSenders = false
 				cfg.Correspondents.LegitimateSenderRequireDKIM = true

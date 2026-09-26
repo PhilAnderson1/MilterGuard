@@ -4,10 +4,9 @@ Using the supplied default configuration, MilterGuard will initially monitor
 inbound email and report how it would identify unwanted spam, scams, threats
 concealed in images, and executable attachments without rejecting anything. It
 will not scan authenticated outbound email. After enforcement is enabled, it
-will provide basic virus protection by blocking executable attachments and will
-learn and whitelist trusted email senders and identify and blacklist problematic
-sending IP addresses to reduce false positives, false negatives, AI usage, and
-operating costs.
+will provide basic virus protection by blocking executable attachments, learn
+and allowlist trusted email senders, and block problematic sending IP addresses
+to reduce false positives, false negatives, AI usage, and operating costs.
 
 **Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
 the repository URL, https://github.com/PhilAnderson1/MilterGuard, and ask it to
@@ -24,13 +23,14 @@ For initial installation and activation, follow the
 3. [Connect Postfix to MilterGuard](#connect-postfix-to-milterguard)
 4. [Start MilterGuard in monitor mode](#start-milterguard-in-monitor-mode)
 5. [Enable enforcement](#enable-enforcement)
-6. [Basic virus protection](#basic-virus-protection)
-7. [Rejection history and saved messages](#rejection-history-and-saved-messages)
-8. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
-9. [Administration commands](#administration-commands)
-10. [Routine operation](#routine-operation)
-11. [Replay saved email](#replay-saved-email)
-12. [Remove MilterGuard](#remove-milterguard)
+6. [Use tag mode](#use-tag-mode)
+7. [Basic virus protection](#basic-virus-protection)
+8. [Rejection history and saved messages](#rejection-history-and-saved-messages)
+9. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
+10. [Administration commands](#administration-commands)
+11. [Routine operation](#routine-operation)
+12. [Replay saved email](#replay-saved-email)
+13. [Remove MilterGuard](#remove-milterguard)
 
 ## Configure the AI service
 
@@ -82,9 +82,10 @@ OpenRouter settings; replace the placeholder `ai.api_key` with your key. If the
 configured model is no longer available, select a current compatible model and
 test it before enabling rejection.
 
-MilterGuard also supports OpenAI and other llama.cpp-compatible endpoints. Set
-`endpoint`, `endpoint_type`, `model`, and `api_key` to match the service. The
-selected model must support image input if image analysis is enabled.
+MilterGuard also supports OpenAI-compatible services, including OpenAI and
+llama.cpp. Set `endpoint`, `endpoint_type`, `model`, and `api_key` to match the
+service. The selected model must support image input if image analysis is
+enabled.
 
 When using a hosted service, review its data-handling policy carefully.
 MilterGuard sends the selected headers, extracted text, links, and qualifying
@@ -278,6 +279,17 @@ only its descriptor until verification completes.
 message. `authentication.max_concurrent` bounds simultaneous verification
 operations. Both values must be positive.
 
+Before starting MilterGuard for the first time, confirm that its configured
+listener is available:
+
+```sh
+milterguard --config /etc/milterguard/milterguard.yaml \
+  --check-config --check-port
+```
+
+Run this check only while MilterGuard is stopped; a running instance already
+occupies its listener and will correctly cause the check to fail.
+
 ### Optional early rejection with Spamhaus ZEN
 
 Spamhaus ZEN can reject mail from known abusive sending IP addresses before
@@ -313,9 +325,9 @@ Review the journal regularly:
 journalctl -u milterguard --since yesterday --no-pager -o cat
 ```
 
-MilterGuard's classification is also recorded in the `X-MilterGuard-*` headers
-of each delivered email. View the message headers or source in your email client
-to see the classification, score, confidence, and action.
+MilterGuard's result is also recorded in the `X-MilterGuard-*` headers of each
+delivered email. View the message headers or source in your email client to see
+the classification, score, confidence, and action where applicable.
 
 Pay particular attention to legitimate messages classified as unwanted,
 unwanted messages classified as legitimate, endpoint failures, and unusually
@@ -345,8 +357,8 @@ endpoint:
 - Authenticated SMTP submissions bypass AI analysis when
   `filtering.scan_authenticated` is `false`, as it is in the supplied
   configuration so that outbound emails can bypass scanning.
-- A sender in the contacts whitelist can be accepted without AI analysis when
-  the configured authentication requirements are met.
+- A sender in the correspondent allowlist can be accepted without AI analysis
+  when the configured authentication requirements are met.
 - A visible `From:` domain in the trusted sender-domain allowlist can bypass AI
   analysis when its configured authentication requirements—normally trusted,
   aligned DKIM—are met.
@@ -380,10 +392,16 @@ them to the AI endpoint:
 
 The above checks take place before AI analysis.
 
-Alternatively, setting `mode: tag` accepts all mail while adding result
-headers. Successfully analysed mail includes its classification and score.
-Attachment policy and IP reputation do not reject mail in tag mode, and adaptive
-correspondent and IP reputation data is not changed.
+Continue reviewing decisions after enabling enforcement. AI classification is
+not perfectly deterministic, and changes made by an AI provider can alter a
+model's behaviour even when the configured model name remains unchanged.
+
+## Use tag mode
+
+As an alternative to enforcement, setting `mode: tag` accepts all mail while
+adding result headers. Successfully analysed mail includes its classification
+and score. Attachment policy and IP reputation do not reject mail in tag mode,
+and adaptive correspondent and IP reputation data is not changed.
 
 ### Deliver tagged mail to the Junk folder
 
@@ -434,13 +452,10 @@ if allof (
 Set `filtering.add_email_headers` to `true` unless using `mode: tag`, which
 always adds result headers. Adjust `Junk` if your destination mailbox has a
 different name. Equivalent rules can be configured in a mail client instead of
-Sieve. Do not trust these headers downstream unless Postfix removes forged
-incoming `X-MilterGuard-*` headers or MilterGuard has removed them using the
-Milter change-header capability, as described earlier in this guide.
-
-Continue reviewing decisions after enabling enforcement. AI classification is
-not perfectly deterministic, and changes made by an AI provider can alter a
-model's behaviour even when the configured model name remains unchanged.
+Sieve. Before relying on these headers, ensure that forged incoming copies
+cannot survive. MilterGuard replaces existing `X-MilterGuard-*` result headers
+when Postfix offers Milter change-header support. In `trusted_headers` mode, the
+recommended Postfix `header_checks` rules also remove them at the SMTP boundary.
 
 ## Basic virus protection
 
@@ -494,8 +509,8 @@ and requires `save_messages` to be disabled as well.
 
 Authenticated outbound mail is not scanned by default. MilterGuard uses
 accepted outbound mail to learn which external addresses each local user
-corresponds with. These addresses are immediately whitelisted and can bypass
-future scanning when the configured authentication requirements are met.
+corresponds with. These addresses are immediately added to the allowlist and can
+bypass future scanning when the configured authentication requirements are met.
 Authenticated submission client addresses are never blocked or otherwise
 modified by IP reputation, even when authenticated mail scanning is enabled.
 MilterGuard can also learn inbound senders that repeatedly receive a
@@ -503,7 +518,7 @@ high-confidence legitimate classification and pass the configured authentication
 checks.
 
 This reduces cost and avoids repeatedly classifying routine mail. Entire email
-domains can also be whitelisted in the configured trusted-sender domains file.
+domains can also be allowlisted in the configured trusted-sender domains file.
 The supplied file contains a curated low-risk sender list whose messages bypass
 scanning only when trusted, aligned DKIM authentication passes. Merely forging
 an address in one of these domains therefore does not bypass filtering.
@@ -525,10 +540,10 @@ offenders receive longer blocks. Legitimate traffic gradually reduces an IP's
 negative reputation. In the supplied configuration, every three legitimate
 messages removes one recorded unwanted-mail strike, although an active block
 continues until it expires. Configured shared mail providers are protected from
-automatic blacklisting.
+automatic blocking.
 
 The `ip_reputation.ip_allowlist` prevents trusted IP addresses and networks from
-ever being blacklisted. The `domain_allowlist` provides the same protection for
+ever being blocked. The `domain_allowlist` provides the same protection for
 sending hosts whose reverse-DNS hostname matches a listed domain or subdomain,
 but only after the hostname has been forward-resolved back to the connecting IP.
 This protects shared mail providers without allowing a forged PTR record to
@@ -576,8 +591,9 @@ EXIT
   correspondent addresses.
 - `REJECTIONS` lists rejected messages, including their rejection IDs and
   reasons.
-- `REJECTION <id>` displays the rejection information for the rejected email
-  with ID `<id>` and its decoded, cleaned plain-text body.
+- `REJECTION <id>` displays the rejection information and decoded, cleaned
+  plain-text body. When the original saved message is available, it also reports
+  the archive path and size.
 - `IP LIST` shows active short and repeat-offender blocks. `IP LIST LOOKUP`
   also performs reverse-DNS lookups and includes each hostname or `(not found)`.
 - `IP ADD` creates a manual block using the configured repeat-offender duration,
@@ -589,18 +605,16 @@ EXIT
 Listing commands default to all local recipients and the previous week.
 `day`, `week`, `month`, and `year` select activity since the corresponding
 point in the past; `all` removes that additional date filter while retaining
-configured expiry rules. Whitelist and active-IP listings use last activity;
+configured expiry rules. Correspondent and active-IP listings use last activity;
 rejection history uses rejection time. Interactive lists are printed from
 oldest to newest so the latest entries appear immediately above the prompt.
 Each listing returns at most 1,000 matching records and reports when that limit
 has been reached; use a shorter date period or a recipient filter to narrow a
 large result.
 
-`REJECTION <id>` displays the rejection information and processed body. When
-the original saved message is available, command mode reports its full archive
-path and size. The processed body is regenerated with the current MIME and HTML
-parser, so it may differ from the text originally supplied to the AI. Connection
-and authentication analysis is not reconstructed.
+The processed body shown by `REJECTION <id>` is regenerated with the current
+MIME and HTML parser, so it may differ from the text originally supplied to the
+AI. Connection and authentication analysis is not reconstructed.
 
 For bulk additions or deletions to the contact or IP databases, commands can
 also be read from a file or pipeline:
@@ -703,13 +717,6 @@ Invalid API credentials and insufficient API credit are logged as distinct
 error-level events with `endpoint_error_kind` and `endpoint_status_code` fields,
 making them suitable for journal monitoring and alerts.
 
-The result headers described under
-[Deliver tagged mail to the Junk folder](#deliver-tagged-mail-to-the-junk-folder)
-are safe to use only after forged incoming copies have been removed. MilterGuard
-does this when Postfix offers Milter change-header support; in `trusted_headers`
-mode, the recommended Postfix `header_checks` rule also removes them at the SMTP
-boundary.
-
 Review `/etc/milterguard/trusted-sender-domains.txt` periodically and remove
 domains that no longer represent low-risk, organization-controlled senders. Add
 new domains conservatively because matching, authenticated mail bypasses AI
@@ -760,11 +767,6 @@ The endpoint check sends one synthetic test email through the configured model
 and detection prompt. Success is reported as `configuration is valid` followed
 by `Endpoint OK`.
 
-Before starting MilterGuard for the first time, add `--check-port` to confirm
-that its configured Milter listener is available. Run this check only while
-MilterGuard is stopped; a running instance already occupies its listener and
-will correctly cause the check to fail.
-
 ## Replay saved email
 
 Mailbox replay lets you test a MilterGuard configuration, AI model, and
@@ -780,10 +782,16 @@ instance.
 Run a separate test instance of MilterGuard in `enforce` mode on an unused port.
 Give its configuration a separate `persistence.database_file` so testing cannot
 alter production correspondent, rejection-history, or IP-reputation data. To
-ensure every corpus message reaches the AI, set `ip_reputation.block_duration`
-to `0s`, `ip_reputation.repeat_threshold` to `0`, and
-`correspondents.use_allowlist` to `false` in the test configuration. The replay
-tool reports the actual Milter response rather than only the AI classification.
+prevent learned correspondents and existing IP reputation from bypassing corpus
+messages, set `ip_reputation.block_duration` to `0s`,
+`ip_reputation.repeat_threshold` to `0`, and `correspondents.use_allowlist` to
+`false` in the test configuration. Trusted sender domains and deterministic
+attachment, MIME, and sender-domain policies can still act before the AI. For a
+test focused only on the model, point `filtering.sender_domain_allowlist` to an
+empty file and disable any deterministic policies that the test is not intended
+to exercise. The replay tool reports the actual Milter response rather than
+only the AI classification.
+
 A test instance in `monitor` mode will therefore report every message as
 accepted even when MilterGuard recommends rejection. In `enforce` mode, a
 message classified as unwanted will still be reported as accepted when its
@@ -824,10 +832,8 @@ For a `.tar.gz` installation:
 REPLAY_SCRIPT=/usr/local/share/milterguard/tools/replay_mailbox.py
 ```
 
-Then run the required tests:
-
 Replace the example `--receiver-ip` value with the address on which the mail
-server received the original messages.
+server received the original messages. Then run the relevant tests, for example:
 
 ```sh
 python3 "$REPLAY_SCRIPT" \
