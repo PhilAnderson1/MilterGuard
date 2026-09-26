@@ -1,0 +1,14 @@
+From:  Alice  <alice@example.test>
+To: Bob <bob@example.test>
+Subject: first line
+	second line with a tab
+X-Repeated: first
+X-Repeated:  second  value 
+X-Odd-Whitespace 	: 	 value with leading and trailing 	 
+Content-Type: application/octet-stream
+Content-Transfer-Encoding: 8bit
+
+first line  
+second	line
+
+

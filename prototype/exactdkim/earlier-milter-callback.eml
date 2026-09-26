@@ -1,0 +1,51 @@
+DKIM-Signature: v=1; d=example.test; s=probe; i=alice@example.test;
+	a=rsa-sha256; t=1790401027; h=From:To:Subject:X-Repeated:X-Repeated:
+	Content-Type:Content-Transfer-Encoding;
+	bh=DWD3IGdeRELW5x2mL+kcL/r11DGTUMcsiWiUm5aKx74=; b=e9Q1R82oaEBDeMsTca3FDPcw
+	8UtgIcrmQqKyZofyYij/gDJXR0SR7gBrOrDBA5mLutDhNu4Eo1vuYasfaxwu3xdD0dV9SQScWxF
+	KPPrr7fnfyZi2cwQSrqHAe7sJy6LIlaeq0lSKuS33tTdp5tU6/4PmCWcmfOK1WHbh7SjYPHHcQt
+	EGhgtlt5WDeIGiPzmCkCo3CXuxO7a5TQS1I1KqFgRq1AEOF6B/rDRagk/xz3bY924EFtQpcFNfZ
+	cGTsyEnUgfrw+sEILr+9WELhKZ0fQe8V2tlQN3JMF7mZ6Dm3FkVP6lAHSAyTwVyB0+cxhTQzzue
+	oNYncP5Xvz5HiyZBWw==
+DKIM-Signature: v=1; d=example.test; s=probe; i=alice@example.test;
+	a=rsa-sha256; c=simple/relaxed; t=1790401027; h=From:To:Subject:X-Repeated:
+	X-Repeated:Content-Type:Content-Transfer-Encoding;
+	bh=pq0PbQZH/3m2yfvOROH5lVs5W1Y/ZhcFppGUm/bgp14=; b=1rO31YOtI7dkj8lGgBIitG8N
+	mUFCfGAjHvIhm1yU7vr2qra+h4Rm8aECFkxtmMVTm9lhuq5JAiwjqT/N/2Q7boXbG+UgRKFudtW
+	Mp20gMJhgYRQ1eBanZx7SsWJQpUlO/RLecWUs+lk5CkIMoZ/lbN+LEHgsrgvltDRMu/jTNLETMo
+	fS2LvF4BGbYEJtyrUr9ALLQeffXdiPWMF1gjv7Lwjt+kIwcaNLo5P9PBquanRoY3CTk003wdFoL
+	PZzBUvIl0xkcHvqP5XT2Yfsy0UjcLrPDigcdUBlZ5nEYtSCwZStNuQeyC0/Hs8LAb8LQeSKaJtI
+	ISy+Aj0NMaB4ycgyCA==
+DKIM-Signature: v=1; d=example.test; s=probe; i=alice@example.test;
+	a=rsa-sha256; c=relaxed/simple; t=1790401027; h=From:To:Subject:X-Repeated:
+	X-Repeated:Content-Type:Content-Transfer-Encoding;
+	bh=DWD3IGdeRELW5x2mL+kcL/r11DGTUMcsiWiUm5aKx74=; b=v8xfh3BwU813GtULynEXrBN5
+	Fq98WV/Fg1LHLqWJ2Fx1gMn7EifDjSxAc06iqG2WYB1zz+TWd4gnudNaODLPm9NHCdhne5GHegF
+	hxItIR9pJgt9AhyiAZiW3td8qXly13JQ9ATEG2rfXCzYqrJIwWVGu+oJkB+bkgRotIA2tpA/bOh
+	7IJ0f+h0u5k04Db2/2YCY+5TMcWKrGXd5iNv8nnJPQkPhyVo7ex/morXbuZ9GSXe1Hemqwmg6iF
+	t/jEnc/W8Dwdhx6rFEpOoG1qVjuql63fjyo4cquNtkAAIm6u5VYD4XFZ+QVH6E29pDOdf+mYcs7
+	dBEuY3CBiGPAYQlGRg==
+DKIM-Signature: v=1; d=example.test; s=probe; i=alice@example.test;
+	a=rsa-sha256; c=relaxed/relaxed; t=1790401027; h=From:To:Subject:
+	X-Repeated:X-Repeated:Content-Type:Content-Transfer-Encoding;
+	bh=pq0PbQZH/3m2yfvOROH5lVs5W1Y/ZhcFppGUm/bgp14=; b=jLd16XtaZb4prRSvAnu4ahGE
+	a4sLu/9tVPTMCngm6VzJw1DyRh7HpdfWLYdwoZzIjLPe+/lf+5Q4t6FynOqBJhxxoJdOMr6ZRvx
+	yuhLbshj3xNj2sEpXsl/lzveuYfBE7G1mT3YS5CXlSUoqLq3uWV5/W1E2qqB9uXxt7UM5Cgb9lk
+	pLatxYIVnsBV99q2AaixPAN2V/SIOfMprntnBXJ5D6Z7ruSY5JocNNf/ZNGs9V4tnWBxg2Syy1n
+	ymg03CFCrdwM/bJGZeeyZeGrOjTyCT9sczOvtFcEgVZD1VgXOv+5lahgbMn471I9o0m0nvls7QA
+	ojZiN21rM3emiRIudg==
+From:  Alice  <alice@example.test>
+To: Bob <bob@example.test>
+Subject: first line
+	second line with a tab
+X-Repeated: first
+X-Repeated:  second  value 
+Content-Type: application/octet-stream
+Content-Transfer-Encoding: 8bit
+Message-Id: <20260926053842.4B6B4571E538E@exactdkim.example.test>
+Date: Sat, 26 Sep 2026 05:38:42 +0000 (GMT)
+
+first line  
+second	line
+
+
