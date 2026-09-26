@@ -274,10 +274,6 @@ func (ss *session) negotiate(payload []byte) bool {
 		ss.deps.log.Warn("internal reply protection disabled for Milter connection because MTA did not offer change-header support",
 			"offered_actions", offeredActions)
 	}
-	if ss.internalAuthentication() && offeredActions&resultHeaderActions != resultHeaderActions {
-		ss.deps.log.Error("internal authentication requires MTA add-header and change-header support",
-			"offered_actions", offeredActions, "required_actions", resultHeaderActions)
-	}
 	ss.negotiatedActions = requestedActions
 	if !ss.send(commandOptionNegotiation, optionResponse(version, requestedActions)) {
 		return false
@@ -380,11 +376,6 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if result.selected == actionAccept {
 		err = ss.writeAcceptedResultHeaders(&result)
 	}
-	if err != nil {
-		if handled, keepConnection := ss.handleAuthenticationHeaderSafetyError(ctx, err); handled {
-			return keepConnection
-		}
-	}
 	if err == nil {
 		err = writeFrame(ss.conn, responseForAction(result.selected, ss.deps.filtering.RejectMessage))
 	}
@@ -411,10 +402,12 @@ func (ss *session) verifyAuthenticationWithProgress(ctx context.Context) (mailau
 	transaction := mailauth.Transaction{
 		RemoteIP: ss.peerIP, HELO: ss.heloIdentity, EnvelopeSender: envelopeSender,
 		ReceiverHostname: ss.mtaHostname, ReceiverIP: ss.receiverIP, VisibleFromDomain: ss.visibleSenderDomain,
-		SMTPUTF8:              ss.smtpUTF8,
-		AuthenticationResults: append([]string(nil), ss.message.Headers["authentication-results"]...),
-		ReceivedSPF:           append([]string(nil), ss.message.Headers["received-spf"]...),
-		TrustedAuthservIDs:    ss.trustedAuthservIDs(),
+		SMTPUTF8: ss.smtpUTF8,
+	}
+	if !ss.internalAuthentication() {
+		transaction.AuthenticationResults = append([]string(nil), ss.message.Headers["authentication-results"]...)
+		transaction.ReceivedSPF = append([]string(nil), ss.message.Headers["received-spf"]...)
+		transaction.TrustedAuthservIDs = ss.trustedAuthservIDs()
 	}
 	if ss.exactMessageErr == nil && ss.exactMessage != nil {
 		reader, size, err := ss.exactMessage.ReaderAt()
@@ -684,11 +677,6 @@ func validMTAHostname(value string) string {
 
 func (ss *session) finishBypassedMessage(ctx context.Context, source string, learn, touchInbound bool, extraAttrs ...any) bool {
 	err := ss.writeAcceptedBypassHeaders()
-	if err != nil {
-		if handled, keepConnection := ss.handleAuthenticationHeaderSafetyError(ctx, err); handled {
-			return keepConnection
-		}
-	}
 	if err == nil {
 		err = writeFrame(ss.conn, responseForAction(actionAccept, ss.deps.filtering.RejectMessage))
 	}

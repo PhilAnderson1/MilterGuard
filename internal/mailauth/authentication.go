@@ -108,15 +108,17 @@ type Evidence struct {
 // authentication provider. It intentionally has no dependency on a Milter
 // session or on Mox-specific types.
 type Transaction struct {
-	RemoteIP              netip.Addr
-	HELO                  string
-	EnvelopeSender        string
-	ReceiverHostname      string
-	ReceiverIP            netip.Addr
-	VisibleFromDomain     string
-	SMTPUTF8              bool
-	Message               io.ReaderAt
-	MessageSize           int64
+	RemoteIP          netip.Addr
+	HELO              string
+	EnvelopeSender    string
+	ReceiverHostname  string
+	ReceiverIP        netip.Addr
+	VisibleFromDomain string
+	SMTPUTF8          bool
+	Message           io.ReaderAt
+	MessageSize       int64
+	// HeaderVerifier-only inputs. Internal verification leaves these empty and
+	// derives evidence from the SMTP fields and byte-exact message above.
 	AuthenticationResults []string
 	ReceivedSPF           []string
 	TrustedAuthservIDs    []string

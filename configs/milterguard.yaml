@@ -51,13 +51,6 @@ authentication:
   # MilterGuard calculate SPF, DKIM, and DMARC directly.
   mode: trusted_headers
 
-  # Temporary migration diagnostic. With trusted_headers mode, also calculate
-  # internal results and log a privacy-bounded comparison while trusted headers
-  # remain fully authoritative. This never changes policy, AI evidence, headers,
-  # learning, or delivery decisions. Keep false outside a bounded observation.
-  # It is invalid with mode: internal.
-  shadow_internal: false
-
   # Whole-operation timeout for internal SPF/DKIM/DMARC verification.
   timeout: 10s
 

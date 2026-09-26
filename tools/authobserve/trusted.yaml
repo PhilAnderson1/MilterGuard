@@ -7,7 +7,6 @@ milter:
 
 authentication:
   mode: trusted_headers
-  shadow_internal: true
   timeout: 10s
   max_concurrent: 4
   message_storage: memory

@@ -15,18 +15,11 @@ var resultHeaderNames = []string{classificationHeader, scoreHeader, confidenceHe
 // accepted message. When configured to add headers, it replaces them with the
 // AI result, AI failure, or bypass outcome.
 func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
-	if err := ss.writeAcceptedAuthenticationHeaders(); err != nil {
-		return err
-	}
-	return ss.writeAcceptedResultHeadersOnly(result)
-}
-
-func (ss *session) writeAcceptedResultHeadersOnly(result *evaluationResult) error {
 	if !ss.deps.filtering.AddEmailHeaders && ss.deps.mode != "tag" {
 		return ss.replaceResultHeaders(nil)
 	}
 	if result == nil {
-		return ss.writeTagHeadersOnly("not-scanned", nil, "accepted-bypass")
+		return ss.writeTagHeaders("not-scanned", nil, "accepted-bypass")
 	}
 	var headers [][2]string
 	if result.err != nil && result.selected == actionAccept {
@@ -60,13 +53,6 @@ func (ss *session) writeAcceptedBypassHeaders() error {
 }
 
 func (ss *session) writeTagHeaders(classification string, score *float64, action string) error {
-	if err := ss.writeAcceptedAuthenticationHeaders(); err != nil {
-		return err
-	}
-	return ss.writeTagHeadersOnly(classification, score, action)
-}
-
-func (ss *session) writeTagHeadersOnly(classification string, score *float64, action string) error {
 	headers := [][2]string{{classificationHeader, classification}}
 	if score != nil {
 		headers = append(headers, [2]string{scoreHeader, strconv.FormatFloat(*score, 'f', -1, 64)})

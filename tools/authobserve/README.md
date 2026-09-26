@@ -5,8 +5,6 @@ same time on loopback-only, otherwise unused Milter listeners. It does not
 change Postfix, systemd, or the production MilterGuard service. Both instances
 run in monitor mode, use separate SQLite databases, and call a deterministic
 local endpoint so AI output cannot obscure authentication differences.
-The trusted-header instance also enables the production shadow switch and logs
-its in-process comparison while continuing to use only trusted evidence.
 
 From the repository root, prepare and validate the setup:
 
@@ -37,9 +35,9 @@ python3 tools/replay_mailbox.py local-testing/test_emails/legitimate \
 ```
 
 Each record includes the saved `Authentication-Results` values and headers
-added by the observed instance. Internal mode removes saved authentication
-fields and adds one freshly calculated `Authentication-Results` field; trusted
-mode retains the saved fields. Stop all three processes with Ctrl-C after the
+added by the observed instance. Internal mode ignores saved authentication
+fields while leaving them unchanged; trusted mode consumes configured local
+results from those fields. Stop all three processes with Ctrl-C after the
 bounded observation window.
 
 The replay is deliberately byte-preserving for header names, order,

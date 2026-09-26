@@ -12,7 +12,7 @@ DNS-authenticity and an error.
 
 | Mox value | MilterGuard treatment |
 | --- | --- |
-| `Received.Result` | Preserve as `Result.Outcome`, including none, neutral, softfail, fail, temperror and permerror. Used by headers, prompts and policy. |
+| `Received.Result` | Preserve as `Result.Outcome`, including none, neutral, softfail, fail, temperror and permerror. Used by prompts and policy. |
 | evaluated domain | Preserve as `Result.Domain`. Used for alignment and display. |
 | `Received.Identity` | Preserve as `Result.SPFIdentity` (`mailfrom` or `helo`). |
 | `Received.Mechanism` | Preserve in bounded form as `Result.SPFMechanism`; useful diagnostic evidence. |
@@ -71,14 +71,12 @@ favor of one bounded service summary.
 See `MOX_INTEROPERABILITY_MATRIX.md` for the tested status and edge-case matrix,
 including Mox's missing-key and multiple-key-record DKIM semantics.
 
-## Authentication-Results output subset
+## Internal-only results
 
-The local RFC 8601 renderer emits one SPF result with `smtp.mailfrom` or
-`smtp.helo`, up to 32 ordered DKIM results with validated `header.d`, `header.s`
-and `header.a` properties, and one DMARC result with `header.from`. For a DMARC
-failure it also emits the registered `policy.dmarc` property with the effective
-`none`, `quarantine` or `reject` disposition. Unbounded reason text, DKIM
-identity, canonicalization details, body length, DNSSEC state, alignment modes
-and percentage metadata remain available in typed evidence but are deliberately
-not copied into the field. Invalid outcomes and unsafe property values are
-omitted; they are never quoted or repaired into attacker-controlled output.
+Internal authentication evidence is consumed only by MilterGuard's filtering,
+AI prompt, bypass, learning, logging, and diagnostic paths. MilterGuard does not
+render it into `Authentication-Results` or alter authentication headers already
+present in the message. The internal verifier receives no parsed
+`Authentication-Results` or `Received-SPF` inputs; those fields remain in the
+byte-exact message solely because removing them could invalidate a DKIM
+signature that covered them.

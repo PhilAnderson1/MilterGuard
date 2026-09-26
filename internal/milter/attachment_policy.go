@@ -117,11 +117,6 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 			err = ss.writeAcceptedResultHeaders(nil)
 		}
 	}
-	if err != nil {
-		if handled, keepConnection := ss.handleAuthenticationHeaderSafetyError(ctx, err); handled {
-			return keepConnection
-		}
-	}
 	if err == nil {
 		err = writeFrame(ss.conn, response)
 	}
