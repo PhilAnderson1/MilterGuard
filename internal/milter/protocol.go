@@ -59,8 +59,10 @@ type action uint8
 type sessionMacroValues struct {
 	AuthenticationIdentity string
 	MTAHostname            string
+	ReceiverAddress        string
 	AuthenticationFound    bool
 	MTAHostnameFound       bool
+	ReceiverAddressFound   bool
 }
 
 const (
@@ -214,6 +216,12 @@ func parseSessionMacros(payload []byte) (target byte, values sessionMacroValues,
 			}
 			values.MTAHostname = string(value)
 			values.MTAHostnameFound = true
+		case strings.EqualFold(macroName, "daemon_addr"):
+			if values.ReceiverAddressFound || len(value) > 64 {
+				return target, values, false
+			}
+			values.ReceiverAddress = string(value)
+			values.ReceiverAddressFound = true
 		}
 	}
 	return target, values, true

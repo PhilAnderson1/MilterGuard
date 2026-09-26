@@ -104,6 +104,7 @@ type MilterConfig struct {
 	MaxMessageSize       int64    `yaml:"max_message_size"`
 	MaxConnections       int      `yaml:"max_connections"`
 	AllowedPeerIPs       []string `yaml:"allowed_peer_ips"`
+	ExactMessageStorage  string   `yaml:"exact_message_storage"`
 }
 type AIConfig struct {
 	Endpoint           string   `yaml:"endpoint"`
@@ -224,7 +225,7 @@ func defaults() Config {
 		Milter: MilterConfig{
 			Socket: "tcp:127.0.0.1:8895", Timeout: Duration(time.Minute),
 			ConnectionDNSTimeout: Duration(5 * time.Second), MaxMessageSize: 10 << 20, MaxConnections: 64,
-			AllowedPeerIPs: []string{"127.0.0.0/8", "::1/128"},
+			AllowedPeerIPs: []string{"127.0.0.0/8", "::1/128"}, ExactMessageStorage: "memory",
 		},
 		AI: AIConfig{
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
@@ -314,6 +315,9 @@ func (c Config) Validate() error {
 	}
 	if c.Milter.MaxConnections < 1 {
 		return fmt.Errorf("milter.max_connections must be positive")
+	}
+	if c.Milter.ExactMessageStorage != "memory" && c.Milter.ExactMessageStorage != "file" {
+		return fmt.Errorf("milter.exact_message_storage must be memory or file")
 	}
 	if listener.Network == "tcp" && len(c.Milter.AllowedPeerIPs) == 0 {
 		return fmt.Errorf("milter.allowed_peer_ips must contain at least one address for a TCP listener")

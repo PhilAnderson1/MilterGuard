@@ -11,11 +11,30 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 )
 
 const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
 func retainedBytes(m *Message) int64 { return m.archiveHeaderBytes + m.bodySize }
+
+func setHeaderAuthentication(t *testing.T, m *Message, trusted []string) {
+	t.Helper()
+	visibleDomain := ""
+	if m.FromHeaderCount() == 1 {
+		visibleDomain = visibleFromDomain(m.Header("From"))
+	}
+	evidence, err := (mailauth.HeaderVerifier{}).Verify(t.Context(), mailauth.Transaction{
+		AuthenticationResults: m.Headers["authentication-results"],
+		ReceivedSPF:           m.Headers["received-spf"], TrustedAuthservIDs: trusted,
+		VisibleFromDomain: visibleDomain,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Authentication = evidence
+}
 
 func TestPromptDecodesMultipart(t *testing.T) {
 	m := New(10000)
@@ -645,11 +664,11 @@ func TestBodyIsTruncatedToRemainingCombinedMessageBudget(t *testing.T) {
 
 func TestPromptIncludesOnlyTrustedAuthenticationResults(t *testing.T) {
 	m := New(1000)
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
 	m.AddHeader("Authentication-Results", "nl.invades.net; dmarc=pass header.from=example.com")
 	m.AddHeader("Authentication-Results", "mx.google.com; dkim=pass header.d=example.com")
 	m.AddHeader("From", "Sender <sender@example.com>")
 	m.AddHeader("Subject", "test")
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 	prompt := m.Prompt(100)
 	if !strings.Contains(prompt, "DMARC: pass for visible From domain example.com (matches supplied visible From domain: yes)") {
 		t.Fatalf("trusted authentication result missing: %s", prompt)
@@ -661,10 +680,10 @@ func TestPromptIncludesOnlyTrustedAuthenticationResults(t *testing.T) {
 
 func TestPromptIncludesOnlyReceivedSPFFromTrustedReceiver(t *testing.T) {
 	m := New(1000)
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
 	m.AddHeader("Received-SPF", "pass receiver=nl.invades.net; client-ip=192.0.2.1")
 	m.AddHeader("Received-SPF", "pass receiver=mx.google.com; client-ip=192.0.2.2")
 	m.AddHeader("Received-SPF", "pass client-ip=192.0.2.3")
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 	prompt := m.Prompt(100)
 	if !strings.Contains(prompt, "SPF: pass for envelope-sender domain unavailable") {
 		t.Fatalf("trusted Received-SPF result missing: %s", prompt)
@@ -682,8 +701,8 @@ func TestPromptIgnoresReceivedSPFReceiverInsideCommentOrQuotedValue(t *testing.T
 	}
 	for _, header := range tests {
 		m := New(1000)
-		m.TrustedAuthservIDs = []string{"nl.invades.net"}
 		m.AddHeader("Received-SPF", header)
+		setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 		prompt := m.Prompt(100)
 		if !strings.Contains(prompt, "SPF: no trusted local result") {
 			t.Fatalf("untrusted receiver accepted from %q:\n%s", header, prompt)
@@ -693,8 +712,8 @@ func TestPromptIgnoresReceivedSPFReceiverInsideCommentOrQuotedValue(t *testing.T
 
 func TestPromptAcceptsQuotedReceivedSPFReceiverParameter(t *testing.T) {
 	m := New(1000)
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
 	m.AddHeader("Received-SPF", `pass (local result) client-ip=192.0.2.1; receiver="nl.invades.net"`)
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 	prompt := m.Prompt(100)
 	if !strings.Contains(prompt, "SPF: pass for envelope-sender domain unavailable") {
 		t.Fatalf("trusted quoted receiver missing:\n%s", prompt)
@@ -726,7 +745,7 @@ func TestPromptDescribesAuthenticatedSubmissionWithoutInboundAuthenticationResul
 	m.AddHeader("From", "Philip Anderson <phil.anderson@invades.net>")
 	m.AddHeader("Subject", "Meeting tomorrow")
 	m.AddHeader("Authentication-Results", "nl.invades.net; dkim=pass header.d=invades.net")
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 	prompt := m.Prompt(100)
 	for _, want := range []string{
 		"AUTHENTICATION INFORMATION:",
@@ -768,10 +787,10 @@ func TestPromptStartsWithCapturedAnalysisTime(t *testing.T) {
 
 func TestPromptNormalizesConflictingBrandAuthenticationEvidence(t *testing.T) {
 	m := New(1000)
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
 	m.AddHeader("From", "Aliexpress <Aliexpress@gernandz.click>")
 	m.AddHeader("Authentication-Results", "nl.invades.net; dmarc=pass header.from=gernandz.click")
 	m.AddHeader("Authentication-Results", "nl.invades.net; \tdkim=pass header.d=gernandz.click; \tdkim=fail reason=\"signature verification failed\" header.d=mail.aliexpress.com")
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 	prompt := m.Prompt(100)
 	for _, want := range []string{
 		"Visible From domain: gernandz.click",
@@ -791,9 +810,9 @@ func TestPromptNormalizesConflictingBrandAuthenticationEvidence(t *testing.T) {
 
 func TestAuthenticationResultsSemicolonInsideQuotedReasonDoesNotSplitClause(t *testing.T) {
 	m := New(2000)
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
 	m.AddHeader("From", "Sender <sender@example.com>")
 	m.AddHeader("Authentication-Results", `nl.invades.net; dkim=pass reason="signature; verified" header.d=example.com; spf=pass reason="accepted\"; still valid" smtp.mailfrom=sender@example.com; dmarc=pass header.from=example.com`)
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 
 	prompt := m.Prompt(100)
 	for _, want := range []string{
@@ -2269,6 +2288,25 @@ func TestHeaderFamiliesCannotSuppressIdentityMIMEOrAuthentication(t *testing.T) 
 		if got := m.Header(name); got != want {
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
+	}
+}
+
+func TestAuthenticationHeaderOccurrencesSurviveRetentionLimits(t *testing.T) {
+	m := New(1 << 20)
+	for range 12 {
+		m.AddHeader("Authentication-Results", strings.Repeat("x", maxHeaderValueBytes))
+	}
+	for range 7 {
+		m.AddHeader("Received-SPF", strings.Repeat("y", maxHeaderValueBytes))
+	}
+	if got := m.HeaderOccurrences("Authentication-Results"); got != 12 {
+		t.Fatalf("Authentication-Results occurrences = %d, want 12", got)
+	}
+	if got := m.HeaderOccurrences("Received-SPF"); got != 7 {
+		t.Fatalf("Received-SPF occurrences = %d, want 7", got)
+	}
+	if len(m.Headers["authentication-results"]) >= 12 || len(m.Headers["received-spf"]) >= 7 {
+		t.Fatal("test did not exceed authentication header retention limits")
 	}
 }
 

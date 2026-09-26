@@ -186,6 +186,21 @@ func TestValidateMilterMaxMessageSize(t *testing.T) {
 	}
 }
 
+func TestValidateExactMessageStorage(t *testing.T) {
+	for _, storage := range []string{"memory", "file"} {
+		cfg := validConfig()
+		cfg.Milter.ExactMessageStorage = storage
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("storage %q rejected: %v", storage, err)
+		}
+	}
+	cfg := validConfig()
+	cfg.Milter.ExactMessageStorage = "automatic"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "milter.exact_message_storage") {
+		t.Fatalf("invalid storage error = %v", err)
+	}
+}
+
 func TestLoadRejectsEmptyAndMultipleYAMLDocuments(t *testing.T) {
 	write := func(content string) string {
 		path := filepath.Join(t.TempDir(), "milterguard.yaml")

@@ -15,6 +15,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 	"github.com/PhilAnderson1/MilterGuard/internal/rdap"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
@@ -96,11 +97,13 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		mode: cfg.Mode, filtering: cfg.Filtering, logging: cfg.Logging,
 		protocol: protocolOptions{
 			timeout: cfg.Milter.Timeout.Value(), maxMessageSize: cfg.Milter.MaxMessageSize,
-			progressInterval: defaultMilterProgressInterval,
+			progressInterval: defaultMilterProgressInterval, exactStorage: cfg.Milter.ExactMessageStorage,
 		},
 		analysis: analysis, policy: policy, attachments: attachments, commands: emailCommands,
-		dns: &connectionDNSService{resolver: net.DefaultResolver, timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
-		log: log,
+		dns:             &connectionDNSService{resolver: net.DefaultResolver, timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
+		authentication:  mailauth.HeaderVerifier{},
+		newExactMessage: mailauth.NewExactMessage,
+		log:             log,
 	}
 	maintenance := &maintenanceService{
 		ip: ipRepository, correspondents: correspondents, rejections: rejections,

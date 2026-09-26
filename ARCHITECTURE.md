@@ -28,7 +28,7 @@ policy or persistence queries.
 | `internal/attachment` | Detects prohibited executable attachments and inspects supported archives. |
 | `internal/config` | Loads defaults, strictly decodes YAML, and validates cross-setting requirements. |
 | `internal/mailaddr` | Provides canonical mailbox parsing and normalization shared by message processing, policy, administration, and persistence. |
-| `internal/mailauth` | Parses trusted Authentication-Results data and evaluates domain alignment. |
+| `internal/mailauth` | Owns provider-neutral authentication evidence, the verifier boundary, trusted-header compatibility parsing, alignment, and exact-message storage. |
 | `internal/message` | Accumulates SMTP message data and produces bounded, decoded text, links, images, and authentication evidence. |
 | `internal/milter` | Implements the Milter protocol, session state, filtering policy, service orchestration, and Postfix responses. |
 | `internal/netsafety` | Normalizes DNS hostnames and rejects unsafe or non-public network destinations. |
@@ -66,8 +66,9 @@ the complete `Server` to locate unrelated functionality.
 Postfix connection
   -> Milter frame parsing and session state
   -> connection and envelope checks
-  -> message headers and body accumulation
+  -> bounded analysis data and byte-exact message accumulation
   -> deterministic policies requiring the complete message
+  -> authentication provider (with progress and cancellation)
   -> MIME, text, link and image extraction
   -> trusted authentication evidence
   -> correspondent and domain-registration evidence
@@ -95,9 +96,13 @@ preserves useful link and image references, and prepares inline images for
 vision analysis. The same archived-message parser is used by `REJECTION <id>`
 so command output reflects the current message-processing implementation.
 
-`internal/mailauth` is the authoritative Authentication-Results parser. Only
-results whose authentication-service identifiers are trusted by configuration
-are used as local evidence. Postfix is still responsible for removing supplied
+`internal/mailauth` owns the authentication provider boundary and the bounded
+evidence types shared by policy and prompt generation. In compatibility mode,
+its header-backed provider parses Authentication-Results once. Only results
+whose authentication-service identifiers are trusted by configuration are
+used as local evidence. The separate exact-message abstraction retains callback
+bytes in bounded memory or an unlinked temporary file for internal verification.
+Postfix is still responsible for removing supplied
 Authentication-Results headers before authentication Milters add fresh local
 results.
 

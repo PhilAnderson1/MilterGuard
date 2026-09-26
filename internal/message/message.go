@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 )
 
 type Message struct {
@@ -17,7 +19,7 @@ type Message struct {
 	AuthenticatedSubmission bool
 	Correspondent           CorrespondentInfo
 	DomainRegistration      DomainRegistrationInfo
-	TrustedAuthservIDs      []string
+	Authentication          mailauth.Evidence
 	Truncated               bool
 	BodyTruncated           bool
 	MIMEHeadersTruncated    bool
@@ -124,6 +126,8 @@ var humanReadableHeaders = map[string]bool{
 }
 
 var countedSecurityHeaders = map[string]bool{
+	"authentication-results":       true,
+	"received-spf":                 true,
 	"x-milterguard-action":         true,
 	"x-milterguard-classification": true,
 	"x-milterguard-confidence":     true,

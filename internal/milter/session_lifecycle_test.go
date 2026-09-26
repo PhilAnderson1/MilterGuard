@@ -8,12 +8,109 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 )
+
+type blockingVerifier struct {
+	started  chan struct{}
+	release  chan struct{}
+	canceled chan struct{}
+}
+
+func (v *blockingVerifier) Verify(ctx context.Context, _ mailauth.Transaction) (mailauth.Evidence, error) {
+	close(v.started)
+	select {
+	case <-v.release:
+		return mailauth.Evidence{}, nil
+	case <-ctx.Done():
+		if v.canceled != nil {
+			close(v.canceled)
+		}
+		return mailauth.Evidence{}, ctx.Err()
+	}
+}
+
+type trackedExactMessage struct {
+	mu     sync.Mutex
+	data   []byte
+	closed bool
+}
+
+type exactMessageRegistry struct {
+	mu            sync.Mutex
+	stores        []*trackedExactMessage
+	panicOnHeader bool
+}
+
+func (r *exactMessageRegistry) factory(string, int64) (mailauth.ExactMessage, error) {
+	store := &trackedExactMessage{}
+	if r.panicOnHeader {
+		return &panicHeaderExactMessage{trackedExactMessage: store}, r.add(store)
+	}
+	return store, r.add(store)
+}
+
+func (r *exactMessageRegistry) add(store *trackedExactMessage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stores = append(r.stores, store)
+	return nil
+}
+
+func (r *exactMessageRegistry) requireAllClosed(t *testing.T) {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.stores) == 0 {
+		t.Fatal("no exact-message stores were created")
+	}
+	for index, store := range r.stores {
+		if !store.isClosed() {
+			t.Errorf("exact-message store %d was not closed", index)
+		}
+	}
+}
+
+type panicHeaderExactMessage struct{ *trackedExactMessage }
+
+func (m *panicHeaderExactMessage) AddHeader(string, string) error { panic("exact-message test panic") }
+
+func (m *trackedExactMessage) AddHeader(name, value string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data = append(m.data, []byte(name+": "+value+"\r\n")...)
+	return nil
+}
+func (m *trackedExactMessage) EndHeaders() error { return m.AddBody([]byte("\r\n")) }
+func (m *trackedExactMessage) AddBody(payload []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data = append(m.data, payload...)
+	return nil
+}
+func (m *trackedExactMessage) ReaderAt() (io.ReaderAt, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copyOfData := append([]byte(nil), m.data...)
+	return bytes.NewReader(copyOfData), int64(len(copyOfData)), nil
+}
+func (m *trackedExactMessage) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closed = true
+	return nil
+}
+func (m *trackedExactMessage) isClosed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closed
+}
 
 type deadlineFailingConn struct {
 	net.Conn
@@ -87,6 +184,257 @@ func TestSlowEndOfMessageSendsProgressBeforeFinalResponse(t *testing.T) {
 		}
 		break
 	}
+}
+
+func TestSlowAuthenticationSendsProgressAndPrecedesAnalysis(t *testing.T) {
+	verifier := &blockingVerifier{started: make(chan struct{}), release: make(chan struct{})}
+	analyzer := &blockingAnalyzer{started: make(chan struct{}), release: make(chan struct{})}
+	server, conn, done := testServer(t, analyzer)
+	server.sessions.authentication = verifier
+	server.sessions.protocol.progressInterval = 10 * time.Millisecond
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "192.0.2.1"),
+		envelopeFrame(commandMail, "sender@example.net"),
+		envelopeFrame(commandRecipient, "recipient@example.com"),
+		headerFrame("From", "sender@example.net"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-verifier.started:
+	case <-time.After(time.Second):
+		t.Fatal("authentication verifier did not start")
+	}
+	expectFrame(t, conn, string([]byte{responseProgress}))
+	select {
+	case <-analyzer.started:
+		t.Fatal("analysis started before authentication completed")
+	default:
+	}
+	close(verifier.release)
+	select {
+	case <-analyzer.started:
+	case <-time.After(time.Second):
+		t.Fatal("analysis did not start after authentication")
+	}
+	close(analyzer.release)
+	for {
+		response, err := readFrame(conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(response) == 1 && response[0] == responseProgress {
+			continue
+		}
+		if len(response) != 1 || response[0] != responseAccept {
+			t.Fatalf("final response = %q, want accept", response)
+		}
+		break
+	}
+}
+
+func TestAuthenticationProgressWriteFailureCancelsVerifier(t *testing.T) {
+	verifier := &blockingVerifier{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}
+	server, conn, done := testServer(t, fixedAnalyzer{})
+	server.sessions.authentication = verifier
+	server.sessions.protocol.progressInterval = 10 * time.Millisecond
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "192.0.2.1"), envelopeFrame(commandMail, "sender@example.net"),
+		envelopeFrame(commandRecipient, "recipient@example.com"), headerFrame("From", "sender@example.net"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-verifier.started:
+	case <-time.After(time.Second):
+		t.Fatal("authentication verifier did not start")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-verifier.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("authentication verifier was not canceled")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("session did not stop after authentication progress failure")
+	}
+}
+
+func TestExactMessageClosesOnAbortAndDisconnect(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := NewServer(config.Config{
+		Mode: "enforce", Milter: config.MilterConfig{Timeout: config.Duration(time.Second), MaxMessageSize: 1024},
+		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
+		Filtering: config.FilteringConfig{RejectScore: .9, AIErrorAction: "accept"},
+	}, fixedAnalyzer{}, log)
+	var storesMu sync.Mutex
+	var stores []*trackedExactMessage
+	server.sessions.newExactMessage = func(string, int64) (mailauth.ExactMessage, error) {
+		store := &trackedExactMessage{}
+		storesMu.Lock()
+		stores = append(stores, store)
+		storesMu.Unlock()
+		return store, nil
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer serverConn.Close()
+		server.handle(context.Background(), serverConn)
+	}()
+
+	negotiate(t, clientConn)
+	sendContinueFrames(t, clientConn, connectFrame('4', "192.0.2.1"), envelopeFrame(commandMail, "sender@example.net"), headerFrame("From", "sender@example.net"))
+	if err := writeFrame(clientConn, []byte{commandAbort}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("session did not stop after disconnect")
+	}
+	storesMu.Lock()
+	defer storesMu.Unlock()
+	if len(stores) != 1 {
+		t.Fatalf("exact-message stores created = %d, want 1", len(stores))
+	}
+	for index, store := range stores {
+		if !store.isClosed() {
+			t.Errorf("exact-message store %d was not closed", index)
+		}
+	}
+}
+
+func TestExactMessageClosesAfterAcceptAndReject(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		decision ai.Decision
+	}{
+		{name: "accept", decision: ai.Decision{Classification: "legitimate", Score: 1}},
+		{name: "reject", decision: ai.Decision{Classification: "unwanted", Score: 1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			serverConn, clientConn := net.Pipe()
+			registry := &exactMessageRegistry{}
+			server := NewServer(config.Config{
+				Mode: "enforce", Milter: config.MilterConfig{Timeout: config.Duration(time.Second), MaxMessageSize: 1024},
+				AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
+				Filtering: config.FilteringConfig{RejectScore: .9, AIErrorAction: "accept", RejectMessage: "blocked"},
+			}, fixedAnalyzer{decision: test.decision}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			server.sessions.newExactMessage = registry.factory
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				defer serverConn.Close()
+				server.handle(context.Background(), serverConn)
+			}()
+
+			negotiate(t, clientConn)
+			sendContinueFrames(t, clientConn,
+				connectFrame('4', "192.0.2.1"), envelopeFrame(commandMail, "sender@example.net"),
+				envelopeFrame(commandRecipient, "recipient@example.com"), headerFrame("From", "sender@example.net"),
+				[]byte{commandEndHeaders}, append([]byte{commandBody}, []byte("body")...),
+			)
+			if err := writeFrame(clientConn, []byte{commandEndBody}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readFrame(clientConn); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeFrame(clientConn, []byte{commandQuit}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("session did not stop")
+			}
+			_ = clientConn.Close()
+			registry.requireAllClosed(t)
+		})
+	}
+}
+
+func TestExactMessageClosesOnPartialFrameTimeout(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	registry := &exactMessageRegistry{}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := NewServer(config.Config{
+		Mode: "enforce", Milter: config.MilterConfig{Timeout: config.Duration(20 * time.Millisecond), MaxMessageSize: 1024},
+		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
+		Filtering: config.FilteringConfig{RejectScore: .9, AIErrorAction: "accept"},
+	}, fixedAnalyzer{}, log)
+	server.sessions.newExactMessage = registry.factory
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer serverConn.Close()
+		newSession(server.sessions, serverConn).run(context.Background())
+	}()
+	// Start a transaction so a per-message exact store exists, then leave the
+	// following frame incomplete until the protocol deadline fires.
+	negotiate(t, clientConn)
+	sendContinueFrames(t, clientConn, connectFrame('4', "192.0.2.1"), envelopeFrame(commandMail, "sender@example.net"))
+	if _, err := clientConn.Write([]byte{0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("session did not stop after partial-frame timeout")
+	}
+	_ = clientConn.Close()
+	registry.requireAllClosed(t)
+}
+
+func TestExactMessageClosesWhenSessionPanics(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	registry := &exactMessageRegistry{panicOnHeader: true}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := NewServer(config.Config{
+		Mode: "enforce", Milter: config.MilterConfig{Timeout: config.Duration(time.Second), MaxMessageSize: 1024},
+		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
+		Filtering: config.FilteringConfig{RejectScore: .9, AIErrorAction: "accept"},
+	}, fixedAnalyzer{}, log)
+	server.sessions.newExactMessage = registry.factory
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer serverConn.Close()
+		server.handle(context.Background(), serverConn)
+	}()
+	negotiate(t, clientConn)
+	sendContinueFrames(t, clientConn, connectFrame('4', "192.0.2.1"), envelopeFrame(commandMail, "sender@example.net"))
+	if err := writeFrame(clientConn, headerFrame("From", "sender@example.net")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFrame(clientConn); err == nil {
+		t.Fatal("connection remained open after session panic")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("panicking session did not stop")
+	}
+	_ = clientConn.Close()
+	registry.requireAllClosed(t)
 }
 
 func TestCompletedCommandRemainsUsableAcrossReadTimeouts(t *testing.T) {

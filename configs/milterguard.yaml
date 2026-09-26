@@ -45,6 +45,10 @@ milter:
   # Larger messages are truncated and the decision log records truncated=true.
   max_message_size: 10485760
 
+  # Exact RFC message retained until authentication completes: memory or file.
+  # Memory is faster; file bounds per-connection heap usage for large limits.
+  exact_message_storage: memory
+
 ai:
   # Full OpenRouter, OpenAI or llama.cpp-compatible chat-completions URL.
   # The endpoint must implement the v1/chat/completions request and response format.

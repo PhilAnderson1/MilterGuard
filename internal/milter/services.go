@@ -8,6 +8,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
@@ -21,6 +22,7 @@ type protocolOptions struct {
 	timeout          time.Duration
 	maxMessageSize   int64
 	progressInterval time.Duration
+	exactStorage     string
 }
 
 type analysisService struct {
@@ -79,16 +81,18 @@ type connectionDNSService struct {
 }
 
 type sessionDependencies struct {
-	mode        string
-	filtering   config.FilteringConfig
-	logging     config.LoggingConfig
-	protocol    protocolOptions
-	analysis    *analysisService
-	policy      *messagePolicyService
-	attachments *attachmentPolicyService
-	commands    *emailCommandService
-	dns         *connectionDNSService
-	log         *slog.Logger
+	mode            string
+	filtering       config.FilteringConfig
+	logging         config.LoggingConfig
+	protocol        protocolOptions
+	analysis        *analysisService
+	policy          *messagePolicyService
+	attachments     *attachmentPolicyService
+	commands        *emailCommandService
+	dns             *connectionDNSService
+	authentication  mailauth.Verifier
+	newExactMessage func(string, int64) (mailauth.ExactMessage, error)
+	log             *slog.Logger
 }
 
 type maintenanceService struct {

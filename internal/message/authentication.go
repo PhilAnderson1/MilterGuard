@@ -20,7 +20,7 @@ func writeAuthenticationInformation(b *strings.Builder, msg *Message) {
 	if msg.FromHeaderCount() == 1 {
 		fromDomain = visibleFromDomain(msg.Header("From"))
 	}
-	results := msg.AuthenticationResults(msg.TrustedAuthservIDs)
+	results := msg.Authentication.Results
 
 	b.WriteString("\nAUTHENTICATION INFORMATION:\n")
 	if msg.FromHeaderCount() > 1 {
@@ -42,16 +42,6 @@ func writeAuthenticationInformation(b *strings.Builder, msg *Message) {
 		}
 	}
 	writeDomainRegistrationEvidence(b, msg.DomainRegistration)
-}
-
-// AuthenticationResults parses all locally produced authentication evidence
-// using only results attributed to one of the supplied trusted services.
-func (msg *Message) AuthenticationResults(trustedAuthservIDs []string) []mailauth.Result {
-	return mailauth.Parse(mailauth.Input{
-		AuthenticationResults: msg.Headers["authentication-results"],
-		ReceivedSPF:           msg.Headers["received-spf"],
-		TrustedAuthservIDs:    trustedAuthservIDs,
-	})
 }
 
 func writeAuthenticationResult(b *strings.Builder, result mailauth.Result, fromDomain string) {

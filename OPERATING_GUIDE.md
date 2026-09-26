@@ -145,8 +145,12 @@ filters in place but do not add MilterGuard to it. MilterGuard should process
 SMTP mail only; filtering locally submitted system mail can cause legitimate
 notifications to be rejected.
 
-Use the actual sockets or ports configured for your services. MilterGuard must
-remain last in the chain.
+Use the actual sockets or ports configured for your services. MilterGuard should
+remain last in the chain. Postfix does not replay header or body changes
+requested by one Milter through later Milters' inspection callbacks, however,
+so ordering alone cannot make MilterGuard authenticate the eventual modified
+representation. Other before-queue Milters must not modify DKIM-signed headers
+or body content.
 
 `milter_default_action = accept` keeps mail flowing if a Milter is unavailable.
 Use `tempfail` instead if you prefer Postfix to defer delivery until every
@@ -165,10 +169,24 @@ concurrency for normal mail bursts. Increasing `ai.max_concurrent` is useful
 only when the configured AI service can process the additional requests
 efficiently; locally hosted AI commonly needs a lower value instead.
 
+`milter.exact_message_storage` selects how the byte-exact message used for
+authentication is retained until verification completes. The default `memory`
+mode is fastest. Its theoretical additional memory bound is approximately
+`milter.max_connections × milter.max_message_size`, although normal messages
+are smaller and the buffer is released immediately after authentication. Use
+`file` when large message limits or high concurrency make that bound unsuitable.
+File mode creates a mode-0600 temporary file, unlinks it immediately, and keeps
+only its descriptor until verification completes.
+
 The authentication service identifier written to `Authentication-Results`
 must be included in MilterGuard's `correspondents.trusted_authserv_ids` setting.
 The default `$mta_hostname` value normally handles results identified with the
 Postfix hostname.
+
+MilterGuard also reads Postfix's `{daemon_addr}` connect macro as the local SMTP
+interface address required by internal SPF verification. Postfix 3.2 and later
+include `{daemon_addr}` in the default `milter_connect_macros`; installations
+with a customized list must retain it.
 
 With OpenDKIM, OpenDMARC, or both installed on your server, configure Postfix
 to remove externally supplied `Authentication-Results` and `Received-SPF`

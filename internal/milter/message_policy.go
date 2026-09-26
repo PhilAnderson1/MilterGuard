@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
@@ -23,7 +24,7 @@ type inboundEvidence struct {
 // prepareInboundEvidence evaluates authentication, configured sender-domain
 // trust, and correspondent state without exposing repository details to the
 // Milter session.
-func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, current messageContext, trustedAuthservIDs []string, filtering config.FilteringConfig) inboundEvidence {
+func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, current messageContext, authentication mailauth.Evidence, filtering config.FilteringConfig) inboundEvidence {
 	evidence := inboundEvidence{recipientsComplete: current.recipientsComplete}
 	if current.authenticated {
 		return evidence
@@ -32,13 +33,13 @@ func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, curre
 		current.message.Correspondent = message.CorrespondentInfo{Enabled: s.correspondentCfg.UseAllowlist, Scope: s.correspondentCfg.Scope}
 		return evidence
 	}
-	authentication := trustedSenderAuthentication(current.message, trustedAuthservIDs, current.visibleSenderDomain)
-	evidence.trustedDKIM = authentication.DKIMAligned
-	if authentication.anyAligned() {
+	senderAuthentication := trustedSenderAuthentication(authentication)
+	evidence.trustedDKIM = senderAuthentication.DKIMAligned
+	if senderAuthentication.anyAligned() {
 		evidence.authenticatedDomain = current.visibleSenderDomain
 	}
 	if domain := allowedSenderDomain(current.visibleSenderDomain, filtering.SenderDomainAllowlist); domain != "" &&
-		(!filtering.SenderDomainAllowlistRequireDKIM || authentication.DKIMAligned) {
+		(!filtering.SenderDomainAllowlistRequireDKIM || senderAuthentication.DKIMAligned) {
 		evidence.allowedSenderDomain = domain
 	}
 	if !s.correspondentCfg.UseAllowlist {
@@ -55,9 +56,9 @@ func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, curre
 	evidence.knownCorrespondent = known
 	current.message.Correspondent = message.CorrespondentInfo{
 		Enabled: true, Known: known, Scope: s.correspondentCfg.Scope,
-		AuthenticationAligned: known && authentication.anyAligned(),
+		AuthenticationAligned: known && senderAuthentication.anyAligned(),
 	}
-	bypassAuthentication := !s.correspondentCfg.RequireDKIMForBypass || authentication.DKIMAligned
+	bypassAuthentication := !s.correspondentCfg.RequireDKIMForBypass || senderAuthentication.DKIMAligned
 	evidence.bypassAI = s.correspondentCfg.BypassAI && evidence.recipientsComplete && known && bypassAuthentication
 	return evidence
 }

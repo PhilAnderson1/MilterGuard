@@ -1,9 +1,6 @@
 package milter
 
-import (
-	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
-	"github.com/PhilAnderson1/MilterGuard/internal/message"
-)
+import "github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 
 type senderAuthenticationEvidence struct {
 	DKIMAligned  bool
@@ -14,24 +11,10 @@ func (e senderAuthenticationEvidence) anyAligned() bool {
 	return e.DKIMAligned || e.DMARCAligned
 }
 
-func trustedSenderAuthentication(msg *message.Message, trustedAuthservIDs []string, fromDomain string) senderAuthenticationEvidence {
-	var evidence senderAuthenticationEvidence
-	if fromDomain == "" {
-		return evidence
+func trustedSenderAuthentication(authentication mailauth.Evidence) senderAuthenticationEvidence {
+	return senderAuthenticationEvidence{
+		DKIMAligned: authentication.DKIMAligned, DMARCAligned: authentication.DMARCAligned,
 	}
-	results := msg.AuthenticationResults(trustedAuthservIDs)
-	for _, result := range results {
-		if result.Outcome != "pass" || !mailauth.DomainAligned(result.Domain, fromDomain) {
-			continue
-		}
-		switch result.Method {
-		case mailauth.MethodDKIM:
-			evidence.DKIMAligned = true
-		case mailauth.MethodDMARC:
-			evidence.DMARCAligned = true
-		}
-	}
-	return evidence
 }
 
 func allowedSenderDomain(fromDomain string, allowedDomains []string) string {
