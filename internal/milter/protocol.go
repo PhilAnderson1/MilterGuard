@@ -162,6 +162,25 @@ func parseEnvelopeAddress(payload []byte) (string, bool) {
 	return string(address), true
 }
 
+func envelopeHasSMTPUTF8(payload []byte) bool {
+	_, arguments, found := bytes.Cut(payload, []byte{0})
+	if !found {
+		return false
+	}
+	for len(arguments) > 0 {
+		argument, remainder, terminated := bytes.Cut(arguments, []byte{0})
+		if !terminated {
+			return false
+		}
+		name, _, _ := bytes.Cut(argument, []byte{'='})
+		if bytes.EqualFold(name, []byte("SMTPUTF8")) {
+			return true
+		}
+		arguments = remainder
+	}
+	return false
+}
+
 func parseConnectHostname(payload []byte) (string, bool) {
 	hostname, _, found := bytes.Cut(payload, []byte{0})
 	if !found {

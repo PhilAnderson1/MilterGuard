@@ -32,9 +32,12 @@ MilterGuard requires:
   locally is recommended, but MilterGuard also supports hosted services such as
   OpenRouter and OpenAI.
 
-OpenDKIM and OpenDMARC are optional but improve the authentication evidence
-available to MilterGuard and enable its DKIM-dependent trust features. Prebuilt
-packages and a portable archive are available for 64-bit x86 Linux systems.
+MilterGuard can calculate inbound SPF, DKIM, and DMARC itself when
+`authentication.mode` is set to `internal`. The compatibility default remains
+`trusted_headers`, which consumes results from local services such as OpenDKIM
+and OpenDMARC during migration. OpenDKIM may still be retained for outbound
+signing. Prebuilt packages and a portable archive are available for 64-bit x86
+Linux systems.
 
 ## Install
 

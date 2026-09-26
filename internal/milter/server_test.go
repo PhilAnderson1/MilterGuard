@@ -468,10 +468,10 @@ func TestAuthenticationProviderReceivesExactTransactionAndFeedsPrompt(t *testing
 	sendContinueFrames(t, conn,
 		connectFrame('4', "198.51.100.9"),
 		append([]byte{commandHelo}, []byte("helo.example.net\x00")...),
-		envelopeFrame(commandMail, "bounce@example.net"),
+		envelopeFrame(commandMail, "bounce@example.net", "SIZE=123", "SMTPUTF8"),
 		envelopeFrame(commandRecipient, "recipient@example.net"),
 		headerFrame("From", "Sender <sender@example.com>"),
-		headerFrame("Subject", "first\n\tsecond"),
+		headerFrame("Subject", "first\n\tsecond ü"),
 		[]byte{commandEndHeaders},
 		append([]byte{commandBody}, []byte{'b', 'o', 'd', 'y', 0, '\r', '\n'}...),
 	)
@@ -483,10 +483,10 @@ func TestAuthenticationProviderReceivesExactTransactionAndFeedsPrompt(t *testing
 	transaction := observation.transaction
 	if transaction.RemoteIP.String() != "198.51.100.9" || transaction.ReceiverIP.String() != "192.0.2.25" ||
 		transaction.ReceiverHostname != "mx.example.net" || transaction.HELO != "helo.example.net" ||
-		transaction.EnvelopeSender != "bounce@example.net" || transaction.VisibleFromDomain != "example.com" {
+		transaction.EnvelopeSender != "bounce@example.net" || transaction.VisibleFromDomain != "example.com" || !transaction.SMTPUTF8 {
 		t.Fatalf("authentication transaction = %#v", transaction)
 	}
-	wantMessage := "From: Sender <sender@example.com>\r\nSubject: first\r\n\tsecond\r\n\r\nbody\x00\r\n"
+	wantMessage := "From: Sender <sender@example.com>\r\nSubject: first\r\n\tsecond ü\r\n\r\nbody\x00\r\n"
 	if string(observation.message) != wantMessage {
 		t.Fatalf("exact authentication message = %q, want %q", observation.message, wantMessage)
 	}
@@ -866,8 +866,13 @@ func macroFrame(target byte, pairs ...string) []byte {
 	return payload
 }
 
-func envelopeFrame(command byte, address string) []byte {
-	return append(append([]byte{command}, []byte("<"+address+">")...), 0)
+func envelopeFrame(command byte, address string, arguments ...string) []byte {
+	payload := append(append([]byte{command}, []byte("<"+address+">")...), 0)
+	for _, argument := range arguments {
+		payload = append(payload, argument...)
+		payload = append(payload, 0)
+	}
+	return payload
 }
 
 func headerFrame(name, value string) []byte {
@@ -2174,6 +2179,16 @@ func TestAnalysisTimeoutUsesAITimeoutWithResponseMargin(t *testing.T) {
 func TestAnalysisTimeoutIncludesRetryAttemptsAndWaits(t *testing.T) {
 	s := &analysisService{milterTimeout: 30 * time.Second, ai: config.AIConfig{Timeout: config.Duration(60 * time.Second), Retries: 2}}
 	if got, want := s.analysisTimeout(), 245*time.Second; got != want {
+		t.Fatalf("analysis timeout = %v, want %v", got, want)
+	}
+}
+
+func TestAnalysisTimeoutIncludesInternalAuthentication(t *testing.T) {
+	s := &analysisService{
+		milterTimeout: 30 * time.Second, authenticationTimeout: 10 * time.Second,
+		ai: config.AIConfig{Timeout: config.Duration(60 * time.Second)},
+	}
+	if got, want := s.analysisTimeout(), 75*time.Second; got != want {
 		t.Fatalf("analysis timeout = %v, want %v", got, want)
 	}
 }

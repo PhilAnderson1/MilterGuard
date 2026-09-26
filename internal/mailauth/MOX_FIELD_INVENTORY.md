@@ -2,8 +2,8 @@
 
 This inventory is based on Mox v0.0.17. `internal/mailauth/moxverify` is the
 only production package that imports Mox and translates these values into the
-bounded MilterGuard-owned types in its parent package. The adapter is not yet
-wired into the runtime composition root.
+bounded MilterGuard-owned types in its parent package. The runtime composition
+root selects this adapter only when `authentication.mode: internal` is set.
 
 ## SPF
 

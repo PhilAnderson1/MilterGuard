@@ -19,8 +19,10 @@ import (
 )
 
 const (
-	MTAHostnameAuthservID = "$mta_hostname"
-	maxMilterMessageSize  = 100 << 20
+	MTAHostnameAuthservID            = "$mta_hostname"
+	AuthenticationModeTrustedHeaders = "trusted_headers"
+	AuthenticationModeInternal       = "internal"
+	maxMilterMessageSize             = 100 << 20
 )
 
 type Duration time.Duration
@@ -38,6 +40,7 @@ func (d Duration) Value() time.Duration { return time.Duration(d) }
 type Config struct {
 	Mode               string                   `yaml:"mode"`
 	Milter             MilterConfig             `yaml:"milter"`
+	Authentication     AuthenticationConfig     `yaml:"authentication"`
 	AI                 AIConfig                 `yaml:"ai"`
 	Filtering          FilteringConfig          `yaml:"filtering"`
 	Attachments        AttachmentsConfig        `yaml:"attachments"`
@@ -104,7 +107,12 @@ type MilterConfig struct {
 	MaxMessageSize       int64    `yaml:"max_message_size"`
 	MaxConnections       int      `yaml:"max_connections"`
 	AllowedPeerIPs       []string `yaml:"allowed_peer_ips"`
-	ExactMessageStorage  string   `yaml:"exact_message_storage"`
+}
+type AuthenticationConfig struct {
+	Mode           string   `yaml:"mode"`
+	Timeout        Duration `yaml:"timeout"`
+	MaxConcurrent  int      `yaml:"max_concurrent"`
+	MessageStorage string   `yaml:"message_storage"`
 }
 type AIConfig struct {
 	Endpoint           string   `yaml:"endpoint"`
@@ -225,7 +233,10 @@ func defaults() Config {
 		Milter: MilterConfig{
 			Socket: "tcp:127.0.0.1:8895", Timeout: Duration(time.Minute),
 			ConnectionDNSTimeout: Duration(5 * time.Second), MaxMessageSize: 10 << 20, MaxConnections: 64,
-			AllowedPeerIPs: []string{"127.0.0.0/8", "::1/128"}, ExactMessageStorage: "memory",
+			AllowedPeerIPs: []string{"127.0.0.0/8", "::1/128"},
+		},
+		Authentication: AuthenticationConfig{
+			Mode: AuthenticationModeTrustedHeaders, Timeout: Duration(10 * time.Second), MaxConcurrent: 8, MessageStorage: "memory",
 		},
 		AI: AIConfig{
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
@@ -316,8 +327,17 @@ func (c Config) Validate() error {
 	if c.Milter.MaxConnections < 1 {
 		return fmt.Errorf("milter.max_connections must be positive")
 	}
-	if c.Milter.ExactMessageStorage != "memory" && c.Milter.ExactMessageStorage != "file" {
-		return fmt.Errorf("milter.exact_message_storage must be memory or file")
+	if c.Authentication.Mode != AuthenticationModeTrustedHeaders && c.Authentication.Mode != AuthenticationModeInternal {
+		return fmt.Errorf("authentication.mode must be trusted_headers or internal")
+	}
+	if c.Authentication.Timeout.Value() <= 0 {
+		return fmt.Errorf("authentication.timeout must be positive")
+	}
+	if c.Authentication.MaxConcurrent < 1 {
+		return fmt.Errorf("authentication.max_concurrent must be positive")
+	}
+	if c.Authentication.MessageStorage != "memory" && c.Authentication.MessageStorage != "file" {
+		return fmt.Errorf("authentication.message_storage must be memory or file")
 	}
 	if listener.Network == "tcp" && len(c.Milter.AllowedPeerIPs) == 0 {
 		return fmt.Errorf("milter.allowed_peer_ips must contain at least one address for a TCP listener")
@@ -467,7 +487,7 @@ func (c Config) Validate() error {
 			return fmt.Errorf("invalid filtering.sender_domain_allowlist entry %q", domain)
 		}
 	}
-	if len(c.Filtering.SenderDomainAllowlist) > 0 && c.Filtering.SenderDomainAllowlistRequireDKIM && len(c.Correspondents.TrustedAuthservIDs) == 0 {
+	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && len(c.Filtering.SenderDomainAllowlist) > 0 && c.Filtering.SenderDomainAllowlistRequireDKIM && len(c.Correspondents.TrustedAuthservIDs) == 0 {
 		return fmt.Errorf("filtering.sender_domain_allowlist_require_dkim requires correspondents.trusted_authserv_ids")
 	}
 	reputation := c.IPReputation
@@ -533,10 +553,10 @@ func (c Config) Validate() error {
 	if allowlist.BypassAI && !allowlist.UseAllowlist {
 		return fmt.Errorf("correspondents.bypass_ai requires use_allowlist")
 	}
-	if allowlist.BypassAI && allowlist.RequireDKIMForBypass && len(allowlist.TrustedAuthservIDs) == 0 {
+	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && allowlist.BypassAI && allowlist.RequireDKIMForBypass && len(allowlist.TrustedAuthservIDs) == 0 {
 		return fmt.Errorf("correspondents.require_dkim_for_bypass requires trusted_authserv_ids")
 	}
-	if allowlist.LearnLegitimateSenders && allowlist.LegitimateSenderRequireDKIM && len(allowlist.TrustedAuthservIDs) == 0 {
+	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && allowlist.LearnLegitimateSenders && allowlist.LegitimateSenderRequireDKIM && len(allowlist.TrustedAuthservIDs) == 0 {
 		return fmt.Errorf("correspondents.legitimate_sender_require_dkim requires trusted_authserv_ids when legitimate sender learning is enabled")
 	}
 	for _, authservID := range allowlist.TrustedAuthservIDs {

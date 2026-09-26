@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
@@ -48,6 +49,7 @@ type session struct {
 	receiverIP                  netip.Addr
 	pendingReceiverIP           netip.Addr
 	heloIdentity                string
+	smtpUTF8                    bool
 	authentication              authenticationState
 	envelopeSender              string
 	envelopeRecipients          []string
@@ -145,6 +147,7 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		ss.receiverIP = netip.Addr{}
 		ss.pendingReceiverIP = netip.Addr{}
 		ss.heloIdentity = ""
+		ss.smtpUTF8 = false
 		ss.authentication = authenticationState{}
 		ss.connectionDNS = connectionDNSResult{status: message.ReverseDNSNotApplicable}
 		ss.connectionDNSPending = nil
@@ -194,6 +197,7 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		ss.resetMessage(phaseEnvelope)
 		if sender, ok := parseEnvelopeAddress(payload); ok {
 			ss.envelopeSender = sender
+			ss.smtpUTF8 = containsNonASCII(sender) || envelopeHasSMTPUTF8(payload)
 		}
 		return ss.sendContinue(command)
 	case commandRecipient:
@@ -270,6 +274,10 @@ func (ss *session) negotiate(payload []byte) bool {
 		ss.deps.log.Warn("internal reply protection disabled for Milter connection because MTA did not offer change-header support",
 			"offered_actions", offeredActions)
 	}
+	if ss.internalAuthentication() && offeredActions&resultHeaderActions != resultHeaderActions {
+		ss.deps.log.Error("internal authentication requires MTA add-header and change-header support",
+			"offered_actions", offeredActions, "required_actions", resultHeaderActions)
+	}
 	ss.negotiatedActions = requestedActions
 	if !ss.send(commandOptionNegotiation, optionResponse(version, requestedActions)) {
 		return false
@@ -340,10 +348,17 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if handled, keepConnection := ss.applyAttachments(ctx); handled {
 		return keepConnection
 	}
-	authentication, progressErr := ss.verifyAuthenticationWithProgress(ctx)
+	authentication := mailauth.Evidence{}
+	var progressErr error
+	if !ss.internalAuthentication() || !ss.authentication.Authenticated {
+		authentication, progressErr = ss.verifyAuthenticationWithProgress(ctx)
+	}
 	ss.closeExactMessage()
 	if progressErr != nil {
 		ss.deps.log.WarnContext(ctx, "authentication verification failed", "error", progressErr)
+		if ss.internalAuthentication() {
+			authentication = authenticationUnavailableEvidence(authentication, ss.visibleSenderDomain)
+		}
 	}
 	ss.message.Authentication = authentication
 	inbound := ss.deps.policy.prepareInboundEvidence(ctx, ss.messageContext(ss.recipientSetComplete()), authentication, ss.deps.filtering)
@@ -364,6 +379,11 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	var err error
 	if result.selected == actionAccept {
 		err = ss.writeAcceptedResultHeaders(&result)
+	}
+	if err != nil {
+		if handled, keepConnection := ss.handleAuthenticationHeaderSafetyError(ctx, err); handled {
+			return keepConnection
+		}
 	}
 	if err == nil {
 		err = writeFrame(ss.conn, responseForAction(result.selected, ss.deps.filtering.RejectMessage))
@@ -391,6 +411,7 @@ func (ss *session) verifyAuthenticationWithProgress(ctx context.Context) (mailau
 	transaction := mailauth.Transaction{
 		RemoteIP: ss.peerIP, HELO: ss.heloIdentity, EnvelopeSender: envelopeSender,
 		ReceiverHostname: ss.mtaHostname, ReceiverIP: ss.receiverIP, VisibleFromDomain: ss.visibleSenderDomain,
+		SMTPUTF8:              ss.smtpUTF8,
 		AuthenticationResults: append([]string(nil), ss.message.Headers["authentication-results"]...),
 		ReceivedSPF:           append([]string(nil), ss.message.Headers["received-spf"]...),
 		TrustedAuthservIDs:    ss.trustedAuthservIDs(),
@@ -612,6 +633,39 @@ func (ss *session) trustedAuthservIDs() []string {
 	return ss.deps.policy.trustedAuthservIDs(ss.mtaHostname)
 }
 
+func (ss *session) internalAuthentication() bool {
+	return ss.deps.authenticationMode == config.AuthenticationModeInternal
+}
+
+func containsNonASCII(value string) bool {
+	for index := range len(value) {
+		if value[index] >= utf8.RuneSelf {
+			return true
+		}
+	}
+	return false
+}
+
+func authenticationUnavailableEvidence(evidence mailauth.Evidence, visibleDomain string) mailauth.Evidence {
+	results := append([]mailauth.Result(nil), evidence.Results...)
+	for _, method := range []mailauth.Method{mailauth.MethodSPF, mailauth.MethodDKIM, mailauth.MethodDMARC} {
+		found := false
+		for _, result := range results {
+			if result.Method == method {
+				found = true
+				break
+			}
+		}
+		if !found {
+			results = append(results, mailauth.Result{
+				Method: method, Outcome: mailauth.OutcomeTemperror,
+				ErrorCategory: mailauth.ErrorInternal, Reason: "authentication unavailable",
+			})
+		}
+	}
+	return mailauth.NewEvidence(results, visibleDomain)
+}
+
 func validMTAHostname(value string) string {
 	value = netsafety.DNSHostname(value)
 	if value == "" {
@@ -625,6 +679,11 @@ func validMTAHostname(value string) string {
 
 func (ss *session) finishBypassedMessage(ctx context.Context, source string, learn, touchInbound bool, extraAttrs ...any) bool {
 	err := ss.writeAcceptedBypassHeaders()
+	if err != nil {
+		if handled, keepConnection := ss.handleAuthenticationHeaderSafetyError(ctx, err); handled {
+			return keepConnection
+		}
+	}
 	if err == nil {
 		err = writeFrame(ss.conn, responseForAction(actionAccept, ss.deps.filtering.RejectMessage))
 	}
@@ -783,6 +842,7 @@ func (ss *session) resetMessage(phase protocolPhase) {
 	ss.envelopeRecipientsTruncated = false
 	ss.visibleSender = ""
 	ss.visibleSenderDomain = ""
+	ss.smtpUTF8 = false
 	ss.phase = phase
 	if phase != phaseEnvelope {
 		ss.exactMessage = nil

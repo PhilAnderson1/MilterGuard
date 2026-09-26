@@ -45,9 +45,21 @@ milter:
   # Larger messages are truncated and the decision log records truncated=true.
   max_message_size: 10485760
 
-  # Exact RFC message retained until authentication completes: memory or file.
+authentication:
+  # Authentication source: trusted_headers or internal. trusted_headers keeps
+  # compatibility with OpenDKIM/OpenDMARC during migration. internal makes
+  # MilterGuard calculate SPF, DKIM, and DMARC directly.
+  mode: trusted_headers
+
+  # Whole-operation timeout for internal SPF/DKIM/DMARC verification.
+  timeout: 10s
+
+  # Maximum number of simultaneous internal verification operations.
+  max_concurrent: 8
+
+  # Exact RFC message storage used for DKIM verification: memory or file.
   # Memory is faster; file bounds per-connection heap usage for large limits.
-  exact_message_storage: memory
+  message_storage: memory
 
 ai:
   # Full OpenRouter, OpenAI or llama.cpp-compatible chat-completions URL.
@@ -376,10 +388,10 @@ correspondents:
   # Set to 0s to record every qualifying activity.
   activity_update_interval: 24h
 
-  # Identifies Authentication-Results and Received-SPF headers added by your own
-  # mail server. $mta_hostname automatically uses your MTA hostname. Your MTA
-  # must remove forged inbound copies of both header types that claim this
-  # hostname before locally calculated authentication results are added.
+  # Used only when authentication.mode is trusted_headers. Identifies
+  # Authentication-Results and Received-SPF headers added by your own mail
+  # server. $mta_hostname automatically uses your MTA hostname. Postfix must
+  # remove forged inbound copies before trusted local filters add replacements.
   trusted_authserv_ids:
     - "$mta_hostname"
 

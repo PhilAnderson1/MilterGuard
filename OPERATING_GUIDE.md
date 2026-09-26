@@ -20,7 +20,7 @@ For initial installation and activation, follow the
 ## Contents
 
 1. [Configure the AI service](#configure-the-ai-service)
-2. [Install and configure OpenDKIM and OpenDMARC (optional)](#install-and-configure-opendkim-and-opendmarc-optional)
+2. [Choose an authentication mode](#choose-an-authentication-mode)
 3. [Connect Postfix to MilterGuard](#connect-postfix-to-milterguard)
 4. [Start MilterGuard in monitor mode](#start-milterguard-in-monitor-mode)
 5. [Enable enforcement](#enable-enforcement)
@@ -73,13 +73,13 @@ has been tested with the configured model; test any prompt or model changes in
 monitor mode against representative legitimate and unwanted email before
 enabling rejection.
 
-## Install and configure OpenDKIM and OpenDMARC (optional)
+## Choose an authentication mode
 
-MilterGuard works without OpenDKIM or OpenDMARC, but trusted DKIM, SPF, and
-DMARC results give the AI stronger evidence about sender identity and improve
-classification quality, so they are strongly recommended. Without trusted DKIM
-results, trusted-domain bypass, authenticated correspondent bypass, and
-automatic sender learning are less effective or unavailable.
+The compatibility default, `authentication.mode: trusted_headers`, consumes
+results produced by trusted local filters. In this mode, trusted DKIM, SPF, and
+DMARC results give the AI stronger identity evidence and enable authentication-
+dependent bypass and learning features. OpenDKIM and OpenDMARC are therefore
+strongly recommended while using this mode.
 
 Your server may already use OpenDKIM to sign outbound email. If so, make sure it
 is configured to verify inbound signatures and add its results to
@@ -87,6 +87,12 @@ is configured to verify inbound signatures and add its results to
 OpenDMARC can then evaluate DMARC and SPF and add those results for MilterGuard
 to use. Install the packages supplied by your operating system and configure
 each service to expose a Milter socket or local TCP listener to Postfix.
+
+`authentication.mode: internal` instead makes MilterGuard calculate inbound
+SPF, DKIM, and DMARC directly. OpenDMARC and inbound OpenDKIM verification are
+then unnecessary. An OpenDKIM instance can remain in the Postfix chain if it is
+needed for outbound signing, but no earlier Milter may modify a DKIM-signed
+header or the body before MilterGuard receives the end-of-message callback.
 Loopback TCP listeners are generally simpler to configure consistently across
 multiple Milter services. Unix sockets also work, but their directory ownership,
 permissions, and any Postfix chroot must be configured correctly.
@@ -103,17 +109,17 @@ directory and socket permissions instead.
 
 ## Connect Postfix to MilterGuard
 
-Add MilterGuard to the end of `smtpd_milters` in `/etc/postfix/main.cf`.
-Postfix calls Milters in the configured order, allowing MilterGuard to use
-authentication results added by earlier filters.
+Add MilterGuard to `smtpd_milters` in `/etc/postfix/main.cf`. In
+`trusted_headers` mode, put it after the local authentication filters whose
+results it consumes.
 
-These filters must run in this order:
+In `trusted_headers` mode, these filters must run in this order:
 
 ```text
 OpenDKIM → OpenDMARC → MilterGuard
 ```
 
-With no authentication filters:
+With `authentication.mode: internal` and no separate authentication filters:
 
 ```text
 milter_default_action = accept
@@ -169,7 +175,7 @@ concurrency for normal mail bursts. Increasing `ai.max_concurrent` is useful
 only when the configured AI service can process the additional requests
 efficiently; locally hosted AI commonly needs a lower value instead.
 
-`milter.exact_message_storage` selects how the byte-exact message used for
+`authentication.message_storage` selects how the byte-exact message used for
 authentication is retained until verification completes. The default `memory`
 mode is fastest. Its theoretical additional memory bound is approximately
 `milter.max_connections × milter.max_message_size`, although normal messages
@@ -178,17 +184,24 @@ are smaller and the buffer is released immediately after authentication. Use
 File mode creates a mode-0600 temporary file, unlinks it immediately, and keeps
 only its descriptor until verification completes.
 
-The authentication service identifier written to `Authentication-Results`
-must be included in MilterGuard's `correspondents.trusted_authserv_ids` setting.
-The default `$mta_hostname` value normally handles results identified with the
-Postfix hostname.
+`authentication.timeout` bounds queueing plus SPF/DKIM/DMARC work for one
+message, while `authentication.max_concurrent` bounds simultaneous internal
+verification operations. Both values must be positive. The former
+`milter.exact_message_storage` key is not accepted; move its value to
+`authentication.message_storage` when upgrading a configuration created during
+development of this feature.
+
+In `trusted_headers` mode, the authentication service identifiers written by
+local filters must be included in `correspondents.trusted_authserv_ids`. The
+default `$mta_hostname` normally handles results identified with the Postfix
+hostname. In `internal` mode, this list is not consulted.
 
 MilterGuard also reads Postfix's `{daemon_addr}` connect macro as the local SMTP
 interface address required by internal SPF verification. Postfix 3.2 and later
 include `{daemon_addr}` in the default `milter_connect_macros`; installations
 with a customized list must retain it.
 
-With OpenDKIM, OpenDMARC, or both installed on your server, configure Postfix
+In `trusted_headers` mode, configure Postfix
 to remove externally supplied `Authentication-Results` and `Received-SPF`
 headers. Their authentication service or receiver identifier is not proof that
 they were created locally, so without this step a remote sender could forge
@@ -215,6 +228,16 @@ MilterGuard runs, and MilterGuard may add its own result headers. Do not apply
 these removal rules through `milter_header_checks`, which operates on headers
 added by Milters.
 
+In `internal` mode, remove the two authentication-header rules above after
+MilterGuard is enabled. MilterGuard itself deletes every supplied
+`Authentication-Results` and `Received-SPF` occurrence and adds one locally
+calculated `Authentication-Results` field to accepted inbound messages. It
+temporarily fails an acceptance if Postfix did not offer the Milter add-header
+and change-header capabilities, preventing forged and genuine results from
+being delivered together. Authenticated SMTP submissions skip inbound
+verification; supplied result fields are stripped without adding inbound
+SPF/DKIM/DMARC claims.
+
 MilterGuard also supplies the connecting IP, reported hostname, HELO/EHLO
 identity, reverse DNS, and forward-confirmation result to the AI as supporting
 evidence. DNS failures do not reject or defer mail, and lookup time is bounded
@@ -230,7 +253,7 @@ MilterGuard can recognize SASL-authenticated mail. Check the effective values
 before changing them:
 
 ```sh
-postconf myhostname milter_protocol milter_content_timeout milter_mail_macros smtpd_milters non_smtpd_milters
+postconf myhostname milter_protocol milter_content_timeout milter_connect_macros milter_mail_macros smtpd_milters non_smtpd_milters
 ```
 
 For full MilterGuard functionality, the output should have these
@@ -240,14 +263,17 @@ characteristics:
 myhostname = mail.example.com
 milter_protocol = 6
 milter_content_timeout = 600s
+milter_connect_macros = ... j ... {daemon_addr} ...
 milter_mail_macros = ... {auth_authen} ...
 smtpd_milters = ...authentication filters..., inet:127.0.0.1:8895
 ```
 
 The hostname and authentication-filter sockets will be specific to the mail
-server. `{auth_authen}` must appear in `milter_mail_macros`, and MilterGuard
-must be the last entry in `smtpd_milters`. If `non_smtpd_milters` is present in
-the `postconf` output, it must not contain MilterGuard.
+server. Internal mode requires valid `j` and `{daemon_addr}` connect macros;
+`{auth_authen}` must appear in `milter_mail_macros`. MilterGuard must be the
+last entry in `smtpd_milters` when earlier authentication filters are present.
+If `non_smtpd_milters` is present in the `postconf` output, it must not contain
+MilterGuard.
 
 ### Optional early rejection with Spamhaus ZEN
 

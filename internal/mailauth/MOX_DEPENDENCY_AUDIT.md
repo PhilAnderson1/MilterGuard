@@ -73,13 +73,15 @@ discard their implementation.
 | Build | Bytes | MiB |
 | --- | ---: | ---: |
 | Stage 1 baseline | 13,406,370 | 12.785 |
-| Mox authentication packages | 17,211,554 | 16.414 |
-| Increase | 3,805,184 | 3.629 |
+| Mox authentication audit shim | 17,211,554 | 16.414 |
+| Internal-mode MilterGuard | 17,797,282 | 16.973 |
+| Final increase | 4,390,912 | 4.188 |
 
-The increase is 28.38%. This is acceptable for a statically linked service and
-does not introduce a runtime package or process dependency. The measurement
-must be repeated against the real verifier because final reachable code may
-differ from the audit linkage shim.
+The final increase is 32.75%. This is acceptable for a statically linked
+service and does not introduce a runtime package or process dependency. The
+final measurement uses the production composition root with the real verifier
+reachable; the audit-shim measurement is retained to make the earlier gate
+reproducible.
 
 ## DNS and package initialization audit
 
@@ -136,9 +138,9 @@ The dependency audit passes subject to these implementation constraints:
 5. Static size and module/licence inventories are rechecked after the real
    verifier is linked.
 
-The first four conditions are implemented by `internal/mailauth/moxverify`.
-The adapter owns whole-operation timeout and concurrency bounds, caps DKIM
-verification and retained results, translates immediately into MilterGuard
-types, and discards Mox's verbose DNS diagnostics. It is not yet selected by
-the runtime composition root, so the final linked-executable size recheck
-remains pending until internal mode is wired.
+All five conditions are implemented. `internal/mailauth/moxverify` owns the
+first four: it applies whole-operation timeout and concurrency bounds, caps
+DKIM verification and retained results, translates immediately into
+MilterGuard types, and discards Mox's verbose DNS diagnostics. The runtime
+composition root selects it only for `authentication.mode: internal`; the
+final linked binary measurement is recorded above.

@@ -71,4 +71,4 @@ Mox's rejection recommendation is not converted into a Milter action.
 - Investigate and document every disagreement, including expiration,
   forwarding and mailing-list transformations.
 - Run unavailable-recursive-resolver load tests and final memory, latency and
-  DNS-volume measurements after the adapter is wired into internal mode.
+  DNS-volume measurements with the adapter selected in internal mode.

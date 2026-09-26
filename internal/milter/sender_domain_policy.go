@@ -72,6 +72,11 @@ func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, doma
 			err = ss.writeAcceptedResultHeaders(nil)
 		}
 	}
+	if err != nil {
+		if handled, keepConnection := ss.handleAuthenticationHeaderSafetyError(ctx, err); handled {
+			return keepConnection
+		}
+	}
 	if err == nil {
 		err = writeFrame(ss.conn, responseForAction(selected, ss.deps.filtering.RejectMessage))
 	}
