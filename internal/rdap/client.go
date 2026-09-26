@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
+	"github.com/PhilAnderson1/MilterGuard/internal/systemdns"
 )
 
 const (
@@ -45,7 +46,7 @@ type Client struct {
 func New(timeout time.Duration) *Client {
 	dialer := &net.Dialer{}
 	client := &Client{
-		resolve:      net.DefaultResolver.LookupIPAddr,
+		resolve:      systemdns.NewResolver().LookupIPAddr,
 		dial:         dialer.DialContext,
 		now:          time.Now,
 		bootstrapURL: bootstrapURL,
@@ -94,7 +95,7 @@ func (c *Client) dialContext(ctx context.Context, network, endpoint string) (net
 		return nil, fmt.Errorf("unsafe RDAP endpoint hostname %q", host)
 	}
 	addresses, err := c.resolve(ctx, hostname)
-	if err != nil {
+	if err != nil && len(addresses) == 0 {
 		return nil, fmt.Errorf("cannot resolve RDAP endpoint hostname %q: %w", hostname, err)
 	}
 	if len(addresses) == 0 {

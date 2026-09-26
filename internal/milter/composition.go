@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"runtime"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/rdap"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
+	"github.com/PhilAnderson1/MilterGuard/internal/systemdns"
 )
 
 type runtimeComponents struct {
@@ -59,7 +59,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	domainRegistration := newDomainRegistrationStore(cfg.DomainRegistration, domainCache, domainLookup, log)
 
 	archive := newRejectedMailArchive(cfg.RejectionHistory, log)
-	commands := commandProcessor(cfg, correspondents, rejections, ipReputation, archive, net.DefaultResolver, log)
+	commands := commandProcessor(cfg, correspondents, rejections, ipReputation, archive, systemdns.NewResolver(), log)
 
 	var attachmentScanner *attachment.Scanner
 	if cfg.Attachments.BlockExecutables {
@@ -100,7 +100,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 			progressInterval: defaultMilterProgressInterval, exactStorage: cfg.Milter.ExactMessageStorage,
 		},
 		analysis: analysis, policy: policy, attachments: attachments, commands: emailCommands,
-		dns:             &connectionDNSService{resolver: net.DefaultResolver, timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
+		dns:             &connectionDNSService{resolver: systemdns.NewResolver(), timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
 		authentication:  mailauth.HeaderVerifier{},
 		newExactMessage: mailauth.NewExactMessage,
 		log:             log,

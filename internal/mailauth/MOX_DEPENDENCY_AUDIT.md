@@ -2,10 +2,10 @@
 
 Audit date: 2026-09-26
 
-Decision: **GO**, with resolver isolation required before the verifier is wired
-into production. Pin `github.com/mjl-/mox` at `v0.0.17`. Mox is pre-v1, so its
+Decision: **GO**. Pin `github.com/mjl-/mox` at `v0.0.17`. Mox is pre-v1, so its
 API is not covered by Go's v1 compatibility guarantee and upgrades require an
-explicit API and behavior review.
+explicit API and behavior review. The required resolver isolation was completed
+before the verifier was wired into production.
 
 ## Version selection
 
@@ -84,13 +84,14 @@ differ from the audit linkage shim.
 ## DNS and package initialization audit
 
 Importing `mox/dns` executes an initializer that sets
-`net.DefaultResolver.StrictErrors = true`. MilterGuard currently uses
-`net.DefaultResolver` for connection reverse DNS, administration-command IP
-lookups and the default RDAP resolver. Before importing Mox from production
-code, those consumers must receive explicit `net.Resolver` instances with
-their existing zero-value `StrictErrors` behavior. Regression tests must cover
-partial A/AAAA failures, timeouts, and RDAP's resolve/validate/pinned-dial
-sequence.
+`net.DefaultResolver.StrictErrors = true`. MilterGuard's connection reverse
+DNS, administration-command IP lookups and RDAP client now each receive an
+explicit resolver created by `internal/systemdns`. These instances retain the
+zero-value `StrictErrors` behavior and do not alias the mutable global default.
+Regression tests cover partial A/AAAA failures, timeouts, and RDAP's
+resolve/validate/pinned-dial sequence. The RDAP path still rejects the entire
+answer set if any returned address is unsafe, then dials a validated IP
+directly.
 
 The dedicated authentication resolver will be `mox/dns.StrictResolver` backed
 by its own `adns.Resolver`. It will not replace any existing MilterGuard
