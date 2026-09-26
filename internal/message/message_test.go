@@ -670,7 +670,7 @@ func TestPromptIncludesOnlyTrustedAuthenticationResults(t *testing.T) {
 	m.AddHeader("Subject", "test")
 	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 	prompt := m.Prompt(100)
-	if !strings.Contains(prompt, "DMARC: pass for visible From domain example.com (matches supplied visible From domain: yes)") {
+	if !strings.Contains(prompt, "DMARC: pass for visible From domain example.com") {
 		t.Fatalf("trusted authentication result missing: %s", prompt)
 	}
 	if strings.Contains(prompt, "mx.google.com") {
@@ -739,6 +739,61 @@ func TestPromptOmitsAuthenticationEvidenceWhenNoTrustedResultsExist(t *testing.T
 	}
 }
 
+func TestPromptTreatsBodyLengthLimitedDKIMAsNoResult(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "sender@example.com")
+	m.Authentication = mailauth.Evidence{Results: []mailauth.Result{{
+		Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy, Domain: "example.com",
+		BodyLengthLimited: true, BodyLength: 12,
+	}}}
+	prompt := m.Prompt(100)
+	if !strings.Contains(prompt, "DKIM: no trusted local result") {
+		t.Fatalf("body-length-limited DKIM was not treated as unavailable:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "DKIM: policy") {
+		t.Fatalf("body-length-limited DKIM policy result leaked into prompt:\n%s", prompt)
+	}
+}
+
+func TestPromptOmitsBodyLengthLimitedDKIMAlongsideUsableResult(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "sender@example.com")
+	m.Authentication = mailauth.NewEvidence([]mailauth.Result{
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy, Domain: "limited.example.com", BodyLengthLimited: true, BodyLength: 12},
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePass, Domain: "example.com"},
+	}, "example.com")
+	prompt := m.Prompt(100)
+	if !strings.Contains(prompt, "DKIM: pass for signing domain example.com") {
+		t.Fatalf("usable DKIM result missing from prompt:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "limited.example.com") || strings.Contains(prompt, "DKIM: no trusted local result") {
+		t.Fatalf("body-length-limited DKIM affected usable result rendering:\n%s", prompt)
+	}
+}
+
+func TestPromptOmitsAlignmentLanguageFromNonPassResults(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "sender@example.com")
+	m.Authentication = mailauth.NewEvidence([]mailauth.Result{
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomeFail, Domain: "example.com"},
+		{Method: mailauth.MethodSPF, Outcome: mailauth.OutcomeSoftfail, Domain: "example.com"},
+		{Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomeFail, Domain: "example.com"},
+	}, "example.com")
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"DKIM: fail for signing domain example.com",
+		"SPF: softfail for envelope-sender domain example.com",
+		"DMARC: fail for visible From domain example.com",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("non-pass authentication result missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "aligned with visible From domain") || strings.Contains(prompt, "matches supplied visible From domain") {
+		t.Fatalf("non-pass authentication result included misleading domain-match language:\n%s", prompt)
+	}
+}
+
 func TestPromptDescribesAuthenticatedSubmissionWithoutInboundAuthenticationResults(t *testing.T) {
 	m := New(1000)
 	m.AuthenticatedSubmission = true
@@ -795,9 +850,9 @@ func TestPromptNormalizesConflictingBrandAuthenticationEvidence(t *testing.T) {
 	for _, want := range []string{
 		"Visible From domain: gernandz.click",
 		"DKIM: pass for signing domain gernandz.click (aligned with visible From domain: yes)",
-		"DKIM: fail for signing domain mail.aliexpress.com (aligned with visible From domain: no)",
+		"DKIM: fail for signing domain mail.aliexpress.com",
 		"SPF: no trusted local result",
-		"DMARC: pass for visible From domain gernandz.click (matches supplied visible From domain: yes)",
+		"DMARC: pass for visible From domain gernandz.click",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("normalized authentication summary missing %q:\n%s", want, prompt)
@@ -805,6 +860,9 @@ func TestPromptNormalizesConflictingBrandAuthenticationEvidence(t *testing.T) {
 	}
 	if strings.Contains(prompt, "Authentication-Results:") {
 		t.Fatalf("raw authentication header leaked into prompt: %s", prompt)
+	}
+	if strings.Contains(prompt, "DKIM: fail for signing domain mail.aliexpress.com (aligned") {
+		t.Fatalf("failed DKIM result included misleading alignment language: %s", prompt)
 	}
 }
 
@@ -818,7 +876,7 @@ func TestAuthenticationResultsSemicolonInsideQuotedReasonDoesNotSplitClause(t *t
 	for _, want := range []string{
 		"DKIM: pass for signing domain example.com (aligned with visible From domain: yes)",
 		"SPF: pass for envelope-sender domain example.com (aligned with visible From domain: yes)",
-		"DMARC: pass for visible From domain example.com (matches supplied visible From domain: yes)",
+		"DMARC: pass for visible From domain example.com",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("quote-aware authentication result missing %q:\n%s", want, prompt)

@@ -32,13 +32,6 @@ MilterGuard requires:
   locally is recommended, but MilterGuard also supports hosted services such as
   OpenRouter and OpenAI.
 
-MilterGuard can calculate inbound SPF, DKIM, and DMARC itself when
-`authentication.mode` is set to `internal`. The compatibility default remains
-`trusted_headers`, which consumes results from local services such as OpenDKIM
-and OpenDMARC during migration. OpenDKIM may still be retained for outbound
-signing. Prebuilt packages and a portable archive are available for 64-bit x86
-Linux systems.
-
 ## Install
 
 Download the appropriate installation file from the

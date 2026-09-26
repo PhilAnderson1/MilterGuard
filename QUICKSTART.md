@@ -78,9 +78,8 @@ configuration, security, testing, and maintenance information.
    smtpd_milters = unix:/run/existing-filter/filter.sock, inet:127.0.0.1:8895
    ```
 
-   See the [Operating Guide](OPERATING_GUIDE.md) if another filter rewrites
-   message content. Do not add MilterGuard to `non_smtpd_milters`, because that
-   setting also filters locally generated system mail.
+   Do not add MilterGuard to `non_smtpd_milters`, because that setting also
+   filters locally generated system mail.
 
 7. Check and reload Postfix:
 

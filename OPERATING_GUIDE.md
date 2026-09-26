@@ -38,8 +38,10 @@ MilterGuard's configuration file is `/etc/milterguard/milterguard.yaml`.
 Edit it before starting the service, preserving its YAML indentation and using
 spaces rather than tabs.
 
-Running the AI model locally provides greater privacy, reliability, and
-consistency, with no per-request API charges, so it is the recommended option.
+MilterGuard works with a range of third-party AI API providers as well as
+locally hosted models. Running the model locally provides greater privacy,
+reliability, and consistency, with no per-request API charges, so it is the
+recommended option.
 
 ### Running AI locally
 
@@ -110,13 +112,7 @@ The supplied configuration uses `authentication.mode: internal`, which is
 recommended for new installations. MilterGuard calculates inbound SPF, DKIM,
 and DMARC directly from the SMTP transaction and the byte-exact message. These
 results are used only for MilterGuard's filtering, AI evidence, bypass, and
-learning decisions. Existing `Authentication-Results` and `Received-SPF`
-headers are ignored and delivered unchanged; MilterGuard neither validates nor
-publishes authentication headers in this mode.
-
-OpenDMARC and inbound OpenDKIM verification are not needed in this mode.
-MilterGuard does not DKIM-sign outbound mail, so an existing OpenDKIM service
-may still be used for outbound signing.
+learning decisions.
 
 ### Reuse existing authentication filters
 
@@ -127,10 +123,9 @@ MilterGuard must run after those filters and must trust only their locally
 generated results. OpenDKIM alone normally supplies DKIM results, not the
 complete SPF, DKIM, and DMARC evidence MilterGuard can use.
 
-Add the authentication service identifiers written by the local filters to
-`correspondents.trusted_authserv_ids`. The default `$mta_hostname` normally
-matches results identified with the Postfix hostname. This setting is not used
-in `internal` mode.
+`correspondents.trusted_authserv_ids` must list the `authserv-id` values that
+your local filters put in `Authentication-Results`. The default,
+`$mta_hostname`, trusts results identified by the Postfix hostname.
 
 ## Connect Postfix to MilterGuard
 
@@ -176,20 +171,6 @@ Milter is available. `milter_content_timeout = 600s` gives bounded attachment
 inspection and AI analysis time to complete. MilterGuard sends progress
 responses during long AI operations so Postfix continues waiting.
 
-### Filters that rewrite messages
-
-Filters that only add their own diagnostic headers can normally remain in the
-chain. Filters that rewrite sender or recipient headers, DKIM-signed headers,
-MIME structure, or body content need special care. Postfix does not replay
-changes requested by one Milter through the inspection callbacks of other
-Milters, so changing their order does not guarantee that MilterGuard will
-authenticate or analyse the final delivered representation.
-
-If MilterGuard must evaluate exactly what will be delivered, disable that
-rewrite for inbound mail or redesign the processing path so MilterGuard receives
-the intended final representation. Review any deliberately retained rewrite to
-ensure that its security consequences are understood.
-
 ### Protect authentication and result headers
 
 In `trusted_headers` mode, Postfix must remove externally supplied
@@ -216,13 +197,8 @@ receives the message. The local authentication filters can then add fresh
 results before MilterGuard runs. Do not apply these rules through
 `milter_header_checks`, which operates on headers added by Milters.
 
-In `internal` mode, these authentication-header rules are not required by
-MilterGuard. It ignores `Authentication-Results` and `Received-SPF` when making
-its decisions and leaves them unchanged for other mail-system components. It
-does not endorse those headers or publish its own calculated results.
-Authenticated SMTP submissions also leave them unchanged. The
-`X-MilterGuard-...` rule may still be kept to prevent a sender from supplying
-misleading MilterGuard result headers.
+None of the header checks above are required with MilterGuard's default
+`authentication.mode: internal`.
 
 ### Required Postfix connection data
 
@@ -336,6 +312,10 @@ Review the journal regularly:
 ```sh
 journalctl -u milterguard --since yesterday --no-pager -o cat
 ```
+
+MilterGuard's classification is also recorded in the `X-MilterGuard-*` headers
+of each delivered email. View the message headers or source in your email client
+to see the classification, score, confidence, and action.
 
 Pay particular attention to legitimate messages classified as unwanted,
 unwanted messages classified as legitimate, endpoint failures, and unusually
