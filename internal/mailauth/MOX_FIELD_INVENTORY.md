@@ -67,3 +67,6 @@ names at 16. Reasons come from a fixed local vocabulary rather than raw Mox or
 resolver errors. Raw Mox types, DNS records and errors never enter session,
 prompt or persistence state, and Mox's verbose DNS logging is discarded in
 favor of one bounded service summary.
+
+See `MOX_INTEROPERABILITY_MATRIX.md` for the tested status and edge-case matrix,
+including Mox's missing-key and multiple-key-record DKIM semantics.
