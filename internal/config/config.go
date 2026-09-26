@@ -110,6 +110,7 @@ type MilterConfig struct {
 }
 type AuthenticationConfig struct {
 	Mode           string   `yaml:"mode"`
+	ShadowInternal bool     `yaml:"shadow_internal"`
 	Timeout        Duration `yaml:"timeout"`
 	MaxConcurrent  int      `yaml:"max_concurrent"`
 	MessageStorage string   `yaml:"message_storage"`
@@ -221,6 +222,9 @@ func Load(path string) (Config, error) {
 	if err := c.Validate(); err != nil {
 		return Config{}, err
 	}
+	if c.Authentication.ShadowInternal {
+		c.Warnings = append(c.Warnings, "authentication.shadow_internal is a temporary diagnostic; trusted headers remain authoritative and the setting must be disabled after the bounded observation")
+	}
 	if c.EmailCommands.Enabled && c.EmailCommands.AllowAuthenticatedUsers && !c.EmailCommands.VerifySenderViaAliases {
 		c.Warnings = append(c.Warnings, "email_commands allows ordinary authenticated users without alias verification; configure Postfix smtpd_sender_login_maps and reject_authenticated_sender_login_mismatch to enforce envelope-sender ownership")
 	}
@@ -329,6 +333,9 @@ func (c Config) Validate() error {
 	}
 	if c.Authentication.Mode != AuthenticationModeTrustedHeaders && c.Authentication.Mode != AuthenticationModeInternal {
 		return fmt.Errorf("authentication.mode must be trusted_headers or internal")
+	}
+	if c.Authentication.ShadowInternal && c.Authentication.Mode != AuthenticationModeTrustedHeaders {
+		return fmt.Errorf("authentication.shadow_internal requires authentication.mode trusted_headers")
 	}
 	if c.Authentication.Timeout.Value() <= 0 {
 		return fmt.Errorf("authentication.timeout must be positive")

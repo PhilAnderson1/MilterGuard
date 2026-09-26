@@ -191,6 +191,24 @@ verification operations. Both values must be positive. The former
 `authentication.message_storage` when upgrading a configuration created during
 development of this feature.
 
+For a bounded migration observation, `authentication.shadow_internal: true`
+may be used only with `authentication.mode: trusted_headers`. MilterGuard then
+calculates internal SPF, DKIM, and DMARC after reading the trusted local results
+and emits one structured `authentication shadow comparison` log record per
+unauthenticated inbound message. Trusted results remain the sole input to
+policy, AI evidence, learning, header handling, and the delivery decision; a
+shadow timeout, error, or panic is logged but cannot change that decision.
+Authenticated submissions are not shadow-verified.
+
+Each comparison record contains method outcomes, alignment, passing domains,
+bounded internal error reasons, duration, and explicit semantic/detail
+difference lists. It does not contain the message body, DNS records, DKIM keys,
+or trusted-header reason text. Shadow verification can add up to
+`authentication.timeout` to end-of-message processing and uses the configured
+authentication concurrency and exact-message storage limits. Enable it only
+for a planned observation window, inspect every difference, and set it back to
+`false` afterward. It is a diagnostic switch, not a third authentication mode.
+
 In `trusted_headers` mode, the authentication service identifiers written by
 local filters must be included in `correspondents.trusted_authserv_ids`. The
 default `$mta_hostname` normally handles results identified with the Postfix

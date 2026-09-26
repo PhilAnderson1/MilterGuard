@@ -82,19 +82,20 @@ type connectionDNSService struct {
 }
 
 type sessionDependencies struct {
-	mode               string
-	filtering          config.FilteringConfig
-	logging            config.LoggingConfig
-	protocol           protocolOptions
-	analysis           *analysisService
-	policy             *messagePolicyService
-	attachments        *attachmentPolicyService
-	commands           *emailCommandService
-	dns                *connectionDNSService
-	authenticationMode string
-	authentication     mailauth.Verifier
-	newExactMessage    func(string, int64) (mailauth.ExactMessage, error)
-	log                *slog.Logger
+	mode                 string
+	filtering            config.FilteringConfig
+	logging              config.LoggingConfig
+	protocol             protocolOptions
+	analysis             *analysisService
+	policy               *messagePolicyService
+	attachments          *attachmentPolicyService
+	commands             *emailCommandService
+	dns                  *connectionDNSService
+	authenticationMode   string
+	authentication       mailauth.Verifier
+	shadowAuthentication mailauth.Verifier
+	newExactMessage      func(string, int64) (mailauth.ExactMessage, error)
+	log                  *slog.Logger
 }
 
 type maintenanceService struct {

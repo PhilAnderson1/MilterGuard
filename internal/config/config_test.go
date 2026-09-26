@@ -24,6 +24,7 @@ func TestLoadAcceptsNewSectionsAndRejectsLegacySections(t *testing.T) {
 	valid := `
 authentication:
   mode: internal
+  shadow_internal: false
   timeout: 7s
   max_concurrent: 3
   message_storage: file
@@ -225,6 +226,32 @@ func TestValidateAuthentication(t *testing.T) {
 	cfg.Authentication.MessageStorage = "automatic"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "authentication.message_storage") {
 		t.Fatalf("invalid storage error = %v", err)
+	}
+
+	cfg = validConfig()
+	cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
+	cfg.Authentication.ShadowInternal = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("trusted-header shadow observation rejected: %v", err)
+	}
+	cfg.Authentication.Mode = AuthenticationModeInternal
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "shadow_internal") {
+		t.Fatalf("internal mode with redundant shadow error = %v", err)
+	}
+}
+
+func TestLoadWarnsForTemporaryAuthenticationShadow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "milterguard.yaml")
+	content := "authentication:\n  mode: trusted_headers\n  shadow_internal: true\nai:\n  api_key: test-key\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Warnings) == 0 || !strings.Contains(strings.Join(cfg.Warnings, "\n"), "temporary diagnostic") {
+		t.Fatalf("shadow warnings = %q", cfg.Warnings)
 	}
 }
 

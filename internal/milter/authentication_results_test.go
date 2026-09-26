@@ -154,6 +154,23 @@ func TestInternalAuthenticationRuntimeComposition(t *testing.T) {
 	if _, ok := internal.sessions.authentication.(*moxverify.Verifier); !ok || internal.sessions.authenticationMode != config.AuthenticationModeInternal || internal.sessions.protocol.exactStorage != "file" {
 		t.Fatalf("internal authentication provider = %T mode=%q storage=%q", internal.sessions.authentication, internal.sessions.authenticationMode, internal.sessions.protocol.exactStorage)
 	}
+
+	shadow := buildRuntime(config.Config{Authentication: config.AuthenticationConfig{
+		Mode: config.AuthenticationModeTrustedHeaders, ShadowInternal: true,
+		Timeout: config.Duration(time.Second), MaxConcurrent: 2, MessageStorage: "file",
+	}}, fixedAnalyzer{}, log)
+	if shadow.err != nil {
+		t.Fatal(shadow.err)
+	}
+	if _, ok := shadow.sessions.authentication.(mailauth.HeaderVerifier); !ok {
+		t.Fatalf("shadow authoritative provider = %T, want HeaderVerifier", shadow.sessions.authentication)
+	}
+	if _, ok := shadow.sessions.shadowAuthentication.(*moxverify.Verifier); !ok || shadow.sessions.authenticationMode != config.AuthenticationModeTrustedHeaders || shadow.sessions.protocol.exactStorage != "file" {
+		t.Fatalf("shadow provider = %T mode=%q storage=%q", shadow.sessions.shadowAuthentication, shadow.sessions.authenticationMode, shadow.sessions.protocol.exactStorage)
+	}
+	if shadow.sessions.analysis.authenticationTimeout != time.Second {
+		t.Fatalf("shadow authentication timeout allowance = %s", shadow.sessions.analysis.authenticationTimeout)
+	}
 }
 
 func TestInternalModeReplacesAllSuppliedAuthenticationHeaders(t *testing.T) {

@@ -5,6 +5,8 @@ same time on loopback-only, otherwise unused Milter listeners. It does not
 change Postfix, systemd, or the production MilterGuard service. Both instances
 run in monitor mode, use separate SQLite databases, and call a deterministic
 local endpoint so AI output cannot obscure authentication differences.
+The trusted-header instance also enables the production shadow switch and logs
+its in-process comparison while continuing to use only trusted evidence.
 
 From the repository root, prepare and validate the setup:
 

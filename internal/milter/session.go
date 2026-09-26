@@ -445,6 +445,11 @@ func (ss *session) verifyAuthenticationWithProgress(ctx context.Context) (mailau
 			results <- result
 		}()
 		result.evidence, result.err = verifier.Verify(workerCtx, transaction)
+		if shadow := ss.deps.shadowAuthentication; shadow != nil && !ss.authentication.Authenticated {
+			started := time.Now()
+			shadowEvidence, shadowErr := ss.verifyShadowAuthentication(workerCtx, shadow, transaction)
+			ss.logShadowAuthenticationComparison(workerCtx, result.evidence, shadowEvidence, shadowErr, time.Since(started))
+		}
 	}()
 
 	interval := ss.deps.protocol.progressInterval
