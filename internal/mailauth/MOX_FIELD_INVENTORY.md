@@ -70,3 +70,15 @@ favor of one bounded service summary.
 
 See `MOX_INTEROPERABILITY_MATRIX.md` for the tested status and edge-case matrix,
 including Mox's missing-key and multiple-key-record DKIM semantics.
+
+## Authentication-Results output subset
+
+The local RFC 8601 renderer emits one SPF result with `smtp.mailfrom` or
+`smtp.helo`, up to 32 ordered DKIM results with validated `header.d`, `header.s`
+and `header.a` properties, and one DMARC result with `header.from`. For a DMARC
+failure it also emits the registered `policy.dmarc` property with the effective
+`none`, `quarantine` or `reject` disposition. Unbounded reason text, DKIM
+identity, canonicalization details, body length, DNSSEC state, alignment modes
+and percentage metadata remain available in typed evidence but are deliberately
+not copied into the field. Invalid outcomes and unsafe property values are
+omitted; they are never quoted or repaired into attacker-controlled output.
