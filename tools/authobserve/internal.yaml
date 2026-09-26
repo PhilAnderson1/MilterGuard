@@ -1,0 +1,60 @@
+mode: monitor
+
+milter:
+  socket: tcp:127.0.0.1:18996
+  connection_dns_timeout: 0s
+  max_connections: 8
+
+authentication:
+  mode: internal
+  timeout: 10s
+  max_concurrent: 4
+  message_storage: file
+
+ai:
+  endpoint: http://127.0.0.1:18080/v1/chat/completions
+  endpoint_type: openai
+  api_key: observation-only
+  model: deterministic-observation
+  prompt_file: tools/authobserve/prompt.txt
+  timeout: 5s
+  retries: 0
+  max_concurrent: 4
+  vision_mode: off
+
+filtering:
+  add_email_headers: true
+  sender_domain_allowlist: ""
+
+attachments:
+  block_executables: false
+
+email_commands:
+  enabled: false
+
+persistence:
+  database_file: local-testing/auth-observation/internal.db
+
+rejection_history:
+  save_messages: false
+  message_directory: local-testing/auth-observation/internal-rejected
+
+correspondents:
+  learn_authenticated_recipients: false
+  learn_legitimate_senders: false
+  use_allowlist: false
+  bypass_ai: false
+
+ip_reputation:
+  block_duration: 0s
+  repeat_threshold: 0
+  ip_allowlist: []
+  domain_allowlist: []
+
+domain_registration:
+  enabled: false
+
+logging:
+  level: info
+  include_subject: false
+  include_ai_input: false

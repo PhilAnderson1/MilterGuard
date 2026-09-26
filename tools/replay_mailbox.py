@@ -73,20 +73,29 @@ def negotiate(sock):
         raise RuntimeError(f"unexpected negotiation response: {response!r}")
 
 
-def begin_smtp_session(sock, connection):
-    hostname = connection["hostname"] or "unknown"
-    helo = connection["helo"] or "unknown"
-    remote_ip = connection["remote_ip"]
+def connect_macro_payload(connection):
     mta_hostname = connection["mta_hostname"]
+    receiver_ip = connection["receiver_ip"]
+    macros = []
     if mta_hostname:
         # The Milter j macro identifies the receiving MTA. MilterGuard uses it
         # to decide which saved Authentication-Results headers are local and
         # therefore trustworthy during a replay.
-        no_response_command(
-            sock,
-            b"D",
-            b"Cj\x00" + mta_hostname.encode("utf-8", "replace") + b"\x00",
-        )
+        macros.extend((b"j", mta_hostname.encode("utf-8", "replace")))
+    if receiver_ip:
+        macros.extend((b"{daemon_addr}", receiver_ip.encode("ascii")))
+    if not macros:
+        return None
+    return b"C" + b"\x00".join(macros) + b"\x00"
+
+
+def begin_smtp_session(sock, connection):
+    hostname = connection["hostname"] or "unknown"
+    helo = connection["helo"] or "unknown"
+    remote_ip = connection["remote_ip"]
+    macro_payload = connect_macro_payload(connection)
+    if macro_payload:
+        no_response_command(sock, b"D", macro_payload)
     if remote_ip:
         family = b"6" if ipaddress.ip_address(remote_ip).version == 6 else b"4"
         connect_payload = (
@@ -119,13 +128,46 @@ def split_message(raw):
     return raw[:position], raw[position + len(marker) :]
 
 
+def callback_headers(header_bytes):
+    """Return the byte-valued header callbacks Postfix supplies to a Milter.
+
+    Postfix removes one separator space after the colon and represents folds
+    with LF in the callback value. Preserve everything else: DKIM relaxed and
+    simple header canonicalization both depend on those details.
+    """
+    normalized = header_bytes.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    result = []
+    current_name = None
+    current_value = None
+    for line in normalized.split(b"\n"):
+        if line.startswith((b" ", b"\t")) and current_name is not None:
+            current_value += b"\n" + line
+            continue
+        if current_name is not None:
+            result.append((current_name, current_value))
+        if not line:
+            current_name = None
+            current_value = None
+            continue
+        name, separator, value = line.partition(b":")
+        if not separator or not name:
+            raise ValueError(f"malformed message header line: {line[:80]!r}")
+        if value.startswith(b" "):
+            value = value[1:]
+        current_name = name
+        current_value = value
+    if current_name is not None:
+        result.append((current_name, current_value))
+    return result
+
+
 def load_message(path):
     raw = path.read_bytes()
     header_bytes, body = split_message(raw)
     parsed = email.parser.BytesHeaderParser(policy=email.policy.compat32).parsebytes(
         header_bytes + b"\n\n"
     )
-    return parsed, body
+    return parsed, callback_headers(header_bytes), body
 
 
 def clean_identity(value):
@@ -174,6 +216,7 @@ def connection_from_received(parsed):
             "hostname": hostname,
             "helo": helo,
             "mta_hostname": mta_hostname,
+            "receiver_ip": None,
             "source": "received",
         }
     return {
@@ -181,6 +224,7 @@ def connection_from_received(parsed):
         "hostname": None,
         "helo": None,
         "mta_hostname": mta_hostname,
+        "receiver_ip": None,
         "source": "unavailable",
     }
 
@@ -194,6 +238,7 @@ def replay_connection(parsed, args):
             "hostname": "replay.local",
             "helo": "replay.local",
             "mta_hostname": "replay.local",
+            "receiver_ip": "127.0.0.1",
             "source": "synthetic",
         }
     if args.remote_ip is not None:
@@ -210,6 +255,12 @@ def replay_connection(parsed, args):
         connection["source"] = "override"
     if args.mta_hostname is not None:
         connection["mta_hostname"] = clean_identity(args.mta_hostname)
+        connection["source"] = "override"
+    if args.receiver_ip is not None:
+        try:
+            connection["receiver_ip"] = ipaddress.ip_address(args.receiver_ip).compressed
+        except ValueError as exc:
+            raise ValueError(f"invalid --receiver-ip: {args.receiver_ip}") from exc
         connection["source"] = "override"
     return connection
 
@@ -235,18 +286,23 @@ def envelope_addresses(parsed, args):
     return mail_from, rcpt_to
 
 
-def replay(sock, parsed, body, mail_from, rcpt_to):
+def replay(sock, headers, body, mail_from, rcpt_to):
 
     started = time.monotonic()
-    response = command(sock, b"M", f"<{mail_from}>\x00".encode("ascii"))
+    envelope_utf8 = f"{mail_from}{rcpt_to}".encode("utf-8")
+    header_utf8 = any(any(byte >= 0x80 for byte in name + value) for name, value in headers)
+    mail_payload = f"<{mail_from}>\x00".encode("utf-8")
+    if header_utf8 or any(byte >= 0x80 for byte in envelope_utf8):
+        mail_payload += b"SMTPUTF8\x00"
+    response = command(sock, b"M", mail_payload)
     if response != b"c":
         elapsed_ms = round((time.monotonic() - started) * 1000)
         return interpret(response), elapsed_ms, {}
-    continue_command(sock, b"R", f"<{rcpt_to}>\x00".encode("ascii"))
+    continue_command(sock, b"R", f"<{rcpt_to}>\x00".encode("utf-8"))
 
-    for name, value in parsed.raw_items():
-        clean_name = name.replace("\x00", "").encode("utf-8", "replace")
-        clean_value = value.replace("\x00", "").encode("utf-8", "replace")
+    for name, value in headers:
+        clean_name = name.replace(b"\x00", b"")
+        clean_value = value.replace(b"\x00", b"")
         response = command(sock, b"L", clean_name + b"\x00" + clean_value + b"\x00")
         if response != b"c":
             raise RuntimeError(f"header rejected unexpectedly: {response!r}")
@@ -352,6 +408,10 @@ def main():
         "--mta-hostname",
         help="override the receiving MTA hostname used to trust saved authentication results",
     )
+    parser.add_argument(
+        "--receiver-ip",
+        help="override the receiving MTA IP supplied as the {daemon_addr} Milter macro",
+    )
     parser.add_argument("--mail-from", help="override Return-Path/From envelope-sender reconstruction")
     parser.add_argument("--rcpt-to", help="override X-Original-To/Delivered-To/To recipient reconstruction")
     parser.add_argument("--expected", choices=("accept", "reject"))
@@ -374,7 +434,7 @@ def main():
 
     for path in files:
         try:
-            parsed, body = load_message(path)
+            parsed, headers, body = load_message(path)
             connection = replay_connection(parsed, args)
             mail_from, rcpt_to = envelope_addresses(parsed, args)
             with socket.create_connection((args.host, args.port), timeout=args.timeout) as sock:
@@ -382,7 +442,7 @@ def main():
                 negotiate(sock)
                 begin_smtp_session(sock, connection)
                 (result, detail), latency, added_headers = replay(
-                    sock, parsed, body, mail_from, rcpt_to
+                    sock, headers, body, mail_from, rcpt_to
                 )
                 send_frame(sock, b"Q")
                 totals[result] += 1
@@ -397,6 +457,11 @@ def main():
                         "latency_ms": latency,
                         "detail": detail,
                         "added_headers": added_headers,
+                        "saved_authentication_results": [
+                            value.decode("utf-8", "replace")
+                            for name, value in headers
+                            if name.lower() == b"authentication-results"
+                        ],
                         "connection": connection,
                         "mail_from": mail_from,
                         "rcpt_to": rcpt_to,

@@ -5,6 +5,7 @@ import io
 import json
 import struct
 import unittest
+from pathlib import Path
 
 from tools import replay_mailbox
 
@@ -40,6 +41,7 @@ class ReceivedConnectionTests(unittest.TestCase):
                 "hostname": "ptr.example",
                 "helo": "helo.example",
                 "mta_hostname": "mx.example",
+                "receiver_ip": None,
                 "source": "received",
             },
         )
@@ -62,6 +64,14 @@ class ReceivedConnectionTests(unittest.TestCase):
         self.assertEqual(connection["remote_ip"], "1.1.1.1")
         self.assertEqual(connection["hostname"], "original.example")
         self.assertEqual(connection["mta_hostname"], "mx.example")
+
+    def test_connect_macros_include_receiver_identity_and_ip(self):
+        self.assertEqual(
+            replay_mailbox.connect_macro_payload(
+                {"mta_hostname": "mx.example", "receiver_ip": "2001:db8::1"}
+            ),
+            b"Cj\x00mx.example\x00{daemon_addr}\x002001:db8::1\x00",
+        )
 
     def test_retains_mta_hostname_without_a_public_peer(self):
         parsed = headers(
@@ -105,10 +115,38 @@ class ProgressFrameTests(unittest.TestCase):
             + [b"p", b"hX-MilterGuard-Classification\x00legitimate\x00", b"p", b"a"]
         )
         result, _, added_headers = replay_mailbox.replay(
-            sock, headers("Subject: test"), b"body", "sender@example.net", "user@example.net"
+            sock, [(b"Subject", b"test")], b"body", "sender@example.net", "user@example.net"
         )
         self.assertEqual(result, ("accept", ""))
         self.assertEqual(added_headers, {"X-MilterGuard-Classification": "legitimate"})
+
+
+class ExactHeaderReplayTests(unittest.TestCase):
+    def test_callback_headers_reconstruct_exact_dkim_fixture(self):
+        path = Path(__file__).parents[1] / "prototype" / "exactdkim" / "signed-canonicalizations.eml"
+        raw_headers, _ = replay_mailbox.split_message(path.read_bytes())
+        callbacks = replay_mailbox.callback_headers(raw_headers)
+        reconstructed = b"".join(
+            name + b": " + value.replace(b"\n", b"\r\n") + b"\r\n"
+            for name, value in callbacks
+        )
+        self.assertEqual(reconstructed, raw_headers + b"\r\n")
+
+    def test_preserves_duplicate_headers_whitespace_and_folds(self):
+        callbacks = replay_mailbox.callback_headers(
+            b"From:  Alice <alice@example.org>\r\n"
+            b"X-Test:\tvalue \r\n"
+            b"X-Test: second\r\n"
+            b"\tcontinued\r\n"
+        )
+        self.assertEqual(
+            callbacks,
+            [
+                (b"From", b" Alice <alice@example.org>"),
+                (b"X-Test", b"\tvalue "),
+                (b"X-Test", b"second\n\tcontinued"),
+            ],
+        )
 
 
 class ReplayOutputTests(unittest.TestCase):

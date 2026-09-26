@@ -1,0 +1,1 @@
+Classify the supplied email. Return only the requested JSON object.
