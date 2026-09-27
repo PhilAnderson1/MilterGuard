@@ -32,6 +32,9 @@ func (s *analysisService) analysisTimeout() time.Duration {
 	if s.domainLookupTimeout > 0 {
 		timeout += s.domainLookupTimeout
 	}
+	if s.authenticationTimeout > 0 {
+		timeout += s.authenticationTimeout
+	}
 	if s.milterTimeout > timeout {
 		return s.milterTimeout
 	}

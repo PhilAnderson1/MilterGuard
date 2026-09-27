@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 )
 
 type Message struct {
@@ -17,7 +19,7 @@ type Message struct {
 	AuthenticatedSubmission bool
 	Correspondent           CorrespondentInfo
 	DomainRegistration      DomainRegistrationInfo
-	TrustedAuthservIDs      []string
+	Authentication          mailauth.Evidence
 	Truncated               bool
 	BodyTruncated           bool
 	MIMEHeadersTruncated    bool

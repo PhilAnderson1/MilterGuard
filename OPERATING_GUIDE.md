@@ -1,13 +1,12 @@
 # MilterGuard Operating Guide
 
-Using the supplied default configuration, MilterGuard will initially monitor
-inbound email and report how it would identify unwanted spam, scams, threats
+Using the supplied default configuration, MilterGuard will initially analyse
+inbound email and report how it identifies unwanted spam, scams, threats
 concealed in images, and executable attachments without rejecting anything. It
 will not scan authenticated outbound email. After enforcement is enabled, it
-will provide basic virus protection by blocking executable attachments and will
-learn and whitelist trusted email senders and identify and blacklist problematic
-sending IP addresses to reduce false positives, false negatives, AI usage, and
-operating costs.
+will provide basic virus protection by blocking executable attachments, learn
+and allowlist trusted email senders, and block problematic sending IP addresses
+to reduce false positives, false negatives, AI usage, and operating costs.
 
 **Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
 the repository URL, https://github.com/PhilAnderson1/MilterGuard, and ask it to
@@ -20,15 +19,15 @@ For initial installation and activation, follow the
 ## Contents
 
 1. [Configure the AI service](#configure-the-ai-service)
-2. [Install and configure OpenDKIM and OpenDMARC (optional)](#install-and-configure-opendkim-and-opendmarc-optional)
+2. [Configure email authentication](#configure-email-authentication)
 3. [Connect Postfix to MilterGuard](#connect-postfix-to-milterguard)
-4. [Start MilterGuard in monitor mode](#start-milterguard-in-monitor-mode)
+4. [Start MilterGuard in accept mode](#start-milterguard-in-accept-mode)
 5. [Enable enforcement](#enable-enforcement)
-6. [Basic virus protection](#basic-virus-protection)
-7. [Rejection history and saved messages](#rejection-history-and-saved-messages)
-8. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
-9. [Administration commands](#administration-commands)
-10. [Running AI locally](#running-ai-locally)
+6. [Use result headers](#use-result-headers)
+7. [Basic virus protection](#basic-virus-protection)
+8. [Rejection history and saved messages](#rejection-history-and-saved-messages)
+9. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
+10. [Administration commands](#administration-commands)
 11. [Routine operation](#routine-operation)
 12. [Replay saved email](#replay-saved-email)
 13. [Remove MilterGuard](#remove-milterguard)
@@ -39,28 +38,61 @@ MilterGuard's configuration file is `/etc/milterguard/milterguard.yaml`.
 Edit it before starting the service, preserving its YAML indentation and using
 spaces rather than tabs.
 
-Running the AI model locally provides greater privacy, reliability and
-consistency, with no per-request API charges, so it is the recommended option.
-The recommended model has relatively modest hardware requirements and can
-perform well with a suitable GPU. See Running AI locally for setup guidance.
+MilterGuard works with a range of third-party AI API providers as well as
+locally hosted models. Running the model locally provides greater privacy,
+reliability, and consistency, with no per-request API charges, so it is the
+recommended option.
+
+### Running AI locally
+
+The recommended Qwen3.6-35B-A3B model provides strong results with relatively
+modest hardware requirements. A system with an 8 GB GPU, such as an RTX 4060,
+and 32 GB of system RAM should work well with a suitable quantization and
+configuration.
+
+The model is available from:
+
+https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF
+
+Choose the largest quantization that fits comfortably within the available GPU
+and system memory. Quantizations below 4-bit may reduce classification quality
+and are not recommended. This practical guide explains how to run the model
+efficiently with limited GPU memory:
+
+https://piefed.crash.cx/c/localllama/p/123973/how-to-run-qwen-35b-a3b-on-4gb-to-8gb-of-vram-with-24-gb-system-ram
+
+Serve the model through llama.cpp:
+
+https://github.com/ggml-org/llama.cpp
+
+Set MilterGuard's AI timeout high enough for the slowest messages and image
+analysis, and keep the MTA's Milter timeout longer than the AI timeout. Start
+with `ai.max_concurrent: 2`, then increase it only if the server can handle
+additional requests without excessive memory use or response times.
+
+Before using a local model on live mail, follow [Replay saved email](#replay-saved-email)
+to check its classification accuracy and response time against representative
+legitimate, spam, and scam messages.
+
+### Hosted and other compatible services
 
 To use OpenRouter instead, create an account and API key at
-https://openrouter.ai. Using the recommended AI model typically costs around
-US$0.25 per 1,000 scanned emails, although the actual cost varies with message
-length and provider pricing. The supplied configuration already contains the
-necessary OpenRouter settings; replace the placeholder `ai.api_key` with your
-key. If the configured model is no longer available, select a current compatible
-model and test it before enabling rejection.
+https://openrouter.ai. The supplied configuration already contains the necessary
+OpenRouter settings; replace the placeholder `ai.api_key` with your key. If the
+configured model is no longer available, select a current compatible model and
+test it before enabling rejection.
 
-MilterGuard sends the email data used for classification to the configured AI
-endpoint, including selected headers, extracted text, links, and qualifying
-inline images. When using a hosted service, review its data-handling policy
-carefully. OpenRouter can restrict requests to providers with a Zero Data
-Retention policy through its Privacy settings.
+MilterGuard also supports OpenAI-compatible services, including OpenAI and
+llama.cpp. Set `endpoint`, `endpoint_type`, `model`, and `api_key` to match the
+service. The selected model must support image input if image analysis is
+enabled.
 
-MilterGuard supports OpenRouter, OpenAI, and llama.cpp-compatible endpoints.
-Set `endpoint`, `endpoint_type`, `model`, and `api_key` to match the service.
-The selected model must support image input if image analysis is enabled.
+When using a hosted service, review its data-handling policy carefully.
+MilterGuard sends the selected headers, extracted text, links, and qualifying
+inline images used for classification. OpenRouter can restrict requests to
+providers with a Zero Data Retention policy through its Privacy settings.
+
+### Classification settings
 
 Image analysis detects scams that conceal their message inside images. Set
 `vision_mode` to `off`, `fallback` to inspect images when insufficient text is
@@ -70,50 +102,36 @@ downloads remote images.
 Before starting MilterGuard, review `/etc/milterguard/detection-prompt.txt` and
 confirm that its rules match the email you want to reject. The supplied prompt
 has been tested with the configured model; test any prompt or model changes in
-monitor mode against representative legitimate and unwanted email before
+accept mode against representative legitimate and unwanted email before
 enabling rejection.
 
-## Install and configure OpenDKIM and OpenDMARC (optional)
+## Configure email authentication
 
-MilterGuard works without OpenDKIM or OpenDMARC, but trusted DKIM, SPF, and
-DMARC results give the AI stronger evidence about sender identity and improve
-classification quality, so they are strongly recommended. Without trusted DKIM
-results, trusted-domain bypass, authenticated correspondent bypass, and
-automatic sender learning are less effective or unavailable.
+### Internal authentication (default)
 
-Your server may already use OpenDKIM to sign outbound email. If so, make sure it
-is configured to verify inbound signatures and add its results to
-`Authentication-Results`.
-OpenDMARC can then evaluate DMARC and SPF and add those results for MilterGuard
-to use. Install the packages supplied by your operating system and configure
-each service to expose a Milter socket or local TCP listener to Postfix.
-Loopback TCP listeners are generally simpler to configure consistently across
-multiple Milter services. Unix sockets also work, but their directory ownership,
-permissions, and any Postfix chroot must be configured correctly.
-If a Unix socket is shared through a group, keep that group limited to Postfix,
-MilterGuard, and any other explicitly trusted mail-filter processes. Every
-member able to connect to the socket is trusted to act as the MTA.
+The supplied configuration uses `authentication.mode: internal`, which is
+recommended for new installations. MilterGuard calculates inbound SPF, DKIM,
+and DMARC directly from the SMTP transaction and the byte-exact message. These
+results are used only for MilterGuard's filtering, AI evidence, bypass, and
+learning decisions.
 
-MilterGuard trusts connection details and authentication data supplied through
-its Milter listener, so only Postfix must be able to connect. The supplied
-`milter.allowed_peer_ips` setting permits loopback connections only. If Postfix
-runs on another machine, add only that server's address (or a tightly scoped
-CIDR) and restrict the Milter port with a firewall. Unix listeners rely on their
-directory and socket permissions instead.
+### Reuse existing authentication filters
+
+If the server already has a complete, reliable local authentication stack, set
+`authentication.mode: trusted_headers` to reuse its SPF, DKIM, and DMARC results.
+This avoids repeating its DNS lookups and cryptographic verification.
+MilterGuard must run after those filters and must trust only their locally
+generated results. OpenDKIM alone normally supplies DKIM results, not the
+complete SPF, DKIM, and DMARC evidence MilterGuard can use.
+
+`correspondents.trusted_authserv_ids` must list the `authserv-id` values that
+your local filters put in `Authentication-Results`. The default,
+`$mta_hostname`, trusts results identified by the Postfix hostname.
 
 ## Connect Postfix to MilterGuard
 
-Add MilterGuard to the end of `smtpd_milters` in `/etc/postfix/main.cf`.
-Postfix calls Milters in the configured order, allowing MilterGuard to use
-authentication results added by earlier filters.
-
-These filters must run in this order:
-
-```text
-OpenDKIM → OpenDMARC → MilterGuard
-```
-
-With no authentication filters:
+Add MilterGuard to `smtpd_milters` in `/etc/postfix/main.cf`. With internal
+authentication and no other SMTP Milters:
 
 ```text
 milter_default_action = accept
@@ -122,60 +140,45 @@ milter_content_timeout = 600s
 smtpd_milters = inet:127.0.0.1:8895
 ```
 
-With OpenDKIM listening on port 8891:
+If `smtpd_milters` already contains other filters, add MilterGuard at the end of
+the list. For example, an OpenDKIM service on port 8891 may remain to sign
+outbound mail:
 
 ```text
-milter_default_action = accept
-milter_protocol = 6
-milter_content_timeout = 600s
 smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8895
 ```
 
-With OpenDKIM on port 8891 and OpenDMARC on port 8892:
+In `trusted_headers` mode, the local authentication filters must precede
+MilterGuard. A typical complete chain is:
 
 ```text
-milter_default_action = accept
-milter_protocol = 6
-milter_content_timeout = 600s
+OpenDKIM → OpenDMARC → MilterGuard
+```
+
+For example, with OpenDKIM on port 8891 and OpenDMARC on port 8892:
+
+```text
 smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
 ```
 
-If `non_smtpd_milters` is already configured on your server, leave its existing
-filters in place but do not add MilterGuard to it. MilterGuard should process
-SMTP mail only; filtering locally submitted system mail can cause legitimate
-notifications to be rejected.
-
-Use the actual sockets or ports configured for your services. MilterGuard must
-remain last in the chain.
+Use the actual sockets or ports configured on the server. If
+`non_smtpd_milters` is already configured, leave its existing filters in place
+but do not add MilterGuard. MilterGuard should process SMTP mail only; applying
+it to locally submitted system mail can reject legitimate notifications.
 
 `milter_default_action = accept` keeps mail flowing if a Milter is unavailable.
-Use `tempfail` instead if you prefer Postfix to defer delivery until every
-configured Milter is available again.
+Use `tempfail` instead if Postfix should defer delivery until every configured
+Milter is available. `milter_content_timeout = 600s` gives bounded attachment
+inspection and AI analysis time to complete. MilterGuard sends progress
+responses during long AI operations so Postfix continues waiting.
 
-`milter_content_timeout = 600s` gives bounded attachment inspection and AI
-analysis sufficient time to begin. MilterGuard sends progress responses during
-long AI operations so Postfix continues waiting.
+### Protect authentication and result headers
 
-`milter.max_connections` bounds the number of messages MilterGuard can hold at
-once, including messages waiting for an available AI analysis slot. The supplied
-value of `64` provides headroom above the hosted-service default of
-`ai.max_concurrent: 8` while limiting aggregate memory use. Memory-constrained
-systems may use a lower value, but should retain enough headroom above AI
-concurrency for normal mail bursts. Increasing `ai.max_concurrent` is useful
-only when the configured AI service can process the additional requests
-efficiently; locally hosted AI commonly needs a lower value instead.
-
-The authentication service identifier written to `Authentication-Results`
-must be included in MilterGuard's `correspondents.trusted_authserv_ids` setting.
-The default `$mta_hostname` value normally handles results identified with the
-Postfix hostname.
-
-With OpenDKIM, OpenDMARC, or both installed on your server, configure Postfix
-to remove externally supplied `Authentication-Results` and `Received-SPF`
-headers. Their authentication service or receiver identifier is not proof that
-they were created locally, so without this step a remote sender could forge
-evidence that MilterGuard trusts. Add the following rule to
-`/etc/postfix/header_checks`:
+In `trusted_headers` mode, Postfix must remove externally supplied
+`Authentication-Results` and `Received-SPF` headers. A claimed authentication
+service or receiver identifier does not prove that a header was created locally,
+so otherwise a remote sender could forge evidence that MilterGuard trusts. Add
+these rules to `/etc/postfix/header_checks`:
 
 ```text
 /^Authentication-Results:/ IGNORE
@@ -190,29 +193,35 @@ Enable the table in `/etc/postfix/main.cf`, merging it with any existing
 header_checks = regexp:/etc/postfix/header_checks
 ```
 
-Postfix removes any existing authentication and MilterGuard result headers as
-it receives the message. OpenDKIM, OpenDMARC, and any locally configured SPF
-service can then add freshly calculated authentication results before
-MilterGuard runs, and MilterGuard may add its own result headers. Do not apply
-these removal rules through `milter_header_checks`, which operates on headers
-added by Milters.
+Postfix removes supplied authentication and MilterGuard result headers as it
+receives the message. The local authentication filters can then add fresh
+results before MilterGuard runs. Do not apply these rules through
+`milter_header_checks`, which operates on headers added by Milters.
 
-MilterGuard also supplies the connecting IP, reported hostname, HELO/EHLO
-identity, reverse DNS, and forward-confirmation result to the AI as supporting
-evidence. DNS failures do not reject or defer mail, and lookup time is bounded
-by `milter.connection_dns_timeout`.
+None of the header checks above are required with MilterGuard's default
+`authentication.mode: internal`.
+
+### Required Postfix connection data
+
+Internal SPF verification requires Postfix to supply its `{daemon_addr}`
+connect macro. Postfix 3.2 and later include it in the default
+`milter_connect_macros`; installations with a customized list must retain it.
+
+MilterGuard supplies the connecting IP, reported hostname, HELO/EHLO identity,
+reverse DNS, and forward-confirmation result to the AI as supporting evidence.
+DNS failures do not reject or defer mail, and lookup time is bounded by
+`milter.connection_dns_timeout`.
 
 Postfix must supply the authenticated user's SASL identity so MilterGuard can
 recognize outbound mail, learn trusted correspondents, and authorize email
-commands. Without it, mail can still be scanned, but these authenticated-user
-features will not operate.
+commands. Without it, mail can still be scanned, but those authenticated-user
+features do not operate.
 
-Ensure `{auth_authen}` is present in Postfix's `milter_mail_macros` setting so
-MilterGuard can recognize SASL-authenticated mail. Check the effective values
-before changing them:
+Ensure `{auth_authen}` is present in Postfix's `milter_mail_macros`. Check the
+effective values before changing them:
 
 ```sh
-postconf myhostname milter_protocol milter_content_timeout milter_mail_macros smtpd_milters non_smtpd_milters
+postconf myhostname milter_protocol milter_content_timeout milter_connect_macros milter_mail_macros smtpd_milters non_smtpd_milters
 ```
 
 For full MilterGuard functionality, the output should have these
@@ -222,14 +231,64 @@ characteristics:
 myhostname = mail.example.com
 milter_protocol = 6
 milter_content_timeout = 600s
+milter_connect_macros = ... j ... {daemon_addr} ...
 milter_mail_macros = ... {auth_authen} ...
-smtpd_milters = ...authentication filters..., inet:127.0.0.1:8895
+smtpd_milters = ...existing filters..., inet:127.0.0.1:8895
 ```
 
-The hostname and authentication-filter sockets will be specific to the mail
-server. `{auth_authen}` must appear in `milter_mail_macros`, and MilterGuard
-must be the last entry in `smtpd_milters`. If `non_smtpd_milters` is present in
-the `postconf` output, it must not contain MilterGuard.
+The hostname and any existing filter sockets will be specific to the server.
+Internal mode requires valid `j` and `{daemon_addr}` connect macros;
+`{auth_authen}` must appear in `milter_mail_macros`. MilterGuard must be last in
+`smtpd_milters`. If `non_smtpd_milters` appears in the output, it must not
+contain MilterGuard.
+
+### Advanced authentication and listener settings
+
+Loopback TCP listeners are usually simplest when several Milter services are in
+use. Unix sockets also work, but their directory ownership, permissions, and any
+Postfix chroot must be configured correctly. If a Unix socket is shared through
+a group, limit membership to Postfix, MilterGuard, and other explicitly trusted
+mail-filter processes. Every process able to connect is trusted to act as the
+MTA.
+
+MilterGuard trusts connection details and authentication data supplied through
+its listener, so only Postfix should be able to connect. The supplied
+`milter.allowed_peer_ips` setting permits loopback connections only. If Postfix
+runs on another machine, add only that server's address or a tightly scoped CIDR
+and restrict the Milter port with a firewall. Unix listeners rely on directory
+and socket permissions instead.
+
+`milter.max_connections` bounds the number of messages MilterGuard can hold at
+once, including messages waiting for an AI analysis slot. The supplied value of
+`64` provides headroom above `ai.max_concurrent: 8` while limiting aggregate
+memory use. Memory-constrained systems may use a lower value, but should retain
+enough headroom above AI concurrency for normal mail bursts. Increasing AI
+concurrency helps only when the configured service can process the additional
+requests efficiently; locally hosted AI commonly needs a lower value.
+
+`authentication.message_storage` controls how the byte-exact message is kept
+until verification completes. The default `memory` mode is fastest. Its
+theoretical additional memory bound is approximately
+`milter.max_connections × milter.max_message_size`, although normal messages
+are smaller and the buffer is released immediately after authentication. Use
+`file` when large message limits or high concurrency make that bound unsuitable.
+File mode creates a mode-0600 temporary file, unlinks it immediately, and keeps
+only its descriptor until verification completes.
+
+`authentication.timeout` bounds queueing plus SPF, DKIM, and DMARC work for one
+message. `authentication.max_concurrent` bounds simultaneous verification
+operations. Both values must be positive.
+
+Before starting MilterGuard for the first time, confirm that its configured
+listener is available:
+
+```sh
+milterguard --config /etc/milterguard/milterguard.yaml \
+  --check-config --check-port
+```
+
+Run this check only while MilterGuard is stopped; a running instance already
+occupies its listener and will correctly cause the check to fail.
 
 ### Optional early rejection with Spamhaus ZEN
 
@@ -253,11 +312,11 @@ sudo postfix check
 sudo postfix reload
 ```
 
-## Start MilterGuard in monitor mode
+## Start MilterGuard in accept mode
 
-The default `monitor` mode analyses email and logs the action MilterGuard
+The default `accept` mode analyses email and logs the action MilterGuard
 would recommend, but allows the message through. Leave it in this mode while you
-send representative test messages and observe real mail traffic. Monitor mode
+send representative test messages and observe real mail traffic. Accept mode
 does not update correspondent allowlists or IP reputation.
 
 Review the journal regularly:
@@ -266,6 +325,10 @@ Review the journal regularly:
 journalctl -u milterguard --since yesterday --no-pager -o cat
 ```
 
+MilterGuard's result is also recorded in the `X-MilterGuard-*` headers of each
+delivered email. View the message headers or source in your email client to see
+the classification, score, confidence, and action where applicable.
+
 Pay particular attention to legitimate messages classified as unwanted,
 unwanted messages classified as legitimate, endpoint failures, and unusually
 slow responses. Adjust the detection prompt, model, or rejection threshold when
@@ -273,7 +336,7 @@ the results consistently show that a change is needed.
 
 ## Enable enforcement
 
-When monitor-mode results are satisfactory, change the mode to `enforce` and
+When accept-mode results are satisfactory, change the mode to `enforce` and
 restart MilterGuard. It will then reject unwanted messages that meet the
 configured confidence threshold and block prohibited executable attachments.
 
@@ -294,8 +357,8 @@ endpoint:
 - Authenticated SMTP submissions bypass AI analysis when
   `filtering.scan_authenticated` is `false`, as it is in the supplied
   configuration so that outbound emails can bypass scanning.
-- A sender in the contacts whitelist can be accepted without AI analysis when
-  the configured authentication requirements are met.
+- A sender in the correspondent allowlist can be accepted without AI analysis
+  when the configured authentication requirements are met.
 - A visible `From:` domain in the trusted sender-domain allowlist can bypass AI
   analysis when its configured authentication requirements—normally trusted,
   aligned DKIM—are met.
@@ -322,23 +385,24 @@ them to the AI endpoint:
   against the sending IP. Do not list a domain if this is not its only valid
   mail server, for example if your organisation operates multiple mail servers
   or a legitimate third party sends email on its behalf.
-- The attachment policy can reject prohibited executable content, including
-  disguised executables and executables inside supported archives. It can also
-  reject encrypted or unscannable attachments when their configured actions are
-  `reject`. These decisions use local attachment inspection and are recorded
-  and archived.
-- Messages with permanently invalid or ambiguous MIME structure are rejected
-  when `attachments.invalid_mime_action` is `reject`, as it is in the supplied
-  configuration. Set it to `accept` to continue with normal AI analysis instead.
+- Attachment and MIME policies can reject prohibited executable, encrypted,
+  unscannable, or malformed content. See
+  [Basic virus protection](#basic-virus-protection) for the supported formats
+  and configuration choices.
 
 The above checks take place before AI analysis.
 
-Alternatively, setting `mode: tag` accepts all mail while adding result
-headers. Successfully analysed mail includes its classification and score.
-Attachment policy and IP reputation do not reject mail in tag mode, and adaptive
-correspondent and IP reputation data is not changed.
+Continue reviewing decisions after enabling enforcement. AI classification is
+not perfectly deterministic, and changes made by an AI provider can alter a
+model's behaviour even when the configured model name remains unchanged.
 
-### Deliver tagged mail to the Junk folder
+## Use result headers
+
+The supplied configuration enables `filtering.add_email_headers`, so accepted
+mail includes MilterGuard's classification, score, confidence, and action where
+applicable. These headers are available in both `accept` and `enforce` modes.
+
+### Deliver classified mail to the Junk folder
 
 MilterGuard's result headers can be used by a server-side delivery filter or
 mail client to move flagged messages into a Junk or Spam folder. For example,
@@ -353,7 +417,7 @@ if header :is "X-MilterGuard-Classification" "unwanted" {
 }
 ```
 
-This is particularly useful with `mode: tag`, where MilterGuard accepts all
+This is particularly useful with `mode: accept`, where MilterGuard accepts all
 mail and leaves the final delivery decision to another filter. To move only
 lower-confidence unwanted classifications, use:
 
@@ -384,15 +448,13 @@ if allof (
 }
 ```
 
-Set `filtering.add_email_headers` to `true` unless using `mode: tag`, which
-always adds result headers. Adjust `Junk` if your destination mailbox has a
-different name. Equivalent rules can be configured in a mail client instead of
-Sieve. Do not trust these headers downstream unless Postfix removes forged
-incoming `X-MilterGuard-*` headers as described earlier in this guide.
-
-Continue reviewing decisions after enabling enforcement. AI classification is
-not perfectly deterministic, and changes made by an AI provider can alter a
-model's behaviour even when the configured model name remains unchanged.
+Set `filtering.add_email_headers` to `false` to disable result headers. Adjust
+`Junk` if your destination mailbox has a different name. Equivalent rules can
+be configured in a mail client instead of Sieve. Before relying on these
+headers, ensure that forged incoming copies cannot survive. MilterGuard replaces
+existing `X-MilterGuard-*` result headers when Postfix offers Milter
+change-header support. In `trusted_headers` mode, the recommended Postfix
+`header_checks` rules also remove them at the SMTP boundary.
 
 ## Basic virus protection
 
@@ -415,7 +477,7 @@ accepted, rejected, or temporarily deferred with `tempfail`. In the supplied
 configuration, encrypted archives are rejected while other unscannable content
 is accepted and continues to AI analysis. The separate `invalid_mime_action`
 setting controls permanently invalid or ambiguous MIME structure; it defaults
-to rejection because retrying cannot repair the message. Monitor mode records
+to rejection because retrying cannot repair the message. Accept mode records
 the proposed attachment action but still accepts the message.
 
 ## Rejection history and saved messages
@@ -437,12 +499,17 @@ messages until it is below the target. `rejection_history.expiry` controls both
 the database record and saved-message lifetime, keeping the two parts aligned.
 Archive errors are logged but never alter the SMTP filtering decision.
 
+The rejection database may temporarily exceed its `max_entries` target between
+maintenance runs; expired and excess oldest entries are then removed
+automatically. Setting `rejection_history.expiry` to `0s` disables the history
+and requires `save_messages` to be disabled as well.
+
 ## Trusted mail and adaptive filtering
 
 Authenticated outbound mail is not scanned by default. MilterGuard uses
 accepted outbound mail to learn which external addresses each local user
-corresponds with. These addresses are immediately whitelisted and can bypass
-future scanning when the configured authentication requirements are met.
+corresponds with. These addresses are immediately added to the allowlist and can
+bypass future scanning when the configured authentication requirements are met.
 Authenticated submission client addresses are never blocked or otherwise
 modified by IP reputation, even when authenticated mail scanning is enabled.
 MilterGuard can also learn inbound senders that repeatedly receive a
@@ -450,7 +517,7 @@ high-confidence legitimate classification and pass the configured authentication
 checks.
 
 This reduces cost and avoids repeatedly classifying routine mail. Entire email
-domains can also be whitelisted in the configured trusted-sender domains file.
+domains can also be allowlisted in the configured trusted-sender domains file.
 The supplied file contains a curated low-risk sender list whose messages bypass
 scanning only when trusted, aligned DKIM authentication passes. Merely forging
 an address in one of these domains therefore does not bypass filtering.
@@ -472,32 +539,14 @@ offenders receive longer blocks. Legitimate traffic gradually reduces an IP's
 negative reputation. In the supplied configuration, every three legitimate
 messages removes one recorded unwanted-mail strike, although an active block
 continues until it expires. Configured shared mail providers are protected from
-automatic blacklisting.
+automatic blocking.
 
 The `ip_reputation.ip_allowlist` prevents trusted IP addresses and networks from
-ever being blacklisted. The `domain_allowlist` provides the same protection for
+ever being blocked. The `domain_allowlist` provides the same protection for
 sending hosts whose reverse-DNS hostname matches a listed domain or subdomain,
 but only after the hostname has been forward-resolved back to the connecting IP.
 This protects shared mail providers without allowing a forged PTR record to
 bypass reputation handling.
-
-The rejection database may temporarily exceed its `max_entries` target between
-maintenance runs; expired and excess oldest entries are then removed
-automatically. Setting `rejection_history.expiry` to `0s` disables the history
-and requires `save_messages` to be disabled as well.
-
-Learned correspondents, rejection history, IP reputation, and cached domain
-registration data are stored in the SQLite database at
-`/var/lib/milterguard/milterguard.db`. To avoid a corrupt or incomplete backup,
-stop MilterGuard before copying the database file. Back it up if you want to
-preserve the learned state when moving the service to another machine.
-Correspondent, IP reputation,
-rejection-history, and domain-registration changes are committed to the SQLite
-database immediately. `persistence.cleanup_interval` controls periodic removal
-of expired and excess records and must be at least one minute; cleanup also runs
-at startup. The same background maintenance task also checkpoints SQLite's
-write-ahead log. Domain-registration expiry is still enforced during lookups,
-before periodic cleanup physically removes the old row.
 
 ## Administration commands
 
@@ -541,8 +590,9 @@ EXIT
   correspondent addresses.
 - `REJECTIONS` lists rejected messages, including their rejection IDs and
   reasons.
-- `REJECTION <id>` displays the rejection information for the rejected email
-  with ID `<id>` and its decoded, cleaned plain-text body.
+- `REJECTION <id>` displays the rejection information and decoded, cleaned
+  plain-text body. When the original saved message is available, it also reports
+  the archive path and size.
 - `IP LIST` shows active short and repeat-offender blocks. `IP LIST LOOKUP`
   also performs reverse-DNS lookups and includes each hostname or `(not found)`.
 - `IP ADD` creates a manual block using the configured repeat-offender duration,
@@ -554,18 +604,16 @@ EXIT
 Listing commands default to all local recipients and the previous week.
 `day`, `week`, `month`, and `year` select activity since the corresponding
 point in the past; `all` removes that additional date filter while retaining
-configured expiry rules. Whitelist and active-IP listings use last activity;
+configured expiry rules. Correspondent and active-IP listings use last activity;
 rejection history uses rejection time. Interactive lists are printed from
 oldest to newest so the latest entries appear immediately above the prompt.
 Each listing returns at most 1,000 matching records and reports when that limit
 has been reached; use a shorter date period or a recipient filter to narrow a
 large result.
 
-`REJECTION <id>` displays the rejection information and processed body. When
-the original saved message is available, command mode reports its full archive
-path and size. The processed body is regenerated with the current MIME and HTML
-parser, so it may differ from the text originally supplied to the AI. Connection
-and authentication analysis is not reconstructed.
+The processed body shown by `REJECTION <id>` is regenerated with the current
+MIME and HTML parser, so it may differ from the text originally supplied to the
+AI. Connection and authentication analysis is not reconstructed.
 
 For bulk additions or deletions to the contact or IP databases, commands can
 also be read from a file or pipeline:
@@ -656,69 +704,17 @@ plaintext. Replies can contain allowlist and rejection-history data, so use
 `required` with remote SMTP servers where possible. SMTP authentication is not
 currently supported.
 
-## Running AI locally
-
-Running the AI locally is the recommended option. Email content remains on your
-own infrastructure, classifications remain consistent, availability is under
-your control, and there are no per-message API charges.
-
-The recommended Qwen3.6-35B-A3B model provides strong results with relatively
-modest hardware requirements. A system with an 8 GB GPU (e.g., RTX 4060) and
-32 GB of system RAM should work well with a suitable quantization and configuration.
-
-The model is available from:
-
-https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF
-
-Choose the largest quantization that fits comfortably within the available GPU
-and system memory. Quantizations below 4-bit may reduce classification quality
-and are not recommended.
-
-This practical guide explains how to run the model efficiently with limited GPU
-memory:
-
-https://piefed.crash.cx/c/localllama/p/123973/how-to-run-qwen-35b-a3b-on-4gb-to-8gb-of-vram-with-24-gb-system-ram
-
-Serve the model through llama.cpp, available from:
-
-https://github.com/ggml-org/llama.cpp
-
-Set MilterGuard's AI timeout high enough for the slowest messages and image
-analysis. The MTA's Milter timeout must be longer than MilterGuard's AI timeout.
-
-A local AI server will usually handle fewer simultaneous requests than a hosted
-service. Start with `ai.max_concurrent: 2`, then increase it only if the server
-has enough processing capacity and memory to run additional requests without
-substantially increasing response times.
-
-Before using a local model on live mail, replay a representative collection of
-legitimate, spam, and scam messages through a separate MilterGuard test instance.
-Check both classification accuracy and response time before enabling enforcement.
-
 ## Routine operation
 
 Keep the service, detection prompt, and model under review as the mail you receive
 changes. Check the journal for rejected mail, endpoint errors, attachment-policy
 decisions, and changes in classification quality. After changing the prompt,
-model, confidence threshold, or filtering policy, repeat the saved-message tests
-before restarting production.
+model, confidence threshold, or filtering policy, repeat the
+[mailbox replay tests](#replay-saved-email) before restarting production.
 
 Invalid API credentials and insufficient API credit are logged as distinct
 error-level events with `endpoint_error_kind` and `endpoint_status_code` fields,
 making them suitable for journal monitoring and alerts.
-
-When `filtering.add_email_headers` is enabled, every accepted message receives
-`X-MilterGuard-Classification`, `X-MilterGuard-Score`,
-`X-MilterGuard-Confidence`, and `X-MilterGuard-Action` headers where applicable.
-`X-MilterGuard-Confidence: low` identifies unwanted classifications below
-`reject_score`, or legitimate classifications below
-`legitimate_low_confidence_score`. It can be used by a server-side or mail-client
-rule to place borderline messages in a Junk folder. MilterGuard removes incoming
-headers with these names before adding its own values when Postfix offers Milter
-change-header support. The recommended Postfix `header_checks` rule also removes
-them at the SMTP boundary. Downstream
-filters should not trust these headers unless one of these protections is in
-place.
 
 Review `/etc/milterguard/trusted-sender-domains.txt` periodically and remove
 domains that no longer represent low-risk, organization-controlled senders. Add
@@ -745,6 +741,19 @@ Subjects may contain personal or sensitive information; set this option to
 `logging.include_connections` to `true` only when connection-open and
 connection-close debug messages are useful for troubleshooting.
 
+### Data storage and maintenance
+
+Learned correspondents, rejection history, IP reputation, and cached domain
+registration data are stored in `/var/lib/milterguard/milterguard.db`. Stop
+MilterGuard before copying this SQLite database so the backup is complete and
+consistent. Back it up when moving the learned state to another machine.
+
+Changes are committed immediately. `persistence.cleanup_interval` controls the
+periodic removal of expired and excess records and must be at least one minute;
+cleanup also runs at startup and checkpoints SQLite's write-ahead log. Expired
+domain-registration entries are ignored during lookups even before cleanup
+removes them.
+
 Validate configuration changes and test the configured AI endpoint before
 applying them:
 
@@ -756,11 +765,6 @@ milterguard --config /etc/milterguard/milterguard.yaml \
 The endpoint check sends one synthetic test email through the configured model
 and detection prompt. Success is reported as `configuration is valid` followed
 by `Endpoint OK`.
-
-Before starting MilterGuard for the first time, add `--check-port` to confirm
-that its configured Milter listener is available. Run this check only while
-MilterGuard is stopped; a running instance already occupies its listener and
-will correctly cause the check to fail.
 
 ## Replay saved email
 
@@ -777,25 +781,39 @@ instance.
 Run a separate test instance of MilterGuard in `enforce` mode on an unused port.
 Give its configuration a separate `persistence.database_file` so testing cannot
 alter production correspondent, rejection-history, or IP-reputation data. To
-ensure every corpus message reaches the AI, set `ip_reputation.block_duration`
-to `0s`, `ip_reputation.repeat_threshold` to `0`, and
-`correspondents.use_allowlist` to `false` in the test configuration. The replay
-tool reports the actual Milter response rather than only the AI classification.
-A test instance in `monitor` mode will therefore report every message as
+prevent learned correspondents and existing IP reputation from bypassing corpus
+messages, set `ip_reputation.block_duration` to `0s`,
+`ip_reputation.repeat_threshold` to `0`, and `correspondents.use_allowlist` to
+`false` in the test configuration. Trusted sender domains and deterministic
+attachment, MIME, and sender-domain policies can still act before the AI. For a
+test focused only on the model, point `filtering.sender_domain_allowlist` to an
+empty file and disable any deterministic policies that the test is not intended
+to exercise. The replay tool reports the actual Milter response rather than
+only the AI classification.
+
+A test instance in `accept` mode will therefore report every message as
 accepted even when MilterGuard recommends rejection. In `enforce` mode, a
 message classified as unwanted will still be reported as accepted when its
 score is below the rejection threshold defined in the configuration file.
 
 By default, the replay tool reconstructs the SMTP peer IP, client hostname,
-HELO identity, and receiving MTA hostname from the saved `Received` headers.
-The MTA hostname allows locally generated DKIM, SPF, and DMARC results already
-present in the message to be supplied to the AI as trusted evidence. It also
-derives the envelope sender and recipient from `Return-Path`, `X-Original-To`,
-`Delivered-To`, or the visible address headers. Each message uses a separate
-Milter connection. Because saved headers do not preserve every original SMTP
-detail, unavailable values are reported rather than guessed. Use
-`--connection-info synthetic` for the previous deterministic loopback identity,
-or the individual override options shown by `--help`.
+HELO identity, and receiving MTA hostname from the saved `Received` headers. It
+also derives the envelope sender and recipient from `Return-Path`,
+`X-Original-To`, `Delivered-To`, or the visible address headers. Each message
+uses a separate Milter connection.
+
+In `internal` authentication mode, MilterGuard ignores saved authentication
+results and recalculates SPF, DKIM, and DMARC from the reconstructed SMTP data,
+the byte-preserved message, and current DNS records. Supply `--receiver-ip` with
+the address of the receiving MTA so the required `{daemon_addr}` macro is
+available. Results can differ from those obtained when the message originally
+arrived if SMTP details are missing or DNS records and DKIM keys have changed.
+
+In `trusted_headers` mode, the reconstructed MTA hostname allows saved local
+authentication results with a trusted authentication-service identifier to be
+used. Use this mode only with messages captured from a server whose result
+headers you trust. Use `--connection-info synthetic` for a deterministic
+loopback identity, or the individual override options shown by `--help`.
 
 Test representative directories and save the JSON Lines results using the
 installed mailbox replay script. First set `REPLAY_SCRIPT` to the appropriate
@@ -813,19 +831,23 @@ For a `.tar.gz` installation:
 REPLAY_SCRIPT=/usr/local/share/milterguard/tools/replay_mailbox.py
 ```
 
-Then run the required tests:
+Replace the example `--receiver-ip` value with the address on which the mail
+server received the original messages. Then run the relevant tests, for example:
 
 ```sh
 python3 "$REPLAY_SCRIPT" \
-  /path/to/legitimate --host 127.0.0.1 --port 8894 --expected accept \
+  /path/to/legitimate --host 127.0.0.1 --port 8894 \
+  --receiver-ip 203.0.113.25 --expected accept \
   | tee legitimate-results.jsonl
 
 python3 "$REPLAY_SCRIPT" \
-  /path/to/spam --host 127.0.0.1 --port 8894 --expected reject \
+  /path/to/spam --host 127.0.0.1 --port 8894 \
+  --receiver-ip 203.0.113.25 --expected reject \
   | tee spam-results.jsonl
 
 python3 "$REPLAY_SCRIPT" \
-  /path/to/scam --host 127.0.0.1 --port 8894 --expected reject \
+  /path/to/scam --host 127.0.0.1 --port 8894 \
+  --receiver-ip 203.0.113.25 --expected reject \
   | tee scam-results.jsonl
 ```
 

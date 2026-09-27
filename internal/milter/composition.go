@@ -8,16 +8,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"runtime"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth/moxverify"
 	"github.com/PhilAnderson1/MilterGuard/internal/rdap"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
+	"github.com/PhilAnderson1/MilterGuard/internal/systemdns"
 )
 
 type runtimeComponents struct {
@@ -58,7 +60,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	domainRegistration := newDomainRegistrationStore(cfg.DomainRegistration, domainCache, domainLookup, log)
 
 	archive := newRejectedMailArchive(cfg.RejectionHistory, log)
-	commands := commandProcessor(cfg, correspondents, rejections, ipReputation, archive, net.DefaultResolver, log)
+	commands := commandProcessor(cfg, correspondents, rejections, ipReputation, archive, systemdns.NewResolver(), log)
 
 	var attachmentScanner *attachment.Scanner
 	if cfg.Attachments.BlockExecutables {
@@ -70,10 +72,15 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		})
 	}
 
+	authenticationTimeout := time.Duration(0)
+	if cfg.Authentication.Mode == config.AuthenticationModeInternal {
+		authenticationTimeout = cfg.Authentication.Timeout.Value()
+	}
 	analysis := &analysisService{
 		analyzer: analyzer, ai: cfg.AI,
 		log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent),
-		domainLookupTimeout: cfg.DomainRegistration.Timeout.Value(), milterTimeout: cfg.Milter.Timeout.Value(),
+		domainLookupTimeout: cfg.DomainRegistration.Timeout.Value(), authenticationTimeout: authenticationTimeout,
+		milterTimeout: cfg.Milter.Timeout.Value(),
 	}
 	policy := &messagePolicyService{
 		correspondentCfg: cfg.Correspondents, log: log,
@@ -92,22 +99,33 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 			Address: cfg.EmailCommands.SMTPHost, TLSMode: cfg.EmailCommands.SMTPTLS, Timeout: commandReplySMTPTimeout,
 		}),
 	}
+	authenticationMode := cfg.Authentication.Mode
+	var authentication mailauth.Verifier = mailauth.HeaderVerifier{}
+	var authenticationErr error
+	if authenticationMode == config.AuthenticationModeInternal {
+		authentication, authenticationErr = moxverify.New(moxverify.Options{
+			Timeout: cfg.Authentication.Timeout.Value(), MaxConcurrent: cfg.Authentication.MaxConcurrent, Logger: log,
+		})
+	}
 	sessions := &sessionDependencies{
 		mode: cfg.Mode, filtering: cfg.Filtering, logging: cfg.Logging,
 		protocol: protocolOptions{
 			timeout: cfg.Milter.Timeout.Value(), maxMessageSize: cfg.Milter.MaxMessageSize,
-			progressInterval: defaultMilterProgressInterval,
+			progressInterval: defaultMilterProgressInterval, exactStorage: cfg.Authentication.MessageStorage,
 		},
 		analysis: analysis, policy: policy, attachments: attachments, commands: emailCommands,
-		dns: &connectionDNSService{resolver: net.DefaultResolver, timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
-		log: log,
+		dns:                &connectionDNSService{resolver: systemdns.NewResolver(), timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
+		authenticationMode: authenticationMode,
+		authentication:     authentication,
+		newExactMessage:    mailauth.NewExactMessage,
+		log:                log,
 	}
 	maintenance := &maintenanceService{
 		ip: ipRepository, correspondents: correspondents, rejections: rejections,
 		domains: domainRegistration, database: database, archive: archive,
 		cleanupInterval: cfg.Persistence.CleanupInterval.Value(), log: log,
 	}
-	return runtimeComponents{sessions: sessions, maintenance: maintenance, database: database, err: errors.Join(tokenErr, databaseErr)}
+	return runtimeComponents{sessions: sessions, maintenance: maintenance, database: database, err: errors.Join(tokenErr, databaseErr, authenticationErr)}
 }
 
 func attachmentConcurrency(maxConnections int) int {

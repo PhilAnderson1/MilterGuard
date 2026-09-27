@@ -1,0 +1,14 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=simple/simple; d=example.test; s=probe; h=from:subject; l=12; bh=3lSbNPjqjxYqSE25TfaRgasECInrs5e5EfAElD0rvyk=; b=MEMARqa1IVqYHQdEi01HoaS+ge90iaj1u2EG2TRj+EFZX2NPoQ4ssNjUOr3eewGw2OGuhh5GsGbrlMVAtXaOMrdR8+mlrJ79GeIUUVjySXCkBO3fwvJycwnfPS1xDDgQ5dMvwRF4KtzgoAJFvpnhII2rEm/idJ4y0KnSmKf6yi0HtC4Q9MbNUbCvXxQGT+0SfmHCQQy+AN3or03CYO69r9VM3r/0A6/EQ8GyJ2xQp5vhIkuPjg51QnCuF2y/F9jpyQ1Bmfbn+jG0VUM9xvRz7t+g8o/EdimRMqqvwtctxdkaNsLH6Caam3tO2edUnOeDO5cFjHbB0TeVBCLsLuu6zQ==
+From:  Alice  <alice@example.test>
+To: Bob <bob@example.test>
+Subject: first line
+	second line with a tab
+X-Repeated: first
+X-Repeated:  second  value 
+Content-Type: application/octet-stream
+Content-Transfer-Encoding: 8bit
+
+first line  
+second	line
+
+

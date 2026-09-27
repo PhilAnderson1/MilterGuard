@@ -22,6 +22,11 @@ func TestLoadAcceptsNewSectionsAndRejectsLegacySections(t *testing.T) {
 	}
 
 	valid := `
+authentication:
+  mode: internal
+  timeout: 7s
+  max_concurrent: 3
+  message_storage: file
 ai:
   api_key: test-key
   model: test-model
@@ -59,7 +64,7 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || !reflect.DeepEqual(cfg.Filtering.AuthenticatedOnlySenderDomains, []string{"example.com"}) || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
+	if cfg.Authentication.Mode != AuthenticationModeInternal || cfg.Authentication.Timeout.Value() != 7*time.Second || cfg.Authentication.MaxConcurrent != 3 || cfg.Authentication.MessageStorage != "file" || cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || !reflect.DeepEqual(cfg.Filtering.AuthenticatedOnlySenderDomains, []string{"example.com"}) || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
@@ -70,6 +75,10 @@ logging:
 	legacy = valid + "\nrejected_mail:\n  enabled: true\n"
 	if _, err := Load(writeConfig(t, legacy)); err == nil || !strings.Contains(err.Error(), "field rejected_mail not found") {
 		t.Fatalf("legacy rejected_mail section error = %v", err)
+	}
+	legacy = valid + "\nmilter:\n  exact_message_storage: memory\n"
+	if _, err := Load(writeConfig(t, legacy)); err == nil || !strings.Contains(err.Error(), "field exact_message_storage not found") {
+		t.Fatalf("legacy exact-message storage error = %v", err)
 	}
 }
 
@@ -186,6 +195,49 @@ func TestValidateMilterMaxMessageSize(t *testing.T) {
 	}
 }
 
+func TestValidateAuthentication(t *testing.T) {
+	for _, mode := range []string{"trusted_headers", "internal"} {
+		cfg := validConfig()
+		cfg.Authentication.Mode = mode
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("mode %q rejected: %v", mode, err)
+		}
+	}
+	for _, configure := range []func(*Config){
+		func(cfg *Config) { cfg.Authentication.Mode = "automatic" },
+		func(cfg *Config) { cfg.Authentication.Timeout = 0 },
+		func(cfg *Config) { cfg.Authentication.MaxConcurrent = 0 },
+	} {
+		cfg := validConfig()
+		configure(&cfg)
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "authentication.") {
+			t.Fatalf("invalid authentication settings error = %v", err)
+		}
+	}
+	for _, storage := range []string{"memory", "file"} {
+		cfg := validConfig()
+		cfg.Authentication.MessageStorage = storage
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("storage %q rejected: %v", storage, err)
+		}
+	}
+	cfg := validConfig()
+	cfg.Authentication.MessageStorage = "automatic"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "authentication.message_storage") {
+		t.Fatalf("invalid storage error = %v", err)
+	}
+}
+
+func TestInternalAuthenticationDoesNotRequireTrustedHeaderProducers(t *testing.T) {
+	cfg := validConfig()
+	cfg.Authentication.Mode = "internal"
+	cfg.Correspondents.TrustedAuthservIDs = nil
+	cfg.Filtering.SenderDomainAllowlist = []string{"example.com"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("internal authentication incorrectly requires trusted headers: %v", err)
+	}
+}
+
 func TestLoadRejectsEmptyAndMultipleYAMLDocuments(t *testing.T) {
 	write := func(content string) string {
 		path := filepath.Join(t.TempDir(), "milterguard.yaml")
@@ -295,6 +347,21 @@ func TestAuthenticatedMailScanningDefaultsDisabled(t *testing.T) {
 	}
 }
 
+func TestAuthenticationDefaultsInternal(t *testing.T) {
+	if defaults().Authentication.Mode != AuthenticationModeInternal {
+		t.Fatal("authentication must default to internal verification")
+	}
+}
+
+func TestOperationModeDefaultsAccept(t *testing.T) {
+	if defaults().Mode != "accept" {
+		t.Fatal("operation mode must default to accept")
+	}
+	if !defaults().Filtering.AddEmailHeaders {
+		t.Fatal("result headers must be enabled by default")
+	}
+}
+
 func TestConnectionLifecycleLoggingDefaultsDisabled(t *testing.T) {
 	if defaults().Logging.IncludeConnections {
 		t.Fatal("connection lifecycle logging must default to disabled")
@@ -302,17 +369,19 @@ func TestConnectionLifecycleLoggingDefaultsDisabled(t *testing.T) {
 }
 
 func TestValidateOperationModes(t *testing.T) {
-	for _, mode := range []string{"monitor", "tag", "enforce"} {
+	for _, mode := range []string{"accept", "enforce"} {
 		cfg := validConfig()
 		cfg.Mode = mode
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("mode %q rejected: %v", mode, err)
 		}
 	}
-	cfg := validConfig()
-	cfg.Mode = "invalid"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mode must") {
-		t.Fatalf("invalid mode error = %v", err)
+	for _, mode := range []string{"monitor", "tag", "invalid"} {
+		cfg := validConfig()
+		cfg.Mode = mode
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mode must") {
+			t.Fatalf("invalid mode %q error = %v", mode, err)
+		}
 	}
 }
 
@@ -475,6 +544,7 @@ func TestValidateSenderDomainAllowlist(t *testing.T) {
 		{
 			name: "DKIM requirement needs trusted authentication service",
 			configure: func(cfg *Config) {
+				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Filtering.SenderDomainAllowlist = []string{"amazon.com"}
 				cfg.Filtering.SenderDomainAllowlistRequireDKIM = true
 				cfg.Correspondents.TrustedAuthservIDs = nil
@@ -819,6 +889,7 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 		{
 			name: "correspondent bypass without trusted authentication service",
 			configure: func(cfg *Config) {
+				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Correspondents.UseAllowlist = true
 				cfg.Correspondents.BypassAI = true
 				cfg.Correspondents.RequireDKIMForBypass = true
@@ -829,6 +900,7 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 		{
 			name: "DKIM-required legitimate sender learning without trusted authentication service",
 			configure: func(cfg *Config) {
+				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Correspondents.BypassAI = false
 				cfg.Correspondents.LearnLegitimateSenders = true
 				cfg.Correspondents.LegitimateSenderRequireDKIM = true
@@ -839,6 +911,7 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 		{
 			name: "disabled legitimate sender learning does not require trusted authentication service",
 			configure: func(cfg *Config) {
+				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Correspondents.BypassAI = false
 				cfg.Correspondents.LearnLegitimateSenders = false
 				cfg.Correspondents.LegitimateSenderRequireDKIM = true

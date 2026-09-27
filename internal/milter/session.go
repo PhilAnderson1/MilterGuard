@@ -13,7 +13,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 )
@@ -44,7 +46,10 @@ type session struct {
 	peerHostname                string
 	mtaHostname                 string
 	pendingMTAHostname          string
+	receiverIP                  netip.Addr
+	pendingReceiverIP           netip.Addr
 	heloIdentity                string
+	smtpUTF8                    bool
 	authentication              authenticationState
 	envelopeSender              string
 	envelopeRecipients          []string
@@ -54,6 +59,8 @@ type session struct {
 	connectionDNS               connectionDNSResult
 	connectionDNSPending        <-chan connectionDNSResult
 	message                     *message.Message
+	exactMessage                mailauth.ExactMessage
+	exactMessageErr             error
 	negotiatedActions           uint32
 }
 
@@ -71,6 +78,7 @@ func (ss *session) run(ctx context.Context) {
 		_ = ss.conn.Close()
 	})
 	defer stopClose()
+	defer ss.closeExactMessage()
 	for {
 		deadline := time.Now().Add(ss.deps.protocol.timeout)
 		if err := ss.conn.SetDeadline(deadline); err != nil {
@@ -136,7 +144,10 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		ss.peerHostname = ""
 		ss.mtaHostname = ""
 		ss.pendingMTAHostname = ""
+		ss.receiverIP = netip.Addr{}
+		ss.pendingReceiverIP = netip.Addr{}
 		ss.heloIdentity = ""
+		ss.smtpUTF8 = false
 		ss.authentication = authenticationState{}
 		ss.connectionDNS = connectionDNSResult{status: message.ReverseDNSNotApplicable}
 		ss.connectionDNSPending = nil
@@ -149,6 +160,8 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		ss.connected = true
 		ss.mtaHostname = ss.pendingMTAHostname
 		ss.pendingMTAHostname = ""
+		ss.receiverIP = ss.pendingReceiverIP
+		ss.pendingReceiverIP = netip.Addr{}
 		ss.peerIP = netip.Addr{}
 		ss.peerHostname = ""
 		ss.heloIdentity = ""
@@ -184,6 +197,7 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		ss.resetMessage(phaseEnvelope)
 		if sender, ok := parseEnvelopeAddress(payload); ok {
 			ss.envelopeSender = sender
+			ss.smtpUTF8 = containsNonASCII(sender) || envelopeHasSMTPUTF8(payload)
 		}
 		return ss.sendContinue(command)
 	case commandRecipient:
@@ -210,12 +224,14 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 			return ss.protocolError("unexpected milter end-of-headers command")
 		}
 		ss.phase = phaseBody
+		ss.captureExact(func(exact mailauth.ExactMessage) error { return exact.EndHeaders() })
 		return ss.sendContinue(command)
 	case commandBody:
 		if ss.phase != phaseBody {
 			return ss.protocolError("milter body outside body phase")
 		}
 		ss.message.AddBody(payload)
+		ss.captureExact(func(exact mailauth.ExactMessage) error { return exact.AddBody(payload) })
 		return ss.sendContinue(command)
 	case commandEndBody:
 		if ss.phase != phaseBody {
@@ -223,6 +239,7 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		}
 		if len(payload) > 0 {
 			ss.message.AddBody(payload)
+			ss.captureExact(func(exact mailauth.ExactMessage) error { return exact.AddBody(payload) })
 		}
 		return ss.finishMessage(ctx)
 	case commandQuit:
@@ -247,7 +264,7 @@ func (ss *session) negotiate(payload []byte) bool {
 	// Request result-header capabilities even when result generation is disabled:
 	// sender-supplied X-MilterGuard result headers must still be removable.
 	requestedActions := offeredActions & resultHeaderActions
-	wantsResultHeaders := ss.deps.filtering.AddEmailHeaders || ss.deps.mode == "tag"
+	wantsResultHeaders := ss.deps.filtering.AddEmailHeaders
 	if wantsResultHeaders && offeredActions&actionAddHeaders == 0 {
 		ss.deps.log.Warn("result headers disabled for Milter connection because MTA did not offer add-header support",
 			"offered_actions", offeredActions)
@@ -274,6 +291,7 @@ func (ss *session) addHeader(payload []byte) bool {
 		return ss.protocolError("malformed milter header command")
 	}
 	ss.message.AddHeader(name, value)
+	ss.captureExact(func(exact mailauth.ExactMessage) error { return exact.AddHeader(name, value) })
 	return ss.sendContinue(commandHeader)
 }
 
@@ -326,14 +344,27 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if handled, keepConnection := ss.applyAttachments(ctx); handled {
 		return keepConnection
 	}
-	inbound := ss.deps.policy.prepareInboundEvidence(ctx, ss.messageContext(ss.recipientSetComplete()), ss.trustedAuthservIDs(), ss.deps.filtering)
+	authentication := mailauth.Evidence{}
+	var progressErr error
+	if !ss.internalAuthentication() || !ss.authentication.Authenticated {
+		authentication, progressErr = ss.verifyAuthenticationWithProgress(ctx)
+	}
+	ss.closeExactMessage()
+	if progressErr != nil {
+		ss.deps.log.WarnContext(ctx, "authentication verification failed", "error", progressErr)
+		if ss.internalAuthentication() {
+			authentication = authenticationUnavailableEvidence(authentication, ss.visibleSenderDomain)
+		}
+	}
+	ss.message.Authentication = authentication
+	inbound := ss.deps.policy.prepareInboundEvidence(ctx, ss.messageContext(ss.recipientSetComplete()), authentication, ss.deps.filtering)
 	if inbound.allowedSenderDomain != "" {
-		return ss.finishBypassedMessage(ctx, "sender_domain_allowlist", false, inbound.knownCorrespondent && inbound.trustedDKIM,
+		return ss.finishBypassedMessage(ctx, "sender_domain_allowlist", false, inbound.knownCorrespondent && inbound.alignedDKIM,
 			"sender_domain", inbound.allowedSenderDomain,
-			"trusted_aligned_dkim", inbound.trustedDKIM)
+			"aligned_dkim", inbound.alignedDKIM)
 	}
 	if inbound.bypassAI {
-		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.trustedDKIM,
+		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.alignedDKIM,
 			ss.knownCorrespondentLogAttrs()...)
 	}
 	result, progressErr := ss.evaluateWithProgress(ctx, inbound)
@@ -355,6 +386,82 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	ss.applyPostDecisionUpdates(ctx, result, inbound)
 	ss.resetMessage(phaseConnection)
 	return true
+}
+
+// verifyAuthenticationWithProgress keeps all Milter socket writes in the
+// session goroutine while a provider performs DNS or cryptographic work.
+func (ss *session) verifyAuthenticationWithProgress(ctx context.Context) (mailauth.Evidence, error) {
+	verifier := ss.deps.authentication
+	if verifier == nil {
+		verifier = mailauth.HeaderVerifier{}
+	}
+	envelopeSender := ss.envelopeSender
+	if envelopeSender != "<>" {
+		envelopeSender = mailaddr.Normalize(envelopeSender)
+	}
+	transaction := mailauth.Transaction{
+		RemoteIP: ss.peerIP, HELO: ss.heloIdentity, EnvelopeSender: envelopeSender,
+		ReceiverHostname: ss.mtaHostname, ReceiverIP: ss.receiverIP, VisibleFromDomain: ss.visibleSenderDomain,
+		SMTPUTF8: ss.smtpUTF8,
+	}
+	if !ss.internalAuthentication() {
+		transaction.AuthenticationResults = append([]string(nil), ss.message.Headers["authentication-results"]...)
+		transaction.ReceivedSPF = append([]string(nil), ss.message.Headers["received-spf"]...)
+		transaction.TrustedAuthservIDs = ss.trustedAuthservIDs()
+	}
+	if ss.exactMessageErr == nil && ss.exactMessage != nil {
+		reader, size, err := ss.exactMessage.ReaderAt()
+		if err != nil {
+			ss.exactMessageErr = err
+		} else {
+			transaction.Message, transaction.MessageSize = reader, size
+		}
+	}
+	if ss.exactMessageErr != nil {
+		ss.deps.log.DebugContext(ctx, "exact authentication input unavailable", "error", ss.exactMessageErr)
+	}
+
+	type verificationResult struct {
+		evidence mailauth.Evidence
+		err      error
+	}
+	results := make(chan verificationResult, 1)
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	defer cancelWorker()
+	go func() {
+		result := verificationResult{}
+		defer func() {
+			if panicValue := recover(); panicValue != nil {
+				logRecoveredWorkerPanic(ss.deps.log, workerCtx, "authentication verification", panicValue)
+				result.err = fmt.Errorf("authentication verification panic: %v", panicValue)
+			}
+			results <- result
+		}()
+		result.evidence, result.err = verifier.Verify(workerCtx, transaction)
+	}()
+
+	interval := ss.deps.protocol.progressInterval
+	if interval <= 0 {
+		interval = defaultMilterProgressInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-results:
+			return result.evidence, result.err
+		case <-ctx.Done():
+			cancelWorker()
+			<-results
+			return mailauth.Evidence{}, fmt.Errorf("authentication verification interrupted: %w", ctx.Err())
+		case <-ticker.C:
+			if err := writeFrame(ss.conn, []byte{responseProgress}); err != nil {
+				cancelWorker()
+				<-results
+				return mailauth.Evidence{}, fmt.Errorf("send authentication progress response: %w", err)
+			}
+		}
+	}
 }
 
 // evaluateWithProgress runs potentially slow message analysis in a worker and
@@ -409,7 +516,6 @@ func (ss *session) evaluateMessage(ctx context.Context, inbound inboundEvidence)
 			ss.message.DomainRegistration = info
 		}
 	}
-	ss.message.TrustedAuthservIDs = ss.trustedAuthservIDs()
 	ss.message.Connection = ss.connectionInformation(ctx)
 	return ss.deps.analysis.evaluate(ctx, ss.message, ss.deps.mode, ss.deps.filtering.RejectScore,
 		ss.deps.filtering.AIErrorAction, ss.deps.logging.IncludeAIInput)
@@ -487,6 +593,14 @@ func (ss *session) captureSessionMacros(payload []byte) {
 			ss.mtaHostname = hostname
 		}
 	}
+	if values.ReceiverAddressFound {
+		address := canonicalMacroIP(values.ReceiverAddress)
+		if target == commandConnect {
+			ss.pendingReceiverIP = address
+		} else if ss.connected {
+			ss.receiverIP = address
+		}
+	}
 	if !ss.connected || !values.AuthenticationFound || (target != commandMail && target != commandData && target != commandEndHeaders && target != commandEndBody) {
 		return
 	}
@@ -494,8 +608,55 @@ func (ss *session) captureSessionMacros(payload []byte) {
 	ss.authentication = authenticationState{Authenticated: identity != "", Identity: identity}
 }
 
+func canonicalMacroIP(value string) netip.Addr {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "[")
+	value = strings.TrimSuffix(value, "]")
+	if strings.HasPrefix(strings.ToLower(value), "ipv6:") {
+		value = value[len("ipv6:"):]
+	}
+	address, err := netip.ParseAddr(value)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return netsafety.CanonicalIP(address)
+}
+
 func (ss *session) trustedAuthservIDs() []string {
 	return ss.deps.policy.trustedAuthservIDs(ss.mtaHostname)
+}
+
+func (ss *session) internalAuthentication() bool {
+	return ss.deps.authenticationMode == config.AuthenticationModeInternal
+}
+
+func containsNonASCII(value string) bool {
+	for index := range len(value) {
+		if value[index] >= utf8.RuneSelf {
+			return true
+		}
+	}
+	return false
+}
+
+func authenticationUnavailableEvidence(evidence mailauth.Evidence, visibleDomain string) mailauth.Evidence {
+	results := append([]mailauth.Result(nil), evidence.Results...)
+	for _, method := range []mailauth.Method{mailauth.MethodSPF, mailauth.MethodDKIM, mailauth.MethodDMARC} {
+		found := false
+		for _, result := range results {
+			if result.Method == method {
+				found = true
+				break
+			}
+		}
+		if !found {
+			results = append(results, mailauth.Result{
+				Method: method, Outcome: mailauth.OutcomeTemperror,
+				ErrorCategory: mailauth.ErrorInternal, Reason: "authentication unavailable",
+			})
+		}
+	}
+	return mailauth.NewEvidence(results, visibleDomain)
 }
 
 func validMTAHostname(value string) string {
@@ -661,13 +822,52 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 // Milter response writing and session reset
 
 func (ss *session) resetMessage(phase protocolPhase) {
+	ss.closeExactMessage()
 	ss.message = message.New(ss.deps.protocol.maxMessageSize)
+	ss.exactMessageErr = nil
 	ss.envelopeSender = ""
 	ss.envelopeRecipients = nil
 	ss.envelopeRecipientsTruncated = false
 	ss.visibleSender = ""
 	ss.visibleSenderDomain = ""
+	ss.smtpUTF8 = false
 	ss.phase = phase
+	if phase != phaseEnvelope || !ss.requiresExactMessage() {
+		ss.exactMessage = nil
+		return
+	}
+	storage := ss.deps.protocol.exactStorage
+	if storage == "" {
+		storage = "memory"
+	}
+	factory := ss.deps.newExactMessage
+	if factory == nil {
+		factory = mailauth.NewExactMessage
+	}
+	ss.exactMessage, ss.exactMessageErr = factory(storage, ss.deps.protocol.maxMessageSize)
+}
+
+func (ss *session) requiresExactMessage() bool {
+	return ss.internalAuthentication()
+}
+
+func (ss *session) captureExact(write func(mailauth.ExactMessage) error) {
+	if ss.exactMessage == nil || ss.exactMessageErr != nil {
+		return
+	}
+	if err := write(ss.exactMessage); err != nil {
+		ss.exactMessageErr = err
+	}
+}
+
+func (ss *session) closeExactMessage() {
+	if ss.exactMessage == nil {
+		return
+	}
+	if err := ss.exactMessage.Close(); err != nil && ss.exactMessageErr == nil {
+		ss.exactMessageErr = err
+	}
+	ss.exactMessage = nil
 }
 
 func (ss *session) sendContinue(command byte) bool {

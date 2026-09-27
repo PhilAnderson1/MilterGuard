@@ -22,15 +22,6 @@ func responseForAction(selected action, rejectMessage string) []byte {
 	}
 }
 
-// acceptedModeLabel identifies why a proposed rejection was accepted in a
-// non-enforcing mode.
-func acceptedModeLabel(mode string) string {
-	if mode == "tag" {
-		return "accepted-tag-mode"
-	}
-	return "accepted-monitor-mode"
-}
-
 // appendDecisionSubject adds the decoded subject to a completed-message
 // decision log when subject logging is enabled.
 func (ss *session) appendDecisionSubject(attrs []any) []any {

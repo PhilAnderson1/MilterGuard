@@ -77,3 +77,23 @@ func TestTruncateUTF8DropsPartialFinalRune(t *testing.T) {
 		t.Fatalf("truncated reply length = %d, want %d", len(got), len(want))
 	}
 }
+
+func TestEnvelopeHasSMTPUTF8(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload []byte
+		want    bool
+	}{
+		{name: "no arguments", payload: []byte("<sender@example.net>\x00")},
+		{name: "other argument", payload: []byte("<sender@example.net>\x00SIZE=123\x00")},
+		{name: "SMTPUTF8", payload: []byte("<sender@example.net>\x00SIZE=123\x00SMTPUTF8\x00"), want: true},
+		{name: "case insensitive", payload: []byte("<sender@example.net>\x00smtputf8\x00"), want: true},
+		{name: "malformed unterminated", payload: []byte("<sender@example.net>\x00SMTPUTF8")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := envelopeHasSMTPUTF8(test.payload); got != test.want {
+				t.Fatalf("envelopeHasSMTPUTF8() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}

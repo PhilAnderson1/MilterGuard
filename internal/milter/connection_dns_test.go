@@ -107,6 +107,16 @@ func TestResolveConnectionDNSOutcomes(t *testing.T) {
 			wantStatus: message.ReverseDNSAvailable,
 			wantNames:  []message.ReverseDNSName{{Hostname: "dns.google", Confirmation: message.ForwardLookupFailed}},
 		},
+		{
+			name: "partial forward result confirms address",
+			resolver: &connectionTestResolver{
+				ptr:        []string{"dns.google."},
+				forward:    map[string][]net.IPAddr{"dns.google": {{IP: net.ParseIP("8.8.8.8")}}},
+				forwardErr: map[string]error{"dns.google": errors.New("IPv6 lookup temporarily failed")},
+			},
+			wantStatus: message.ReverseDNSAvailable,
+			wantNames:  []message.ReverseDNSName{{Hostname: "dns.google", Confirmation: message.ForwardConfirmed}},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

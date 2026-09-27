@@ -11,11 +11,30 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 )
 
 const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
 func retainedBytes(m *Message) int64 { return m.archiveHeaderBytes + m.bodySize }
+
+func setHeaderAuthentication(t *testing.T, m *Message, trusted []string) {
+	t.Helper()
+	visibleDomain := ""
+	if m.FromHeaderCount() == 1 {
+		visibleDomain = visibleFromDomain(m.Header("From"))
+	}
+	evidence, err := (mailauth.HeaderVerifier{}).Verify(t.Context(), mailauth.Transaction{
+		AuthenticationResults: m.Headers["authentication-results"],
+		ReceivedSPF:           m.Headers["received-spf"], TrustedAuthservIDs: trusted,
+		VisibleFromDomain: visibleDomain,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Authentication = evidence
+}
 
 func TestPromptDecodesMultipart(t *testing.T) {
 	m := New(10000)
@@ -645,13 +664,13 @@ func TestBodyIsTruncatedToRemainingCombinedMessageBudget(t *testing.T) {
 
 func TestPromptIncludesOnlyTrustedAuthenticationResults(t *testing.T) {
 	m := New(1000)
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
 	m.AddHeader("Authentication-Results", "nl.invades.net; dmarc=pass header.from=example.com")
 	m.AddHeader("Authentication-Results", "mx.google.com; dkim=pass header.d=example.com")
 	m.AddHeader("From", "Sender <sender@example.com>")
 	m.AddHeader("Subject", "test")
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 	prompt := m.Prompt(100)
-	if !strings.Contains(prompt, "DMARC: pass for visible From domain example.com (matches supplied visible From domain: yes)") {
+	if !strings.Contains(prompt, "DMARC: pass for visible From domain example.com") {
 		t.Fatalf("trusted authentication result missing: %s", prompt)
 	}
 	if strings.Contains(prompt, "mx.google.com") {
@@ -661,10 +680,10 @@ func TestPromptIncludesOnlyTrustedAuthenticationResults(t *testing.T) {
 
 func TestPromptIncludesOnlyReceivedSPFFromTrustedReceiver(t *testing.T) {
 	m := New(1000)
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
 	m.AddHeader("Received-SPF", "pass receiver=nl.invades.net; client-ip=192.0.2.1")
 	m.AddHeader("Received-SPF", "pass receiver=mx.google.com; client-ip=192.0.2.2")
 	m.AddHeader("Received-SPF", "pass client-ip=192.0.2.3")
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 	prompt := m.Prompt(100)
 	if !strings.Contains(prompt, "SPF: pass for envelope-sender domain unavailable") {
 		t.Fatalf("trusted Received-SPF result missing: %s", prompt)
@@ -682,8 +701,8 @@ func TestPromptIgnoresReceivedSPFReceiverInsideCommentOrQuotedValue(t *testing.T
 	}
 	for _, header := range tests {
 		m := New(1000)
-		m.TrustedAuthservIDs = []string{"nl.invades.net"}
 		m.AddHeader("Received-SPF", header)
+		setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 		prompt := m.Prompt(100)
 		if !strings.Contains(prompt, "SPF: no trusted local result") {
 			t.Fatalf("untrusted receiver accepted from %q:\n%s", header, prompt)
@@ -693,8 +712,8 @@ func TestPromptIgnoresReceivedSPFReceiverInsideCommentOrQuotedValue(t *testing.T
 
 func TestPromptAcceptsQuotedReceivedSPFReceiverParameter(t *testing.T) {
 	m := New(1000)
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
 	m.AddHeader("Received-SPF", `pass (local result) client-ip=192.0.2.1; receiver="nl.invades.net"`)
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 	prompt := m.Prompt(100)
 	if !strings.Contains(prompt, "SPF: pass for envelope-sender domain unavailable") {
 		t.Fatalf("trusted quoted receiver missing:\n%s", prompt)
@@ -720,13 +739,103 @@ func TestPromptOmitsAuthenticationEvidenceWhenNoTrustedResultsExist(t *testing.T
 	}
 }
 
+func TestPromptTreatsBodyLengthLimitedDKIMAsNoResult(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "sender@example.com")
+	m.Authentication = mailauth.Evidence{Results: []mailauth.Result{{
+		Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy, Domain: "example.com",
+		BodyLengthLimited: true, BodyLength: 12,
+	}}}
+	prompt := m.Prompt(100)
+	if !strings.Contains(prompt, "DKIM: no trusted local result") {
+		t.Fatalf("body-length-limited DKIM was not treated as unavailable:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "DKIM: policy") {
+		t.Fatalf("body-length-limited DKIM policy result leaked into prompt:\n%s", prompt)
+	}
+}
+
+func TestPromptOmitsBodyLengthLimitedDKIMAlongsideUsableResult(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "sender@example.com")
+	m.Authentication = mailauth.NewEvidence([]mailauth.Result{
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy, Domain: "limited.example.com", BodyLengthLimited: true, BodyLength: 12},
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePass, Domain: "example.com"},
+	}, "example.com")
+	prompt := m.Prompt(100)
+	if !strings.Contains(prompt, "DKIM: pass for signing domain example.com") {
+		t.Fatalf("usable DKIM result missing from prompt:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "limited.example.com") || strings.Contains(prompt, "DKIM: no trusted local result") {
+		t.Fatalf("body-length-limited DKIM affected usable result rendering:\n%s", prompt)
+	}
+}
+
+func TestPromptOmitsAlignmentLanguageFromNonPassResults(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "sender@example.com")
+	m.Authentication = mailauth.NewEvidence([]mailauth.Result{
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomeFail, Domain: "example.com"},
+		{Method: mailauth.MethodSPF, Outcome: mailauth.OutcomeSoftfail, Domain: "example.com"},
+		{Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomeFail, Domain: "example.com"},
+	}, "example.com")
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"DKIM: fail for signing domain example.com",
+		"SPF: softfail for envelope-sender domain example.com",
+		"DMARC: fail for visible From domain example.com",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("non-pass authentication result missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "aligned with visible From domain") || strings.Contains(prompt, "matches supplied visible From domain") {
+		t.Fatalf("non-pass authentication result included misleading domain-match language:\n%s", prompt)
+	}
+}
+
+func TestPromptUsesFriendlyAuthenticationErrorDescriptions(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "sender@example.com")
+	m.Authentication = mailauth.NewEvidence([]mailauth.Result{
+		{Method: mailauth.MethodSPF, Outcome: mailauth.OutcomePermerror, Domain: "spf.example.com"},
+		{Method: mailauth.MethodSPF, Outcome: mailauth.OutcomeTemperror, Domain: "temp-spf.example.com"},
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy, Domain: "policy.example.com"},
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomeNeutral, Domain: "neutral.example.com"},
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePermerror, Domain: "permanent.example.com"},
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomeTemperror, Domain: "temp-dkim.example.com"},
+		{Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomePermerror, Domain: "dmarc.example.com"},
+		{Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomeTemperror, Domain: "temp-dmarc.example.com"},
+	}, "example.com")
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"SPF: invalid SPF policy for envelope-sender domain spf.example.com",
+		"SPF: verification temporarily unavailable for envelope-sender domain temp-spf.example.com",
+		"DKIM: no usable signature for signing domain policy.example.com",
+		"DKIM: no usable signature for signing domain neutral.example.com",
+		"DKIM: no usable signature for signing domain permanent.example.com",
+		"DKIM: verification temporarily unavailable for signing domain temp-dkim.example.com",
+		"DMARC: invalid DMARC policy for visible From domain dmarc.example.com",
+		"DMARC: verification temporarily unavailable for visible From domain temp-dmarc.example.com",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("friendly authentication description missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, unwanted := range []string{"permerror", "temperror", "DKIM: policy", "DKIM: neutral"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("protocol result %q leaked into prompt:\n%s", unwanted, prompt)
+		}
+	}
+}
+
 func TestPromptDescribesAuthenticatedSubmissionWithoutInboundAuthenticationResults(t *testing.T) {
 	m := New(1000)
 	m.AuthenticatedSubmission = true
 	m.AddHeader("From", "Philip Anderson <phil.anderson@invades.net>")
 	m.AddHeader("Subject", "Meeting tomorrow")
 	m.AddHeader("Authentication-Results", "nl.invades.net; dkim=pass header.d=invades.net")
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 	prompt := m.Prompt(100)
 	for _, want := range []string{
 		"AUTHENTICATION INFORMATION:",
@@ -768,17 +877,17 @@ func TestPromptStartsWithCapturedAnalysisTime(t *testing.T) {
 
 func TestPromptNormalizesConflictingBrandAuthenticationEvidence(t *testing.T) {
 	m := New(1000)
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
 	m.AddHeader("From", "Aliexpress <Aliexpress@gernandz.click>")
 	m.AddHeader("Authentication-Results", "nl.invades.net; dmarc=pass header.from=gernandz.click")
 	m.AddHeader("Authentication-Results", "nl.invades.net; \tdkim=pass header.d=gernandz.click; \tdkim=fail reason=\"signature verification failed\" header.d=mail.aliexpress.com")
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 	prompt := m.Prompt(100)
 	for _, want := range []string{
 		"Visible From domain: gernandz.click",
 		"DKIM: pass for signing domain gernandz.click (aligned with visible From domain: yes)",
-		"DKIM: fail for signing domain mail.aliexpress.com (aligned with visible From domain: no)",
+		"DKIM: fail for signing domain mail.aliexpress.com",
 		"SPF: no trusted local result",
-		"DMARC: pass for visible From domain gernandz.click (matches supplied visible From domain: yes)",
+		"DMARC: pass for visible From domain gernandz.click",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("normalized authentication summary missing %q:\n%s", want, prompt)
@@ -787,19 +896,22 @@ func TestPromptNormalizesConflictingBrandAuthenticationEvidence(t *testing.T) {
 	if strings.Contains(prompt, "Authentication-Results:") {
 		t.Fatalf("raw authentication header leaked into prompt: %s", prompt)
 	}
+	if strings.Contains(prompt, "DKIM: fail for signing domain mail.aliexpress.com (aligned") {
+		t.Fatalf("failed DKIM result included misleading alignment language: %s", prompt)
+	}
 }
 
 func TestAuthenticationResultsSemicolonInsideQuotedReasonDoesNotSplitClause(t *testing.T) {
 	m := New(2000)
-	m.TrustedAuthservIDs = []string{"nl.invades.net"}
 	m.AddHeader("From", "Sender <sender@example.com>")
 	m.AddHeader("Authentication-Results", `nl.invades.net; dkim=pass reason="signature; verified" header.d=example.com; spf=pass reason="accepted\"; still valid" smtp.mailfrom=sender@example.com; dmarc=pass header.from=example.com`)
+	setHeaderAuthentication(t, m, []string{"nl.invades.net"})
 
 	prompt := m.Prompt(100)
 	for _, want := range []string{
 		"DKIM: pass for signing domain example.com (aligned with visible From domain: yes)",
 		"SPF: pass for envelope-sender domain example.com (aligned with visible From domain: yes)",
-		"DMARC: pass for visible From domain example.com (matches supplied visible From domain: yes)",
+		"DMARC: pass for visible From domain example.com",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("quote-aware authentication result missing %q:\n%s", want, prompt)

@@ -22,6 +22,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
@@ -34,6 +35,27 @@ type fixedAnalyzer struct {
 type countingAnalyzer struct {
 	decision ai.Decision
 	calls    atomic.Int32
+}
+
+type authenticationObservation struct {
+	transaction mailauth.Transaction
+	message     []byte
+}
+
+type recordingVerifier struct {
+	observations chan authenticationObservation
+	evidence     mailauth.Evidence
+}
+
+func (v *recordingVerifier) Verify(_ context.Context, transaction mailauth.Transaction) (mailauth.Evidence, error) {
+	messageBytes := make([]byte, transaction.MessageSize)
+	if transaction.Message != nil && transaction.MessageSize > 0 {
+		if _, err := transaction.Message.ReadAt(messageBytes, 0); err != nil {
+			return mailauth.Evidence{}, err
+		}
+	}
+	v.observations <- authenticationObservation{transaction: transaction, message: messageBytes}
+	return v.evidence, nil
 }
 
 func TestSessionPanicIsRecoveredAndConnectionClosed(t *testing.T) {
@@ -426,6 +448,56 @@ func (failingAnalyzer) Analyze(context.Context, ai.Input) (ai.Decision, error) {
 	return ai.Decision{}, errors.New("endpoint unavailable")
 }
 
+func TestAuthenticationProviderReceivesExactTransactionAndFeedsPrompt(t *testing.T) {
+	verifier := &recordingVerifier{
+		observations: make(chan authenticationObservation, 1),
+		evidence: mailauth.NewEvidence([]mailauth.Result{{
+			Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePass, Domain: "mail.example.com",
+		}}, "example.com"),
+	}
+	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 1)}
+	server, conn, done := testServer(t, analyzer)
+	server.sessions.authenticationMode = config.AuthenticationModeInternal
+	server.sessions.authentication = verifier
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	if err := writeFrame(conn, macroFrame(commandConnect, "j", "mx.example.net", "{daemon_addr}", "192.0.2.25")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "198.51.100.9"),
+		append([]byte{commandHelo}, []byte("helo.example.net\x00")...),
+		envelopeFrame(commandMail, "bounce@example.net", "SIZE=123", "SMTPUTF8"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+		headerFrame("From", "Sender <sender@example.com>"),
+		headerFrame("Subject", "first\n\tsecond ü"),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte{'b', 'o', 'd', 'y', 0, '\r', '\n'}...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+
+	observation := <-verifier.observations
+	transaction := observation.transaction
+	if transaction.RemoteIP.String() != "198.51.100.9" || transaction.ReceiverIP.String() != "192.0.2.25" ||
+		transaction.ReceiverHostname != "mx.example.net" || transaction.HELO != "helo.example.net" ||
+		transaction.EnvelopeSender != "bounce@example.net" || transaction.VisibleFromDomain != "example.com" || !transaction.SMTPUTF8 {
+		t.Fatalf("authentication transaction = %#v", transaction)
+	}
+	wantMessage := "From: Sender <sender@example.com>\r\nSubject: first\r\n\tsecond ü\r\n\r\nbody\x00\r\n"
+	if string(observation.message) != wantMessage {
+		t.Fatalf("exact authentication message = %q, want %q", observation.message, wantMessage)
+	}
+	input := <-analyzer.inputs
+	if !strings.Contains(input.Text, "DKIM: pass for signing domain mail.example.com (aligned with visible From domain: yes)") {
+		t.Fatalf("provider evidence missing from prompt:\n%s", input.Text)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+}
+
 func TestPostDecisionUpdatesDoNotInheritExpiredAnalysisContext(t *testing.T) {
 	store, _ := newTestRejectionHistoryStore(t, config.RejectionHistoryConfig{
 		Expiry: config.Duration(24 * time.Hour), MaxEntries: 10,
@@ -795,8 +867,13 @@ func macroFrame(target byte, pairs ...string) []byte {
 	return payload
 }
 
-func envelopeFrame(command byte, address string) []byte {
-	return append(append([]byte{command}, []byte("<"+address+">")...), 0)
+func envelopeFrame(command byte, address string, arguments ...string) []byte {
+	payload := append(append([]byte{command}, []byte("<"+address+">")...), 0)
+	for _, argument := range arguments {
+		payload = append(payload, argument...)
+		payload = append(payload, 0)
+	}
+	return payload
 }
 
 func headerFrame(name, value string) []byte {
@@ -871,6 +948,7 @@ func TestResultHeaderRemovalSurvivesRetentionLimit(t *testing.T) {
 
 func TestSenderResultHeadersRemovedWhenResultGenerationDisabled(t *testing.T) {
 	server, conn, done := testServer(t, fixedAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}})
+	setTestMode(server, "accept")
 	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = false })
 	defer func() { _ = conn.Close(); <-done }()
 
@@ -938,18 +1016,20 @@ func TestAcceptedLegitimateAddsTrustedResultHeaders(t *testing.T) {
 	expectFrame(t, conn, string([]byte{responseAccept}))
 }
 
-func TestTagModeAddsHeadersForEveryAIClassification(t *testing.T) {
+func TestAcceptModeAddsConfiguredHeadersForEveryAIClassification(t *testing.T) {
 	for _, test := range []struct {
 		decision       ai.Decision
 		wantScore      string
 		wantConfidence string
+		wantAction     string
 	}{
-		{ai.Decision{Classification: "legitimate", Score: 0.8, Reasons: []string{"test"}}, "0.8", "high"},
-		{ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}, "1", "high"},
+		{ai.Decision{Classification: "legitimate", Score: 0.8, Reasons: []string{"test"}}, "0.8", "high", "accepted"},
+		{ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}, "1", "high", "accepted-accept-mode"},
 	} {
 		t.Run(test.decision.Classification, func(t *testing.T) {
 			server, conn, done := testServer(t, fixedAnalyzer{decision: test.decision})
-			setTestMode(server, "tag")
+			setTestMode(server, "accept")
+			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
 			defer func() { _ = conn.Close(); <-done }()
 
 			negotiateWithActions(t, conn, resultHeaderActions)
@@ -966,7 +1046,7 @@ func TestTagModeAddsHeadersForEveryAIClassification(t *testing.T) {
 			expectFrame(t, conn, string(addHeaderResponse(classificationHeader, test.decision.Classification)))
 			expectFrame(t, conn, string(addHeaderResponse(scoreHeader, test.wantScore)))
 			expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, test.wantConfidence)))
-			expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-tag-mode")))
+			expectFrame(t, conn, string(addHeaderResponse(actionHeader, test.wantAction)))
 			expectFrame(t, conn, string([]byte{responseAccept}))
 		})
 	}
@@ -1379,9 +1459,16 @@ func TestParseAuthenticationSessionMacro(t *testing.T) {
 
 func TestParseMTAHostnameMacro(t *testing.T) {
 	target, values, valid := parseSessionMacros(macroFrame(commandConnect,
-		"j", "mx.example.com", "{daemon_name}", "smtp")[1:])
-	if !valid || target != commandConnect || !values.MTAHostnameFound || values.MTAHostname != "mx.example.com" {
+		"j", "mx.example.com", "{daemon_name}", "smtp", "{daemon_addr}", "2001:db8::25")[1:])
+	if !valid || target != commandConnect || !values.MTAHostnameFound || values.MTAHostname != "mx.example.com" ||
+		!values.ReceiverAddressFound || values.ReceiverAddress != "2001:db8::25" {
 		t.Fatalf("parsed macro = target %q values=%#v valid=%v", target, values, valid)
+	}
+	if got := canonicalMacroIP("[IPv6:2001:db8::25]"); got.String() != "2001:db8::25" {
+		t.Fatalf("canonical receiver address = %s", got)
+	}
+	if got := canonicalMacroIP("not-an-address"); got.IsValid() {
+		t.Fatalf("invalid receiver address accepted as %s", got)
 	}
 }
 
@@ -1962,86 +2049,78 @@ func TestAIResultLearnsInboundSender(t *testing.T) {
 	}
 }
 
-func TestNonEnforceModesDoNotLearnFromAIResultsOrDecayIPReputation(t *testing.T) {
-	for _, mode := range []string{"monitor", "tag"} {
-		t.Run(mode, func(t *testing.T) {
-			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
-			server, conn, done := testServer(t, analyzer)
-			setTestMode(server, mode)
-			correspondentCfg := config.CorrespondentsConfig{
-				LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-				LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
-				MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
-			}
-			setTestCorrespondents(server, correspondentCfg, newTestCorrespondentStore(t, correspondentCfg, server.log))
-			ipCfg := config.IPReputationConfig{
-				BlockDuration: config.Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: config.Duration(24 * time.Hour), LegitimatePerStrike: 1,
-				MaxEntries: 100,
-			}
-			setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
-			addr := netip.MustParseAddr("192.0.2.90")
-			server.sessions.policy.ipReputation.add(context.Background(), addr, connectionDNSResult{})
+func TestAcceptModeDoesNotLearnFromAIResultsOrDecayIPReputation(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
+	server, conn, done := testServer(t, analyzer)
+	setTestMode(server, "accept")
+	correspondentCfg := config.CorrespondentsConfig{
+		LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+		LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
+		MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
+	}
+	setTestCorrespondents(server, correspondentCfg, newTestCorrespondentStore(t, correspondentCfg, server.log))
+	ipCfg := config.IPReputationConfig{
+		BlockDuration: config.Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: config.Duration(24 * time.Hour), LegitimatePerStrike: 1,
+		MaxEntries: 100,
+	}
+	setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
+	addr := netip.MustParseAddr("192.0.2.90")
+	server.sessions.policy.ipReputation.add(context.Background(), addr, connectionDNSResult{})
 
-			negotiate(t, conn)
-			sendContinueFrames(t, conn,
-				connectFrame('4', addr.String()),
-				envelopeFrame(commandMail, "news@example.com"),
-				envelopeFrame(commandRecipient, "philip@invades.net"),
-				headerFrame("From", "News <news@example.com>"),
-				headerFrame("Authentication-Results", "nl.invades.net; dkim=pass header.d=example.com"),
-				[]byte{commandEndHeaders},
-			)
-			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
-				t.Fatal(err)
-			}
-			expectFrame(t, conn, string([]byte{responseAccept}))
-			_ = conn.Close()
-			<-done
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', addr.String()),
+		envelopeFrame(commandMail, "news@example.com"),
+		envelopeFrame(commandRecipient, "philip@invades.net"),
+		headerFrame("From", "News <news@example.com>"),
+		headerFrame("Authentication-Results", "nl.invades.net; dkim=pass header.d=example.com"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	_ = conn.Close()
+	<-done
 
-			if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); match.Known {
-				t.Fatalf("%s mode learned an inbound correspondent", mode)
-			}
-			strikes := len(server.sessions.policy.ipReputation.snapshot()[addr].Strikes)
-			if strikes != 1 {
-				t.Fatalf("%s mode changed IP strike count to %d", mode, strikes)
-			}
-		})
+	if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); match.Known {
+		t.Fatal("accept mode learned an inbound correspondent")
+	}
+	strikes := len(server.sessions.policy.ipReputation.snapshot()[addr].Strikes)
+	if strikes != 1 {
+		t.Fatalf("accept mode changed IP strike count to %d", strikes)
 	}
 }
 
-func TestNonEnforceModesDoNotLearnAuthenticatedRecipients(t *testing.T) {
-	for _, mode := range []string{"monitor", "tag"} {
-		t.Run(mode, func(t *testing.T) {
-			server, conn, done := testServer(t, &countingAnalyzer{})
-			setTestMode(server, mode)
-			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = false })
-			correspondentCfg := config.CorrespondentsConfig{
-				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-				MaxEntries: 100,
-			}
-			setTestCorrespondents(server, correspondentCfg, newTestCorrespondentStore(t, correspondentCfg, server.log))
+func TestAcceptModeDoesNotLearnAuthenticatedRecipients(t *testing.T) {
+	server, conn, done := testServer(t, &countingAnalyzer{})
+	setTestMode(server, "accept")
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.ScanAuthenticated = false })
+	correspondentCfg := config.CorrespondentsConfig{
+		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+		MaxEntries: 100,
+	}
+	setTestCorrespondents(server, correspondentCfg, newTestCorrespondentStore(t, correspondentCfg, server.log))
 
-			negotiate(t, conn)
-			sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
-			if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip")); err != nil {
-				t.Fatal(err)
-			}
-			expectNoFrame(t, conn)
-			sendContinueFrames(t, conn,
-				envelopeFrame(commandMail, "philip@invades.net"),
-				envelopeFrame(commandRecipient, "alice@example.com"),
-				[]byte{commandEndHeaders},
-			)
-			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
-				t.Fatal(err)
-			}
-			expectFrame(t, conn, string([]byte{responseAccept}))
-			_ = conn.Close()
-			<-done
-			if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
-				t.Fatalf("%s mode learned an authenticated recipient", mode)
-			}
-		})
+	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
+	if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn,
+		envelopeFrame(commandMail, "philip@invades.net"),
+		envelopeFrame(commandRecipient, "alice@example.com"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	_ = conn.Close()
+	<-done
+	if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "alice@example.com", []string{"philip@invades.net"}); match.Known {
+		t.Fatal("accept mode learned an authenticated recipient")
 	}
 }
 
@@ -2096,6 +2175,16 @@ func TestAnalysisTimeoutUsesAITimeoutWithResponseMargin(t *testing.T) {
 func TestAnalysisTimeoutIncludesRetryAttemptsAndWaits(t *testing.T) {
 	s := &analysisService{milterTimeout: 30 * time.Second, ai: config.AIConfig{Timeout: config.Duration(60 * time.Second), Retries: 2}}
 	if got, want := s.analysisTimeout(), 245*time.Second; got != want {
+		t.Fatalf("analysis timeout = %v, want %v", got, want)
+	}
+}
+
+func TestAnalysisTimeoutIncludesInternalAuthentication(t *testing.T) {
+	s := &analysisService{
+		milterTimeout: 30 * time.Second, authenticationTimeout: 10 * time.Second,
+		ai: config.AIConfig{Timeout: config.Duration(60 * time.Second)},
+	}
+	if got, want := s.analysisTimeout(), 75*time.Second; got != want {
 		t.Fatalf("analysis timeout = %v, want %v", got, want)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/netip"
 	"sync"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
+	"github.com/PhilAnderson1/MilterGuard/internal/systemdns"
 )
 
 // commandProcessor binds administration logic to repositories, archive access,
@@ -68,7 +68,7 @@ func OpenCommandProcessor(cfg config.Config, log *slog.Logger) (*admincmd.Proces
 	ipRepository := newIPRepository(cfg.IPReputation, database, time.Now, log)
 	ipPolicy := newIPReputationStore(cfg.IPReputation, ipRepository, log)
 	archive := newRejectedMailArchive(cfg.RejectionHistory, log)
-	return commandProcessor(cfg, correspondents, rejections, ipPolicy, archive, net.DefaultResolver, log), closeProcessor, nil
+	return commandProcessor(cfg, correspondents, rejections, ipPolicy, archive, systemdns.NewResolver(), log), closeProcessor, nil
 }
 
 type commandIPResolver struct {

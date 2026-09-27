@@ -94,11 +94,11 @@ func TestExecutableAttachmentRejectedBeforeAI(t *testing.T) {
 	}
 }
 
-func TestAttachmentsMonitorModeAddsHeadersWhenEnabled(t *testing.T) {
+func TestAttachmentsAcceptModeAddsHeadersWhenEnabled(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
 	enableTestAttachments(server)
-	setTestMode(server, "monitor")
+	setTestMode(server, "accept")
 	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
 	defer func() { _ = conn.Close(); <-done }()
 
@@ -117,7 +117,7 @@ func TestAttachmentsMonitorModeAddsHeadersWhenEnabled(t *testing.T) {
 	expectAttachmentProgress(t, conn)
 	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
 	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "unavailable")))
-	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-monitor-mode")))
+	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-accept-mode")))
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)
@@ -149,11 +149,11 @@ func TestExecutableAttachmentRejectionIsArchived(t *testing.T) {
 	}
 }
 
-func TestAttachmentsMonitorModeAcceptsWithoutAI(t *testing.T) {
+func TestAttachmentsAcceptModeWithoutHeadersAcceptsWithoutAI(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
 	enableTestAttachments(server)
-	setTestMode(server, "monitor")
+	setTestMode(server, "accept")
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
@@ -169,35 +169,6 @@ func TestAttachmentsMonitorModeAcceptsWithoutAI(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectAttachmentProgress(t, conn)
-	expectFrame(t, conn, string([]byte{responseAccept}))
-	if got := analyzer.calls.Load(); got != 0 {
-		t.Fatalf("AI analysis calls = %d, want 0", got)
-	}
-}
-
-func TestAttachmentsTagModeAcceptsAndAddsHeaders(t *testing.T) {
-	analyzer := &countingAnalyzer{}
-	server, conn, done := testServer(t, analyzer)
-	enableTestAttachments(server)
-	setTestMode(server, "tag")
-	defer func() { _ = conn.Close(); <-done }()
-
-	negotiateWithActions(t, conn, resultHeaderActions)
-	sendContinueFrames(t, conn,
-		connectFrame('4', "127.0.0.1"),
-		[]byte{commandMail},
-		headerFrame("Content-Type", "application/octet-stream"),
-		headerFrame("Content-Disposition", `attachment; filename="invoice.exe"`),
-		[]byte{commandEndHeaders},
-		append([]byte{commandBody}, []byte("payload")...),
-	)
-	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
-		t.Fatal(err)
-	}
-	expectAttachmentProgress(t, conn)
-	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
-	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "unavailable")))
-	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-tag-mode")))
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)

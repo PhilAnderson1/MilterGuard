@@ -430,6 +430,52 @@ func TestDialPinsValidatedAddress(t *testing.T) {
 	}
 }
 
+func TestDialUsesValidatedPartialResolution(t *testing.T) {
+	client := New(time.Second)
+	client.resolve = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, errors.New("IPv6 lookup temporarily failed")
+	}
+	var dialed string
+	client.dial = func(_ context.Context, _, endpoint string) (net.Conn, error) {
+		dialed = endpoint
+		clientSide, serverSide := net.Pipe()
+		_ = serverSide.Close()
+		return clientSide, nil
+	}
+
+	conn, err := client.dialContext(context.Background(), "tcp", "rdap.example:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if dialed != "8.8.8.8:443" {
+		t.Fatalf("dialed endpoint = %q, want pinned partial-result address", dialed)
+	}
+}
+
+func TestDialHonorsResolutionContextCancellation(t *testing.T) {
+	client := New(time.Second)
+	client.resolve = func(ctx context.Context, _ string) ([]net.IPAddr, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	dialed := false
+	client.dial = func(context.Context, string, string) (net.Conn, error) {
+		dialed = true
+		return nil, errors.New("unexpected dial")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := client.dialContext(ctx, "tcp", "rdap.example:443")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("dial error = %v, want context canceled", err)
+	}
+	if dialed {
+		t.Fatal("RDAP endpoint was dialed after resolution cancellation")
+	}
+}
+
 func TestDialTriesAllValidatedAddresses(t *testing.T) {
 	client := New(time.Second)
 	client.resolve = func(context.Context, string) ([]net.IPAddr, error) {

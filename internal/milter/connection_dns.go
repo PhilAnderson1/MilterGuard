@@ -74,13 +74,12 @@ func resolveConnectionDNS(parent context.Context, resolver dnsResolver, addr net
 		forward, err := resolver.LookupIPAddr(ctx, hostname)
 		if err != nil {
 			entry.Confirmation = message.ForwardLookupFailed
-		} else {
-			for _, resolved := range forward {
-				confirmed, ok := netip.AddrFromSlice(resolved.IP)
-				if ok && confirmed.Unmap() == addr.Unmap() {
-					entry.Confirmation = message.ForwardConfirmed
-					break
-				}
+		}
+		for _, resolved := range forward {
+			confirmed, ok := netip.AddrFromSlice(resolved.IP)
+			if ok && confirmed.Unmap() == addr.Unmap() {
+				entry.Confirmation = message.ForwardConfirmed
+				break
 			}
 		}
 		result.names = append(result.names, entry)

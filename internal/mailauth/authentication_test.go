@@ -60,6 +60,35 @@ func TestParseReceivedSPFFallback(t *testing.T) {
 	}
 }
 
+func TestParseNormalizesOpenDMARCSPFTempfail(t *testing.T) {
+	tests := []Input{
+		{
+			AuthenticationResults: []string{`mx.example; spf=tempfail smtp.mailfrom=sender@example.com`},
+			TrustedAuthservIDs:    []string{"mx.example"},
+		},
+		{
+			ReceivedSPF:        []string{`tempfail receiver=mx.example; envelope-from=sender@example.com`},
+			TrustedAuthservIDs: []string{"mx.example"},
+		},
+	}
+	for _, input := range tests {
+		got := Parse(input)
+		want := []Result{{Method: MethodSPF, Outcome: OutcomeTemperror, Domain: "example.com"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("Parse() = %#v, want %#v", got, want)
+		}
+	}
+
+	input := Input{
+		AuthenticationResults: []string{`mx.example; dkim=tempfail header.d=example.com`},
+		TrustedAuthservIDs:    []string{"mx.example"},
+	}
+	want := []Result{{Method: MethodDKIM, Outcome: "tempfail", Domain: "example.com"}}
+	if got := Parse(input); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse() changed non-SPF extension result: %#v, want %#v", got, want)
+	}
+}
+
 func TestDomainNormalizationAndAlignment(t *testing.T) {
 	if got := NormalizeDomain(" Mail.Example.COM. "); got != "mail.example.com" {
 		t.Fatalf("NormalizeDomain() = %q", got)
@@ -90,6 +119,23 @@ func TestParseRemovesDuplicateResults(t *testing.T) {
 	}
 }
 
+func TestHeaderVerifierProducesSharedAlignmentEvidence(t *testing.T) {
+	verifier := HeaderVerifier{}
+	evidence, err := verifier.Verify(t.Context(), Transaction{
+		AuthenticationResults: []string{`mx.example; dkim=pass header.d=mail.example.com; spf=pass smtp.mailfrom=other.example; dmarc=pass header.from=example.com`},
+		TrustedAuthservIDs:    []string{"mx.example"}, VisibleFromDomain: "news.example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !evidence.DKIMAligned || !evidence.DMARCAligned || !evidence.AnyAligned() {
+		t.Fatalf("alignment evidence = %#v", evidence)
+	}
+	if len(evidence.Results) != 3 || !evidence.Results[0].Aligned || evidence.Results[1].Aligned || !evidence.Results[2].Aligned {
+		t.Fatalf("per-result alignment = %#v", evidence.Results)
+	}
+}
+
 func FuzzParse(f *testing.F) {
 	f.Add(`mx.example; dkim=pass header.d=example.com`, `pass receiver=mx.example; envelope-from=a@example.com`)
 	f.Add(`mx.example; dkim=fail reason="bad; dmarc=pass"`, `neutral (comment) receiver="mx.example"`)
@@ -104,7 +150,7 @@ func FuzzParse(f *testing.F) {
 			t.Fatalf("non-deterministic results: %#v != %#v", first, second)
 		}
 		for _, result := range first {
-			if result.Outcome != strings.ToLower(result.Outcome) {
+			if string(result.Outcome) != strings.ToLower(string(result.Outcome)) {
 				t.Fatalf("outcome is not normalized: %q", result.Outcome)
 			}
 			if result.Domain != "" && NormalizeDomain(result.Domain) != result.Domain {

@@ -230,10 +230,10 @@ func TestMalformedFromListDoesNotTreatDisplayTextAsProtectedMailbox(t *testing.T
 	}
 }
 
-func TestProtectedSenderDomainMonitorModeTagsWithoutAI(t *testing.T) {
+func TestProtectedSenderDomainAcceptModeAddsHeadersWithoutAI(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
-	setTestMode(server, "monitor")
+	setTestMode(server, "accept")
 	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
 	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
 	defer func() { _ = conn.Close(); <-done }()
@@ -250,17 +250,17 @@ func TestProtectedSenderDomainMonitorModeTagsWithoutAI(t *testing.T) {
 	}
 	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
 	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "unavailable")))
-	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-monitor-mode")))
+	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-accept-mode")))
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)
 	}
 }
 
-func TestProtectedSenderDomainMonitorModeWithoutHeadersOnlyRemovesSpoofedResults(t *testing.T) {
+func TestProtectedSenderDomainAcceptModeWithoutHeadersOnlyRemovesSpoofedResults(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, done := testServer(t, analyzer)
-	setTestMode(server, "monitor")
+	setTestMode(server, "accept")
 	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = false })
 	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
 	defer func() { _ = conn.Close(); <-done }()
