@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 )
 
 var (
@@ -38,6 +39,54 @@ func NewExactMessage(storage string, maxBytes int64) (ExactMessage, error) {
 	default:
 		return nil, fmt.Errorf("unknown exact message storage %q", storage)
 	}
+}
+
+// ExactMessageFactory creates exact-message stores and limits how many hybrid
+// stores use memory concurrently. Hybrid overflow uses temporary files without
+// waiting for a memory slot.
+type ExactMessageFactory struct {
+	memorySlots chan struct{}
+}
+
+// NewExactMessageFactory returns a factory with the supplied hybrid-mode
+// in-memory message limit. Configuration validation ensures the limit is
+// positive; a non-positive limit safely makes every hybrid store use a file.
+func NewExactMessageFactory(memoryMessageLimit int) *ExactMessageFactory {
+	if memoryMessageLimit < 0 {
+		memoryMessageLimit = 0
+	}
+	return &ExactMessageFactory{memorySlots: make(chan struct{}, memoryMessageLimit)}
+}
+
+// New returns a memory or file store according to storage. In hybrid mode it
+// acquires an immediately available memory slot or falls back to a file.
+func (f *ExactMessageFactory) New(storage string, maxBytes int64) (ExactMessage, error) {
+	if storage != "hybrid" {
+		return NewExactMessage(storage, maxBytes)
+	}
+	select {
+	case f.memorySlots <- struct{}{}:
+		message, err := NewExactMessage("memory", maxBytes)
+		if err != nil {
+			<-f.memorySlots
+			return nil, err
+		}
+		return &limitedMemoryExactMessage{ExactMessage: message, release: func() { <-f.memorySlots }}, nil
+	default:
+		return NewExactMessage("file", maxBytes)
+	}
+}
+
+type limitedMemoryExactMessage struct {
+	ExactMessage
+	releaseOnce sync.Once
+	release     func()
+}
+
+func (m *limitedMemoryExactMessage) Close() error {
+	err := m.ExactMessage.Close()
+	m.releaseOnce.Do(m.release)
+	return err
 }
 
 type exactMessageWriter interface {

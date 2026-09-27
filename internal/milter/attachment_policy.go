@@ -12,6 +12,7 @@ import (
 type attachmentPolicyResult struct {
 	handled       bool
 	cancelled     bool
+	ipStrike      bool
 	proposed      action
 	path          string
 	detection     string
@@ -38,7 +39,7 @@ func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
 			"message_id", ss.message.Header("Message-ID"), "error", result.err)
 		return false, true
 	}
-	return true, ss.finishAttachmentDecision(ctx, result.proposed, result.path, result.detection, result.err, result.rejectMessage)
+	return true, ss.finishAttachmentDecision(ctx, result.proposed, result.path, result.detection, result.err, result.rejectMessage, result.ipStrike)
 }
 
 // evaluate runs the attachment scanner under its concurrency limit and maps
@@ -68,7 +69,7 @@ func (s *attachmentPolicyService) evaluate(ctx context.Context, msg *message.Mes
 		msg.BodyBytes(),
 	)
 	if finding != nil {
-		return attachmentPolicyResult{handled: true, proposed: actionReject, path: finding.Path, detection: finding.Detection}
+		return attachmentPolicyResult{handled: true, ipStrike: true, proposed: actionReject, path: finding.Path, detection: finding.Detection}
 	}
 	if scanErr == nil && msg.BodyTruncated {
 		scanErr = errors.New("message body was truncated before attachment inspection completed")
@@ -99,7 +100,7 @@ func (s *attachmentPolicyService) evaluate(ctx context.Context, msg *message.Mes
 
 // finishAttachmentDecision applies operating mode, writes any accepted-message
 // headers, records deterministic rejections, and sends the Milter response.
-func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action, path, detection string, scanErr error, rejectMessage string) bool {
+func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action, path, detection string, scanErr error, rejectMessage string, ipStrike bool) bool {
 	selected := selectActionForMode(proposed, ss.deps.mode)
 	if rejectMessage == "" {
 		rejectMessage = ss.deps.attachments.cfg.RejectMessage
@@ -147,6 +148,16 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 		persistCtx, cancel := postDecisionContext(ctx)
 		ss.deps.attachments.policy.recordRejection(persistCtx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, "attachment_policy")
 		cancel()
+		if ipStrike && ss.deps.attachments.cfg.AddIPReputationStrike && !ss.authentication.Authenticated {
+			// Resolve the connection identity before updating reputation so the
+			// configured reverse-DNS domain exclusions remain effective.
+			dnsCtx, cancelDNS := postDecisionContext(ctx)
+			dns := ss.awaitConnectionDNS(dnsCtx)
+			cancelDNS()
+			strikeCtx, cancelStrike := postDecisionContext(ctx)
+			ss.deps.attachments.policy.ipReputation.add(strikeCtx, ss.peerIP, dns)
+			cancelStrike()
+		}
 	}
 	ss.resetMessage(phaseConnection)
 	return true

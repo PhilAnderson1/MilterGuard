@@ -93,6 +93,49 @@ func TestFileExactMessageIsUnlinkedImmediately(t *testing.T) {
 	}
 }
 
+func TestHybridExactMessageFactoryFallsBackAndReusesMemorySlots(t *testing.T) {
+	factory := NewExactMessageFactory(2)
+	first, err := factory.New("hybrid", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := factory.New("hybrid", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := factory.New("hybrid", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := first.(*limitedMemoryExactMessage); !ok {
+		t.Fatalf("first hybrid store = %T, want memory", first)
+	}
+	if _, ok := second.(*limitedMemoryExactMessage); !ok {
+		t.Fatalf("second hybrid store = %T, want memory", second)
+	}
+	if _, ok := third.(*fileExactMessage); !ok {
+		t.Fatalf("overflow hybrid store = %T, want file", third)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+	reused, err := factory.New("hybrid", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reused.(*limitedMemoryExactMessage); !ok {
+		t.Fatalf("reused hybrid store = %T, want memory", reused)
+	}
+	for _, message := range []ExactMessage{second, third, reused} {
+		if err := message.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestExactBytesReaderAtEOF(t *testing.T) {
 	reader := exactBytes("abc")
 	buffer := make([]byte, 4)

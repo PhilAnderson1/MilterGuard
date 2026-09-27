@@ -56,9 +56,13 @@ authentication:
   # Maximum number of simultaneous internal verification operations.
   max_concurrent: 8
 
-  # Exact RFC message storage used for DKIM verification: memory or file.
-  # Memory is faster; file bounds per-connection heap usage for large limits.
-  message_storage: memory
+  # Exact RFC message storage used for DKIM verification: memory, file, or
+  # hybrid. Hybrid keeps a limited number in memory and sends overflow to disk.
+  message_storage: hybrid
+
+  # Maximum simultaneous in-memory exact messages in hybrid mode. Additional
+  # messages use temporary files without waiting for a memory slot.
+  memory_message_limit: 8
 
 ai:
   # Full OpenRouter, OpenAI or llama.cpp-compatible chat-completions URL.
@@ -163,6 +167,10 @@ filtering:
 attachments:
   # Block executable attachments before AI analysis.
   block_executables: true
+
+  # Add an IP reputation strike when a positively identified prohibited
+  # attachment is rejected. Errors and merely unscannable content never count.
+  add_ip_reputation_strike: false
 
   # Filename extensions to block, including inside supported archives.
   blocked_extensions:

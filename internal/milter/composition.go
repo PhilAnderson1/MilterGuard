@@ -107,6 +107,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 			Timeout: cfg.Authentication.Timeout.Value(), MaxConcurrent: cfg.Authentication.MaxConcurrent, Logger: log,
 		})
 	}
+	exactMessageFactory := mailauth.NewExactMessageFactory(cfg.Authentication.MemoryMessageLimit)
 	sessions := &sessionDependencies{
 		mode: cfg.Mode, filtering: cfg.Filtering, logging: cfg.Logging,
 		protocol: protocolOptions{
@@ -117,7 +118,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		dns:                &connectionDNSService{resolver: systemdns.NewResolver(), timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
 		authenticationMode: authenticationMode,
 		authentication:     authentication,
-		newExactMessage:    mailauth.NewExactMessage,
+		newExactMessage:    exactMessageFactory.New,
 		log:                log,
 	}
 	maintenance := &maintenanceService{

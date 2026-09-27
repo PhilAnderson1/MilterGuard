@@ -267,13 +267,15 @@ concurrency helps only when the configured service can process the additional
 requests efficiently; locally hosted AI commonly needs a lower value.
 
 `authentication.message_storage` controls how the byte-exact message is kept
-until verification completes. The default `memory` mode is fastest. Its
-theoretical additional memory bound is approximately
-`milter.max_connections × milter.max_message_size`, although normal messages
-are smaller and the buffer is released immediately after authentication. Use
-`file` when large message limits or high concurrency make that bound unsuitable.
-File mode creates a mode-0600 temporary file, unlinks it immediately, and keeps
-only its descriptor until verification completes.
+until verification completes. The default `hybrid` mode keeps up to
+`authentication.memory_message_limit` simultaneous messages in memory and
+places additional messages in temporary files without waiting. Its theoretical
+additional heap bound is approximately `memory_message_limit ×
+milter.max_message_size`, although normal messages are smaller and each buffer
+is released immediately after authentication. Use `memory` to retain every
+message in memory or `file` to use temporary files for every message. File-backed
+stores use mode 0600, are unlinked immediately, and retain only an open file
+descriptor until verification completes.
 
 `authentication.timeout` bounds queueing plus SPF, DKIM, and DMARC work for one
 message. `authentication.max_concurrent` bounds simultaneous verification
@@ -479,6 +481,13 @@ is accepted and continues to AI analysis. The separate `invalid_mime_action`
 setting controls permanently invalid or ambiguous MIME structure; it defaults
 to rejection because retrying cannot repair the message. Accept mode records
 the proposed attachment action but still accepts the message.
+
+Set `attachments.add_ip_reputation_strike: true` to count a rejected,
+positively identified prohibited attachment against the sending IP. This can
+quickly block malware-infected or persistently malicious senders. It does not
+count encrypted archives, invalid MIME, inspection errors, or content that is
+merely unscannable; authenticated submissions and configured IP or reverse-DNS
+domain exclusions also remain protected.
 
 ## Rejection history and saved messages
 

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
@@ -73,11 +74,15 @@ func TestExecutableAttachmentRejectedBeforeAI(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 	server, conn, done := testServer(t, analyzer)
 	enableTestAttachments(server)
+	server.sessions.attachments.cfg.AddIPReputationStrike = true
+	ipRecords := &recordingIPReputationRepository{rejectionCall: make(chan struct{}, 1)}
+	setTestIPReputation(server, &ipReputationStore{repository: ipRecords, enabledFeature: true, log: server.log})
+	setTestResolver(server, &connectionTestResolver{ptrErr: &net.DNSError{IsNotFound: true}})
 	defer func() { _ = conn.Close(); <-done }()
 
 	negotiate(t, conn)
 	sendContinueFrames(t, conn,
-		connectFrame('4', "127.0.0.1"),
+		connectFrame('4', "192.0.2.10"),
 		[]byte{commandMail},
 		headerFrame("Content-Type", "application/octet-stream"),
 		headerFrame("Content-Disposition", `attachment; filename="invoice.exe"`),
@@ -91,6 +96,27 @@ func TestExecutableAttachmentRejectedBeforeAI(t *testing.T) {
 	expectFrame(t, conn, "y550 5.7.1 executable attachment blocked\x00")
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)
+	}
+	select {
+	case <-ipRecords.rejectionCall:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for attachment IP reputation strike")
+	}
+	if got := ipRecords.rejections.Load(); got != 1 {
+		t.Fatalf("IP reputation strikes = %d, want 1", got)
+	}
+}
+
+func TestOnlyConfirmedProhibitedAttachmentsQualifyForIPStrike(t *testing.T) {
+	service := &attachmentPolicyService{
+		cfg: config.AttachmentsConfig{InvalidMIMEAction: "reject"}, slots: make(chan struct{}, 1),
+		scanner: attachment.New(attachment.Options{BlockedExtensions: []string{"exe"}}),
+	}
+	msg := message.New(1024)
+	msg.MIMEHeadersTruncated = true
+	result := service.evaluate(context.Background(), msg)
+	if !result.handled || result.proposed != actionReject || result.ipStrike {
+		t.Fatalf("invalid MIME result = %+v, want rejection without IP strike", result)
 	}
 }
 

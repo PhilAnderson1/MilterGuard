@@ -27,6 +27,7 @@ authentication:
   timeout: 7s
   max_concurrent: 3
   message_storage: file
+  memory_message_limit: 5
 ai:
   api_key: test-key
   model: test-model
@@ -40,6 +41,7 @@ filtering:
     - example.com
 attachments:
   block_executables: false
+  add_ip_reputation_strike: true
 correspondents:
   scope: global
 ip_reputation:
@@ -64,7 +66,7 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Authentication.Mode != AuthenticationModeInternal || cfg.Authentication.Timeout.Value() != 7*time.Second || cfg.Authentication.MaxConcurrent != 3 || cfg.Authentication.MessageStorage != "file" || cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || !reflect.DeepEqual(cfg.Filtering.AuthenticatedOnlySenderDomains, []string{"example.com"}) || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
+	if cfg.Authentication.Mode != AuthenticationModeInternal || cfg.Authentication.Timeout.Value() != 7*time.Second || cfg.Authentication.MaxConcurrent != 3 || cfg.Authentication.MessageStorage != "file" || cfg.Authentication.MemoryMessageLimit != 5 || cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || !reflect.DeepEqual(cfg.Filtering.AuthenticatedOnlySenderDomains, []string{"example.com"}) || cfg.Attachments.BlockExecutables || !cfg.Attachments.AddIPReputationStrike || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
@@ -214,7 +216,7 @@ func TestValidateAuthentication(t *testing.T) {
 			t.Fatalf("invalid authentication settings error = %v", err)
 		}
 	}
-	for _, storage := range []string{"memory", "file"} {
+	for _, storage := range []string{"memory", "file", "hybrid"} {
 		cfg := validConfig()
 		cfg.Authentication.MessageStorage = storage
 		if err := cfg.Validate(); err != nil {
@@ -225,6 +227,11 @@ func TestValidateAuthentication(t *testing.T) {
 	cfg.Authentication.MessageStorage = "automatic"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "authentication.message_storage") {
 		t.Fatalf("invalid storage error = %v", err)
+	}
+	cfg = validConfig()
+	cfg.Authentication.MemoryMessageLimit = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "authentication.memory_message_limit") {
+		t.Fatalf("invalid memory message limit error = %v", err)
 	}
 }
 

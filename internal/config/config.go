@@ -88,6 +88,7 @@ type EmailCommandsConfig struct {
 
 type AttachmentsConfig struct {
 	BlockExecutables            bool     `yaml:"block_executables"`
+	AddIPReputationStrike       bool     `yaml:"add_ip_reputation_strike"`
 	BlockedExtensions           []string `yaml:"blocked_extensions"`
 	InspectSignatures           bool     `yaml:"inspect_file_signatures"`
 	InspectArchives             bool     `yaml:"inspect_archives"`
@@ -109,10 +110,11 @@ type MilterConfig struct {
 	AllowedPeerIPs       []string `yaml:"allowed_peer_ips"`
 }
 type AuthenticationConfig struct {
-	Mode           string   `yaml:"mode"`
-	Timeout        Duration `yaml:"timeout"`
-	MaxConcurrent  int      `yaml:"max_concurrent"`
-	MessageStorage string   `yaml:"message_storage"`
+	Mode               string   `yaml:"mode"`
+	Timeout            Duration `yaml:"timeout"`
+	MaxConcurrent      int      `yaml:"max_concurrent"`
+	MessageStorage     string   `yaml:"message_storage"`
+	MemoryMessageLimit int      `yaml:"memory_message_limit"`
 }
 type AIConfig struct {
 	Endpoint           string   `yaml:"endpoint"`
@@ -236,7 +238,8 @@ func defaults() Config {
 			AllowedPeerIPs: []string{"127.0.0.0/8", "::1/128"},
 		},
 		Authentication: AuthenticationConfig{
-			Mode: AuthenticationModeInternal, Timeout: Duration(10 * time.Second), MaxConcurrent: 8, MessageStorage: "memory",
+			Mode: AuthenticationModeInternal, Timeout: Duration(10 * time.Second), MaxConcurrent: 8,
+			MessageStorage: "hybrid", MemoryMessageLimit: 8,
 		},
 		AI: AIConfig{
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
@@ -248,7 +251,7 @@ func defaults() Config {
 			SiteURL: "https://github.com/PhilAnderson1/MilterGuard", AppName: "MilterGuard",
 		},
 		Attachments: AttachmentsConfig{
-			BlockExecutables:  true,
+			BlockExecutables: true, AddIPReputationStrike: false,
 			BlockedExtensions: []string{"exe", "com", "scr", "pif", "bat", "cmd", "ps1", "vbs", "js", "jse", "msi", "dll", "jar", "lnk", "iso", "7z", "rar"},
 			InspectSignatures: true, InspectArchives: true, MaxAttachmentBytes: 10 << 20,
 			MaxArchiveDepth: 2, MaxArchiveFiles: 100, MaxArchiveUncompressedBytes: 50 << 20,
@@ -336,8 +339,11 @@ func (c Config) Validate() error {
 	if c.Authentication.MaxConcurrent < 1 {
 		return fmt.Errorf("authentication.max_concurrent must be positive")
 	}
-	if c.Authentication.MessageStorage != "memory" && c.Authentication.MessageStorage != "file" {
-		return fmt.Errorf("authentication.message_storage must be memory or file")
+	if c.Authentication.MessageStorage != "memory" && c.Authentication.MessageStorage != "file" && c.Authentication.MessageStorage != "hybrid" {
+		return fmt.Errorf("authentication.message_storage must be memory, file, or hybrid")
+	}
+	if c.Authentication.MemoryMessageLimit < 1 {
+		return fmt.Errorf("authentication.memory_message_limit must be positive")
 	}
 	if listener.Network == "tcp" && len(c.Milter.AllowedPeerIPs) == 0 {
 		return fmt.Errorf("milter.allowed_peer_ips must contain at least one address for a TCP listener")

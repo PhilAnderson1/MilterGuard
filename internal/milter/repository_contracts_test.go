@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,7 +87,8 @@ func TestCommandProcessorUsesUnrestrictedRejectionScopeOnlyForAdministrator(t *t
 
 type recordingIPReputationRepository struct {
 	stores.IPReputationRepository
-	rejections int
+	rejections    atomic.Int32
+	rejectionCall chan struct{}
 }
 
 type cachedDomainRegistrationRepository struct {
@@ -108,8 +110,15 @@ func (r *cachedDomainRegistrationRepository) PutDomainRegistration(_ context.Con
 }
 
 func (r *recordingIPReputationRepository) RecordRejection(_ context.Context, address netip.Addr) (stores.IPBlock, error) {
-	r.rejections++
+	r.rejections.Add(1)
+	if r.rejectionCall != nil {
+		r.rejectionCall <- struct{}{}
+	}
 	return stores.IPBlock{Address: address, Level: stores.IPBlockLevelShort, ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (r *recordingIPReputationRepository) ActiveBlock(context.Context, netip.Addr) (stores.IPBlock, bool, error) {
+	return stores.IPBlock{}, false, nil
 }
 
 func TestIPAllowlistPreventsRepositoryMutation(t *testing.T) {
@@ -122,8 +131,8 @@ func TestIPAllowlistPreventsRepositoryMutation(t *testing.T) {
 	if policy.add(context.Background(), netip.MustParseAddr("192.0.2.10"), connectionDNSResult{}) {
 		t.Fatal("allowlisted address was blocked")
 	}
-	if repository.rejections != 0 {
-		t.Fatalf("RecordRejection calls = %d, want 0", repository.rejections)
+	if got := repository.rejections.Load(); got != 0 {
+		t.Fatalf("RecordRejection calls = %d, want 0", got)
 	}
 }
 

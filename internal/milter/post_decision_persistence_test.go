@@ -87,7 +87,9 @@ func TestAttachmentRejectionPersistsAfterMessageContextCancellation(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	done := make(chan bool, 1)
-	go func() { done <- ss.finishAttachmentDecision(ctx, actionReject, "invoice.exe", "executable", nil, "") }()
+	go func() {
+		done <- ss.finishAttachmentDecision(ctx, actionReject, "invoice.exe", "executable", nil, "", false)
+	}()
 	expectFrame(t, clientConn, "y550 5.7.1 blocked\x00")
 	if !<-done {
 		t.Fatal("attachment rejection failed after response")
