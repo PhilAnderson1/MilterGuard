@@ -123,7 +123,7 @@ class ProgressFrameTests(unittest.TestCase):
 
 class ExactHeaderReplayTests(unittest.TestCase):
     def test_callback_headers_reconstruct_exact_dkim_fixture(self):
-        path = Path(__file__).parents[1] / "prototype" / "exactdkim" / "signed-canonicalizations.eml"
+        path = Path(__file__).parents[1] / "testdata" / "mailauth" / "signed-canonicalizations.eml"
         raw_headers, _ = replay_mailbox.split_message(path.read_bytes())
         callbacks = replay_mailbox.callback_headers(raw_headers)
         reconstructed = b"".join(

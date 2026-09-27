@@ -11,7 +11,7 @@ func (e senderAuthenticationEvidence) anyAligned() bool {
 	return e.DKIMAligned || e.DMARCAligned
 }
 
-func trustedSenderAuthentication(authentication mailauth.Evidence) senderAuthenticationEvidence {
+func alignedSenderAuthentication(authentication mailauth.Evidence) senderAuthenticationEvidence {
 	return senderAuthenticationEvidence{
 		DKIMAligned: authentication.DKIMAligned, DMARCAligned: authentication.DMARCAligned,
 	}

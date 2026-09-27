@@ -14,7 +14,7 @@ const postDecisionUpdateTimeout = 5 * time.Second
 
 type inboundEvidence struct {
 	recipientsComplete  bool
-	trustedDKIM         bool
+	alignedDKIM         bool
 	knownCorrespondent  bool
 	bypassAI            bool
 	allowedSenderDomain string
@@ -33,8 +33,8 @@ func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, curre
 		current.message.Correspondent = message.CorrespondentInfo{Enabled: s.correspondentCfg.UseAllowlist, Scope: s.correspondentCfg.Scope}
 		return evidence
 	}
-	senderAuthentication := trustedSenderAuthentication(authentication)
-	evidence.trustedDKIM = senderAuthentication.DKIMAligned
+	senderAuthentication := alignedSenderAuthentication(authentication)
+	evidence.alignedDKIM = senderAuthentication.DKIMAligned
 	if senderAuthentication.anyAligned() {
 		evidence.authenticatedDomain = current.visibleSenderDomain
 	}
@@ -112,7 +112,7 @@ func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, cur
 		s.learnAuthenticatedRecipients(ctx, current.envelopeSender, current.envelopeRecipients)
 	}
 	if !current.authenticated && result.err == nil && current.visibleSender != "" {
-		s.recordInboundClassification(ctx, current, result, inbound.trustedDKIM, unwantedMinScore)
+		s.recordInboundClassification(ctx, current, result, inbound.alignedDKIM, unwantedMinScore)
 	}
 }
 

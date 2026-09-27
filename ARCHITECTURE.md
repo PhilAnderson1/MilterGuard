@@ -29,7 +29,8 @@ policy or persistence queries.
 | `internal/config` | Loads defaults, strictly decodes YAML, and validates cross-setting requirements. |
 | `internal/mailaddr` | Provides canonical mailbox parsing and normalization shared by message processing, policy, administration, and persistence. |
 | `internal/mailauth` | Owns provider-neutral authentication evidence, the verifier boundary, trusted-header compatibility parsing, alignment, and exact-message storage. |
-| `internal/message` | Accumulates SMTP message data and produces bounded, decoded text, links, images, and authentication evidence. |
+| `internal/mailauth/moxverify` | Adapts Mox SPF, DKIM, and DMARC verification to bounded, provider-neutral evidence using a dedicated resolver and resource limits. |
+| `internal/message` | Accumulates SMTP message data, produces bounded decoded text, links, and images, and renders supplied authentication evidence for analysis. |
 | `internal/milter` | Implements the Milter protocol, session state, filtering policy, service orchestration, and Postfix responses. |
 | `internal/netsafety` | Normalizes DNS hostnames and rejects unsafe or non-public network destinations. |
 | `internal/rdap` | Discovers and queries RDAP services with redirect, SSRF, and DNS-rebinding protection. |
@@ -38,6 +39,7 @@ policy or persistence queries.
 | `internal/sqlitedb` | Owns SQLite connection setup, schema migration, WAL handling, busy retries, transactions, and checkpoints. |
 | `internal/stores` | Defines SQL-independent repository interfaces, queries, and value types. |
 | `internal/stores/sqlite` | Implements the repository contracts with indexed SQLite operations. |
+| `internal/systemdns` | Constructs explicit resolvers for non-authentication DNS users, isolating them from dependency changes to the process-wide default resolver. |
 
 The dependency direction is intentional. Protocol and policy code depends on
 interfaces in `stores`; concrete SQL is confined to `stores/sqlite`, while
@@ -53,7 +55,8 @@ Normal service construction begins in `milter.NewServer` and
 3. Builds IP-reputation and domain-registration policy services around those
    repositories.
 4. Creates the rejected-message archive, attachment scanner, command
-   processor, AI service, and SMTP reply sender as required.
+   processor, AI service, SMTP reply sender, and selected authentication
+   provider as required.
 5. Groups those dependencies into analysis, policy, attachment, command,
    connection-DNS, maintenance, and session services.
 
@@ -66,16 +69,14 @@ the complete `Server` to locate unrelated functionality.
 Postfix connection
   -> Milter frame parsing and session state
   -> connection and envelope checks
-  -> bounded analysis data and byte-exact message accumulation
+  -> bounded message data and, in internal mode, byte-exact accumulation
   -> deterministic policies requiring the complete message
   -> authentication provider (with progress and cancellation)
-  -> MIME, text, link and image extraction
-  -> trusted authentication evidence
-  -> correspondent and domain-registration evidence
-  -> AI classification when no deterministic result applies
+  -> provider-neutral authentication and correspondent evidence
+  -> domain-registration and connection evidence when needed
+  -> bounded MIME, text, link and image extraction for AI classification
   -> accept, reject or temporary failure response
-  -> asynchronous reputation and correspondent updates
-  -> rejection record and optional original-message archive
+  -> bounded post-response persistence updates where applicable
 ```
 
 `session.run` owns one Milter connection. It decodes frames, checks protocol
@@ -97,14 +98,19 @@ vision analysis. The same archived-message parser is used by `REJECTION <id>`
 so command output reflects the current message-processing implementation.
 
 `internal/mailauth` owns the authentication provider boundary and the bounded
-evidence types shared by policy and prompt generation. In compatibility mode,
-its header-backed provider parses Authentication-Results once. Only results
-whose authentication-service identifiers are trusted by configuration are
-used as local evidence. The separate exact-message abstraction retains callback
-bytes in bounded memory or an unlinked temporary file for internal verification.
-Postfix is still responsible for removing supplied
-Authentication-Results headers before authentication Milters add fresh local
-results.
+evidence types shared by policy and prompt generation. The default `internal`
+provider uses `internal/mailauth/moxverify` to calculate SPF, DKIM, and DMARC
+from SMTP transaction data and the byte-exact message. The adapter owns its
+strict DNS resolver, timeout and concurrency bounds, and immediate translation
+from Mox types. The exact-message abstraction retains callback bytes in bounded
+memory or an unlinked temporary file. Existing `Authentication-Results` and
+`Received-SPF` fields are not inputs to internal verification and are delivered
+unchanged.
+
+The alternative `trusted_headers` provider parses authentication headers once
+and uses only results whose authentication-service identifiers are trusted by
+configuration. In that mode, Postfix must remove externally supplied result
+headers before the upstream authentication filters add fresh local results.
 
 ## AI analysis
 
@@ -185,6 +191,8 @@ recovery.
   lifetime, and maintenance goroutines.
 - Each `session` owns one connection and its message state.
 - The analysis service owns the AI concurrency semaphore.
+- The internal authentication verifier owns its DNS and cryptographic
+  verification concurrency semaphore.
 - The attachment service owns attachment-scan concurrency.
 - The domain-registration service owns lookup concurrency and duplicate lookup
   suppression.
@@ -192,20 +200,25 @@ recovery.
 - RDAP, SMTP reply, and SQLite clients own only operations or connections
   created for their individual calls.
 
-Long-running end-of-message AI work sends periodic Milter progress responses.
-Panics at goroutine and session boundaries are recovered and logged so one
-message cannot terminate the service.
+Long-running internal authentication and AI work send periodic Milter progress
+responses. Panics at worker and session boundaries are recovered and logged so
+one message cannot terminate the service.
 
 ## Security boundaries
 
 Important trust boundaries include:
 
-- Postfix peer restrictions determine who may speak the Milter protocol.
+- The listener configuration and `milter.allowed_peer_ips` determine who may
+  speak the Milter protocol.
 - Postfix authentication macros identify authenticated SMTP submissions.
-- Trusted Authentication-Results identifiers distinguish locally calculated
-  evidence from supplied headers.
+- Internal authentication derives evidence from the SMTP transaction and
+  byte-exact message rather than trusting authentication headers.
+- In `trusted_headers` mode, configured Authentication-Results identifiers
+  distinguish locally calculated evidence from supplied headers.
 - Administration email authorization ties authenticated identities to allowed
   local sender addresses.
+- Dedicated authentication and system resolvers keep Mox DNS behavior isolated
+  from other network-security decisions.
 - `netsafety` and RDAP pinned dialing prevent requests to internal services.
 - Message content, images, and links are always treated as untrusted data by
   the AI request.

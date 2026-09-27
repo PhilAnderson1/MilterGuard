@@ -27,7 +27,7 @@ func (v *fixedAuthenticationVerifier) Verify(context.Context, mailauth.Transacti
 	return v.evidence, v.err
 }
 
-func TestTrustedSenderAuthenticationAlignment(t *testing.T) {
+func TestAlignedSenderAuthentication(t *testing.T) {
 	tests := []struct {
 		name      string
 		header    string
@@ -83,7 +83,7 @@ func TestTrustedSenderAuthenticationAlignment(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := trustedSenderAuthentication(authentication)
+			got := alignedSenderAuthentication(authentication)
 			if got.DKIMAligned != test.wantDKIM || got.DMARCAligned != test.wantDMARC {
 				t.Fatalf("authentication evidence = %#v, want DKIM=%v DMARC=%v", got, test.wantDKIM, test.wantDMARC)
 			}
@@ -93,7 +93,9 @@ func TestTrustedSenderAuthenticationAlignment(t *testing.T) {
 
 func TestInternalAuthenticationRuntimeComposition(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	trusted := buildRuntime(config.Config{}, fixedAnalyzer{}, log)
+	trusted := buildRuntime(config.Config{Authentication: config.AuthenticationConfig{
+		Mode: config.AuthenticationModeTrustedHeaders,
+	}}, fixedAnalyzer{}, log)
 	if _, ok := trusted.sessions.authentication.(mailauth.HeaderVerifier); !ok || trusted.sessions.authenticationMode != config.AuthenticationModeTrustedHeaders {
 		t.Fatalf("default authentication provider = %T mode=%q", trusted.sessions.authentication, trusted.sessions.authenticationMode)
 	}
@@ -107,43 +109,23 @@ func TestInternalAuthenticationRuntimeComposition(t *testing.T) {
 	if _, ok := internal.sessions.authentication.(*moxverify.Verifier); !ok || internal.sessions.authenticationMode != config.AuthenticationModeInternal || internal.sessions.protocol.exactStorage != "file" {
 		t.Fatalf("internal authentication provider = %T mode=%q storage=%q", internal.sessions.authentication, internal.sessions.authenticationMode, internal.sessions.protocol.exactStorage)
 	}
-
-	shadow := buildRuntime(config.Config{Authentication: config.AuthenticationConfig{
-		Mode: config.AuthenticationModeTrustedHeaders, ShadowInternal: true,
-		Timeout: config.Duration(time.Second), MaxConcurrent: 2, MessageStorage: "file",
-	}}, fixedAnalyzer{}, log)
-	if shadow.err != nil {
-		t.Fatal(shadow.err)
-	}
-	if _, ok := shadow.sessions.authentication.(mailauth.HeaderVerifier); !ok {
-		t.Fatalf("shadow authoritative provider = %T, want HeaderVerifier", shadow.sessions.authentication)
-	}
-	if _, ok := shadow.sessions.shadowAuthentication.(*moxverify.Verifier); !ok || shadow.sessions.authenticationMode != config.AuthenticationModeTrustedHeaders || shadow.sessions.protocol.exactStorage != "file" {
-		t.Fatalf("shadow provider = %T mode=%q storage=%q", shadow.sessions.shadowAuthentication, shadow.sessions.authenticationMode, shadow.sessions.protocol.exactStorage)
-	}
-	if shadow.sessions.analysis.authenticationTimeout != time.Second {
-		t.Fatalf("shadow authentication timeout allowance = %s", shadow.sessions.analysis.authenticationTimeout)
-	}
 }
 
 func TestExactMessageCaptureMatchesAuthenticationProviderNeeds(t *testing.T) {
 	tests := []struct {
-		name   string
-		mode   string
-		shadow mailauth.Verifier
-		want   bool
+		name string
+		mode string
+		want bool
 	}{
 		{name: "trusted headers", mode: config.AuthenticationModeTrustedHeaders},
 		{name: "internal", mode: config.AuthenticationModeInternal, want: true},
-		{name: "shadow internal", mode: config.AuthenticationModeTrustedHeaders, shadow: &fixedAuthenticationVerifier{}, want: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			created := false
 			ss := &session{deps: &sessionDependencies{
-				authenticationMode:   test.mode,
-				shadowAuthentication: test.shadow,
-				protocol:             protocolOptions{maxMessageSize: 1024, exactStorage: "memory"},
+				authenticationMode: test.mode,
+				protocol:           protocolOptions{maxMessageSize: 1024, exactStorage: "memory"},
 				newExactMessage: func(string, int64) (mailauth.ExactMessage, error) {
 					created = true
 					return mailauth.NewExactMessage("memory", 1024)

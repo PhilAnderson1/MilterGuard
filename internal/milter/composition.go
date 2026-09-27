@@ -73,7 +73,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	}
 
 	authenticationTimeout := time.Duration(0)
-	if cfg.Authentication.Mode == config.AuthenticationModeInternal || cfg.Authentication.ShadowInternal {
+	if cfg.Authentication.Mode == config.AuthenticationModeInternal {
 		authenticationTimeout = cfg.Authentication.Timeout.Value()
 	}
 	analysis := &analysisService{
@@ -100,18 +100,10 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		}),
 	}
 	authenticationMode := cfg.Authentication.Mode
-	if authenticationMode == "" {
-		authenticationMode = config.AuthenticationModeTrustedHeaders
-	}
 	var authentication mailauth.Verifier = mailauth.HeaderVerifier{}
-	var shadowAuthentication mailauth.Verifier
 	var authenticationErr error
 	if authenticationMode == config.AuthenticationModeInternal {
 		authentication, authenticationErr = moxverify.New(moxverify.Options{
-			Timeout: cfg.Authentication.Timeout.Value(), MaxConcurrent: cfg.Authentication.MaxConcurrent, Logger: log,
-		})
-	} else if cfg.Authentication.ShadowInternal {
-		shadowAuthentication, authenticationErr = moxverify.New(moxverify.Options{
 			Timeout: cfg.Authentication.Timeout.Value(), MaxConcurrent: cfg.Authentication.MaxConcurrent, Logger: log,
 		})
 	}
@@ -122,12 +114,11 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 			progressInterval: defaultMilterProgressInterval, exactStorage: cfg.Authentication.MessageStorage,
 		},
 		analysis: analysis, policy: policy, attachments: attachments, commands: emailCommands,
-		dns:                  &connectionDNSService{resolver: systemdns.NewResolver(), timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
-		authenticationMode:   authenticationMode,
-		authentication:       authentication,
-		shadowAuthentication: shadowAuthentication,
-		newExactMessage:      mailauth.NewExactMessage,
-		log:                  log,
+		dns:                &connectionDNSService{resolver: systemdns.NewResolver(), timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
+		authenticationMode: authenticationMode,
+		authentication:     authentication,
+		newExactMessage:    mailauth.NewExactMessage,
+		log:                log,
 	}
 	maintenance := &maintenanceService{
 		ip: ipRepository, correspondents: correspondents, rejections: rejections,

@@ -518,7 +518,7 @@ func resultFor(t *testing.T, evidence mailauth.Evidence, method mailauth.Method,
 
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
-	contents, err := os.ReadFile(filepath.Join("..", "..", "..", "prototype", "exactdkim", name))
+	contents, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "mailauth", name))
 	if err != nil {
 		t.Fatal(err)
 	}

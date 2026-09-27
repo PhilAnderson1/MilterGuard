@@ -359,12 +359,12 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	ss.message.Authentication = authentication
 	inbound := ss.deps.policy.prepareInboundEvidence(ctx, ss.messageContext(ss.recipientSetComplete()), authentication, ss.deps.filtering)
 	if inbound.allowedSenderDomain != "" {
-		return ss.finishBypassedMessage(ctx, "sender_domain_allowlist", false, inbound.knownCorrespondent && inbound.trustedDKIM,
+		return ss.finishBypassedMessage(ctx, "sender_domain_allowlist", false, inbound.knownCorrespondent && inbound.alignedDKIM,
 			"sender_domain", inbound.allowedSenderDomain,
-			"trusted_aligned_dkim", inbound.trustedDKIM)
+			"aligned_dkim", inbound.alignedDKIM)
 	}
 	if inbound.bypassAI {
-		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.trustedDKIM,
+		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.alignedDKIM,
 			ss.knownCorrespondentLogAttrs()...)
 	}
 	result, progressErr := ss.evaluateWithProgress(ctx, inbound)
@@ -438,11 +438,6 @@ func (ss *session) verifyAuthenticationWithProgress(ctx context.Context) (mailau
 			results <- result
 		}()
 		result.evidence, result.err = verifier.Verify(workerCtx, transaction)
-		if shadow := ss.deps.shadowAuthentication; shadow != nil && !ss.authentication.Authenticated {
-			started := time.Now()
-			shadowEvidence, shadowErr := ss.verifyShadowAuthentication(workerCtx, shadow, transaction)
-			ss.logShadowAuthenticationComparison(workerCtx, result.evidence, shadowEvidence, shadowErr, time.Since(started))
-		}
 	}()
 
 	interval := ss.deps.protocol.progressInterval
@@ -853,7 +848,7 @@ func (ss *session) resetMessage(phase protocolPhase) {
 }
 
 func (ss *session) requiresExactMessage() bool {
-	return ss.internalAuthentication() || ss.deps.shadowAuthentication != nil
+	return ss.internalAuthentication()
 }
 
 func (ss *session) captureExact(write func(mailauth.ExactMessage) error) {
