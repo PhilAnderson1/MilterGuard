@@ -33,6 +33,7 @@ stand.earth
 rainforestactionnetwork.org
 globalwitness.org
 ran.org
+rspb.org.uk
 
 # Digital rights
 eff.org
@@ -48,43 +49,17 @@ globalcitizen.org
 oxfam.org
 actionaid.org
 goodlawproject.org
+bhf.org.uk
+cancerresearchuk.org
+emailsavethechildren.org.uk
+nationaltrust.org.uk
+savethechildren.org.uk
 
 # Animal protection
 worldanimalprotection.org
 four-paws.org
 ifaw.org
 seashepherd.org
-
-# Amazon
-amazon.com
-amazon.ca
-amazon.com.mx
-amazon.com.br
-amazon.co.uk
-amazon.de
-amazon.fr
-amazon.it
-amazon.es
-amazon.nl
-amazon.se
-amazon.pl
-amazon.com.be
-amazon.ie
-amazon.com.tr
-amazon.ae
-amazon.sa
-amazon.eg
-amazon.co.za
-amazon.co.jp
-amazon.cn
-amazon.in
-amazon.com.au
-amazon.sg
-primevideo.com
-audible.com
-goodreads.com
-imdb.com
-twitch.tv
 
 # Identity, accounts and developer platforms
 accountprotection.microsoft.com
@@ -97,6 +72,7 @@ okta.com
 bitwarden.com
 lastpass.com
 yubico.com
+dashlane.com
 
 # Regulated financial institutions and account services
 wise.com
@@ -123,8 +99,48 @@ kraken.com
 binance.com
 bitstamp.net
 gemini.com
+e-vanguard.com
+evanguard.com
+firstdirect.com
+lloydsbank.com
+m-vanguard.com
+nationwide.co.uk
+nsandi.com
+trading212.com
+tsb.co.uk
+vanguard.com
+vanguardinvestments.com
+wealthsimple.com
+aexp.com
+aexpfeedback.com
+horacemann.com
+statefarminfo.com
 
 # Commerce and controlled marketplaces
+amazon.com
+amazon.ca
+amazon.com.mx
+amazon.com.br
+amazon.co.uk
+amazon.de
+amazon.fr
+amazon.it
+amazon.es
+amazon.nl
+amazon.se
+amazon.pl
+amazon.com.be
+amazon.ie
+amazon.com.tr
+amazon.ae
+amazon.sa
+amazon.eg
+amazon.co.za
+amazon.co.jp
+amazon.cn
+amazon.in
+amazon.com.au
+amazon.sg
 ebay.com
 ebay.ca
 ebay.co.uk
@@ -175,6 +191,17 @@ lookfantastic.com
 cult.com
 sephora.com
 ulta.com
+argos.co.uk
+decathlon.co.uk
+ikea.com
+dell.com
+barnesandnoble.com
+bn.com
+crocs-email.com
+fashionnova.com
+grainger.com
+hp.com
+wish.com
 
 # Grocers, food and delivery
 tesco.com
@@ -193,6 +220,9 @@ ubermail.com
 gousto.co.uk
 hellofresh.co.uk
 instacart.com
+dominos.com
+rover.com
+bark.com
 
 # Travel and logistics
 airbnb.com
@@ -223,6 +253,24 @@ dpdgroup.com
 dhl.com
 ups.com
 fedex.com
+aeroplan.ca
+aeroplan.com
+aircanada.ca
+aircanada.com
+airnz.co.nz
+anpost.com
+canadapost-postescanada.ca
+canadapost.ca
+dpd.com
+dpd.cz
+dpd.ee
+geopost.com
+nzpost.co.nz
+qantas.com
+qantas.com.au
+vacv.com
+amtrak.com
+flyfrontier.com
 
 # Telecoms, energy and utilities
 sky.com
@@ -243,8 +291,17 @@ spectrum.net
 octopusenergy.com
 britishgas.co.uk
 edfenergy.com
+eonnext.com
+giffgaff.com
+ovoenergy.com
+scottishpower.co.uk
+dishemail.com
 
 # Media, streaming and gaming
+primevideo.com
+audible.com
+imdb.com
+twitch.tv
 netflix.com
 spotify.com
 disneyplus.com
@@ -262,8 +319,13 @@ ea.com
 nintendo.com
 playstation.com
 xbox.com
+gog.com
+nowtv.com
+roblox.com
+nfl.com
 
 # Social platforms
+goodreads.com
 linkedin.com
 facebook.com
 fbmail.com
@@ -277,6 +339,13 @@ discordapp.com
 snapchat.com
 telegram.org
 strava.com
+eharmony.com
+hinge.co
+match.com
+meetup.com
+talkmatch.com
+tinder.com
+youversion.com
 
 # Ticketing, jobs and property
 ticketmaster.co.uk
@@ -290,6 +359,13 @@ ziprecruiter.com
 rightmove.co.uk
 zoopla.co.uk
 openrent.com
+daft.ie
+redfin.com
+reed.co.uk
+seetickets.com
+skiddle.com
+spareroom.co.uk
+account-mail.mlb.com
 
 # Government and civic services
 gov.uk
@@ -298,6 +374,10 @@ ssa.gov
 uscis.gov
 va.gov
 usps.com
+cra-arc.gc.ca
+ird.govt.nz
+login.gov
+my.gov.au
 
 # Development and infrastructure account services
 slack.com
@@ -320,6 +400,16 @@ squarespace.com
 wix.com
 ionos.com
 ovhcloud.com
+hostinger-domains.com
+hostinger.com
+hostingerdomains.com
+hostingermedia.com
+porkbun.com
+digicert.com
+lifelock.com
+norton.com
+nortonlifelock.com
+securenorton.com
 
 # Organization-operated document and account services
 adobe.com
@@ -337,6 +427,13 @@ admiral.co.uk
 legalandgeneral.com
 adp.com
 gusto.com
+chemistdirect.co.uk
+login.nhs.uk
+pharmacy2u.co.uk
+calm.com
+calmhealth.com
+headspace.com
+myfitnesspal.com
 
 # Established publishers
 nytimes.com
@@ -350,3 +447,28 @@ economist.com
 axios.com
 arstechnica.com
 theverge.com
+overdrive.com
+bookbub.com
+livingwelldaily.com
+tyndale.com
+
+# Education and professional bodies
+icaew.com
+registration.edx.org
+t.mail.coursera.org
+aladdin.ie
+khanacademy.org
+twinkl.co.uk
+twinkl.com
+act.org
+cambridge.org
+powerschool.com
+pre-kpages.com
+socrative.com
+sylvanlearning.com
+teacherspayteachers.com
+
+# Automotive, mobility and roadside services
+lyft.com
+lyftmail.com
+theaa.com
