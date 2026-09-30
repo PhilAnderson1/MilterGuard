@@ -306,7 +306,10 @@ func TestValidateMilterAllowedPeerIPs(t *testing.T) {
 	}
 }
 
-func TestValidateLegitimateLowConfidenceScore(t *testing.T) {
+func TestValidateFilteringScores(t *testing.T) {
+	if got := defaults().Filtering.RejectScore; got != 0.5 {
+		t.Fatalf("default rejection score = %v", got)
+	}
 	if got := defaults().Filtering.LegitimateLowConfidenceScore; got != 0.8 {
 		t.Fatalf("default legitimate low-confidence score = %v", got)
 	}
@@ -477,6 +480,20 @@ func TestValidateFilteringRejectMessage(t *testing.T) {
 	cfg.Filtering.RejectMessage = "Message rejected"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid reject message rejected: %v", err)
+	}
+}
+
+func TestValidateIPReputationRejectMessage(t *testing.T) {
+	const want = "Message rejected because the sending IP address is blocked by this server"
+	if got := defaults().IPReputation.RejectMessage; got != want {
+		t.Fatalf("default IP reputation rejection message = %q, want %q", got, want)
+	}
+	for _, message := range []string{"", " \t "} {
+		cfg := validConfig()
+		cfg.IPReputation.RejectMessage = message
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ip_reputation.reject_message") {
+			t.Errorf("blank IP reputation rejection message %q error = %v", message, err)
+		}
 	}
 }
 

@@ -377,8 +377,9 @@ them to the AI endpoint:
 - An active IP reputation block rejects the SMTP transaction at `MAIL FROM`,
   before MilterGuard receives the body. Because the complete message is not
   available, this rejection cannot be added to rejection history or the saved
-  message archive. Administrators can list, add, and remove these IP blocks
-  through the [administration command interfaces](#administration-commands).
+  message archive. The SMTP response is configured with
+  `ip_reputation.reject_message`. Administrators can list, add, and remove these
+  IP blocks through the [administration command interfaces](#administration-commands).
 - To prevent outsiders from impersonating your own domains, list domains for
   which this server is the only legitimate mail source under
   `filtering.authenticated_only_sender_domains`. MilterGuard then rejects

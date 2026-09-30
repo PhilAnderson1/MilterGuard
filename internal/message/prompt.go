@@ -115,8 +115,8 @@ func writeDomainRegistrationEvidence(b *strings.Builder, info DomainRegistration
 	if age < 0 {
 		return
 	}
-	fmt.Fprintf(b, "Authenticated visible From domain registration date: %s (%s old)\n",
-		registered.Format("2006-01-02"), formatDomainAge(age))
+	fmt.Fprintf(b, "Authenticated registrable From domain %s was registered: %s (%s old)\n",
+		info.Domain, registered.Format("2006-01-02"), formatDomainAge(age))
 }
 
 func formatDomainAge(age time.Duration) string {

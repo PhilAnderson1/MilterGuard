@@ -2127,7 +2127,9 @@ func TestAcceptModeDoesNotLearnAuthenticatedRecipients(t *testing.T) {
 func TestRejectedIPBypassesSecondAIAnalysis(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
-	ipCfg := config.IPReputationConfig{BlockDuration: config.Duration(15 * time.Minute), MaxEntries: 100}
+	ipCfg := config.IPReputationConfig{
+		RejectMessage: "sending IP blocked", BlockDuration: config.Duration(15 * time.Minute), MaxEntries: 100,
+	}
 	setTestIPReputation(server, newTestIPReputationStore(t, ipCfg, server.log))
 	defer conn.Close()
 
@@ -2146,7 +2148,7 @@ func TestRejectedIPBypassesSecondAIAnalysis(t *testing.T) {
 	if err := writeFrame(conn, []byte{commandMail}); err != nil {
 		t.Fatal(err)
 	}
-	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
+	expectFrame(t, conn, "y550 5.7.1 sending IP blocked\x00")
 	if got := analyzer.calls.Load(); got != 1 {
 		t.Fatalf("AI analysis calls = %d, want 1", got)
 	}

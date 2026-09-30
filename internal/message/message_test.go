@@ -829,6 +829,35 @@ func TestPromptUsesFriendlyAuthenticationErrorDescriptions(t *testing.T) {
 	}
 }
 
+func TestPromptUsesFriendlyDescriptionsForAbsentAuthentication(t *testing.T) {
+	m := New(1000)
+	m.AddHeader("From", "sender@example.com")
+	m.Authentication = mailauth.NewEvidence([]mailauth.Result{
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomeNone},
+		{Method: mailauth.MethodSPF, Outcome: mailauth.OutcomeNone, Domain: "bounce.example.net"},
+		{Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomeNone, Domain: "example.com"},
+	}, "example.com")
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"DKIM: no signature present",
+		"SPF: no SPF policy for envelope-sender domain bounce.example.net",
+		"DMARC: no DMARC policy for visible From domain example.com",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("friendly absent-authentication description missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, unwanted := range []string{
+		"DKIM: none for signing domain unavailable",
+		"SPF: none for envelope-sender domain",
+		"DMARC: none for visible From domain",
+	} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("raw absent-authentication result %q leaked into prompt:\n%s", unwanted, prompt)
+		}
+	}
+}
+
 func TestPromptDescribesAuthenticatedSubmissionWithoutInboundAuthenticationResults(t *testing.T) {
 	m := New(1000)
 	m.AuthenticatedSubmission = true
@@ -939,7 +968,7 @@ func TestPromptIncludesDomainRegistrationEvidence(t *testing.T) {
 	prompt := m.Prompt(1000)
 	for _, wanted := range []string{
 		"AUTHENTICATION INFORMATION:",
-		"Authenticated visible From domain registration date:",
+		"Authenticated registrable From domain example.com was registered:",
 		"(3 days old)",
 	} {
 		if !strings.Contains(prompt, wanted) {

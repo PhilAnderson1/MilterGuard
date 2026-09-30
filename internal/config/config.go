@@ -149,6 +149,7 @@ type FilteringConfig struct {
 	SenderDomainAllowlistRequireDKIM bool     `yaml:"sender_domain_allowlist_require_dkim"`
 }
 type IPReputationConfig struct {
+	RejectMessage          string   `yaml:"reject_message"`
 	BlockDuration          Duration `yaml:"block_duration"`
 	RepeatThreshold        int      `yaml:"repeat_threshold"`
 	RepeatWindow           Duration `yaml:"repeat_window"`
@@ -271,13 +272,14 @@ func defaults() Config {
 			MessageDirectory: "/var/lib/milterguard/rejected-mail", MessageMaxTotalBytes: 1 << 30,
 		},
 		Filtering: FilteringConfig{
-			RejectScore: .9, LegitimateLowConfidenceScore: .8, AddEmailHeaders: true,
+			RejectScore: .5, LegitimateLowConfidenceScore: .8, AddEmailHeaders: true,
 			AIErrorAction: "accept", RejectMessage: "Message rejected as suspected spam or fraud",
 			AuthenticatedOnlySenderDomains:   []string{},
 			SenderDomainAllowlistFile:        "/etc/milterguard/trusted-sender-domains.txt",
 			SenderDomainAllowlistRequireDKIM: true,
 		},
 		IPReputation: IPReputationConfig{
+			RejectMessage: "Message rejected because the sending IP address is blocked by this server",
 			BlockDuration: Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: Duration(30 * 24 * time.Hour),
 			RepeatBlockDuration: Duration(30 * 24 * time.Hour), RepeatRefreshOnAttempt: true,
 			LegitimatePerStrike: 3, MaxEntries: 10000,
@@ -479,6 +481,9 @@ func (c Config) Validate() error {
 	}
 	if c.Filtering.AIErrorAction != "accept" && c.Filtering.AIErrorAction != "tempfail" {
 		return fmt.Errorf("filtering.ai_error_action must be accept or tempfail")
+	}
+	if strings.TrimSpace(c.IPReputation.RejectMessage) == "" {
+		return fmt.Errorf("ip_reputation.reject_message must not be empty")
 	}
 	for _, domain := range c.Filtering.AuthenticatedOnlySenderDomains {
 		if !validDomainName(domain) {

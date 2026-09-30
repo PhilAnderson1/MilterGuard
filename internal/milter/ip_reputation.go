@@ -30,6 +30,7 @@ func canonicalIPPrefix(prefix netip.Prefix) (netip.Prefix, bool) {
 type ipReputationStore struct {
 	repository      stores.IPReputationRepository
 	enabledFeature  bool
+	rejectMessage   string
 	allowlist       []netip.Prefix
 	domainAllowlist []string
 	log             *slog.Logger
@@ -38,7 +39,9 @@ type ipReputationStore struct {
 // newIPReputationStore adds configured IP and reverse-DNS exclusions around
 // the persistent strike and block repository.
 func newIPReputationStore(cfg config.IPReputationConfig, repository stores.IPReputationRepository, log *slog.Logger) *ipReputationStore {
-	policy := &ipReputationStore{repository: repository, enabledFeature: ipReputationFeaturesEnabled(cfg), log: log}
+	policy := &ipReputationStore{
+		repository: repository, enabledFeature: ipReputationFeaturesEnabled(cfg), rejectMessage: cfg.RejectMessage, log: log,
+	}
 	for _, entry := range cfg.IPAllowlist {
 		if prefix, err := netip.ParsePrefix(entry); err == nil {
 			if prefix, ok := canonicalIPPrefix(prefix); ok {

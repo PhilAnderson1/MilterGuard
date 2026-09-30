@@ -797,7 +797,11 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 	if !ok {
 		return false, true
 	}
-	err := writeFrame(ss.conn, responseForAction(actionReject, ss.deps.filtering.RejectMessage))
+	rejectMessage := ss.deps.policy.ipReputation.rejectMessage
+	if rejectMessage == "" {
+		rejectMessage = ss.deps.filtering.RejectMessage
+	}
+	err := writeFrame(ss.conn, responseForAction(actionReject, rejectMessage))
 	attrs := []any{
 		"remote_ip", ss.peerIP.String(),
 		"mode", ss.deps.mode,

@@ -50,6 +50,17 @@ func authenticationResultForPrompt(result mailauth.Result) bool {
 
 func writeAuthenticationResult(b *strings.Builder, result mailauth.Result, fromDomain string) {
 	method := strings.ToUpper(string(result.Method))
+	if result.Outcome == mailauth.OutcomeNone {
+		switch result.Method {
+		case mailauth.MethodDKIM:
+			b.WriteString("DKIM: no signature present\n")
+		case mailauth.MethodSPF:
+			fmt.Fprintf(b, "SPF: no SPF policy for envelope-sender domain %s\n", availableValue(result.Domain))
+		case mailauth.MethodDMARC:
+			fmt.Fprintf(b, "DMARC: no DMARC policy for visible From domain %s\n", availableValue(fromDomain))
+		}
+		return
+	}
 	description := authenticationOutcomeDescription(result)
 	switch result.Method {
 	case mailauth.MethodDKIM:

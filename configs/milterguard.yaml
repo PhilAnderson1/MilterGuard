@@ -124,8 +124,10 @@ ai:
   app_name: MilterGuard
 
 filtering:
-  # Reject unwanted classifications at or above this confidence score (0.5-1).
-  reject_score: 0.9
+  # The supplied detection prompt already has a conservative bias towards
+  # legitimate classifications. The minimum of 0.5 rejects every `unwanted`
+  # classification; increasing it makes rejection still more conservative.
+  reject_score: 0.5
 
   # Mark legitimate classifications below this score as low confidence (0.5-1).
   legitimate_low_confidence_score: 0.8
@@ -287,6 +289,9 @@ rejection_history:
   message_max_total_bytes: 1073741824
 
 ip_reputation:
+  # Text returned when mail is rejected because the sending IP is blocked.
+  reject_message: Message rejected because the sending IP address is blocked by this server
+
   # Temporarily block the sending IP after rejecting an email, avoiding further
   # AI requests. Uses Go duration syntax; 0s disables.
   block_duration: 60m
