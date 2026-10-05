@@ -20,7 +20,7 @@ import (
 	lib "modernc.org/sqlite/lib"
 )
 
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 var (
 	//go:embed schema/*.sql

@@ -11,7 +11,7 @@ import (
 )
 
 const maintenanceDatabaseTimeout = 60 * time.Second
-const rejectedMailCleanupInterval = 24 * time.Hour
+const dailyCleanupInterval = 24 * time.Hour
 
 // cleanupPersistentStores removes expired or excess repository records and
 // passively checkpoints the WAL. Startup and the maintenance timer call it.
@@ -80,18 +80,15 @@ func wrapStoreError(operation string, err error) error {
 	return fmt.Errorf("%s: %w", operation, err)
 }
 
-func (s *maintenanceService) startRejectedMailCleanup(ctx context.Context) {
-	if s.archive == nil {
-		return
-	}
-	s.runRejectedMailCleanup()
+func (s *maintenanceService) startDailyCleanup(ctx context.Context) {
+	s.runDailyCleanup()
 	go func() {
-		ticker := time.NewTicker(rejectedMailCleanupInterval)
+		ticker := time.NewTicker(dailyCleanupInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				s.runRejectedMailCleanup()
+				s.runDailyCleanup()
 			case <-ctx.Done():
 				return
 			}
@@ -99,12 +96,31 @@ func (s *maintenanceService) startRejectedMailCleanup(ctx context.Context) {
 	}()
 }
 
-// runRejectedMailCleanup applies archive retention and target-size limits. It
-// is intentionally independent of SQLite rejection-history cleanup.
-func (s *maintenanceService) runRejectedMailCleanup() {
-	s.runMaintenance("rejected-mail cleanup", func() {
-		if err := s.archive.Cleanup(); err != nil {
-			s.log.Warn("cannot clean rejected mail archive", "error", err)
+// runDailyCleanup independently applies rejected-message archive limits and
+// activity retention without coupling either failure to the other.
+func (s *maintenanceService) runDailyCleanup() {
+	s.runMaintenance("daily cleanup", func() {
+		if s.archive != nil {
+			if err := s.archive.Cleanup(); err != nil {
+				s.log.Warn("cannot clean rejected mail archive", "error", err)
+			}
+		}
+		if s.activity == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), maintenanceDatabaseTimeout)
+		defer cancel()
+		deleted, err := s.activity.CleanupActivity(ctx)
+		if err != nil {
+			s.log.Warn("cannot clean activity history", "error", err)
+			return
+		}
+		if s.log != nil && s.log.Enabled(ctx, slog.LevelDebug) {
+			count, countErr := s.activity.CountActivity(ctx)
+			s.log.Debug("activity cleanup completed", "activity_deleted", deleted, "activity_records", count)
+			if countErr != nil {
+				s.log.Warn("cannot count activity history", "error", countErr)
+			}
 		}
 	})
 }

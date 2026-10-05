@@ -58,6 +58,59 @@ type DomainRegistration struct {
 	ExpiresAt    time.Time
 }
 
+type ActivityEventType uint8
+
+const (
+	ActivityEventScan ActivityEventType = iota + 1
+	ActivityEventIPRejection
+	ActivityEventWhitelistAccept
+	ActivityEventTrustedDomainAccept
+	ActivityEventAttachmentRejection
+	ActivityEventProtectedSenderDomainRejection
+)
+
+type ActivityOutcome uint8
+
+const (
+	ActivityOutcomeAccepted ActivityOutcome = iota + 1
+	ActivityOutcomeRejected
+	ActivityOutcomeTempfailed
+	ActivityOutcomeResponseFailed
+)
+
+type ServiceMode uint8
+
+const (
+	ServiceModeAccept ServiceMode = iota + 1
+	ServiceModeEnforce
+)
+
+type ActivityEvent struct {
+	OccurredAt     time.Time
+	EventType      ActivityEventType
+	Outcome        ActivityOutcome
+	AnalysisFailed bool
+	TokenCost      float64
+}
+
+type ActivitySummary struct {
+	ScanTotal                       int64
+	ScanRejections                  int64
+	ScanAccepted                    int64
+	AIEvaluationsFailed             int64
+	IPRejections                    int64
+	WhitelistAccepts                int64
+	TrustedDomainAccepts            int64
+	AttachmentRejections            int64
+	ProtectedSenderDomainRejections int64
+	TokenCost                       float64
+}
+
+type ServiceStatus struct {
+	StartedAt time.Time
+	Mode      ServiceMode
+}
+
 type CorrespondentPage struct {
 	Entries   []Correspondent
 	Truncated bool

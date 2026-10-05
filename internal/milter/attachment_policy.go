@@ -7,6 +7,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 type attachmentPolicyResult struct {
@@ -134,6 +135,9 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 		attrs = append(attrs, "inspection_error", scanErr)
 	}
 	attrs = ss.appendDecisionSubject(attrs)
+	if selected == actionReject {
+		ss.deps.activity.recordDeterministic(ctx, stores.ActivityEventAttachmentRejection, selected, err)
+	}
 	if err != nil {
 		attrs = append(attrs, "response_error", err)
 		ss.deps.log.ErrorContext(ctx, "attachment policy response failed", attrs...)

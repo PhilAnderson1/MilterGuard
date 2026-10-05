@@ -343,11 +343,12 @@ func checkAIEndpoint(cfg config.Config, logger *slog.Logger) (ai.Decision, error
 }
 
 type endpointAnalyzer interface {
-	Analyze(context.Context, ai.Input) (ai.Decision, error)
+	Analyze(context.Context, ai.Input) (ai.Analysis, error)
 }
 
 func analyzeEndpointTest(client endpointAnalyzer) (ai.Decision, error) {
-	return client.Analyze(context.Background(), ai.Input{Text: endpointTestEmail})
+	analysis, err := client.Analyze(context.Background(), ai.Input{Text: endpointTestEmail})
+	return analysis.Decision, err
 }
 
 type endpointPromptError struct{ err error }

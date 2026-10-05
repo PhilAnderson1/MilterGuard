@@ -127,11 +127,11 @@ type blockingAnalyzer struct {
 	finished      chan struct{}
 }
 
-func (a *blockingAnalyzer) Analyze(ctx context.Context, _ ai.Input) (ai.Decision, error) {
+func (a *blockingAnalyzer) Analyze(ctx context.Context, _ ai.Input) (ai.Analysis, error) {
 	close(a.started)
 	select {
 	case <-a.release:
-		return ai.Decision{Classification: "legitimate", Score: 1}, nil
+		return ai.Analysis{Decision: ai.Decision{Classification: "legitimate", Score: 1}}, nil
 	case <-ctx.Done():
 		if a.canceled != nil {
 			close(a.canceled)
@@ -142,7 +142,7 @@ func (a *blockingAnalyzer) Analyze(ctx context.Context, _ ai.Input) (ai.Decision
 		if a.finished != nil {
 			close(a.finished)
 		}
-		return ai.Decision{}, ctx.Err()
+		return ai.Analysis{}, ctx.Err()
 	}
 }
 

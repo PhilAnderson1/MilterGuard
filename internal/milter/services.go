@@ -35,6 +35,11 @@ type analysisService struct {
 	milterTimeout         time.Duration
 }
 
+type activityService struct {
+	repository stores.ActivityRepository
+	log        *slog.Logger
+}
+
 type messagePolicyService struct {
 	correspondentCfg   config.CorrespondentsConfig
 	log                *slog.Logger
@@ -87,6 +92,7 @@ type sessionDependencies struct {
 	logging            config.LoggingConfig
 	protocol           protocolOptions
 	analysis           *analysisService
+	activity           *activityService
 	policy             *messagePolicyService
 	attachments        *attachmentPolicyService
 	commands           *emailCommandService
@@ -104,6 +110,7 @@ type maintenanceService struct {
 	domains         *domainRegistrationStore
 	database        *sqlitedb.Store
 	archive         *rejectedmail.Archive
+	activity        stores.ActivityRepository
 	cleanupInterval time.Duration
 	log             *slog.Logger
 }

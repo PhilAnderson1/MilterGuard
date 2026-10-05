@@ -12,12 +12,14 @@ func TestCommandAuthorizationAndCanonicalization(t *testing.T) {
 	p := New(Dependencies{})
 	user := Actor{DefaultRecipient: "Phil <phil@example.com>"}
 	admin := Actor{Administrator: true, DefaultRecipient: "phil@example.com"}
-	for _, line := range []string{"WHITELIST DELETE news@example.net *", "REJECTIONS *", "WHITELIST LIST *", "IP LIST"} {
+	for _, line := range []string{"ACTIVITY", "WHITELIST DELETE news@example.net *", "REJECTIONS *", "WHITELIST LIST *", "IP LIST"} {
 		if _, err := p.Parse(line, user); err == nil {
 			t.Errorf("ordinary user could issue %q", line)
 		}
 	}
 	tests := map[string]string{
+		"ACTIVITY":                            "ACTIVITY week",
+		"ACTIVITY month":                      "ACTIVITY month",
 		"REJECTIONS":                          "REJECTIONS week",
 		"REJECTIONS * year":                   "REJECTIONS * year",
 		"WHITELIST LIST * month":              "WHITELIST LIST * month",
@@ -31,7 +33,7 @@ func TestCommandAuthorizationAndCanonicalization(t *testing.T) {
 			t.Errorf("Parse(%q) = %q, %v; want %q", line, command.Canonical(), err, want)
 		}
 	}
-	for _, line := range []string{"REJECTION", "REJECTION 0", "IP ADD invalid", "IP LIST fortnight", "WHITELIST LIST * month extra"} {
+	for _, line := range []string{"ACTIVITY fortnight", "ACTIVITY week extra", "REJECTION", "REJECTION 0", "IP ADD invalid", "IP LIST fortnight", "WHITELIST LIST * month extra"} {
 		if _, err := p.Parse(line, admin); err == nil {
 			t.Errorf("invalid command %q accepted", line)
 		}
@@ -52,6 +54,7 @@ func TestRecognizedLineMatchesOnlyCommandKeywords(t *testing.T) {
 		want bool
 	}{
 		{"HELP", true},
+		{"activity month", true},
 		{"  help  ", true},
 		{"Ip ADD 192.0.2.1", true},
 		{"rejection 7", true},

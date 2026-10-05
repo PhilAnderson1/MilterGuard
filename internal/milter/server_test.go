@@ -25,11 +25,14 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
+	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
+	storesqlite "github.com/PhilAnderson1/MilterGuard/internal/stores/sqlite"
 )
 
 type fixedAnalyzer struct {
 	decision ai.Decision
+	usage    ai.Usage
 }
 
 type countingAnalyzer struct {
@@ -126,10 +129,55 @@ func TestRejectedMailCleanupRunsImmediatelyAtStartup(t *testing.T) {
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	service.startRejectedMailCleanup(ctx)
+	service.startDailyCleanup(ctx)
 
 	if _, err := os.Lstat(filepath.Join(root, "2000")); !os.IsNotExist(err) {
 		t.Fatalf("expired archive tree remains after startup cleanup: %v", err)
+	}
+}
+
+func TestDailyActivityCleanupRunsWhenArchiveIsDisabled(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	database, err := sqlitedb.Open(context.Background(), filepath.Join(t.TempDir(), "activity.db"), sqlitedb.DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := storesqlite.NewActivity(database, storesqlite.ActivityOptions{
+		Expiry: 24 * time.Hour, Now: func() time.Time { return now },
+	})
+	if err := repository.AddActivity(context.Background(), stores.ActivityEvent{
+		OccurredAt: now.Add(-25 * time.Hour), EventType: stores.ActivityEventScan, Outcome: stores.ActivityOutcomeAccepted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := &maintenanceService{activity: repository, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	service.startDailyCleanup(ctx)
+	if count, err := repository.CountActivity(context.Background()); err != nil || count != 0 {
+		t.Fatalf("activity count after daily cleanup = %d, err = %v", count, err)
+	}
+}
+
+func TestServerServiceStatusLifecycle(t *testing.T) {
+	server := NewServer(config.Config{
+		Mode:        "enforce",
+		Milter:      config.MilterConfig{MaxConnections: 1},
+		AI:          config.AIConfig{MaxConcurrent: 1},
+		Activity:    config.ActivityConfig{Expiry: config.Duration(24 * time.Hour)},
+		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "status.db")},
+	}, fixedAnalyzer{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer server.Close()
+	started := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	server.setServiceStatus(started)
+	status, found, err := server.maintenance.activity.ServiceStatus(context.Background())
+	if err != nil || !found || !status.StartedAt.Equal(started) || status.Mode != stores.ServiceModeEnforce {
+		t.Fatalf("service status = %+v, found=%t, err=%v", status, found, err)
+	}
+	server.clearServiceStatus()
+	if _, found, err := server.maintenance.activity.ServiceStatus(context.Background()); err != nil || found {
+		t.Fatalf("service status remained after clear: found=%t err=%v", found, err)
 	}
 }
 
@@ -183,6 +231,8 @@ type recordingAnalyzer struct {
 }
 
 type failingAnalyzer struct{}
+
+type usageFailingAnalyzer struct{ usage ai.Usage }
 
 type failingReader struct{}
 
@@ -430,22 +480,26 @@ func (w *shortWriter) Write(p []byte) (int, error) {
 	return w.b.Write(p)
 }
 
-func (a fixedAnalyzer) Analyze(context.Context, ai.Input) (ai.Decision, error) {
-	return a.decision, nil
+func (a fixedAnalyzer) Analyze(context.Context, ai.Input) (ai.Analysis, error) {
+	return ai.Analysis{Decision: a.decision, Usage: a.usage}, nil
 }
 
-func (a *countingAnalyzer) Analyze(context.Context, ai.Input) (ai.Decision, error) {
+func (a *countingAnalyzer) Analyze(context.Context, ai.Input) (ai.Analysis, error) {
 	a.calls.Add(1)
-	return a.decision, nil
+	return ai.Analysis{Decision: a.decision}, nil
 }
 
-func (a *recordingAnalyzer) Analyze(_ context.Context, input ai.Input) (ai.Decision, error) {
+func (a *recordingAnalyzer) Analyze(_ context.Context, input ai.Input) (ai.Analysis, error) {
 	a.inputs <- input
-	return ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}, nil
+	return ai.Analysis{Decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}, nil
 }
 
-func (failingAnalyzer) Analyze(context.Context, ai.Input) (ai.Decision, error) {
-	return ai.Decision{}, errors.New("endpoint unavailable")
+func (failingAnalyzer) Analyze(context.Context, ai.Input) (ai.Analysis, error) {
+	return ai.Analysis{}, errors.New("endpoint unavailable")
+}
+
+func (a usageFailingAnalyzer) Analyze(context.Context, ai.Input) (ai.Analysis, error) {
+	return ai.Analysis{Usage: a.usage}, errors.New("endpoint unavailable")
 }
 
 func TestAuthenticationProviderReceivesExactTransactionAndFeedsPrompt(t *testing.T) {
@@ -496,6 +550,109 @@ func TestAuthenticationProviderReceivesExactTransactionAndFeedsPrompt(t *testing
 		t.Fatalf("provider evidence missing from prompt:\n%s", input.Text)
 	}
 	expectFrame(t, conn, string([]byte{responseAccept}))
+}
+
+func TestCompletedScanRecordsActivityAndTokenCost(t *testing.T) {
+	cfg := config.Config{
+		Mode:   "enforce",
+		Milter: config.MilterConfig{Timeout: config.Duration(time.Second), MaxMessageSize: 1024},
+		AI: config.AIConfig{
+			Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
+			InputCostPerMillionTokens: 1, OutputCostPerMillionTokens: 2,
+		},
+		Activity:    config.ActivityConfig{Expiry: config.Duration(24 * time.Hour)},
+		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db")},
+		Filtering: config.FilteringConfig{
+			RejectScore: .9, LegitimateLowConfidenceScore: .8, AIErrorAction: "accept", RejectMessage: "blocked",
+		},
+	}
+	server, conn, done := testServerWithConfig(t, cfg, fixedAnalyzer{
+		decision: ai.Decision{Classification: "legitimate", Score: 1},
+		usage:    ai.Usage{InputTokens: 1000, OutputTokens: 500},
+	})
+	defer func() { _ = conn.Close(); <-done; _ = server.Close() }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "198.51.100.9"),
+		envelopeFrame(commandMail, "sender@example.net"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+		headerFrame("From", "sender@example.net"),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("body")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+
+	var summary stores.ActivitySummary
+	var err error
+	deadline := time.Now().Add(time.Second)
+	for {
+		summary, err = server.maintenance.activity.ActivitySummary(context.Background(), stores.ActivityQuery{Before: time.Now().Add(time.Second)})
+		if err != nil || summary.ScanTotal == 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ScanTotal != 1 || summary.ScanAccepted != 1 || summary.ScanRejections != 0 || summary.AIEvaluationsFailed != 0 || summary.TokenCost != .002 {
+		t.Fatalf("activity summary = %+v", summary)
+	}
+}
+
+func TestFailedFailOpenScanRecordsAcceptedActivityAndKnownCost(t *testing.T) {
+	cfg := config.Config{
+		Mode:   "enforce",
+		Milter: config.MilterConfig{Timeout: config.Duration(time.Second), MaxMessageSize: 1024},
+		AI: config.AIConfig{
+			Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
+			InputCostPerMillionTokens: 1, OutputCostPerMillionTokens: 2,
+		},
+		Activity:    config.ActivityConfig{Expiry: config.Duration(24 * time.Hour)},
+		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db")},
+		Filtering: config.FilteringConfig{
+			RejectScore: .9, LegitimateLowConfidenceScore: .8, AIErrorAction: "accept", RejectMessage: "blocked",
+		},
+	}
+	server, conn, done := testServerWithConfig(t, cfg, usageFailingAnalyzer{
+		usage: ai.Usage{InputTokens: 1000, OutputTokens: 500},
+	})
+	defer func() { _ = conn.Close(); <-done; _ = server.Close() }()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "198.51.100.9"),
+		envelopeFrame(commandMail, "sender@example.net"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+		headerFrame("From", "sender@example.net"),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("body")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+
+	var summary stores.ActivitySummary
+	deadline := time.Now().Add(time.Second)
+	for {
+		var err error
+		summary, err = server.maintenance.activity.ActivitySummary(context.Background(), stores.ActivityQuery{Before: time.Now().Add(time.Second)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if summary.ScanTotal == 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if summary.ScanTotal != 1 || summary.ScanAccepted != 1 || summary.AIEvaluationsFailed != 1 || summary.TokenCost != .002 {
+		t.Fatalf("activity summary = %+v", summary)
+	}
 }
 
 func TestPostDecisionUpdatesDoNotInheritExpiredAnalysisContext(t *testing.T) {

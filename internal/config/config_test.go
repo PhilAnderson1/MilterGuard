@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -125,6 +126,40 @@ func TestValidatePersistenceDatabaseFile(t *testing.T) {
 	cfg.Persistence.DatabaseFile = ""
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "persistence.database_file") {
 		t.Fatalf("empty persistence database path error = %v", err)
+	}
+}
+
+func TestValidateActivityAndTokenPricing(t *testing.T) {
+	if got := defaults().Activity.Expiry.Value(); got != 365*24*time.Hour {
+		t.Fatalf("default activity expiry = %s", got)
+	}
+	if defaults().AI.InputCostPerMillionTokens != 0 || defaults().AI.OutputCostPerMillionTokens != 0 {
+		t.Fatal("token prices must default to zero")
+	}
+	for _, expiry := range []time.Duration{0, -time.Second} {
+		cfg := validConfig()
+		cfg.Activity.Expiry = Duration(expiry)
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "activity.expiry") {
+			t.Fatalf("activity expiry %s error = %v", expiry, err)
+		}
+	}
+	for _, price := range []float64{-1, math.NaN(), math.Inf(1)} {
+		cfg := validConfig()
+		cfg.AI.InputCostPerMillionTokens = price
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "token prices") {
+			t.Fatalf("input price %v error = %v", price, err)
+		}
+		cfg = validConfig()
+		cfg.AI.OutputCostPerMillionTokens = price
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "token prices") {
+			t.Fatalf("output price %v error = %v", price, err)
+		}
+	}
+	cfg := validConfig()
+	cfg.AI.InputCostPerMillionTokens = 0.05
+	cfg.AI.OutputCostPerMillionTokens = 0.70
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid token prices rejected: %v", err)
 	}
 }
 
@@ -719,6 +754,11 @@ func TestDefaultsMatchDistributedConfiguration(t *testing.T) {
 	// Credentials must be explicitly supplied even though the sample shows the
 	// placeholder and all operational defaults are safe to omit.
 	want.AI.APIKey = sample.AI.APIKey
+	// The complete sample names a particular hosted model and includes its
+	// current prices. Omitted prices must remain zero so a different or local
+	// model is never assigned an invented cost.
+	want.AI.InputCostPerMillionTokens = sample.AI.InputCostPerMillionTokens
+	want.AI.OutputCostPerMillionTokens = sample.AI.OutputCostPerMillionTokens
 	if !reflect.DeepEqual(want, sample) {
 		t.Fatalf("internal defaults differ from distributed configuration:\ninternal: %#v\nsample:   %#v", want, sample)
 	}

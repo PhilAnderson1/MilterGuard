@@ -331,6 +331,59 @@ func TestAnalyzeRetriesMalformedDecision(t *testing.T) {
 	}
 }
 
+func TestAnalyzeAccumulatesUsageAcrossRetriesAndErrors(t *testing.T) {
+	var attempts atomic.Int32
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if attempts.Add(1) == 1 {
+			return responseWithUsage(`{"classification":"unwanted","score":0.9,"reasons":[1]}`, 100, 20), nil
+		}
+		return responseWithUsage(`{"classification":"legitimate","score":0.9,"reasons":[]}`, 80, 10), nil
+	})
+	client := retryTestClient(transport, 1)
+	analysis, err := client.Analyze(context.Background(), Input{Text: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis.Usage.InputTokens != 180 || analysis.Usage.OutputTokens != 30 {
+		t.Fatalf("usage = %+v, want input=180 output=30", analysis.Usage)
+	}
+}
+
+func TestAnalyzePreservesUsageWhenRetriesAreExhausted(t *testing.T) {
+	client := retryTestClient(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return responseWithUsage(`{"classification":"unwanted","score":0.9,"reasons":[1]}`, 25, 5), nil
+	}), 1)
+	analysis, err := client.Analyze(context.Background(), Input{Text: "test"})
+	if err == nil {
+		t.Fatal("expected malformed decision error")
+	}
+	if analysis.Usage.InputTokens != 50 || analysis.Usage.OutputTokens != 10 {
+		t.Fatalf("usage = %+v, want input=50 output=10", analysis.Usage)
+	}
+}
+
+func TestAnalyzeIgnoresMissingOrMalformedUsage(t *testing.T) {
+	for _, usage := range []any{nil, map[string]any{"prompt_tokens": "invalid", "completion_tokens": -1}} {
+		body, err := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": `{"classification":"legitimate","score":0.9,"reasons":[]}`}}},
+			"usage":   usage,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		client := retryTestClient(roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+		}), 0)
+		analysis, err := client.Analyze(context.Background(), Input{Text: "test"})
+		if err != nil {
+			t.Fatalf("usage %v invalidated decision: %v", usage, err)
+		}
+		if analysis.Usage != (Usage{}) {
+			t.Fatalf("malformed usage was retained: %+v", analysis.Usage)
+		}
+	}
+}
+
 func TestAnalyzeRetriesTransientHTTPError(t *testing.T) {
 	var attempts atomic.Int32
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -579,6 +632,14 @@ func retryTestClient(transport http.RoundTripper, retries int) *Client {
 func decisionResponse(content string) *http.Response {
 	body, _ := json.Marshal(map[string]any{
 		"choices": []any{map[string]any{"message": map[string]string{"content": content}}},
+	})
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body)))}
+}
+
+func responseWithUsage(content string, input, output uint64) *http.Response {
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]string{"content": content}}},
+		"usage":   map[string]any{"prompt_tokens": input, "completion_tokens": output},
 	})
 	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body)))}
 }

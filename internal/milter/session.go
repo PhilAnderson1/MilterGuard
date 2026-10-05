@@ -18,6 +18,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 type protocolPhase uint8
@@ -370,6 +371,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	result, progressErr := ss.evaluateWithProgress(ctx, inbound)
 	if progressErr != nil {
 		ss.deps.log.WarnContext(ctx, "message analysis with progress failed", "error", progressErr)
+		ss.deps.activity.recordScan(ctx, result, progressErr)
 		return false
 	}
 	var err error
@@ -380,6 +382,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		err = writeFrame(ss.conn, responseForAction(result.selected, ss.deps.filtering.RejectMessage))
 	}
 	ss.deps.analysis.logOutcome(ctx, ss.message, result, ss.deps.mode, ss.deps.logging.IncludeSubject, err == nil, err)
+	ss.deps.activity.recordScan(ctx, result, err)
 	if err != nil {
 		return false
 	}
@@ -493,13 +496,13 @@ func (ss *session) evaluateWithProgress(ctx context.Context, inbound inboundEvid
 			return result, nil
 		case <-ctx.Done():
 			cancelWorker()
-			<-results
-			return evaluationResult{}, fmt.Errorf("message analysis interrupted: %w", ctx.Err())
+			result := <-results
+			return result, fmt.Errorf("message analysis interrupted: %w", ctx.Err())
 		case <-ticker.C:
 			if err := writeFrame(ss.conn, []byte{responseProgress}); err != nil {
 				cancelWorker()
-				<-results
-				return evaluationResult{}, fmt.Errorf("send Milter progress response: %w", err)
+				result := <-results
+				return result, fmt.Errorf("send Milter progress response: %w", err)
 			}
 		}
 	}
@@ -684,6 +687,12 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 	}
 	attrs = append(attrs, extraAttrs...)
 	attrs = ss.appendDecisionSubject(attrs)
+	switch source {
+	case "known_correspondent":
+		ss.deps.activity.recordDeterministic(ctx, stores.ActivityEventWhitelistAccept, actionAccept, err)
+	case "sender_domain_allowlist":
+		ss.deps.activity.recordDeterministic(ctx, stores.ActivityEventTrustedDomainAccept, actionAccept, err)
+	}
 	if err != nil {
 		attrs = append(attrs, "response_error", err)
 		ss.deps.log.ErrorContext(ctx, "message bypass response failed", attrs...)
@@ -802,6 +811,7 @@ func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {
 		rejectMessage = ss.deps.filtering.RejectMessage
 	}
 	err := writeFrame(ss.conn, responseForAction(actionReject, rejectMessage))
+	ss.deps.activity.recordDeterministic(ctx, stores.ActivityEventIPRejection, actionReject, err)
 	attrs := []any{
 		"remote_ip", ss.peerIP.String(),
 		"mode", ss.deps.mode,

@@ -56,3 +56,8 @@ type InboundClassification struct {
 	UnwantedMinScore   float64
 	DKIMAligned        bool
 }
+
+type ActivityQuery struct {
+	Since  time.Time
+	Before time.Time
+}

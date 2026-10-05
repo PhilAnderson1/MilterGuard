@@ -14,6 +14,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 const commandDatabaseTimeout = 15 * time.Second
@@ -89,7 +90,10 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			s.log.Warn("SQLite cleanup failed", "trigger", "startup", "error", err)
 		}
 	})
-	s.maintenance.startRejectedMailCleanup(sessionCtx)
+	startedAt := time.Now().UTC()
+	s.setServiceStatus(startedAt)
+	defer s.clearServiceStatus()
+	s.maintenance.startDailyCleanup(sessionCtx)
 	if cleanupInterval := s.maintenance.cleanupInterval; cleanupInterval > 0 {
 		maintenanceCtx, stopMaintenance := context.WithCancel(sessionCtx)
 		maintenanceDone := make(chan struct{})
@@ -165,6 +169,32 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			}()
 			s.handle(sessionCtx, conn)
 		}()
+	}
+}
+
+func (s *Server) setServiceStatus(startedAt time.Time) {
+	if s == nil || s.maintenance == nil || s.maintenance.activity == nil {
+		return
+	}
+	mode := stores.ServiceModeAccept
+	if s.sessions != nil && s.sessions.mode == "enforce" {
+		mode = stores.ServiceModeEnforce
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), commandDatabaseTimeout)
+	defer cancel()
+	if err := s.maintenance.activity.SetServiceStatus(ctx, stores.ServiceStatus{StartedAt: startedAt, Mode: mode}); err != nil && s.log != nil {
+		s.log.Warn("cannot record service status", "error", err)
+	}
+}
+
+func (s *Server) clearServiceStatus() {
+	if s == nil || s.maintenance == nil || s.maintenance.activity == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), commandDatabaseTimeout)
+	defer cancel()
+	if err := s.maintenance.activity.ClearServiceStatus(ctx); err != nil && s.log != nil {
+		s.log.Warn("cannot clear service status", "error", err)
 	}
 }
 

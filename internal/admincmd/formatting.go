@@ -21,12 +21,90 @@ func formatUTC(value time.Time) string {
 func Help(admin, commandMode bool) string {
 	text := "Send one or more commands, one per line:\n\nWHITELIST ADD sender@example.com\nWHITELIST DELETE sender@example.com\nWHITELIST LIST [day|week|month|year|all]\nREJECTIONS [day|week|month|year|all]\nREJECTION id\nHELP\n\nListing commands default to the previous week. The local address is taken from your authenticated envelope sender.\n"
 	if admin && commandMode {
-		return "Enter one command at a time:\n\nWHITELIST ADD sender@example.com recipient@example.com\nWHITELIST DELETE sender@example.com [recipient@example.com|*]\nWHITELIST LIST [recipient@example.com|*] [day|week|month|year|all]\nREJECTIONS [recipient@example.com|*] [day|week|month|year|all]\nREJECTION id\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\nHELP\nEXIT\n\nListing commands default to the previous week and all local recipients. WHITELIST ADD requires an explicit local recipient.\n"
+		return "Enter one command at a time:\n\nACTIVITY [day|week|month|year|all]\nWHITELIST ADD sender@example.com recipient@example.com\nWHITELIST DELETE sender@example.com [recipient@example.com|*]\nWHITELIST LIST [recipient@example.com|*] [day|week|month|year|all]\nREJECTIONS [recipient@example.com|*] [day|week|month|year|all]\nREJECTION id\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\nHELP\nEXIT\n\nListing commands default to the previous week and all local recipients. WHITELIST ADD requires an explicit local recipient.\n"
 	}
 	if admin {
-		text += "\nAdministrator commands:\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\n\nAdministrators may append a local recipient address before the period in WHITELIST LIST and REJECTIONS commands, and to modification commands. They may use * with WHITELIST DELETE, WHITELIST LIST, or REJECTIONS. For example:\n\nWHITELIST LIST * month\nREJECTIONS * year\n"
+		text += "\nAdministrator commands:\nACTIVITY [day|week|month|year|all]\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\n\nAdministrators may append a local recipient address before the period in WHITELIST LIST and REJECTIONS commands, and to modification commands. They may use * with WHITELIST DELETE, WHITELIST LIST, or REJECTIONS. For example:\n\nWHITELIST LIST * month\nREJECTIONS * year\n"
 	}
 	return text
+}
+
+func formatActivity(pd period, since, before time.Time, retention time.Duration, summary stores.ActivitySummary, status stores.ServiceStatus, statusAvailable bool) string {
+	var body strings.Builder
+	if statusAvailable && status.Mode == stores.ServiceModeAccept {
+		body.WriteString("MilterGuard is running in accept mode. Scans completed in this mode are accepted even when the AI recommends rejection.\n")
+		if activityHasRejections(summary) {
+			body.WriteString("This period also contains rejections recorded in enforce mode.\n")
+		}
+		body.WriteString("\n")
+	}
+	fmt.Fprintf(&body, "Activity: %s\n", pd.description())
+	fmt.Fprintf(&body, "Period: %s to %s\n", formatUTC(since), formatUTC(before))
+	fmt.Fprintf(&body, "Retention: %s\n", formatDuration(retention))
+	uptime := "unavailable"
+	if statusAvailable && !status.StartedAt.After(before) {
+		uptime = formatDuration(before.Sub(status.StartedAt))
+	}
+	fmt.Fprintf(&body, "Service uptime: %s\n\n", uptime)
+	if activitySummaryEmpty(summary) {
+		body.WriteString("No activity was recorded for this period.\n\n")
+	}
+	fmt.Fprintf(&body, "Scan total: %d\n", summary.ScanTotal)
+	fmt.Fprintf(&body, "Scan rejections: %d\n", summary.ScanRejections)
+	fmt.Fprintf(&body, "Scan accepted: %d\n", summary.ScanAccepted)
+	fmt.Fprintf(&body, "AI evaluations failed: %d\n", summary.AIEvaluationsFailed)
+	fmt.Fprintf(&body, "IP blacklist rejections: %d\n", summary.IPRejections)
+	fmt.Fprintf(&body, "Whitelist accepts: %d\n", summary.WhitelistAccepts)
+	fmt.Fprintf(&body, "Trusted domain accepts: %d\n", summary.TrustedDomainAccepts)
+	fmt.Fprintf(&body, "Attachment rejections: %d\n", summary.AttachmentRejections)
+	fmt.Fprintf(&body, "Protected sender-domain rejections: %d\n\n", summary.ProtectedSenderDomainRejections)
+	fmt.Fprintf(&body, "Estimated total token cost: USD %.4f\n", summary.TokenCost)
+	if summary.ScanTotal == 0 {
+		body.WriteString("Average cost per message scanned (estimated): N/A (no scans)\n")
+	} else {
+		fmt.Fprintf(&body, "Average cost per message scanned (estimated): USD %.6f\n", summary.TokenCost/float64(summary.ScanTotal))
+	}
+	return body.String()
+}
+
+func formatDuration(value time.Duration) string {
+	if value < 0 {
+		return "unavailable"
+	}
+	days := int64(value / (24 * time.Hour))
+	value %= 24 * time.Hour
+	hours := int64(value / time.Hour)
+	value %= time.Hour
+	minutes := int64(value / time.Minute)
+	parts := make([]string, 0, 3)
+	if days > 0 {
+		parts = append(parts, durationPart(days, "day"))
+	}
+	if hours > 0 {
+		parts = append(parts, durationPart(hours, "hour"))
+	}
+	if minutes > 0 || len(parts) == 0 {
+		parts = append(parts, durationPart(minutes, "minute"))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func durationPart(value int64, unit string) string {
+	if value != 1 {
+		unit += "s"
+	}
+	return fmt.Sprintf("%d %s", value, unit)
+}
+
+func activitySummaryEmpty(summary stores.ActivitySummary) bool {
+	return summary.ScanTotal == 0 && summary.IPRejections == 0 && summary.WhitelistAccepts == 0 &&
+		summary.TrustedDomainAccepts == 0 && summary.AttachmentRejections == 0 &&
+		summary.ProtectedSenderDomainRejections == 0
+}
+
+func activityHasRejections(summary stores.ActivitySummary) bool {
+	return summary.ScanRejections > 0 || summary.IPRejections > 0 || summary.AttachmentRejections > 0 ||
+		summary.ProtectedSenderDomainRejections > 0
 }
 
 func formatAllowlist(entries []stores.Correspondent, includeRecipient, truncated bool) string {

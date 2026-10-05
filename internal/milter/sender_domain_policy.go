@@ -7,6 +7,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 const authenticatedOnlySenderDomainSource = "authenticated_only_sender_domain"
@@ -87,6 +88,9 @@ func (ss *session) finishAuthenticatedOnlySenderDomain(ctx context.Context, doma
 		"response_sent", err == nil,
 	}
 	attrs = ss.appendDecisionSubject(attrs)
+	if selected == actionReject {
+		ss.deps.activity.recordDeterministic(ctx, stores.ActivityEventProtectedSenderDomainRejection, selected, err)
+	}
 	if err != nil {
 		attrs = append(attrs, "response_error", err)
 		ss.deps.log.ErrorContext(ctx, "authenticated-only sender domain policy response failed", attrs...)

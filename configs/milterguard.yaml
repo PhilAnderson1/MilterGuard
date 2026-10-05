@@ -86,6 +86,12 @@ ai:
   # provider/model names; llama.cpp may use its configured model name or path.
   model: qwen/qwen3.6-35b-a3b
 
+  # Estimated USD prices per million input and output tokens. Set these to the
+  # rates charged by the selected model. Zero is suitable for local or free AI,
+  # default figures below are current costs for qwen3.6-35b-a3b on Openrouter.
+  input_cost_per_million_tokens: 0.1262
+  output_cost_per_million_tokens: 0.9827
+
   # Boolean: true or false. It is recommended to keep thinking turned off
   # to minimize response time.
   disable_thinking: true
@@ -406,6 +412,10 @@ correspondents:
   # remove forged inbound copies before trusted local filters add replacements.
   trusted_authserv_ids:
     - "$mta_hostname"
+
+activity:
+  # Retain activity-reporting events for this positive Go duration.
+  expiry: 8760h
 
 persistence:
   # SQLite database containing all persistent MilterGuard state.

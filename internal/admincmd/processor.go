@@ -20,12 +20,39 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 	ctx, cancel := context.WithTimeout(parent, p.databaseTimeout)
 	defer cancel()
 	admin := actor.Administrator
-	cutoff := command.period.cutoff(p.now().UTC())
+	now := p.now().UTC()
+	cutoff := command.period.cutoff(now)
 	switch command.kind {
 	case "parse_error":
 		return textResponse(func() string { return command.errorText + ".\n" }), nil
 	case "help":
 		return textResponse(func() string { return Help(admin, actor.CommandMode) }), nil
+	case "activity":
+		if !admin {
+			return nil, fmt.Errorf("ACTIVITY is restricted to administrators")
+		}
+		if p.activity == nil {
+			return nil, fmt.Errorf("activity repository is unavailable")
+		}
+		activitySince := cutoff
+		retainedSince := now.Add(-p.activityExpiry)
+		if activitySince.IsZero() || activitySince.Before(retainedSince) {
+			activitySince = retainedSince
+		}
+		summary, err := p.activity.ActivitySummary(ctx, stores.ActivityQuery{Since: activitySince, Before: now})
+		if err != nil {
+			return nil, err
+		}
+		status, statusAvailable, statusErr := p.activity.ServiceStatus(ctx)
+		if statusErr != nil {
+			statusAvailable = false
+			if p.log != nil {
+				p.log.WarnContext(ctx, "cannot read service status for activity report", "error", statusErr)
+			}
+		}
+		return textResponse(func() string {
+			return formatActivity(command.period, activitySince, now, p.activityExpiry, summary, status, statusAvailable)
+		}), nil
 	case "rejections":
 		page, err := p.rejections.ListRejections(ctx, stores.RejectionListQuery{Recipients: recipientScope(command.recipient), RejectedSince: cutoff, Limit: MaxListRows})
 		if err != nil {

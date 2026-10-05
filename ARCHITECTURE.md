@@ -51,7 +51,8 @@ Normal service construction begins in `milter.NewServer` and
 `milter.buildRuntime`. Runtime construction:
 
 1. Opens SQLite when an enabled feature requires persistent state.
-2. Constructs the four configured repositories.
+2. Constructs the configured repositories, including activity reporting and
+   service-status persistence.
 3. Builds IP-reputation and domain-registration policy services around those
    repositories.
 4. Creates the rejected-message archive, attachment scanner, command
@@ -132,6 +133,8 @@ After the Milter response has been determined, policy updates may:
 - Learn or update correspondent records.
 - Write rejection history.
 - Save the original rejected message.
+- Record the selected filtering path, response outcome, and estimated scan cost
+  for activity reports.
 
 These updates are bounded by a separate timeout and occur outside the critical
 response path where possible. Accept mode does not mutate adaptive reputation
@@ -149,6 +152,9 @@ Repository behavior lives in `internal/stores/sqlite`:
 - IP reputation stores strikes and active short or repeat blocks.
 - Rejections store one event with all affected local recipients.
 - Domain registrations cache registration and expiration dates.
+- Activity stores filtering outcomes and estimated scan costs, while a
+  singleton status row records the current serving process's start time and
+  mode for administration reports.
 
 Expired rows and capacity excess are removed during periodic maintenance.
 Queries must independently exclude expired data when stale rows must not be

@@ -338,20 +338,20 @@ func TestPortCheckErrorMessage(t *testing.T) {
 	}
 }
 
-type endpointAnalyzerFunc func(context.Context, ai.Input) (ai.Decision, error)
+type endpointAnalyzerFunc func(context.Context, ai.Input) (ai.Analysis, error)
 
-func (f endpointAnalyzerFunc) Analyze(ctx context.Context, input ai.Input) (ai.Decision, error) {
+func (f endpointAnalyzerFunc) Analyze(ctx context.Context, input ai.Input) (ai.Analysis, error) {
 	return f(ctx, input)
 }
 
 func TestAnalyzeEndpointTestUsesEmbeddedUnwantedMessage(t *testing.T) {
-	analyzer := endpointAnalyzerFunc(func(_ context.Context, input ai.Input) (ai.Decision, error) {
+	analyzer := endpointAnalyzerFunc(func(_ context.Context, input ai.Input) (ai.Analysis, error) {
 		for _, wanted := range []string{"Bank Security", "urgent-account-security.invalid", "password", "security code"} {
 			if !strings.Contains(input.Text, wanted) {
 				t.Errorf("embedded test email missing %q", wanted)
 			}
 		}
-		return ai.Decision{Classification: "unwanted", Score: .99}, nil
+		return ai.Analysis{Decision: ai.Decision{Classification: "unwanted", Score: .99}}, nil
 	})
 	decision, err := analyzeEndpointTest(analyzer)
 	if err != nil || decision.Classification != "unwanted" {

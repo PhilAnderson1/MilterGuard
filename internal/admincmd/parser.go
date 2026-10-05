@@ -41,7 +41,7 @@ func (c Command) Canonical() string { return c.canonical }
 
 func RecognizedLine(line string) bool {
 	fields := strings.Fields(line)
-	return len(fields) > 0 && (strings.EqualFold(fields[0], "HELP") || strings.EqualFold(fields[0], "IP") ||
+	return len(fields) > 0 && (strings.EqualFold(fields[0], "ACTIVITY") || strings.EqualFold(fields[0], "HELP") || strings.EqualFold(fields[0], "IP") ||
 		strings.EqualFold(fields[0], "REJECTION") || strings.EqualFold(fields[0], "REJECTIONS") || strings.EqualFold(fields[0], "WHITELIST"))
 }
 
@@ -104,10 +104,35 @@ func (p period) cutoff(now time.Time) time.Time {
 	}
 }
 
+func (p period) description() string {
+	switch p {
+	case periodDay:
+		return "past day"
+	case periodMonth:
+		return "past month"
+	case periodYear:
+		return "past year"
+	case periodAll:
+		return "all retained activity"
+	default:
+		return "past week"
+	}
+}
+
 func parse(text, authenticatedSender string, admin bool) (Command, error) {
 	fields := strings.Fields(text)
 	if len(fields) == 1 && strings.EqualFold(fields[0], "HELP") {
 		return Command{kind: "help", canonical: "HELP"}, nil
+	}
+	if len(fields) >= 1 && strings.EqualFold(fields[0], "ACTIVITY") {
+		if !admin {
+			return Command{}, fmt.Errorf("ACTIVITY is restricted to administrators")
+		}
+		pd, err := listPeriod(fields, 1)
+		if err != nil {
+			return Command{}, fmt.Errorf("ACTIVITY period must be day, week, month, year, or all")
+		}
+		return Command{kind: "activity", canonical: "ACTIVITY " + string(pd), period: pd}, nil
 	}
 	if len(fields) >= 1 && strings.EqualFold(fields[0], "REJECTION") {
 		if len(fields) != 2 {

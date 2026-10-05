@@ -78,3 +78,15 @@ type DomainRegistrationCache interface {
 	DomainRegistrationRepository
 	MaintainedRepository
 }
+
+// ActivityRepository records aggregateable filtering outcomes and the
+// singleton status of the currently serving process.
+type ActivityRepository interface {
+	AddActivity(context.Context, ActivityEvent) error
+	ActivitySummary(context.Context, ActivityQuery) (ActivitySummary, error)
+	CleanupActivity(context.Context) (int64, error)
+	CountActivity(context.Context) (int, error)
+	ServiceStatus(context.Context) (ServiceStatus, bool, error)
+	SetServiceStatus(context.Context, ServiceStatus) error
+	ClearServiceStatus(context.Context) error
+}

@@ -87,6 +87,12 @@ llama.cpp. Set `endpoint`, `endpoint_type`, `model`, and `api_key` to match the
 service. The selected model must support image input if image analysis is
 enabled.
 
+Set `ai.input_cost_per_million_tokens` and
+`ai.output_cost_per_million_tokens` to the selected model's USD prices if you
+want activity reports to estimate usage costs. Leave both at zero for local or
+free inference. Prices are applied when each scan completes, so later changes
+do not reprice historical activity.
+
 When using a hosted service, review its data-handling policy carefully.
 MilterGuard sends the selected headers, extracted text, links, and qualifying
 inline images used for classification. OpenRouter can restrict requests to
@@ -583,6 +589,7 @@ history is not saved to disk.
 Available commands are:
 
 ```text
+ACTIVITY [day|week|month|year|all]
 WHITELIST ADD sender@example.com recipient@example.com
 WHITELIST DELETE sender@example.com [recipient@example.com|*]
 WHITELIST LIST [recipient@example.com|*] [day|week|month|year|all]
@@ -596,6 +603,8 @@ HELP
 EXIT
 ```
 
+- `ACTIVITY` reports filtering activity, failed AI evaluations, estimated AI
+  cost, and service uptime. It is restricted to administrators.
 - `WHITELIST ADD`, `WHITELIST DELETE`, and `WHITELIST LIST` manage trusted
   correspondent addresses.
 - `REJECTIONS` lists rejected messages, including their rejection IDs and
@@ -611,7 +620,8 @@ EXIT
 - `HELP` displays the command summary. `EXIT`, `QUIT`, or Ctrl-D closes the
   session.
 
-Listing commands default to all local recipients and the previous week.
+Listing and activity commands default to the previous week. Recipient-scoped
+administrator listings default to all local recipients.
 `day`, `week`, `month`, and `year` select activity since the corresponding
 point in the past; `all` removes that additional date filter while retaining
 configured expiry rules. Correspondent and active-IP listings use last activity;
@@ -635,10 +645,11 @@ sudo milterguard --command-mode < commands.txt
 ### Email commands
 
 The optional email command interface supports the same commands and sends the
-results back by email. For ordinary authenticated users, the local recipient
-address is inferred from the authenticated envelope sender, so it is omitted
+results back by email. `ACTIVITY` and IP commands are administrator-only. For
+ordinary authenticated users, the local recipient address is inferred from the
+authenticated envelope sender, so it is omitted
 from `WHITELIST` and `REJECTIONS` commands. Administrators may specify another
-recipient or use `*`, and may use the IP commands.
+recipient or use `*`.
 
 Enable and configure `email_commands` in
 `/etc/milterguard/milterguard.yaml`. Set `recipient` to the local command
@@ -753,8 +764,9 @@ connection-close debug messages are useful for troubleshooting.
 
 ### Data storage and maintenance
 
-Learned correspondents, rejection history, IP reputation, and cached domain
-registration data are stored in `/var/lib/milterguard/milterguard.db`. Stop
+Learned correspondents, rejection history, IP reputation, cached domain
+registration data, and activity history are stored in
+`/var/lib/milterguard/milterguard.db`. Stop
 MilterGuard before copying this SQLite database so the backup is complete and
 consistent. Back it up when moving the learned state to another machine.
 
@@ -763,6 +775,17 @@ periodic removal of expired and excess records and must be at least one minute;
 cleanup also runs at startup and checkpoints SQLite's write-ahead log. Expired
 domain-registration entries are ignored during lookups even before cleanup
 removes them.
+
+Activity history is retained for `activity.expiry`, which defaults to one year.
+Its expiry shares the separate startup and 24-hour rejected-mail maintenance
+cycle, and still runs when saved-message archiving is disabled. Token costs are
+estimates based on reported usage and configured prices. Connection timeouts or
+missing token counts may cause costs to be under-counted.
+
+The activity report's service uptime is elapsed time since the last recorded
+server start. An unclean shutdown can leave that status stale until the next
+server start; it is not a service-liveness check. Use only one serving
+MilterGuard instance with a given database.
 
 Validate configuration changes and test the configured AI endpoint before
 applying them:

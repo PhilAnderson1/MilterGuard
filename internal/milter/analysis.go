@@ -7,13 +7,14 @@ import (
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
 const analysisResponseMargin = 5 * time.Second
 
 type Analyzer interface {
-	Analyze(context.Context, ai.Input) (ai.Decision, error)
+	Analyze(context.Context, ai.Input) (ai.Analysis, error)
 }
 
 type evaluationResult struct {
@@ -23,6 +24,7 @@ type evaluationResult struct {
 	score          float64
 	reasons        []string
 	visionImages   int
+	tokenCost      float64
 	err            error
 	latency        time.Duration
 }
@@ -55,25 +57,28 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		return s.analysisFailure(ctx.Err(), started, mode, aiErrorAction)
 	}
 
-	analysis := msg.BuildAnalysis(s.ai.MaxBodyChars, message.VisionOptions{
+	prepared := msg.BuildAnalysis(s.ai.MaxBodyChars, message.VisionOptions{
 		Mode:         s.ai.VisionMode,
 		MinTextChars: s.ai.VisionMinTextChars,
 		MaxImages:    s.ai.MaxImages,
 		MaxBytes:     s.ai.MaxImageBytes,
 		MaxPixels:    s.ai.MaxImagePixels,
 	})
-	input := ai.Input{Text: analysis.Prompt, Images: make([]ai.Image, 0, len(analysis.Images))}
-	for _, image := range analysis.Images {
+	input := ai.Input{Text: prepared.Prompt, Images: make([]ai.Image, 0, len(prepared.Images))}
+	for _, image := range prepared.Images {
 		input.Images = append(input.Images, ai.Image{MediaType: image.MediaType, Data: image.Data})
 	}
 	s.logAIInput(msg, input, includeAIInput)
-	decision, err := s.analyzer.Analyze(ctx, input)
+	aiResult, err := s.analyzer.Analyze(ctx, input)
+	tokenCost := tokenCost(aiResult.Usage, s.ai)
 	if err != nil {
 		failure := s.analysisFailure(err, started, mode, aiErrorAction)
 		failure.visionImages = len(input.Images)
+		failure.tokenCost = tokenCost
 		return failure
 	}
 
+	decision := aiResult.Decision
 	proposed, selected := s.applyPolicy(decision, mode, rejectScore)
 	return evaluationResult{
 		proposed:       proposed,
@@ -82,8 +87,14 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		score:          decision.Score,
 		reasons:        decision.Reasons,
 		visionImages:   len(input.Images),
+		tokenCost:      tokenCost,
 		latency:        time.Since(started),
 	}
+}
+
+func tokenCost(usage ai.Usage, cfg config.AIConfig) float64 {
+	return float64(usage.InputTokens)/1_000_000*cfg.InputCostPerMillionTokens +
+		float64(usage.OutputTokens)/1_000_000*cfg.OutputCostPerMillionTokens
 }
 
 func (s *analysisService) logAIInput(msg *message.Message, input ai.Input, enabled bool) {

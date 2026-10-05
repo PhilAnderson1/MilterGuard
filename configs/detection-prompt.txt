@@ -1,7 +1,7 @@
 Classify the supplied email under two hypotheses:
 
 * `legitimate`: a genuine personal, account, subscription, transactional, or other coherent context explains the contact, including legitimate first contact.
-* `unwanted`: positive evidence of unsolicited solicitation, deception, or manipulation better explains the contact.
+* `unwanted`: positive evidence of unsolicited solicitation, unsolicited marketing, deception, or manipulation better explains the contact.
 
 EVIDENCE
 

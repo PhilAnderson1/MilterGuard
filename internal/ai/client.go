@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -22,6 +23,19 @@ type Decision struct {
 	Classification string   `json:"classification"`
 	Score          float64  `json:"score"`
 	Reasons        []string `json:"reasons"`
+}
+
+// Usage contains endpoint-reported token counts accumulated across every
+// request attempt in one analysis workflow.
+type Usage struct {
+	InputTokens  uint64
+	OutputTokens uint64
+}
+
+// Analysis keeps usage accounting available even when decision parsing fails.
+type Analysis struct {
+	Decision
+	Usage Usage
 }
 
 type ErrorKind uint8
@@ -100,8 +114,9 @@ func NewClient(cfg config.AIConfig, prompt string, logger ...*slog.Logger) *Clie
 }
 
 // Analyze submits one prepared email, retries eligible transport or decoding
-// failures, and returns only a structurally valid classification decision.
-func (c *Client) Analyze(ctx context.Context, input Input) (Decision, error) {
+// failures, and returns endpoint-reported usage alongside the valid decision
+// or final error.
+func (c *Client) Analyze(ctx context.Context, input Input) (Analysis, error) {
 	userText := emailDataPrefix + input.Text
 	systemText := emailDataInstruction + "\n\n" + c.prompt
 	var userContent any = userText
@@ -136,33 +151,36 @@ func (c *Client) Analyze(ctx context.Context, input Input) (Decision, error) {
 	}
 	b, err := json.Marshal(reqBody)
 	if err != nil {
-		return Decision{}, err
+		return Analysis{}, err
 	}
 	var lastErr error
+	var usage Usage
 	for attempt := 0; attempt <= c.cfg.Retries; attempt++ {
-		decision, retry, err := c.analyzeOnce(ctx, b)
+		analysis, retry, err := c.analyzeOnce(ctx, b)
+		usage.add(analysis.Usage)
 		if err == nil {
-			return decision, nil
+			analysis.Usage = usage
+			return analysis, nil
 		}
 		lastErr = err
 		if !retry || attempt == c.cfg.Retries || ctx.Err() != nil {
-			return Decision{}, err
+			return Analysis{Usage: usage}, err
 		}
 		delay := c.retryDelay(err, attempt+1)
 		c.log.WarnContext(ctx, "retrying AI endpoint request",
 			"attempt", attempt+1, "next_attempt", attempt+2,
 			"max_attempts", c.cfg.Retries+1, "retry_delay", delay.String(), "error", err)
 		if err := waitForRetry(ctx, delay); err != nil {
-			return Decision{}, err
+			return Analysis{Usage: usage}, err
 		}
 	}
-	return Decision{}, lastErr
+	return Analysis{Usage: usage}, lastErr
 }
 
-func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, error) {
+func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Analysis, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.Endpoint, bytes.NewReader(body))
 	if err != nil {
-		return Decision{}, false, err
+		return Analysis{}, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -176,13 +194,14 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, 
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return Decision{}, true, err
+		return Analysis{}, true, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return Decision{}, true, err
+		return Analysis{}, true, err
 	}
+	usage := endpointUsage(raw)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		kind := ErrorHTTP
 		switch resp.StatusCode {
@@ -202,7 +221,7 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, 
 		if kind == ErrorCredentials {
 			httpErr = fmt.Errorf("AI endpoint rejected credentials with HTTP %d", resp.StatusCode)
 		}
-		return Decision{}, retryableHTTPStatus(resp.StatusCode), &EndpointError{
+		return Analysis{Usage: usage}, retryableHTTPStatus(resp.StatusCode), &EndpointError{
 			Kind: kind, StatusCode: resp.StatusCode,
 			RetryAfter: retryAfterDelay(resp.Header.Get("Retry-After"), time.Now()),
 			Err:        httpErr,
@@ -216,10 +235,10 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, 
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return Decision{}, true, &EndpointError{Kind: ErrorResponse, Err: fmt.Errorf("decode endpoint response: %w", err)}
+		return Analysis{Usage: usage}, true, &EndpointError{Kind: ErrorResponse, Err: fmt.Errorf("decode endpoint response: %w", err)}
 	}
 	if len(envelope.Choices) == 0 {
-		return Decision{}, true, &EndpointError{
+		return Analysis{Usage: usage}, true, &EndpointError{
 			Kind: ErrorResponse,
 			Err:  fmt.Errorf("endpoint returned no choices: response_body=%q", responseExcerpt(raw)),
 		}
@@ -232,20 +251,63 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Decision, bool, 
 	dec := json.NewDecoder(strings.NewReader(envelope.Choices[0].Message.Content))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&parsed); err != nil {
-		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: fmt.Errorf("invalid decision JSON: %w", err)}
+		return Analysis{Usage: usage}, true, &EndpointError{Kind: ErrorDecision, Err: fmt.Errorf("invalid decision JSON: %w", err)}
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
-		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: fmt.Errorf("invalid decision JSON: trailing content")}
+		return Analysis{Usage: usage}, true, &EndpointError{Kind: ErrorDecision, Err: fmt.Errorf("invalid decision JSON: trailing content")}
 	}
 	if parsed.Score == nil {
-		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: fmt.Errorf("invalid decision JSON: score is required")}
+		return Analysis{Usage: usage}, true, &EndpointError{Kind: ErrorDecision, Err: fmt.Errorf("invalid decision JSON: score is required")}
 	}
 	d := Decision{Classification: parsed.Classification, Score: *parsed.Score, Reasons: parsed.Reasons}
 	if err := validate(d); err != nil {
-		return Decision{}, true, &EndpointError{Kind: ErrorDecision, Err: err}
+		return Analysis{Usage: usage}, true, &EndpointError{Kind: ErrorDecision, Err: err}
 	}
-	return d, false, nil
+	return Analysis{Decision: d, Usage: usage}, false, nil
+}
+
+func (u *Usage) add(other Usage) {
+	u.InputTokens = saturatingAdd(u.InputTokens, other.InputTokens)
+	u.OutputTokens = saturatingAdd(u.OutputTokens, other.OutputTokens)
+}
+
+func saturatingAdd(left, right uint64) uint64 {
+	if math.MaxUint64-left < right {
+		return math.MaxUint64
+	}
+	return left + right
+}
+
+func endpointUsage(raw []byte) Usage {
+	var envelope struct {
+		Usage struct {
+			PromptTokens     json.RawMessage `json:"prompt_tokens"`
+			CompletionTokens json.RawMessage `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return Usage{}
+	}
+	return Usage{
+		InputTokens:  nonnegativeTokenCount(envelope.Usage.PromptTokens),
+		OutputTokens: nonnegativeTokenCount(envelope.Usage.CompletionTokens),
+	}
+}
+
+func nonnegativeTokenCount(raw json.RawMessage) uint64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var number json.Number
+	if json.Unmarshal(raw, &number) != nil {
+		return 0
+	}
+	value, err := strconv.ParseUint(number.String(), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 const maxEndpointRetryAfter = 30 * time.Second

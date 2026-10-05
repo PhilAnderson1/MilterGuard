@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/mail"
 	"net/netip"
@@ -42,6 +43,7 @@ type Config struct {
 	Milter             MilterConfig             `yaml:"milter"`
 	Authentication     AuthenticationConfig     `yaml:"authentication"`
 	AI                 AIConfig                 `yaml:"ai"`
+	Activity           ActivityConfig           `yaml:"activity"`
 	Filtering          FilteringConfig          `yaml:"filtering"`
 	Attachments        AttachmentsConfig        `yaml:"attachments"`
 	EmailCommands      EmailCommandsConfig      `yaml:"email_commands"`
@@ -57,6 +59,10 @@ type Config struct {
 type PersistenceConfig struct {
 	DatabaseFile    string   `yaml:"database_file"`
 	CleanupInterval Duration `yaml:"cleanup_interval"`
+}
+
+type ActivityConfig struct {
+	Expiry Duration `yaml:"expiry"`
 }
 
 type DomainRegistrationConfig struct {
@@ -117,24 +123,26 @@ type AuthenticationConfig struct {
 	MemoryMessageLimit int      `yaml:"memory_message_limit"`
 }
 type AIConfig struct {
-	Endpoint           string   `yaml:"endpoint"`
-	EndpointType       string   `yaml:"endpoint_type"`
-	APIKey             string   `yaml:"api_key"`
-	APIKeyEnv          string   `yaml:"api_key_env"`
-	Model              string   `yaml:"model"`
-	DisableThinking    bool     `yaml:"disable_thinking"`
-	PromptFile         string   `yaml:"prompt_file"`
-	Timeout            Duration `yaml:"timeout"`
-	Retries            int      `yaml:"retries"`
-	MaxConcurrent      int      `yaml:"max_concurrent"`
-	MaxBodyChars       int      `yaml:"max_body_chars"`
-	VisionMode         string   `yaml:"vision_mode"`
-	VisionMinTextChars int      `yaml:"vision_min_text_chars"`
-	MaxImages          int      `yaml:"max_images"`
-	MaxImageBytes      int64    `yaml:"max_image_bytes"`
-	MaxImagePixels     int64    `yaml:"max_image_pixels"`
-	SiteURL            string   `yaml:"site_url"`
-	AppName            string   `yaml:"app_name"`
+	Endpoint                   string   `yaml:"endpoint"`
+	EndpointType               string   `yaml:"endpoint_type"`
+	APIKey                     string   `yaml:"api_key"`
+	APIKeyEnv                  string   `yaml:"api_key_env"`
+	Model                      string   `yaml:"model"`
+	DisableThinking            bool     `yaml:"disable_thinking"`
+	PromptFile                 string   `yaml:"prompt_file"`
+	Timeout                    Duration `yaml:"timeout"`
+	Retries                    int      `yaml:"retries"`
+	MaxConcurrent              int      `yaml:"max_concurrent"`
+	MaxBodyChars               int      `yaml:"max_body_chars"`
+	VisionMode                 string   `yaml:"vision_mode"`
+	VisionMinTextChars         int      `yaml:"vision_min_text_chars"`
+	MaxImages                  int      `yaml:"max_images"`
+	MaxImageBytes              int64    `yaml:"max_image_bytes"`
+	MaxImagePixels             int64    `yaml:"max_image_pixels"`
+	SiteURL                    string   `yaml:"site_url"`
+	AppName                    string   `yaml:"app_name"`
+	InputCostPerMillionTokens  float64  `yaml:"input_cost_per_million_tokens"`
+	OutputCostPerMillionTokens float64  `yaml:"output_cost_per_million_tokens"`
 }
 type FilteringConfig struct {
 	RejectScore                      float64  `yaml:"reject_score"`
@@ -251,6 +259,7 @@ func defaults() Config {
 			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000,
 			SiteURL: "https://github.com/PhilAnderson1/MilterGuard", AppName: "MilterGuard",
 		},
+		Activity: ActivityConfig{Expiry: Duration(365 * 24 * time.Hour)},
 		Attachments: AttachmentsConfig{
 			BlockExecutables: true, AddIPReputationStrike: false,
 			BlockedExtensions: []string{"exe", "com", "scr", "pif", "bat", "cmd", "ps1", "vbs", "js", "jse", "msi", "dll", "jar", "lnk", "iso", "7z", "rar"},
@@ -382,6 +391,13 @@ func (c Config) Validate() error {
 	}
 	if c.AI.Retries < 0 || c.AI.Retries > 10 {
 		return fmt.Errorf("ai.retries must be between 0 and 10")
+	}
+	if math.IsNaN(c.AI.InputCostPerMillionTokens) || math.IsInf(c.AI.InputCostPerMillionTokens, 0) || c.AI.InputCostPerMillionTokens < 0 ||
+		math.IsNaN(c.AI.OutputCostPerMillionTokens) || math.IsInf(c.AI.OutputCostPerMillionTokens, 0) || c.AI.OutputCostPerMillionTokens < 0 {
+		return fmt.Errorf("ai token prices must be finite and nonnegative")
+	}
+	if c.Activity.Expiry.Value() <= 0 {
+		return fmt.Errorf("activity.expiry must be positive")
 	}
 	if c.AI.VisionMode != "off" && c.AI.VisionMode != "fallback" && c.AI.VisionMode != "always" {
 		return fmt.Errorf("ai.vision_mode must be off, fallback, or always")

@@ -68,6 +68,10 @@ func newIPRepository(cfg config.IPReputationConfig, db *sqlitedb.Store, now func
 	}, log)
 }
 
+func newActivityRepository(cfg config.ActivityConfig, db *sqlitedb.Store, now func() time.Time) stores.ActivityRepository {
+	return storesqlite.NewActivity(db, storesqlite.ActivityOptions{Expiry: cfg.Expiry.Value(), Now: now})
+}
+
 func emailAddressDomain(address string) string {
 	return mailaddr.Domain(address)
 }

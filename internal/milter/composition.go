@@ -42,7 +42,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	var database *sqlitedb.Store
 	var databaseErr error
 	if correspondentFeaturesEnabled(cfg.Correspondents) || ipReputationFeaturesEnabled(cfg.IPReputation) ||
-		rejectionHistoryEnabled(cfg.RejectionHistory) || domainRegistrationEnabled(cfg.DomainRegistration) {
+		rejectionHistoryEnabled(cfg.RejectionHistory) || domainRegistrationEnabled(cfg.DomainRegistration) || cfg.Activity.Expiry.Value() > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), databaseOpenTimeout)
 		database, databaseErr = sqlitedb.Open(ctx, cfg.Persistence.DatabaseFile, sqlitedb.DefaultOptions())
 		cancel()
@@ -52,6 +52,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	correspondents := newCorrespondentRepository(cfg.Correspondents, database, time.Now, log)
 	rejections := newRejectionRepository(cfg.RejectionHistory, database, time.Now, log)
 	domainCache := newDomainRepository(cfg.DomainRegistration, database, time.Now)
+	activityRepository := newActivityRepository(cfg.Activity, database, time.Now)
 	ipReputation := newIPReputationStore(cfg.IPReputation, ipRepository, log)
 	var domainLookup domainRegistrationLookup
 	if domainRegistrationEnabled(cfg.DomainRegistration) {
@@ -60,7 +61,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	domainRegistration := newDomainRegistrationStore(cfg.DomainRegistration, domainCache, domainLookup, log)
 
 	archive := newRejectedMailArchive(cfg.RejectionHistory, log)
-	commands := commandProcessor(cfg, correspondents, rejections, ipReputation, archive, systemdns.NewResolver(), log)
+	commands := commandProcessor(cfg, correspondents, rejections, ipReputation, activityRepository, archive, systemdns.NewResolver(), log)
 
 	var attachmentScanner *attachment.Scanner
 	if cfg.Attachments.BlockExecutables {
@@ -82,6 +83,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		domainLookupTimeout: cfg.DomainRegistration.Timeout.Value(), authenticationTimeout: authenticationTimeout,
 		milterTimeout: cfg.Milter.Timeout.Value(),
 	}
+	activity := &activityService{repository: activityRepository, log: log}
 	policy := &messagePolicyService{
 		correspondentCfg: cfg.Correspondents, log: log,
 		ipReputation: ipReputation, correspondents: correspondents, rejectionHistory: rejections,
@@ -114,7 +116,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 			timeout: cfg.Milter.Timeout.Value(), maxMessageSize: cfg.Milter.MaxMessageSize,
 			progressInterval: defaultMilterProgressInterval, exactStorage: cfg.Authentication.MessageStorage,
 		},
-		analysis: analysis, policy: policy, attachments: attachments, commands: emailCommands,
+		analysis: analysis, activity: activity, policy: policy, attachments: attachments, commands: emailCommands,
 		dns:                &connectionDNSService{resolver: systemdns.NewResolver(), timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
 		authenticationMode: authenticationMode,
 		authentication:     authentication,
@@ -123,7 +125,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	}
 	maintenance := &maintenanceService{
 		ip: ipRepository, correspondents: correspondents, rejections: rejections,
-		domains: domainRegistration, database: database, archive: archive,
+		domains: domainRegistration, database: database, archive: archive, activity: activityRepository,
 		cleanupInterval: cfg.Persistence.CleanupInterval.Value(), log: log,
 	}
 	return runtimeComponents{sessions: sessions, maintenance: maintenance, database: database, err: errors.Join(tokenErr, databaseErr, authenticationErr)}

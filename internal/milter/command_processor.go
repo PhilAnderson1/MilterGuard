@@ -23,12 +23,13 @@ import (
 // and optional reverse-DNS enrichment shared by terminal and email commands.
 func commandProcessor(cfg config.Config, correspondents stores.CorrespondentAdminRepository,
 	rejections stores.RejectionRepository, ipReputation stores.IPReputationRepository,
+	activity stores.ActivityRepository,
 	archive *rejectedmail.Archive, resolver dnsResolver, log *slog.Logger) *admincmd.Processor {
 	return admincmd.New(admincmd.Dependencies{
-		Correspondents: correspondents, Rejections: rejections, IPReputation: ipReputation,
+		Correspondents: correspondents, Rejections: rejections, IPReputation: ipReputation, Activity: activity,
 		MessageSource: commandArchiveSource{archive}, IPResolver: &commandIPResolver{resolver: resolver,
 			timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
-		MaxMessageSize: cfg.Milter.MaxMessageSize, DatabaseTimeout: commandDatabaseTimeout,
+		MaxMessageSize: cfg.Milter.MaxMessageSize, DatabaseTimeout: commandDatabaseTimeout, ActivityExpiry: cfg.Activity.Expiry.Value(),
 		Logger: log,
 	})
 }
@@ -67,8 +68,9 @@ func OpenCommandProcessor(cfg config.Config, log *slog.Logger) (*admincmd.Proces
 	rejections := newRejectionRepository(cfg.RejectionHistory, database, time.Now, log)
 	ipRepository := newIPRepository(cfg.IPReputation, database, time.Now, log)
 	ipPolicy := newIPReputationStore(cfg.IPReputation, ipRepository, log)
+	activity := newActivityRepository(cfg.Activity, database, time.Now)
 	archive := newRejectedMailArchive(cfg.RejectionHistory, log)
-	return commandProcessor(cfg, correspondents, rejections, ipPolicy, archive, systemdns.NewResolver(), log), closeProcessor, nil
+	return commandProcessor(cfg, correspondents, rejections, ipPolicy, activity, archive, systemdns.NewResolver(), log), closeProcessor, nil
 }
 
 type commandIPResolver struct {

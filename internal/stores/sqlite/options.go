@@ -39,6 +39,11 @@ type DomainOptions struct {
 	Now         func() time.Time
 }
 
+type ActivityOptions struct {
+	Expiry time.Duration
+	Now    func() time.Time
+}
+
 func clock(value func() time.Time) func() time.Time {
 	if value != nil {
 		return value

@@ -84,6 +84,28 @@ type messageSourceStub struct {
 	err      error
 }
 
+type activityRepositoryStub struct {
+	query   stores.ActivityQuery
+	summary stores.ActivitySummary
+	status  stores.ServiceStatus
+	found   bool
+}
+
+func (*activityRepositoryStub) AddActivity(context.Context, stores.ActivityEvent) error { return nil }
+func (r *activityRepositoryStub) ActivitySummary(_ context.Context, query stores.ActivityQuery) (stores.ActivitySummary, error) {
+	r.query = query
+	return r.summary, nil
+}
+func (*activityRepositoryStub) CleanupActivity(context.Context) (int64, error) { return 0, nil }
+func (*activityRepositoryStub) CountActivity(context.Context) (int, error)     { return 0, nil }
+func (r *activityRepositoryStub) ServiceStatus(context.Context) (stores.ServiceStatus, bool, error) {
+	return r.status, r.found, nil
+}
+func (*activityRepositoryStub) SetServiceStatus(context.Context, stores.ServiceStatus) error {
+	return nil
+}
+func (*activityRepositoryStub) ClearServiceStatus(context.Context) error { return nil }
+
 func (s *messageSourceStub) ReadWithRecordID(uint64, time.Time, int64) (ArchivedMessage, error) {
 	s.reads++
 	return ArchivedMessage{Contents: s.contents, Path: "/archive/2026/09/20/7.eml"}, s.err
@@ -104,6 +126,33 @@ func TestExecuteBuildsScopedQueries(t *testing.T) {
 	}
 	if !repository.getScope.All || repository.getScope.Address != "" {
 		t.Fatalf("admin scope=%+v", repository.getScope)
+	}
+}
+
+func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	repository := &activityRepositoryStub{
+		summary: stores.ActivitySummary{ScanTotal: 2, ScanAccepted: 2, AIEvaluationsFailed: 1, IPRejections: 1, TokenCost: .25},
+		status:  stores.ServiceStatus{StartedAt: now.Add(-time.Hour), Mode: stores.ServiceModeAccept}, found: true,
+	}
+	p := New(Dependencies{Activity: repository, ActivityExpiry: 365 * 24 * time.Hour, Now: func() time.Time { return now }})
+	response, err := p.ExecuteLine(context.Background(), "ACTIVITY", Actor{Administrator: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repository.query.Since.Equal(now.Add(-7*24*time.Hour)) || !repository.query.Before.Equal(now) {
+		t.Fatalf("activity query = %+v", repository.query)
+	}
+	for _, want := range []string{
+		"MilterGuard is running in accept mode", "This period also contains rejections recorded in enforce mode",
+		"Activity: past week", "Retention: 365 days",
+		"Service uptime: 1 hour", "Scan total: 2", "AI evaluations failed: 1",
+		"IP blacklist rejections: 1",
+		"Estimated total token cost: USD 0.2500", "Average cost per message scanned (estimated): USD 0.125000",
+	} {
+		if !strings.Contains(response.Text, want) {
+			t.Errorf("activity response missing %q:\n%s", want, response.Text)
+		}
 	}
 }
 
