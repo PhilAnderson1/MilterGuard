@@ -365,7 +365,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 			"aligned_dkim", inbound.alignedDKIM)
 	}
 	if inbound.bypassAI {
-		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.alignedDKIM,
+		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.alignedDKIM || inbound.alignedSPF,
 			ss.knownCorrespondentLogAttrs()...)
 	}
 	result, progressErr := ss.evaluateWithProgress(ctx, inbound)

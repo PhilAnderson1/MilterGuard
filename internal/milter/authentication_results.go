@@ -4,16 +4,23 @@ import "github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 
 type senderAuthenticationEvidence struct {
 	DKIMAligned  bool
+	SPFAligned   bool
 	DMARCAligned bool
 }
 
 func (e senderAuthenticationEvidence) anyAligned() bool {
-	return e.DKIMAligned || e.DMARCAligned
+	return e.DKIMAligned || e.SPFAligned || e.DMARCAligned
+
+}
+
+func (e senderAuthenticationEvidence) spfOrDKIMAligned() bool {
+	return e.DKIMAligned || e.SPFAligned
 }
 
 func alignedSenderAuthentication(authentication mailauth.Evidence) senderAuthenticationEvidence {
 	return senderAuthenticationEvidence{
-		DKIMAligned: authentication.DKIMAligned, DMARCAligned: authentication.DMARCAligned,
+		DKIMAligned: authentication.DKIMAligned, SPFAligned: authentication.SPFAligned,
+		DMARCAligned: authentication.DMARCAligned,
 	}
 }
 

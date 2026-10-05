@@ -949,7 +949,7 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Correspondents.UseAllowlist = true
 				cfg.Correspondents.BypassAI = true
-				cfg.Correspondents.RequireDKIMForBypass = true
+				cfg.Correspondents.RequireSPFOrDKIMForBypass = true
 				cfg.Correspondents.TrustedAuthservIDs = nil
 			},
 			wantError: "requires trusted_authserv_ids",

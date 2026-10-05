@@ -306,8 +306,8 @@ func TestVerifyMissingExactMessageCannotProduceDKIMOrDMARCPass(t *testing.T) {
 			t.Fatalf("%s unavailable result = %#v", method, result)
 		}
 	}
-	if evidence.AnyAligned() {
-		t.Fatalf("unavailable exact message produced aligned evidence: %#v", evidence)
+	if !evidence.SPFAligned || evidence.DKIMAligned || evidence.DMARCAligned {
+		t.Fatalf("unavailable exact message produced incorrect alignment evidence: %#v", evidence)
 	}
 }
 

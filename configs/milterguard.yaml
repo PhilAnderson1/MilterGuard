@@ -390,9 +390,9 @@ correspondents:
   # is supplied to the AI as supporting evidence.
   bypass_ai: true
 
-  # Require trusted, aligned DKIM authentication before a known correspondent can
+  # Require a trusted, aligned SPF or DKIM pass before a known correspondent can
   # bypass AI. Disable to permit bypass without authentication.
-  require_dkim_for_bypass: true
+  require_spf_or_dkim_for_bypass: true
 
   # Retention target for relationships. Periodic cleanup removes unpromoted and
   # then oldest records above this number.

@@ -128,11 +128,25 @@ func TestHeaderVerifierProducesSharedAlignmentEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !evidence.DKIMAligned || !evidence.DMARCAligned || !evidence.AnyAligned() {
+	if !evidence.DKIMAligned || evidence.SPFAligned || !evidence.DMARCAligned || !evidence.AnyAligned() {
 		t.Fatalf("alignment evidence = %#v", evidence)
 	}
 	if len(evidence.Results) != 3 || !evidence.Results[0].Aligned || evidence.Results[1].Aligned || !evidence.Results[2].Aligned {
 		t.Fatalf("per-result alignment = %#v", evidence.Results)
+	}
+}
+
+func TestHeaderVerifierRecognizesAlignedSPF(t *testing.T) {
+	verifier := HeaderVerifier{}
+	evidence, err := verifier.Verify(t.Context(), Transaction{
+		AuthenticationResults: []string{`mx.example; spf=pass smtp.mailfrom=bounce.example.com`},
+		TrustedAuthservIDs:    []string{"mx.example"}, VisibleFromDomain: "news.example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !evidence.SPFAligned || !evidence.AnyAligned() {
+		t.Fatalf("alignment evidence = %#v", evidence)
 	}
 }
 

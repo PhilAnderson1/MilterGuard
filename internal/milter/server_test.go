@@ -2003,27 +2003,29 @@ func TestMultipleFromHeadersCannotBypassOrTeachSenderTrust(t *testing.T) {
 
 func TestKnownCorrespondentBypassAuthenticationPolicy(t *testing.T) {
 	for _, test := range []struct {
-		name            string
-		authentication  string
-		secondRecipient string
-		recipientMatch  string
-		requireDKIM     bool
-		wantAICalls     int32
+		name             string
+		authentication   string
+		secondRecipient  string
+		recipientMatch   string
+		requireSPFOrDKIM bool
+		wantAICalls      int32
 	}{
-		{name: "trusted aligned DKIM required", authentication: "nl.invades.net; dkim=pass header.d=example.com", recipientMatch: "all", requireDKIM: true, wantAICalls: 0},
-		{name: "untrusted DKIM required", authentication: "attacker.example; dkim=pass header.d=example.com", recipientMatch: "all", requireDKIM: true, wantAICalls: 1},
-		{name: "DMARC is insufficient when DKIM required", authentication: "nl.invades.net; dmarc=pass header.from=example.com", recipientMatch: "all", requireDKIM: true, wantAICalls: 1},
-		{name: "no authentication required", authentication: "", recipientMatch: "all", requireDKIM: false, wantAICalls: 0},
-		{name: "partial match requiring all", authentication: "", secondRecipient: "other@invades.net", recipientMatch: "all", requireDKIM: false, wantAICalls: 1},
-		{name: "partial match requiring any", authentication: "", secondRecipient: "other@invades.net", recipientMatch: "any", requireDKIM: false, wantAICalls: 0},
+		{name: "trusted aligned DKIM", authentication: "nl.invades.net; dkim=pass header.d=example.com", recipientMatch: "all", requireSPFOrDKIM: true, wantAICalls: 0},
+		{name: "trusted aligned SPF", authentication: "nl.invades.net; spf=pass smtp.mailfrom=bounce.example.com", recipientMatch: "all", requireSPFOrDKIM: true, wantAICalls: 0},
+		{name: "untrusted DKIM", authentication: "attacker.example; dkim=pass header.d=example.com", recipientMatch: "all", requireSPFOrDKIM: true, wantAICalls: 1},
+		{name: "unaligned SPF", authentication: "nl.invades.net; spf=pass smtp.mailfrom=attacker.example", recipientMatch: "all", requireSPFOrDKIM: true, wantAICalls: 1},
+		{name: "DMARC alone is insufficient", authentication: "nl.invades.net; dmarc=pass header.from=example.com", recipientMatch: "all", requireSPFOrDKIM: true, wantAICalls: 1},
+		{name: "no authentication required", authentication: "", recipientMatch: "all", requireSPFOrDKIM: false, wantAICalls: 0},
+		{name: "partial match requiring all", authentication: "", secondRecipient: "other@invades.net", recipientMatch: "all", requireSPFOrDKIM: false, wantAICalls: 1},
+		{name: "partial match requiring any", authentication: "", secondRecipient: "other@invades.net", recipientMatch: "any", requireSPFOrDKIM: false, wantAICalls: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 			server, conn, done := testServer(t, analyzer)
 			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: test.recipientMatch, BypassAI: true,
-				RequireDKIMForBypass: test.requireDKIM,
-				MaxEntries:           100, TrustedAuthservIDs: []string{"nl.invades.net"},
+				RequireSPFOrDKIMForBypass: test.requireSPFOrDKIM,
+				MaxEntries:                100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
 			setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
 			if err := server.sessions.policy.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
@@ -2074,7 +2076,7 @@ func TestMTAHostnameMacroExpandsTrustedAuthenticationService(t *testing.T) {
 			server, conn, done := testServer(t, analyzer)
 			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-				BypassAI: true, RequireDKIMForBypass: true,
+				BypassAI: true, RequireSPFOrDKIMForBypass: true,
 				MaxEntries: 100, TrustedAuthservIDs: []string{config.MTAHostnameAuthservID},
 			}
 			setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
@@ -2111,24 +2113,25 @@ func TestMTAHostnameMacroExpandsTrustedAuthenticationService(t *testing.T) {
 	}
 }
 
-func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
+func TestBypassedInboundActivityRequiresTrustedSPFOrDKIM(t *testing.T) {
 	for _, test := range []struct {
-		name           string
-		authentication string
-		requireDKIM    bool
-		allowedDomain  string
-		wantRefresh    bool
+		name             string
+		authentication   string
+		requireSPFOrDKIM bool
+		allowedDomain    string
+		wantRefresh      bool
 	}{
-		{name: "unauthenticated bypass is not refreshed", requireDKIM: false},
-		{name: "trusted DKIM bypass is refreshed", authentication: "nl.invades.net; dkim=pass header.d=example.com", requireDKIM: true, wantRefresh: true},
-		{name: "trusted sender-domain bypass refreshes known correspondent", authentication: "nl.invades.net; dkim=pass header.d=example.com", requireDKIM: true, allowedDomain: "example.com", wantRefresh: true},
+		{name: "unauthenticated bypass is not refreshed", requireSPFOrDKIM: false},
+		{name: "trusted DKIM bypass is refreshed", authentication: "nl.invades.net; dkim=pass header.d=example.com", requireSPFOrDKIM: true, wantRefresh: true},
+		{name: "trusted SPF bypass is refreshed", authentication: "nl.invades.net; spf=pass smtp.mailfrom=example.com", requireSPFOrDKIM: true, wantRefresh: true},
+		{name: "trusted sender-domain bypass refreshes known correspondent", authentication: "nl.invades.net; dkim=pass header.d=example.com", requireSPFOrDKIM: true, allowedDomain: "example.com", wantRefresh: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 			server, conn, done := testServer(t, analyzer)
 			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-				BypassAI: true, RequireDKIMForBypass: test.requireDKIM,
+				BypassAI: true, RequireSPFOrDKIMForBypass: test.requireSPFOrDKIM,
 				MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
 			setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))

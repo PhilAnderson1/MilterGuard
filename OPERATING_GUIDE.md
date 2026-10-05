@@ -366,7 +366,8 @@ endpoint:
   `filtering.scan_authenticated` is `false`, as it is in the supplied
   configuration so that outbound emails can bypass scanning.
 - A sender in the correspondent allowlist can be accepted without AI analysis
-  when the configured authentication requirements are met.
+  when the configured authentication requirements are met. By default, this
+  requires an aligned SPF or DKIM pass for the visible `From:` domain.
 - A visible `From:` domain in the trusted sender-domain allowlist can bypass AI
   analysis when its configured authentication requirements—normally trusted,
   aligned DKIM—are met.
@@ -526,6 +527,8 @@ Authenticated outbound mail is not scanned by default. MilterGuard uses
 accepted outbound mail to learn which external addresses each local user
 corresponds with. These addresses are immediately added to the allowlist and can
 bypass future scanning when the configured authentication requirements are met.
+The supplied configuration requires either SPF or DKIM to pass and align with
+the visible `From:` domain before a known correspondent bypasses scanning.
 Authenticated submission client addresses are never blocked or otherwise
 modified by IP reputation, even when authenticated mail scanning is enabled.
 MilterGuard can also learn inbound senders that repeatedly receive a

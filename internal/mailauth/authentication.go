@@ -100,6 +100,7 @@ type Result struct {
 type Evidence struct {
 	Results       []Result
 	DKIMAligned   bool
+	SPFAligned    bool
 	DMARCAligned  bool
 	VisibleDomain string
 }
@@ -152,6 +153,8 @@ func NewEvidence(results []Result, visibleDomain string) Evidence {
 		switch result.Method {
 		case MethodDKIM:
 			evidence.DKIMAligned = evidence.DKIMAligned || result.Aligned
+		case MethodSPF:
+			evidence.SPFAligned = evidence.SPFAligned || result.Aligned
 		case MethodDMARC:
 			evidence.DMARCAligned = evidence.DMARCAligned || result.Aligned
 		}
@@ -159,8 +162,8 @@ func NewEvidence(results []Result, visibleDomain string) Evidence {
 	return evidence
 }
 
-// AnyAligned reports whether DKIM or DMARC authenticated the visible domain.
-func (e Evidence) AnyAligned() bool { return e.DKIMAligned || e.DMARCAligned }
+// AnyAligned reports whether DKIM, SPF or DMARC authenticated the visible domain.
+func (e Evidence) AnyAligned() bool { return e.DKIMAligned || e.SPFAligned || e.DMARCAligned }
 
 // Input contains untrusted message headers and the local authentication
 // service identifiers that are permitted to have produced trustworthy results.

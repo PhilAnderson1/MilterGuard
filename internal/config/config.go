@@ -185,7 +185,7 @@ type CorrespondentsConfig struct {
 	Scope                        string   `yaml:"scope"`
 	RecipientMatch               string   `yaml:"recipient_match"`
 	BypassAI                     bool     `yaml:"bypass_ai"`
-	RequireDKIMForBypass         bool     `yaml:"require_dkim_for_bypass"`
+	RequireSPFOrDKIMForBypass    bool     `yaml:"require_spf_or_dkim_for_bypass"`
 	TrustedAuthservIDs           []string `yaml:"trusted_authserv_ids"`
 	MaxEntries                   int      `yaml:"max_entries"`
 	StaleAfter                   Duration `yaml:"stale_after"`
@@ -305,7 +305,7 @@ func defaults() Config {
 			LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .95, LegitimateSenderRequireDKIM: true,
 			UseAllowlist: true,
 			Scope:        "per_sender", RecipientMatch: "all",
-			BypassAI: true, RequireDKIMForBypass: true,
+			BypassAI: true, RequireSPFOrDKIMForBypass: true,
 			TrustedAuthservIDs: []string{MTAHostnameAuthservID}, MaxEntries: 10000,
 			StaleAfter: Duration(365 * 24 * time.Hour),
 		},
@@ -576,8 +576,8 @@ func (c Config) Validate() error {
 	if allowlist.BypassAI && !allowlist.UseAllowlist {
 		return fmt.Errorf("correspondents.bypass_ai requires use_allowlist")
 	}
-	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && allowlist.BypassAI && allowlist.RequireDKIMForBypass && len(allowlist.TrustedAuthservIDs) == 0 {
-		return fmt.Errorf("correspondents.require_dkim_for_bypass requires trusted_authserv_ids")
+	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && allowlist.BypassAI && allowlist.RequireSPFOrDKIMForBypass && len(allowlist.TrustedAuthservIDs) == 0 {
+		return fmt.Errorf("correspondents.require_spf_or_dkim_for_bypass requires trusted_authserv_ids")
 	}
 	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && allowlist.LearnLegitimateSenders && allowlist.LegitimateSenderRequireDKIM && len(allowlist.TrustedAuthservIDs) == 0 {
 		return fmt.Errorf("correspondents.legitimate_sender_require_dkim requires trusted_authserv_ids when legitimate sender learning is enabled")

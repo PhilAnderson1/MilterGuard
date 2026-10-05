@@ -15,6 +15,7 @@ const postDecisionUpdateTimeout = 5 * time.Second
 type inboundEvidence struct {
 	recipientsComplete  bool
 	alignedDKIM         bool
+	alignedSPF          bool
 	knownCorrespondent  bool
 	bypassAI            bool
 	allowedSenderDomain string
@@ -35,6 +36,7 @@ func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, curre
 	}
 	senderAuthentication := alignedSenderAuthentication(authentication)
 	evidence.alignedDKIM = senderAuthentication.DKIMAligned
+	evidence.alignedSPF = senderAuthentication.SPFAligned
 	if senderAuthentication.anyAligned() {
 		evidence.authenticatedDomain = current.visibleSenderDomain
 	}
@@ -58,7 +60,7 @@ func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, curre
 		Enabled: true, Known: known, Scope: s.correspondentCfg.Scope,
 		AuthenticationAligned: known && senderAuthentication.anyAligned(),
 	}
-	bypassAuthentication := !s.correspondentCfg.RequireDKIMForBypass || senderAuthentication.DKIMAligned
+	bypassAuthentication := !s.correspondentCfg.RequireSPFOrDKIMForBypass || senderAuthentication.spfOrDKIMAligned()
 	evidence.bypassAI = s.correspondentCfg.BypassAI && evidence.recipientsComplete && known && bypassAuthentication
 	return evidence
 }
