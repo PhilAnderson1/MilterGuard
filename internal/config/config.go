@@ -189,7 +189,6 @@ type CorrespondentsConfig struct {
 	TrustedAuthservIDs           []string `yaml:"trusted_authserv_ids"`
 	MaxEntries                   int      `yaml:"max_entries"`
 	StaleAfter                   Duration `yaml:"stale_after"`
-	ActivityUpdateInterval       Duration `yaml:"activity_update_interval"`
 }
 
 // Load applies defaults, strictly decodes one YAML file, and validates the
@@ -308,7 +307,7 @@ func defaults() Config {
 			Scope:        "per_sender", RecipientMatch: "all",
 			BypassAI: true, RequireDKIMForBypass: true,
 			TrustedAuthservIDs: []string{MTAHostnameAuthservID}, MaxEntries: 10000,
-			StaleAfter: Duration(365 * 24 * time.Hour), ActivityUpdateInterval: Duration(24 * time.Hour),
+			StaleAfter: Duration(365 * 24 * time.Hour),
 		},
 		Logging: LoggingConfig{Level: "info", IncludeSubject: true},
 	}
@@ -573,9 +572,6 @@ func (c Config) Validate() error {
 	}
 	if allowlist.StaleAfter.Value() < 0 {
 		return fmt.Errorf("correspondents.stale_after must not be negative")
-	}
-	if allowlist.ActivityUpdateInterval.Value() < 0 {
-		return fmt.Errorf("correspondents.activity_update_interval must not be negative")
 	}
 	if allowlist.BypassAI && !allowlist.UseAllowlist {
 		return fmt.Errorf("correspondents.bypass_ai requires use_allowlist")

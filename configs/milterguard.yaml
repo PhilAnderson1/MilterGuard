@@ -402,10 +402,6 @@ correspondents:
   # this duration. 0s disables age-based expiry.
   stale_after: 8760h
 
-  # Minimum interval between database activity updates for each relationship.
-  # Set to 0s to record every qualifying activity.
-  activity_update_interval: 24h
-
   # Used only when authentication.mode is trusted_headers. Identifies
   # Authentication-Results and Received-SPF headers added by your own mail
   # server. $mta_hostname automatically uses your MTA hostname. Postfix must

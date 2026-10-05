@@ -78,9 +78,8 @@ func (r *correspondentRepository) LearnAuthenticated(ctx context.Context, localA
 		args = []any{unixMillis(now)}
 		args = append(args, targetArgs...)
 		args = append(args, stores.CorrespondentKindManual)
-		args = append(args, r.activityDueArgs(now)...)
 		if _, err := tx.ExecContext(ctx, `UPDATE correspondents SET last_activity_at_ms=?
-			WHERE `+target+` AND whitelist_type=?`+r.activityDueSQL(), args...); err != nil {
+			WHERE `+target+` AND whitelist_type=?`, args...); err != nil {
 			return err
 		}
 		result, err := tx.ExecContext(ctx, insertQuery, insertArgs...)
@@ -111,10 +110,9 @@ func (r *correspondentRepository) TouchInbound(ctx context.Context, corresponden
 	}
 	now := r.now().UTC()
 	query := `UPDATE correspondents SET last_activity_at_ms = ?
-		WHERE correspondent = ? AND ` + r.qualifiedSQL() + r.notStaleSQL() + r.activityDueSQL()
+		WHERE correspondent = ? AND ` + r.qualifiedSQL() + r.notStaleSQL()
 	args := []any{unixMillis(now), correspondent, r.options.LegitimateSenderMinMessages}
 	args = append(args, r.notStaleArgs(now)...)
-	args = append(args, r.activityDueArgs(now)...)
 	if r.options.Scope == "per_sender" {
 		addresses := sortedSet(normalizedAddressSet(recipients, maxCorrespondentRecipients))
 		if len(addresses) == 0 {
@@ -235,9 +233,8 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 		args := []any{unixMillis(now)}
 		args = append(args, targetArgs...)
 		args = append(args, r.options.LegitimateSenderMinMessages, unixMillis(now))
-		args = append(args, r.activityDueArgs(now)...)
 		if _, err := tx.ExecContext(ctx, `UPDATE correspondents SET last_activity_at_ms=?
-			WHERE `+target+` AND `+r.qualifiedSQL()+` AND last_activity_at_ms<>?`+r.activityDueSQL(), args...); err != nil {
+			WHERE `+target+` AND `+r.qualifiedSQL()+` AND last_activity_at_ms<>?`, args...); err != nil {
 			return err
 		}
 		if qualifying {
@@ -403,20 +400,6 @@ func (r *correspondentRepository) staleCutoff(now time.Time) (int64, bool) {
 		return 0, false
 	}
 	return unixMillis(now.Add(-r.options.StaleAfter)), true
-}
-
-func (r *correspondentRepository) activityDueSQL() string {
-	if r.options.ActivityUpdateInterval <= 0 {
-		return ""
-	}
-	return " AND last_activity_at_ms <= ?"
-}
-
-func (r *correspondentRepository) activityDueArgs(now time.Time) []any {
-	if r.options.ActivityUpdateInterval <= 0 {
-		return nil
-	}
-	return []any{unixMillis(now.Add(-r.options.ActivityUpdateInterval))}
 }
 
 func scanCorrespondent(row rowScanner) (stores.Correspondent, error) {

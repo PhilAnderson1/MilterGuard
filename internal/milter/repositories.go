@@ -35,7 +35,6 @@ func newCorrespondentRepository(cfg config.CorrespondentsConfig, db *sqlitedb.St
 		Scope:                        cfg.Scope,
 		MaxEntries:                   cfg.MaxEntries,
 		StaleAfter:                   cfg.StaleAfter.Value(),
-		ActivityUpdateInterval:       cfg.ActivityUpdateInterval.Value(),
 		LegitimateSenderMinScore:     cfg.LegitimateSenderMinScore,
 		LegitimateSenderMinMessages:  cfg.LegitimateSenderMinMessages,
 		LegitimateSenderRequireDKIM:  cfg.LegitimateSenderRequireDKIM,

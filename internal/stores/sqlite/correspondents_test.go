@@ -400,25 +400,16 @@ func TestCorrespondentCleanupRemovesOnlyStaleRelationships(t *testing.T) {
 	}
 }
 
-func TestCorrespondentActivityUpdatesAreThrottled(t *testing.T) {
+func TestCorrespondentActivityUpdatesImmediately(t *testing.T) {
 	store := newTestCorrespondentStore(t, CorrespondentOptions{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", MaxEntries: 10,
-		ActivityUpdateInterval: 24 * time.Hour,
 	}, nil)
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
 	if err := store.learn(context.Background(), "owner@example.com", []string{"alice@example.net"}); err != nil {
 		t.Fatal(err)
 	}
-	initial := store.snapshot(t)["owner@example.com\x00alice@example.net"].LastActivityAt
 	now = now.Add(time.Hour)
-	if err := store.touchInbound(context.Background(), "alice@example.net", []string{"owner@example.com"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := store.snapshot(t)["owner@example.com\x00alice@example.net"].LastActivityAt; !got.Equal(initial) {
-		t.Fatalf("activity updated before interval: %s", got)
-	}
-	now = now.Add(24 * time.Hour)
 	if err := store.touchInbound(context.Background(), "alice@example.net", []string{"owner@example.com"}); err != nil {
 		t.Fatal(err)
 	}
@@ -433,14 +424,12 @@ func TestCorrespondentOutboundBatchPreservesRelationshipRules(t *testing.T) {
 		UseAllowlist:                 true,
 		Scope:                        "per_sender",
 		LegitimateSenderMinMessages:  3,
-		ActivityUpdateInterval:       24 * time.Hour,
 		StaleAfter:                   48 * time.Hour,
 		MaxEntries:                   20,
 	}, nil)
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
-	manualActivity := now.Add(-time.Hour)
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "manual@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: manualActivity})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "manual@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
 	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "candidate@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
 	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "stale@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-96 * time.Hour), LastActivityAt: now.Add(-49 * time.Hour)})
 
@@ -454,7 +443,7 @@ func TestCorrespondentOutboundBatchPreservesRelationshipRules(t *testing.T) {
 		t.Fatalf("batch learned %d relationships, want 4", len(records))
 	}
 	manual := records["owner@example.com\x00manual@example.net"]
-	if manual.WhitelistType != whitelistManual || !manual.LastActivityAt.Equal(manualActivity) {
+	if manual.WhitelistType != whitelistManual || !manual.LastActivityAt.Equal(now) {
 		t.Fatalf("manual relationship changed unexpectedly: %+v", manual)
 	}
 	for _, correspondent := range []string{"candidate@example.net", "stale@example.net", "new@example.net"} {
@@ -525,7 +514,6 @@ func TestCorrespondentInboundBatchPreservesRelationshipRules(t *testing.T) {
 		Scope:                       "per_sender",
 		LegitimateSenderMinMessages: 3,
 		LegitimateSenderMinScore:    .9,
-		ActivityUpdateInterval:      24 * time.Hour,
 		StaleAfter:                  48 * time.Hour,
 		MaxEntries:                  20,
 	}, nil)

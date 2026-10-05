@@ -148,7 +148,8 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 		"Activity: past week", "Retention: 365 days",
 		"Service uptime: 1 hour", "Scan total: 2", "AI evaluations failed: 1",
 		"IP blacklist rejections: 1",
-		"Estimated total token cost: USD 0.2500", "Average cost per message scanned (estimated): USD 0.125000",
+		"Token costs are estimates based on endpoint-reported usage and configured prices.",
+		"Total token cost: USD 0.2500", "Average cost per message scanned: USD 0.125000",
 	} {
 		if !strings.Contains(response.Text, want) {
 			t.Errorf("activity response missing %q:\n%s", want, response.Text)

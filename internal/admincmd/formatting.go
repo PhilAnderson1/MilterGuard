@@ -58,11 +58,12 @@ func formatActivity(pd period, since, before time.Time, retention time.Duration,
 	fmt.Fprintf(&body, "Trusted domain accepts: %d\n", summary.TrustedDomainAccepts)
 	fmt.Fprintf(&body, "Attachment rejections: %d\n", summary.AttachmentRejections)
 	fmt.Fprintf(&body, "Protected sender-domain rejections: %d\n\n", summary.ProtectedSenderDomainRejections)
-	fmt.Fprintf(&body, "Estimated total token cost: USD %.4f\n", summary.TokenCost)
+	body.WriteString("Token costs are estimates based on endpoint-reported usage and configured prices.\n")
+	fmt.Fprintf(&body, "Total token cost: USD %.4f\n", summary.TokenCost)
 	if summary.ScanTotal == 0 {
-		body.WriteString("Average cost per message scanned (estimated): N/A (no scans)\n")
+		body.WriteString("Average cost per message scanned: N/A (no scans)\n")
 	} else {
-		fmt.Fprintf(&body, "Average cost per message scanned (estimated): USD %.6f\n", summary.TokenCost/float64(summary.ScanTotal))
+		fmt.Fprintf(&body, "Average cost per message scanned: USD %.6f\n", summary.TokenCost/float64(summary.ScanTotal))
 	}
 	return body.String()
 }

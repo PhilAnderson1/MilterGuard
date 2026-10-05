@@ -9,7 +9,6 @@ type CorrespondentOptions struct {
 	Scope                        string
 	MaxEntries                   int
 	StaleAfter                   time.Duration
-	ActivityUpdateInterval       time.Duration
 	LegitimateSenderMinScore     float64
 	LegitimateSenderMinMessages  int
 	LegitimateSenderRequireDKIM  bool

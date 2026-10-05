@@ -921,13 +921,6 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 			wantError: "correspondents.stale_after",
 		},
 		{
-			name: "negative correspondent activity update interval",
-			configure: func(cfg *Config) {
-				cfg.Correspondents.ActivityUpdateInterval = Duration(-time.Second)
-			},
-			wantError: "correspondents.activity_update_interval",
-		},
-		{
 			name: "zero legitimate sender message threshold",
 			configure: func(cfg *Config) {
 				cfg.Correspondents.LegitimateSenderMinMessages = 0
