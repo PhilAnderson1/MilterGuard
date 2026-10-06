@@ -29,7 +29,7 @@ func Help(admin, commandMode bool) string {
 	return text
 }
 
-func formatActivity(pd period, since, before time.Time, retention time.Duration, summary stores.ActivitySummary, status stores.ServiceStatus, statusAvailable bool) string {
+func formatActivity(pd period, before time.Time, retention time.Duration, summary stores.ActivitySummary, status stores.ServiceStatus, statusAvailable bool) string {
 	var body strings.Builder
 	if statusAvailable && status.Mode == stores.ServiceModeAccept {
 		body.WriteString("MilterGuard is running in accept mode. Scans completed in this mode are accepted even when the AI recommends rejection.\n")
@@ -39,25 +39,28 @@ func formatActivity(pd period, since, before time.Time, retention time.Duration,
 		body.WriteString("\n")
 	}
 	fmt.Fprintf(&body, "Activity: %s\n", pd.description())
-	fmt.Fprintf(&body, "Period: %s to %s\n", formatUTC(since), formatUTC(before))
-	fmt.Fprintf(&body, "Retention: %s\n", formatDuration(retention))
 	uptime := "unavailable"
 	if statusAvailable && !status.StartedAt.After(before) {
 		uptime = formatDuration(before.Sub(status.StartedAt))
 	}
-	fmt.Fprintf(&body, "Service uptime: %s\n\n", uptime)
+	fmt.Fprintf(&body, "Service uptime: %s\n", uptime)
+	fmt.Fprintf(&body, "Retention: %s\n\n", formatDuration(retention))
 	if activitySummaryEmpty(summary) {
 		body.WriteString("No activity was recorded for this period.\n\n")
 	}
-	fmt.Fprintf(&body, "Scan total: %d\n", summary.ScanTotal)
-	fmt.Fprintf(&body, "Scan rejections: %d\n", summary.ScanRejections)
-	fmt.Fprintf(&body, "Scan accepted: %d\n", summary.ScanAccepted)
-	fmt.Fprintf(&body, "AI evaluations failed: %d\n", summary.AIEvaluationsFailed)
-	fmt.Fprintf(&body, "IP blacklist rejections: %d\n", summary.IPRejections)
-	fmt.Fprintf(&body, "Whitelist accepts: %d\n", summary.WhitelistAccepts)
-	fmt.Fprintf(&body, "Trusted domain accepts: %d\n", summary.TrustedDomainAccepts)
-	fmt.Fprintf(&body, "Attachment rejections: %d\n", summary.AttachmentRejections)
-	fmt.Fprintf(&body, "Protected sender-domain rejections: %d\n\n", summary.ProtectedSenderDomainRejections)
+	totalRejected := summary.ScanRejections + summary.IPRejections + summary.AttachmentRejections + summary.ProtectedSenderDomainRejections
+	totalAccepted := summary.ScanAccepted + summary.WhitelistAccepts + summary.TrustedDomainAccepts
+	fmt.Fprintf(&body, "Total rejected: %d\n", totalRejected)
+	fmt.Fprintf(&body, "  AI classification: %d\n", summary.ScanRejections)
+	fmt.Fprintf(&body, "  IP reputation: %d\n", summary.IPRejections)
+	fmt.Fprintf(&body, "  Attachment policy: %d\n", summary.AttachmentRejections)
+	fmt.Fprintf(&body, "  Protected sender-domain policy: %d\n\n", summary.ProtectedSenderDomainRejections)
+	fmt.Fprintf(&body, "Total accepted: %d\n", totalAccepted)
+	fmt.Fprintf(&body, "  AI classification: %d\n", summary.ScanAccepted)
+	fmt.Fprintf(&body, "  Correspondent whitelist: %d\n", summary.WhitelistAccepts)
+	fmt.Fprintf(&body, "  Trusted sender domain: %d\n\n", summary.TrustedDomainAccepts)
+	fmt.Fprintf(&body, "Total AI scans: %d\n", summary.ScanTotal)
+	fmt.Fprintf(&body, "AI evaluations failed: %d\n\n", summary.AIEvaluationsFailed)
 	body.WriteString("Token costs are estimates based on endpoint-reported usage and configured prices.\n")
 	fmt.Fprintf(&body, "Total token cost: USD %.4f\n", summary.TokenCost)
 	if summary.ScanTotal == 0 {

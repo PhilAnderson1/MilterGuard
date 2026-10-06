@@ -132,8 +132,11 @@ func TestExecuteBuildsScopedQueries(t *testing.T) {
 func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	repository := &activityRepositoryStub{
-		summary: stores.ActivitySummary{ScanTotal: 2, ScanAccepted: 2, AIEvaluationsFailed: 1, IPRejections: 1, TokenCost: .25},
-		status:  stores.ServiceStatus{StartedAt: now.Add(-time.Hour), Mode: stores.ServiceModeAccept}, found: true,
+		summary: stores.ActivitySummary{
+			ScanTotal: 30, ScanRejections: 20, ScanAccepted: 10, AIEvaluationsFailed: 1,
+			IPRejections: 2, WhitelistAccepts: 1, TokenCost: .0197,
+		},
+		status: stores.ServiceStatus{StartedAt: now.Add(-time.Hour), Mode: stores.ServiceModeAccept}, found: true,
 	}
 	p := New(Dependencies{Activity: repository, ActivityExpiry: 365 * 24 * time.Hour, Now: func() time.Time { return now }})
 	response, err := p.ExecuteLine(context.Background(), "ACTIVITY", Actor{Administrator: true})
@@ -146,14 +149,19 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	for _, want := range []string{
 		"MilterGuard is running in accept mode", "This period also contains rejections recorded in enforce mode",
 		"Activity: past week", "Retention: 365 days",
-		"Service uptime: 1 hour", "Scan total: 2", "AI evaluations failed: 1",
-		"IP blacklist rejections: 1",
+		"Service uptime: 1 hour", "Total rejected: 22", "  AI classification: 20", "  IP reputation: 2",
+		"  Attachment policy: 0", "  Protected sender-domain policy: 0",
+		"Total accepted: 11", "  AI classification: 10", "  Correspondent whitelist: 1", "  Trusted sender domain: 0",
+		"Total AI scans: 30", "AI evaluations failed: 1",
 		"Token costs are estimates based on endpoint-reported usage and configured prices.",
-		"Total token cost: USD 0.2500", "Average cost per message scanned: USD 0.125000",
+		"Total token cost: USD 0.0197", "Average cost per message scanned: USD 0.000657",
 	} {
 		if !strings.Contains(response.Text, want) {
 			t.Errorf("activity response missing %q:\n%s", want, response.Text)
 		}
+	}
+	if strings.Contains(response.Text, "Period:") {
+		t.Errorf("activity response contains redundant exact period:\n%s", response.Text)
 	}
 }
 

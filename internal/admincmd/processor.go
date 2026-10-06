@@ -51,7 +51,7 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 			}
 		}
 		return textResponse(func() string {
-			return formatActivity(command.period, activitySince, now, p.activityExpiry, summary, status, statusAvailable)
+			return formatActivity(command.period, now, p.activityExpiry, summary, status, statusAvailable)
 		}), nil
 	case "rejections":
 		page, err := p.rejections.ListRejections(ctx, stores.RejectionListQuery{Recipients: recipientScope(command.recipient), RejectedSince: cutoff, Limit: MaxListRows})

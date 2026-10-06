@@ -555,10 +555,10 @@ failures never reject or defer mail.
 When MilterGuard rejects unwanted mail, it records the sending IP address.
 Repeated attempts can then be rejected without another AI request, and persistent
 offenders receive longer blocks. Legitimate traffic gradually reduces an IP's
-negative reputation. In the supplied configuration, every three legitimate
-messages removes one recorded unwanted-mail strike, although an active block
-continues until it expires. Configured shared mail providers are protected from
-automatic blocking.
+negative reputation. In the supplied configuration, each legitimate message
+removes one recorded unwanted-mail strike, although an active block continues
+until it expires. Configured shared mail providers are protected from automatic
+blocking.
 
 The `ip_reputation.ip_allowlist` prevents trusted IP addresses and networks from
 ever being blocked. The `domain_allowlist` provides the same protection for

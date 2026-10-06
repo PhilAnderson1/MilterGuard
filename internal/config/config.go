@@ -290,7 +290,7 @@ func defaults() Config {
 			RejectMessage: "Message rejected because the sending IP address is blocked by this server",
 			BlockDuration: Duration(time.Hour), RepeatThreshold: 3, RepeatWindow: Duration(30 * 24 * time.Hour),
 			RepeatBlockDuration: Duration(30 * 24 * time.Hour), RepeatRefreshOnAttempt: true,
-			LegitimatePerStrike: 3, MaxEntries: 10000,
+			LegitimatePerStrike: 1, MaxEntries: 10000,
 			IPAllowlist: []string{"127.0.0.0/8", "::1/128"},
 			DomainAllowlist: []string{
 				"google.com", "outlook.com", "yahoo.com", "yahoo.net", "me.com", "icloud.com",

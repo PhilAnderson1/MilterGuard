@@ -312,7 +312,8 @@ ip_reputation:
   repeat_refresh_on_attempt: true
 
   # Legitimate emails required to remove one IP strike. Set to 0 to disable.
-  legitimate_messages_per_strike: 3
+  # Use ip_allowlist or domain_allowlist below for hosts that must never be blocked.
+  legitimate_messages_per_strike: 1
 
   # Retention target for sending IP records; positive integer. Periodic cleanup
   # removes the least useful records above this number.
