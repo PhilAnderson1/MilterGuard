@@ -50,7 +50,7 @@ func TestParseArchivedRestoresArchiveTruncationState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !msg.ArchiveTruncated {
+	if !msg.SavedArchiveTruncated {
 		t.Fatal("archive truncation marker was not restored")
 	}
 }

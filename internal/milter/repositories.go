@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
-	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/rejectedmail"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
@@ -29,16 +28,16 @@ func newRejectedMailArchive(cfg config.RejectionHistoryConfig, log *slog.Logger)
 
 func newCorrespondentRepository(cfg config.CorrespondentsConfig, db *sqlitedb.Store, now func() time.Time, log *slog.Logger) stores.CorrespondentRepository {
 	return storesqlite.NewCorrespondents(db, storesqlite.CorrespondentOptions{
-		LearnAuthenticatedRecipients: cfg.LearnAuthenticatedRecipients,
-		LearnLegitimateSenders:       cfg.LearnLegitimateSenders,
-		UseAllowlist:                 cfg.UseAllowlist,
-		Scope:                        cfg.Scope,
-		MaxEntries:                   cfg.MaxEntries,
-		StaleAfter:                   cfg.StaleAfter.Value(),
-		LegitimateSenderMinScore:     cfg.LegitimateSenderMinScore,
-		LegitimateSenderMinMessages:  cfg.LegitimateSenderMinMessages,
-		LegitimateSenderRequireDKIM:  cfg.LegitimateSenderRequireDKIM,
-		Now:                          now,
+		LearnAuthenticatedRecipients:          cfg.LearnAuthenticatedRecipients,
+		LearnLegitimateSenders:                cfg.LearnLegitimateSenders,
+		UseAllowlist:                          cfg.UseAllowlist,
+		Scope:                                 cfg.Scope,
+		MaxEntries:                            cfg.MaxEntries,
+		StaleAfter:                            cfg.StaleAfter.Value(),
+		LegitimateSenderMinScore:              cfg.LegitimateSenderMinScore,
+		LegitimateSenderMinMessages:           cfg.LegitimateSenderMinMessages,
+		LegitimateSenderRequireAuthentication: cfg.LegitimateSenderRequireAuthentication,
+		Now:                                   now,
 	}, log)
 }
 
@@ -69,8 +68,4 @@ func newIPRepository(cfg config.IPReputationConfig, db *sqlitedb.Store, now func
 
 func newActivityRepository(cfg config.ActivityConfig, db *sqlitedb.Store, now func() time.Time) stores.ActivityRepository {
 	return storesqlite.NewActivity(db, storesqlite.ActivityOptions{Expiry: cfg.Expiry.Value(), Now: now})
-}
-
-func emailAddressDomain(address string) string {
-	return mailaddr.Domain(address)
 }

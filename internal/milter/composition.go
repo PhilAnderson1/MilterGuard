@@ -85,7 +85,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	}
 	activity := &activityService{repository: activityRepository, log: log}
 	policy := &messagePolicyService{
-		correspondentCfg: cfg.Correspondents, log: log,
+		correspondentCfg: cfg.Correspondents, trustRequirement: cfg.Authentication.TrustRequirement, log: log,
 		ipReputation: ipReputation, correspondents: correspondents, rejectionHistory: rejections,
 		domainRegistration: domainRegistration, archive: archive,
 	}

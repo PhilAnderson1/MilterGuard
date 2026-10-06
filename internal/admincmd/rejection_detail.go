@@ -27,7 +27,7 @@ func (p *Processor) rejectionDetail(entry stores.Rejection) Response {
 				if strings.TrimSpace(processedBody) == "" {
 					processedBody = "No readable message text was found."
 				}
-				if archived.ArchiveTruncated {
+				if archived.SavedArchiveTruncated {
 					processedBody = "NOTICE: Saved message was truncated during archiving; some headers or body content may be missing.\n\n" + processedBody
 				}
 			} else if p.log != nil {

@@ -150,6 +150,28 @@ func TestHeaderVerifierRecognizesAlignedSPF(t *testing.T) {
 	}
 }
 
+func TestEvidenceWithUnavailableMethodsPreservesExistingResults(t *testing.T) {
+	existing := []Result{{Method: MethodSPF, Outcome: OutcomePass, Domain: "example.com"}}
+	evidence := EvidenceWithUnavailableMethods(existing, "example.com", "authentication unavailable",
+		MethodSPF, MethodDKIM, MethodDMARC)
+
+	if len(existing) != 1 {
+		t.Fatalf("input results were modified: %#v", existing)
+	}
+	if len(evidence.Results) != 3 || evidence.Results[0].Method != MethodSPF || evidence.Results[0].Outcome != OutcomePass ||
+		evidence.Results[0].Domain != "example.com" || !evidence.Results[0].Aligned {
+		t.Fatalf("results = %#v", evidence.Results)
+	}
+	for _, result := range evidence.Results[1:] {
+		if result.Outcome != OutcomeTemperror || result.ErrorCategory != ErrorInternal || result.Reason != "authentication unavailable" {
+			t.Fatalf("unavailable result = %#v", result)
+		}
+	}
+	if !evidence.SPFAligned || !evidence.AnyAligned() {
+		t.Fatalf("alignment evidence = %#v", evidence)
+	}
+}
+
 func FuzzParse(f *testing.F) {
 	f.Add(`mx.example; dkim=pass header.d=example.com`, `pass receiver=mx.example; envelope-from=a@example.com`)
 	f.Add(`mx.example; dkim=fail reason="bad; dmarc=pass"`, `neutral (comment) receiver="mx.example"`)

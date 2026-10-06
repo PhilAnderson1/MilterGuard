@@ -64,7 +64,7 @@ func newTestCorrespondentStore(t *testing.T, cfg config.CorrespondentsConfig, lo
 }
 
 func (s *correspondentStore) qualified(entry correspondentEntry) bool {
-	return entry.WhitelistType != whitelistRepeatedLegitimate || entry.LegitimateEmailCount >= s.cfg.LegitimateSenderMinMessages
+	return entry.CorrespondentType != whitelistRepeatedLegitimate || entry.LegitimateEmailCount >= s.cfg.LegitimateSenderMinMessages
 }
 
 type rejectionHistoryStore struct {
@@ -140,7 +140,6 @@ func testCorrespondentMatch(t *testing.T, repository stores.CorrespondentReposit
 	return result
 }
 
-func unixMillis(value time.Time) int64     { return value.UTC().UnixMilli() }
 func timeFromMillis(value int64) time.Time { return time.UnixMilli(value).UTC() }
 
 func (s *correspondentStore) learn(ctx context.Context, local string, recipients []string) error {
@@ -153,7 +152,7 @@ func (s *correspondentStore) touchInbound(ctx context.Context, correspondent str
 
 func (s *correspondentStore) recordInboundClassification(ctx context.Context, correspondent string, recipients []string, complete bool, classification string, score, minimum float64, aligned bool) error {
 	return s.RecordInboundClassification(ctx, stores.InboundClassification{Correspondent: correspondent, Recipients: recipients,
-		RecipientsComplete: complete, Classification: classification, Score: score, UnwantedMinScore: minimum, DKIMAligned: aligned})
+		RecipientsComplete: complete, Classification: classification, Score: score, UnwantedMinScore: minimum, AuthenticationSatisfied: aligned})
 }
 
 func (s *correspondentStore) match(t *testing.T, ctx context.Context, correspondent string, recipients []string) stores.CorrespondentMatch {
@@ -278,7 +277,7 @@ func (s *correspondentStore) snapshot() map[string]correspondentEntry {
 		var entry correspondentEntry
 		var id, learnedAt, lastActivityAt int64
 		if err := rows.Scan(&id, &entry.LocalAddress, &entry.Correspondent, &learnedAt,
-			&lastActivityAt, &entry.WhitelistType, &entry.LegitimateEmailCount); err != nil {
+			&lastActivityAt, &entry.CorrespondentType, &entry.LegitimateEmailCount); err != nil {
 			return result
 		}
 		entry.ID = uint64(id)

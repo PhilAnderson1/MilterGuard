@@ -90,7 +90,7 @@ func TestPeriodCutoffs(t *testing.T) {
 }
 
 func TestFormattingBoundsAndAudience(t *testing.T) {
-	entries := []stores.Correspondent{{Correspondent: "news@example.net", LocalAddress: "phil@example.com", WhitelistType: stores.CorrespondentKindRepeatedLegitimateInbound}}
+	entries := []stores.Correspondent{{Correspondent: "news@example.net", LocalAddress: "phil@example.com", CorrespondentType: stores.CorrespondentKindRepeatedLegitimateInbound}}
 	if got := formatAllowlist(entries, false, false); strings.Contains(got, "Recipient:") {
 		t.Fatalf("ordinary output exposes recipient: %s", got)
 	}
@@ -99,7 +99,7 @@ func TestFormattingBoundsAndAudience(t *testing.T) {
 	}
 	many := make([]stores.Correspondent, MaxListRows+1)
 	for i := range many {
-		many[i] = stores.Correspondent{Correspondent: "sender@example.net", WhitelistType: stores.CorrespondentKindManual}
+		many[i] = stores.Correspondent{Correspondent: "sender@example.net", CorrespondentType: stores.CorrespondentKindManual}
 	}
 	if got := formatAllowlist(many, false, false); !strings.Contains(got, listTruncatedNotice) {
 		t.Fatal("row truncation was not reported")

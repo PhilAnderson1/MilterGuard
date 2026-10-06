@@ -58,7 +58,7 @@ func newIPReputationStore(cfg config.IPReputationConfig, repository stores.IPRep
 		}
 	}
 	for _, domain := range cfg.DomainAllowlist {
-		policy.domainAllowlist = append(policy.domainAllowlist, normalizeDomain(domain))
+		policy.domainAllowlist = append(policy.domainAllowlist, netsafety.DNSHostname(domain))
 	}
 	return policy
 }
@@ -71,7 +71,7 @@ func (s *ipReputationStore) enabled() bool {
 	return s != nil && s.repository != nil && s.enabledFeature
 }
 
-var _ stores.IPReputationRepository = (*ipReputationStore)(nil)
+var _ stores.IPReputationAdminRepository = (*ipReputationStore)(nil)
 
 func (s *ipReputationStore) allowed(addr netip.Addr) (netip.Prefix, bool) {
 	if !addr.IsValid() {
@@ -86,8 +86,9 @@ func (s *ipReputationStore) allowed(addr netip.Addr) (netip.Prefix, bool) {
 	return netip.Prefix{}, false
 }
 
-// add records one AI or deterministic sender-domain rejection unless the
-// address or its confirmed reverse-DNS domain is excluded from reputation.
+// add records one AI, attachment-policy, or deterministic sender-domain
+// rejection unless the address or its confirmed reverse-DNS domain is excluded
+// from reputation.
 func (s *ipReputationStore) add(ctx context.Context, addr netip.Addr, dns connectionDNSResult) bool {
 	if !s.enabled() || !addr.IsValid() {
 		return false
@@ -117,17 +118,6 @@ func (s *ipReputationStore) lookup(ctx context.Context, addr netip.Addr) (stores
 		return stores.IPBlock{}, false
 	}
 	return block, found
-}
-
-func (s *ipReputationStore) RecordRejection(ctx context.Context, addr netip.Addr) (stores.IPBlock, error) {
-	if !s.enabled() || !addr.IsValid() {
-		return stores.IPBlock{}, nil
-	}
-	addr = netsafety.CanonicalIP(addr)
-	if _, ok := s.allowed(addr); ok {
-		return stores.IPBlock{}, nil
-	}
-	return s.repository.RecordRejection(ctx, addr)
 }
 
 func (s *ipReputationStore) RecordLegitimate(ctx context.Context, addr netip.Addr) error {
@@ -181,7 +171,7 @@ func (s *ipReputationStore) domainAllowed(dns connectionDNSResult) (string, stri
 		if entry.Confirmation != message.ForwardConfirmed {
 			continue
 		}
-		hostname := normalizeDomain(entry.Hostname)
+		hostname := netsafety.DNSHostname(entry.Hostname)
 		for _, domain := range s.domainAllowlist {
 			if domainMatches(hostname, domain) {
 				return hostname, domain, true
@@ -193,10 +183,6 @@ func (s *ipReputationStore) domainAllowed(dns connectionDNSResult) (string, stri
 
 func (s *ipReputationStore) usesDomainAllowlist() bool {
 	return s != nil && len(s.domainAllowlist) > 0
-}
-
-func normalizeDomain(value string) string {
-	return netsafety.DNSHostname(value)
 }
 
 func domainMatches(hostname, domain string) bool {

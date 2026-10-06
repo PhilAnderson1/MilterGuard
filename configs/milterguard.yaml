@@ -50,6 +50,14 @@ authentication:
   # new installations. trusted_headers reuses results from existing filters.
   mode: internal
 
+  # Authentication required by trust-based policies when their corresponding
+  # require_authentication option is enabled: dkim, spf, either, or both.
+  # The default "either" accepts aligned SPF or DKIM. Select "dkim" for a
+  # stricter policy that cannot be satisfied by an excessively permissive SPF
+  # record. "both" is strictest but forwarding often breaks SPF even when DKIM
+  # remains valid.
+  trust_requirement: either
+
   # Whole-operation timeout for internal SPF/DKIM/DMARC verification.
   timeout: 10s
 
@@ -86,9 +94,10 @@ ai:
   # provider/model names; llama.cpp may use its configured model name or path.
   model: qwen/qwen3.6-35b-a3b
 
-  # Estimated USD prices per million input and output tokens. Set these to the
-  # rates charged by the selected model. Zero is suitable for local or free AI,
-  # default figures below are current costs for qwen3.6-35b-a3b on Openrouter.
+  # Estimated USD prices per million input and output tokens. The example prices
+  # below are for the sample model on OpenRouter; update them for your selected
+  # model and provider. Omitting these settings assumes zero cost, which is
+  # suitable for locally hosted or free AI services.
   input_cost_per_million_tokens: 0.1262
   output_cost_per_million_tokens: 0.9827
 
@@ -161,8 +170,8 @@ filtering:
   # List one exact domain per line; entries also match their subdomains.
   sender_domain_allowlist: /etc/milterguard/trusted-sender-domains.txt
 
-  # Require trusted, aligned DKIM authentication for the domain bypass.
-  sender_domain_allowlist_require_dkim: true
+  # Apply authentication.trust_requirement before allowing a domain bypass.
+  sender_domain_allowlist_require_authentication: true
 
   # Action when AI analysis fails: accept or tempfail. tempfail asks the sending
   # mail server to retry later. Accept mode always accepts.
@@ -370,9 +379,9 @@ correspondents:
   legitimate_sender_min_messages: 3
   legitimate_sender_min_score: 0.95
 
-  # Boolean: require trusted aligned DKIM before an inbound legitimate result
+  # Apply authentication.trust_requirement before an inbound legitimate result
   # contributes toward automatic allowlisting.
-  legitimate_sender_require_dkim: true
+  legitimate_sender_require_authentication: true
 
   # Boolean: use saved relationships when assessing inbound mail. When false,
   # the database may still be populated for inspection without affecting mail.
@@ -391,9 +400,9 @@ correspondents:
   # is supplied to the AI as supporting evidence.
   bypass_ai: true
 
-  # Require a trusted, aligned SPF or DKIM pass before a known correspondent can
+  # Apply authentication.trust_requirement before a known correspondent can
   # bypass AI. Disable to permit bypass without authentication.
-  require_spf_or_dkim_for_bypass: true
+  require_authentication_for_bypass: true
 
   # Retention target for relationships. Periodic cleanup removes unpromoted and
   # then oldest records above this number.

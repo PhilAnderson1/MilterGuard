@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -150,6 +152,56 @@ func TestFinishBypassedMessageSubjectLogging(t *testing.T) {
 			hasSubject := strings.Contains(output.String(), `"subject":"Bypassed subject"`)
 			if hasSubject != test.wantSubject {
 				t.Fatalf("subject present = %t, want %t; log: %s", hasSubject, test.wantSubject, output.String())
+			}
+		})
+	}
+}
+
+func TestTrustedInboundBypassDecaysIPReputation(t *testing.T) {
+	tests := []struct {
+		name          string
+		source        string
+		mode          string
+		authenticated bool
+		wantUpdates   int32
+	}{
+		{name: "known correspondent", source: "known_correspondent", mode: "enforce", wantUpdates: 1},
+		{name: "trusted sender domain", source: "sender_domain_allowlist", mode: "enforce", wantUpdates: 1},
+		{name: "authenticated sender", source: "known_correspondent", mode: "enforce", authenticated: true},
+		{name: "accept mode", source: "known_correspondent", mode: "accept"},
+		{name: "internal command reply", source: "internal_command_reply", mode: "enforce"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			repository := &recordingIPReputationRepository{}
+			policy := &messagePolicyService{
+				ipReputation: &ipReputationStore{repository: repository, enabledFeature: true, log: logger},
+				log:          logger,
+			}
+			serverConn, clientConn := net.Pipe()
+			defer serverConn.Close()
+			defer clientConn.Close()
+
+			ss := newSession(&sessionDependencies{
+				mode: test.mode, protocol: protocolOptions{maxMessageSize: 1024},
+				filtering: config.FilteringConfig{RejectMessage: "blocked"},
+				analysis:  &analysisService{}, policy: policy, log: logger,
+			}, serverConn)
+			ss.peerIP = netip.MustParseAddr("192.0.2.10")
+			ss.authentication.Authenticated = test.authenticated
+
+			done := make(chan bool, 1)
+			go func() {
+				done <- ss.finishBypassedMessage(context.Background(), test.source, false, false)
+			}()
+			expectFrame(t, clientConn, string([]byte{responseAccept}))
+			if !<-done {
+				t.Fatal("finishBypassedMessage reported failure")
+			}
+			if got := repository.legitimate.Load(); got != test.wantUpdates {
+				t.Fatalf("legitimate IP updates = %d, want %d", got, test.wantUpdates)
 			}
 		})
 	}

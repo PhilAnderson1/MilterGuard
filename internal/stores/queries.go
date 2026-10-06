@@ -48,13 +48,13 @@ type NewRejection struct {
 }
 
 type InboundClassification struct {
-	Correspondent      string
-	Recipients         []string
-	RecipientsComplete bool
-	Classification     string
-	Score              float64
-	UnwantedMinScore   float64
-	DKIMAligned        bool
+	Correspondent           string
+	Recipients              []string
+	RecipientsComplete      bool
+	Classification          string
+	Score                   float64
+	UnwantedMinScore        float64
+	AuthenticationSatisfied bool
 }
 
 type ActivityQuery struct {

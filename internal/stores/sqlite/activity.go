@@ -84,14 +84,14 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 		stores.ActivityEventScan, stores.ActivityOutcomeAccepted,
 		stores.ActivityEventScan,
 		stores.ActivityEventIPRejection, stores.ActivityOutcomeRejected,
-		stores.ActivityEventWhitelistAccept, stores.ActivityOutcomeAccepted,
+		stores.ActivityEventCorrespondentAccept, stores.ActivityOutcomeAccepted,
 		stores.ActivityEventTrustedDomainAccept, stores.ActivityOutcomeAccepted,
 		stores.ActivityEventAttachmentRejection, stores.ActivityOutcomeRejected,
 		stores.ActivityEventProtectedSenderDomainRejection, stores.ActivityOutcomeRejected,
 		stores.ActivityEventScan,
 		unixMillis(since), unixMillis(before)).Scan(
 		&summary.ScanTotal, &summary.ScanRejections, &summary.ScanAccepted,
-		&summary.AIEvaluationsFailed, &summary.IPRejections, &summary.WhitelistAccepts,
+		&summary.AIEvaluationsFailed, &summary.IPRejections, &summary.CorrespondentAccepts,
 		&summary.TrustedDomainAccepts, &summary.AttachmentRejections,
 		&summary.ProtectedSenderDomainRejections, &summary.TokenCost)
 	if err != nil {

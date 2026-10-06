@@ -42,6 +42,7 @@ type activityService struct {
 
 type messagePolicyService struct {
 	correspondentCfg   config.CorrespondentsConfig
+	trustRequirement   string
 	log                *slog.Logger
 	ipReputation       *ipReputationStore
 	correspondents     stores.CorrespondentRepository

@@ -321,7 +321,7 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		ss.deps.log.WarnContext(ctx, "message has ambiguous sender identity", "message_id", ss.message.Header("Message-ID"), "from_header_count", count)
 	} else {
 		ss.visibleSender = mailaddr.Normalize(ss.message.Header("From"))
-		ss.visibleSenderDomain = emailAddressDomain(ss.visibleSender)
+		ss.visibleSenderDomain = mailaddr.Domain(ss.visibleSender)
 	}
 	if ss.isInternalMessage() {
 		return ss.finishInternalMessage(ctx)
@@ -354,18 +354,20 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if progressErr != nil {
 		ss.deps.log.WarnContext(ctx, "authentication verification failed", "error", progressErr)
 		if ss.internalAuthentication() {
-			authentication = authenticationUnavailableEvidence(authentication, ss.visibleSenderDomain)
+			authentication = mailauth.EvidenceWithUnavailableMethods(authentication.Results, ss.visibleSenderDomain,
+				"authentication unavailable", mailauth.MethodSPF, mailauth.MethodDKIM, mailauth.MethodDMARC)
 		}
 	}
 	ss.message.Authentication = authentication
 	inbound := ss.deps.policy.prepareInboundEvidence(ctx, ss.messageContext(ss.recipientSetComplete()), authentication, ss.deps.filtering)
 	if inbound.allowedSenderDomain != "" {
-		return ss.finishBypassedMessage(ctx, "sender_domain_allowlist", false, inbound.knownCorrespondent && inbound.alignedDKIM,
+		return ss.finishBypassedMessage(ctx, "sender_domain_allowlist", false, inbound.knownCorrespondent && inbound.trustRequirementMet,
 			"sender_domain", inbound.allowedSenderDomain,
-			"aligned_dkim", inbound.alignedDKIM)
+			"aligned_dkim", inbound.alignedDKIM,
+			"aligned_spf", inbound.alignedSPF)
 	}
 	if inbound.bypassAI {
-		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.alignedDKIM || inbound.alignedSPF,
+		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.trustRequirementMet,
 			ss.knownCorrespondentLogAttrs()...)
 	}
 	result, progressErr := ss.evaluateWithProgress(ctx, inbound)
@@ -395,9 +397,6 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 // session goroutine while a provider performs DNS or cryptographic work.
 func (ss *session) verifyAuthenticationWithProgress(ctx context.Context) (mailauth.Evidence, error) {
 	verifier := ss.deps.authentication
-	if verifier == nil {
-		verifier = mailauth.HeaderVerifier{}
-	}
 	envelopeSender := ss.envelopeSender
 	if envelopeSender != "<>" {
 		envelopeSender = mailaddr.Normalize(envelopeSender)
@@ -642,26 +641,6 @@ func containsNonASCII(value string) bool {
 	return false
 }
 
-func authenticationUnavailableEvidence(evidence mailauth.Evidence, visibleDomain string) mailauth.Evidence {
-	results := append([]mailauth.Result(nil), evidence.Results...)
-	for _, method := range []mailauth.Method{mailauth.MethodSPF, mailauth.MethodDKIM, mailauth.MethodDMARC} {
-		found := false
-		for _, result := range results {
-			if result.Method == method {
-				found = true
-				break
-			}
-		}
-		if !found {
-			results = append(results, mailauth.Result{
-				Method: method, Outcome: mailauth.OutcomeTemperror,
-				ErrorCategory: mailauth.ErrorInternal, Reason: "authentication unavailable",
-			})
-		}
-	}
-	return mailauth.NewEvidence(results, visibleDomain)
-}
-
 func validMTAHostname(value string) string {
 	value = netsafety.DNSHostname(value)
 	if value == "" {
@@ -689,7 +668,7 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 	attrs = ss.appendDecisionSubject(attrs)
 	switch source {
 	case "known_correspondent":
-		ss.deps.activity.recordDeterministic(ctx, stores.ActivityEventWhitelistAccept, actionAccept, err)
+		ss.deps.activity.recordDeterministic(ctx, stores.ActivityEventCorrespondentAccept, actionAccept, err)
 	case "sender_domain_allowlist":
 		ss.deps.activity.recordDeterministic(ctx, stores.ActivityEventTrustedDomainAccept, actionAccept, err)
 	}
@@ -699,6 +678,9 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 		return false
 	}
 	if ss.deps.mode == "enforce" {
+		if !ss.authentication.Authenticated && (source == "known_correspondent" || source == "sender_domain_allowlist") {
+			ss.deps.policy.recordLegitimateIP(ctx, ss.peerIP)
+		}
 		if learn {
 			ss.learnAuthenticatedRecipients(ctx)
 		}
@@ -856,7 +838,9 @@ func (ss *session) resetMessage(phase protocolPhase) {
 	}
 	factory := ss.deps.newExactMessage
 	if factory == nil {
-		factory = mailauth.NewExactMessage
+		ss.exactMessage = nil
+		ss.exactMessageErr = fmt.Errorf("exact-message factory is unavailable")
+		return
 	}
 	ss.exactMessage, ss.exactMessageErr = factory(storage, ss.deps.protocol.maxMessageSize)
 }

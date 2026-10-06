@@ -39,7 +39,7 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 		mediaType = "text/plain"
 	}
 	mediaType = strings.ToLower(mediaType)
-	decoded, transferIncomplete := decodeTransfer(encoding, data)
+	decoded, transferIncomplete := decodeTransferRecovering(encoding, data)
 	if strings.HasPrefix(mediaType, "multipart/") {
 		boundary := params["boundary"]
 		if boundary == "" {
@@ -213,11 +213,11 @@ func normalizeContentID(value string) string {
 	return strings.ToLower(value)
 }
 
-// decodeTransfer is deliberately recovery-oriented: message extraction keeps
+// decodeTransferRecovering is deliberately recovery-oriented: message extraction keeps
 // readable evidence from malformed encodings and accepts omitted Base64
 // padding. Attachment inspection uses a separate strict decoder so incomplete
 // data cannot be reported as successfully scanned.
-func decodeTransfer(encoding string, data []byte) ([]byte, bool) {
+func decodeTransferRecovering(encoding string, data []byte) ([]byte, bool) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":
 		decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(data)))

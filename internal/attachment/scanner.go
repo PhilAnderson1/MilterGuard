@@ -179,7 +179,7 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 			return &Finding{Path: cleanLocation(location), Detection: "blocked extension ." + extension}, nil
 		}
 	}
-	decoded, err := decodeTransfer(state.ctx, transferEncoding, data, s.options.MaxAttachmentBytes)
+	decoded, err := decodeTransferStrict(state.ctx, transferEncoding, data, s.options.MaxAttachmentBytes)
 	if err != nil {
 		if s.options.InspectSignatures {
 			if signature := executableSignature(decoded); signature != "" {
@@ -694,11 +694,11 @@ func scriptInterpreter(data []byte) string {
 	return ""
 }
 
-// decodeTransfer is deliberately strict: partial decoded bytes are returned
+// decodeTransferStrict is deliberately strict: partial decoded bytes are returned
 // with an error so signatures can still be detected without claiming that an
 // incomplete attachment was fully inspected. Message text extraction uses a
 // separate recovery-oriented decoder to preserve readable evidence.
-func decodeTransfer(ctx context.Context, encoding string, data []byte, limit int64) ([]byte, error) {
+func decodeTransferStrict(ctx context.Context, encoding string, data []byte, limit int64) ([]byte, error) {
 	var reader io.Reader = bytes.NewReader(data)
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":

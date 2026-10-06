@@ -34,6 +34,7 @@ func TestAlignedSenderAuthentication(t *testing.T) {
 		domain    string
 		trust     []string
 		wantDKIM  bool
+		wantSPF   bool
 		wantDMARC bool
 	}{
 		{
@@ -67,9 +68,9 @@ func TestAlignedSenderAuthentication(t *testing.T) {
 			domain: "example.com", trust: []string{"nl.invades.net"},
 		},
 		{
-			name:   "SPF is not sufficient for correspondent authentication",
+			name:   "aligned SPF",
 			header: "nl.invades.net; spf=pass smtp.mailfrom=example.com",
-			domain: "example.com", trust: []string{"nl.invades.net"},
+			domain: "example.com", trust: []string{"nl.invades.net"}, wantSPF: true,
 		},
 	}
 	for _, test := range tests {
@@ -83,9 +84,33 @@ func TestAlignedSenderAuthentication(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := alignedSenderAuthentication(authentication)
-			if got.DKIMAligned != test.wantDKIM || got.DMARCAligned != test.wantDMARC {
-				t.Fatalf("authentication evidence = %#v, want DKIM=%v DMARC=%v", got, test.wantDKIM, test.wantDMARC)
+			if authentication.DKIMAligned != test.wantDKIM || authentication.SPFAligned != test.wantSPF || authentication.DMARCAligned != test.wantDMARC {
+				t.Fatalf("authentication evidence = %#v, want DKIM=%v SPF=%v DMARC=%v", authentication, test.wantDKIM, test.wantSPF, test.wantDMARC)
+			}
+		})
+	}
+}
+
+func TestSenderAuthenticationTrustRequirements(t *testing.T) {
+	tests := []struct {
+		name        string
+		evidence    mailauth.Evidence
+		requirement string
+		want        bool
+	}{
+		{name: "DKIM accepts DKIM", evidence: mailauth.Evidence{DKIMAligned: true}, requirement: config.AuthenticationTrustDKIM, want: true},
+		{name: "DKIM rejects SPF", evidence: mailauth.Evidence{SPFAligned: true}, requirement: config.AuthenticationTrustDKIM},
+		{name: "SPF accepts SPF", evidence: mailauth.Evidence{SPFAligned: true}, requirement: config.AuthenticationTrustSPF, want: true},
+		{name: "either accepts DKIM", evidence: mailauth.Evidence{DKIMAligned: true}, requirement: config.AuthenticationTrustEither, want: true},
+		{name: "either accepts SPF", evidence: mailauth.Evidence{SPFAligned: true}, requirement: config.AuthenticationTrustEither, want: true},
+		{name: "both rejects DKIM alone", evidence: mailauth.Evidence{DKIMAligned: true}, requirement: config.AuthenticationTrustBoth},
+		{name: "both accepts both", evidence: mailauth.Evidence{DKIMAligned: true, SPFAligned: true}, requirement: config.AuthenticationTrustBoth, want: true},
+		{name: "DMARC is not an independent option", evidence: mailauth.Evidence{DMARCAligned: true}, requirement: config.AuthenticationTrustEither},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := meetsTrustRequirement(test.evidence, test.requirement); got != test.want {
+				t.Fatalf("trust result = %v, want %v", got, test.want)
 			}
 		})
 	}

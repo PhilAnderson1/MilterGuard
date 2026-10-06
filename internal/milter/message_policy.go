@@ -2,6 +2,7 @@ package milter
 
 import (
 	"context"
+	"net/netip"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
@@ -16,6 +17,7 @@ type inboundEvidence struct {
 	recipientsComplete  bool
 	alignedDKIM         bool
 	alignedSPF          bool
+	trustRequirementMet bool
 	knownCorrespondent  bool
 	bypassAI            bool
 	allowedSenderDomain string
@@ -34,14 +36,14 @@ func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, curre
 		current.message.Correspondent = message.CorrespondentInfo{Enabled: s.correspondentCfg.UseAllowlist, Scope: s.correspondentCfg.Scope}
 		return evidence
 	}
-	senderAuthentication := alignedSenderAuthentication(authentication)
-	evidence.alignedDKIM = senderAuthentication.DKIMAligned
-	evidence.alignedSPF = senderAuthentication.SPFAligned
-	if senderAuthentication.anyAligned() {
+	evidence.alignedDKIM = authentication.DKIMAligned
+	evidence.alignedSPF = authentication.SPFAligned
+	evidence.trustRequirementMet = meetsTrustRequirement(authentication, s.trustRequirement)
+	if authentication.AnyAligned() {
 		evidence.authenticatedDomain = current.visibleSenderDomain
 	}
 	if domain := allowedSenderDomain(current.visibleSenderDomain, filtering.SenderDomainAllowlist); domain != "" &&
-		(!filtering.SenderDomainAllowlistRequireDKIM || senderAuthentication.DKIMAligned) {
+		(!filtering.SenderDomainAllowlistRequireAuthentication || evidence.trustRequirementMet) {
 		evidence.allowedSenderDomain = domain
 	}
 	if !s.correspondentCfg.UseAllowlist {
@@ -58,9 +60,9 @@ func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, curre
 	evidence.knownCorrespondent = known
 	current.message.Correspondent = message.CorrespondentInfo{
 		Enabled: true, Known: known, Scope: s.correspondentCfg.Scope,
-		AuthenticationAligned: known && senderAuthentication.anyAligned(),
+		AuthenticationAligned: known && authentication.AnyAligned(),
 	}
-	bypassAuthentication := !s.correspondentCfg.RequireSPFOrDKIMForBypass || senderAuthentication.spfOrDKIMAligned()
+	bypassAuthentication := !s.correspondentCfg.RequireAuthenticationForBypass || evidence.trustRequirementMet
 	evidence.bypassAI = s.correspondentCfg.BypassAI && evidence.recipientsComplete && known && bypassAuthentication
 	return evidence
 }
@@ -106,23 +108,28 @@ func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, cur
 		}
 	}
 	if !current.authenticated && result.err == nil && result.classification == "legitimate" {
-		if err := s.ipReputation.RecordLegitimate(ctx, current.peerIP); err != nil {
-			s.log.ErrorContext(ctx, "cannot update sending IP reputation", "error", err)
-		}
+		s.recordLegitimateIP(ctx, current.peerIP)
 	}
 	if result.selected == actionAccept && current.authenticated {
 		s.learnAuthenticatedRecipients(ctx, current.envelopeSender, current.envelopeRecipients)
 	}
 	if !current.authenticated && result.err == nil && current.visibleSender != "" {
-		s.recordInboundClassification(ctx, current, result, inbound.alignedDKIM, unwantedMinScore)
+		s.recordInboundClassification(ctx, current, result, inbound.trustRequirementMet, unwantedMinScore)
 	}
 }
 
-func (s *messagePolicyService) recordInboundClassification(ctx context.Context, current messageContext, result evaluationResult, dkimAligned bool, unwantedMinScore float64) {
+// recordLegitimateIP applies legitimate-message credit to the sending IP.
+func (s *messagePolicyService) recordLegitimateIP(ctx context.Context, addr netip.Addr) {
+	if err := s.ipReputation.RecordLegitimate(ctx, addr); err != nil {
+		s.log.ErrorContext(ctx, "cannot update sending IP reputation", "error", err)
+	}
+}
+
+func (s *messagePolicyService) recordInboundClassification(ctx context.Context, current messageContext, result evaluationResult, authenticationSatisfied bool, unwantedMinScore float64) {
 	if err := s.correspondents.RecordInboundClassification(ctx, stores.InboundClassification{
 		Correspondent: current.visibleSender, Recipients: current.envelopeRecipients,
 		RecipientsComplete: current.recipientsComplete, Classification: result.classification,
-		Score: result.score, UnwantedMinScore: unwantedMinScore, DKIMAligned: dkimAligned,
+		Score: result.score, UnwantedMinScore: unwantedMinScore, AuthenticationSatisfied: authenticationSatisfied,
 	}); err != nil {
 		s.log.ErrorContext(ctx, "cannot update inbound correspondent learning", "error", err)
 	}

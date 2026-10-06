@@ -65,11 +65,11 @@ func (r *correspondentRepository) DeleteCorrespondent(ctx context.Context, sende
 	}
 	result, err := r.db.Exec(ctx, query, args...)
 	if err != nil {
-		return 0, fmt.Errorf("delete manual correspondent: %w", err)
+		return 0, fmt.Errorf("delete correspondent: %w", err)
 	}
 	removed, err := result.RowsAffected()
 	if err != nil {
-		return 0, fmt.Errorf("count deleted manual correspondents: %w", err)
+		return 0, fmt.Errorf("count deleted correspondents: %w", err)
 	}
 	return int(removed), nil
 }

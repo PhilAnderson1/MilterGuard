@@ -69,9 +69,9 @@ func TestTransferDecodingRecoversMalformedInput(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			decoded, _ := decodeTransfer(test.encoding, []byte(test.input))
+			decoded, _ := decodeTransferRecovering(test.encoding, []byte(test.input))
 			if got := string(decoded); got != test.want {
-				t.Fatalf("decodeTransfer(%q, %q) = %q, want %q", test.encoding, test.input, got, test.want)
+				t.Fatalf("decodeTransferRecovering(%q, %q) = %q, want %q", test.encoding, test.input, got, test.want)
 			}
 		})
 	}

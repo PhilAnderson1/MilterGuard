@@ -3,16 +3,16 @@ package sqlite
 import "time"
 
 type CorrespondentOptions struct {
-	LearnAuthenticatedRecipients bool
-	LearnLegitimateSenders       bool
-	UseAllowlist                 bool
-	Scope                        string
-	MaxEntries                   int
-	StaleAfter                   time.Duration
-	LegitimateSenderMinScore     float64
-	LegitimateSenderMinMessages  int
-	LegitimateSenderRequireDKIM  bool
-	Now                          func() time.Time
+	LearnAuthenticatedRecipients          bool
+	LearnLegitimateSenders                bool
+	UseAllowlist                          bool
+	Scope                                 string
+	MaxEntries                            int
+	StaleAfter                            time.Duration
+	LegitimateSenderMinScore              float64
+	LegitimateSenderMinMessages           int
+	LegitimateSenderRequireAuthentication bool
+	Now                                   func() time.Time
 }
 
 type RejectionOptions struct {

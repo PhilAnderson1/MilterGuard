@@ -10,6 +10,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 	"golang.org/x/net/publicsuffix"
 )
@@ -54,12 +55,12 @@ func domainRegistrationEnabled(cfg config.DomainRegistrationConfig) bool {
 }
 
 func registrableDomain(domain string) string {
-	domain = normalizeDomain(domain)
+	domain = netsafety.DNSHostname(domain)
 	registrable, err := publicsuffix.EffectiveTLDPlusOne(domain)
 	if err != nil {
 		return ""
 	}
-	return normalizeDomain(registrable)
+	return netsafety.DNSHostname(registrable)
 }
 
 // evidence returns current cached registration evidence or coalesces a bounded

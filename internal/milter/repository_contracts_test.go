@@ -88,6 +88,7 @@ func TestCommandProcessorUsesUnrestrictedRejectionScopeOnlyForAdministrator(t *t
 type recordingIPReputationRepository struct {
 	stores.IPReputationRepository
 	rejections    atomic.Int32
+	legitimate    atomic.Int32
 	rejectionCall chan struct{}
 }
 
@@ -115,6 +116,11 @@ func (r *recordingIPReputationRepository) RecordRejection(_ context.Context, add
 		r.rejectionCall <- struct{}{}
 	}
 	return stores.IPBlock{Address: address, Level: stores.IPBlockLevelShort, ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (r *recordingIPReputationRepository) RecordLegitimate(context.Context, netip.Addr) error {
+	r.legitimate.Add(1)
+	return nil
 }
 
 func (r *recordingIPReputationRepository) ActiveBlock(context.Context, netip.Addr) (stores.IPBlock, bool, error) {

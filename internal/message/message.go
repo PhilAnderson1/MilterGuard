@@ -23,7 +23,7 @@ type Message struct {
 	Truncated               bool
 	BodyTruncated           bool
 	MIMEHeadersTruncated    bool
-	ArchiveTruncated        bool
+	SavedArchiveTruncated   bool
 	maxBytes                int64
 	bodySize                int64
 	headerBytesByName       map[string]int64
@@ -31,7 +31,7 @@ type Message struct {
 	toHeaderSeen            bool
 	archiveHeaders          bytes.Buffer
 	archiveHeaderBytes      int64
-	archiveTruncated        bool
+	archiveHeadersTruncated bool
 }
 
 type ConnectionInfo struct {
@@ -219,12 +219,12 @@ func (m *Message) FromHeaderCount() int { return m.fromHeaderCount }
 func (m *Message) addArchiveHeader(name, value string) {
 	name = strings.TrimSpace(name)
 	if name == "" || strings.ContainsAny(name, ":\r\n\x00") {
-		m.archiveTruncated = true
+		m.archiveHeadersTruncated = true
 		return
 	}
 	for _, char := range name {
 		if char < 33 || char > 126 {
-			m.archiveTruncated = true
+			m.archiveHeadersTruncated = true
 			return
 		}
 	}
@@ -237,7 +237,7 @@ func (m *Message) addArchiveHeader(name, value string) {
 	// excessive headers cannot suppress all content presented for analysis.
 	headerLimit := m.maxBytes / 2
 	if m.archiveHeaderBytes+int64(len(line)) > headerLimit {
-		m.archiveTruncated = true
+		m.archiveHeadersTruncated = true
 		return
 	}
 	m.archiveHeaderBytes += int64(len(line))
@@ -306,7 +306,7 @@ func (m *Message) ArchiveBytes() []byte {
 	if limit < 2 {
 		return nil
 	}
-	truncated := m.archiveTruncated || m.BodyTruncated
+	truncated := m.archiveHeadersTruncated || m.BodyTruncated
 	reserved := int64(2)
 	includeMarker := truncated && limit >= int64(len(archiveTruncationHeader))+reserved
 	if includeMarker {

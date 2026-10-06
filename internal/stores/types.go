@@ -26,7 +26,7 @@ type Correspondent struct {
 	Correspondent        string
 	LearnedAt            time.Time
 	LastActivityAt       time.Time
-	WhitelistType        CorrespondentKind
+	CorrespondentType    CorrespondentKind
 	LegitimateEmailCount int
 }
 
@@ -63,7 +63,7 @@ type ActivityEventType uint8
 const (
 	ActivityEventScan ActivityEventType = iota + 1
 	ActivityEventIPRejection
-	ActivityEventWhitelistAccept
+	ActivityEventCorrespondentAccept
 	ActivityEventTrustedDomainAccept
 	ActivityEventAttachmentRejection
 	ActivityEventProtectedSenderDomainRejection
@@ -99,7 +99,7 @@ type ActivitySummary struct {
 	ScanAccepted                    int64
 	AIEvaluationsFailed             int64
 	IPRejections                    int64
-	WhitelistAccepts                int64
+	CorrespondentAccepts            int64
 	TrustedDomainAccepts            int64
 	AttachmentRejections            int64
 	ProtectedSenderDomainRejections int64

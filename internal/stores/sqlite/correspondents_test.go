@@ -35,7 +35,7 @@ func (s *correspondentStore) touchInbound(ctx context.Context, correspondent str
 }
 func (s *correspondentStore) recordInboundClassification(ctx context.Context, correspondent string, recipients []string, complete bool, classification string, score, minimum float64, aligned bool) error {
 	return s.RecordInboundClassification(ctx, stores.InboundClassification{Correspondent: correspondent, Recipients: recipients,
-		RecipientsComplete: complete, Classification: classification, Score: score, UnwantedMinScore: minimum, DKIMAligned: aligned})
+		RecipientsComplete: complete, Classification: classification, Score: score, UnwantedMinScore: minimum, AuthenticationSatisfied: aligned})
 }
 func (s *correspondentStore) match(t *testing.T, ctx context.Context, correspondent string, recipients []string) stores.CorrespondentMatch {
 	t.Helper()
@@ -104,7 +104,7 @@ func putTestCorrespondent(t *testing.T, store *correspondentStore, entry corresp
 	_, err := store.db.Exec(context.Background(), `INSERT INTO correspondents
 		(local_address, correspondent, learned_at_ms, last_activity_at_ms, whitelist_type, legitimate_email_count)
 		VALUES (?, ?, ?, ?, ?, ?)`, entry.LocalAddress, entry.Correspondent, unixMillis(entry.LearnedAt),
-		unixMillis(entry.LastActivityAt), entry.WhitelistType, entry.LegitimateEmailCount)
+		unixMillis(entry.LastActivityAt), entry.CorrespondentType, entry.LegitimateEmailCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestAddManualCreatesAndConvertsExistingCorrespondents(t *testing.T) {
 		t.Fatalf("new manual correspondent created=%t, err=%v", created, err)
 	}
 	createdEntry := store.snapshot(t)["owner@example.com\x00new@example.net"]
-	if createdEntry.WhitelistType != whitelistManual || createdEntry.LegitimateEmailCount != 0 ||
+	if createdEntry.CorrespondentType != whitelistManual || createdEntry.LegitimateEmailCount != 0 ||
 		!createdEntry.LearnedAt.Equal(now) || !createdEntry.LastActivityAt.Equal(now) {
 		t.Fatalf("new manual correspondent=%+v", createdEntry)
 	}
@@ -170,7 +170,7 @@ func TestAddManualCreatesAndConvertsExistingCorrespondents(t *testing.T) {
 	learnedAt := now.Add(-48 * time.Hour)
 	putTestCorrespondent(t, store, correspondentEntry{
 		LocalAddress: "other@example.com", Correspondent: "candidate@example.net",
-		WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2,
+		CorrespondentType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2,
 		LearnedAt: learnedAt, LastActivityAt: now.Add(-24 * time.Hour),
 	})
 	now = now.Add(time.Hour)
@@ -180,7 +180,7 @@ func TestAddManualCreatesAndConvertsExistingCorrespondents(t *testing.T) {
 	}
 	records := store.snapshot(t)
 	converted := records["other@example.com\x00candidate@example.net"]
-	if len(records) != 2 || converted.WhitelistType != whitelistManual || converted.LegitimateEmailCount != 0 ||
+	if len(records) != 2 || converted.CorrespondentType != whitelistManual || converted.LegitimateEmailCount != 0 ||
 		!converted.LearnedAt.Equal(learnedAt) || !converted.LastActivityAt.Equal(now) {
 		t.Fatalf("converted manual correspondent=%+v records=%d", converted, len(records))
 	}
@@ -190,9 +190,9 @@ func TestDeleteCorrespondentHonorsRecipientScope(t *testing.T) {
 	store := newTestCorrespondentStore(t, CorrespondentOptions{UseAllowlist: true, MaxEntries: 10}, nil)
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	for _, entry := range []correspondentEntry{
-		{LocalAddress: "first@example.com", Correspondent: "sender@example.net", WhitelistType: whitelistManual, LearnedAt: now, LastActivityAt: now},
-		{LocalAddress: "second@example.com", Correspondent: "sender@example.net", WhitelistType: whitelistManual, LearnedAt: now, LastActivityAt: now},
-		{LocalAddress: "first@example.com", Correspondent: "unrelated@example.net", WhitelistType: whitelistManual, LearnedAt: now, LastActivityAt: now},
+		{LocalAddress: "first@example.com", Correspondent: "sender@example.net", CorrespondentType: whitelistManual, LearnedAt: now, LastActivityAt: now},
+		{LocalAddress: "second@example.com", Correspondent: "sender@example.net", CorrespondentType: whitelistManual, LearnedAt: now, LastActivityAt: now},
+		{LocalAddress: "first@example.com", Correspondent: "unrelated@example.net", CorrespondentType: whitelistManual, LearnedAt: now, LastActivityAt: now},
 	} {
 		putTestCorrespondent(t, store, entry)
 	}
@@ -358,7 +358,7 @@ func TestCorrespondentActivityDoesNotResurrectStaleRelationship(t *testing.T) {
 	staleActivity := now.Add(-25 * time.Hour)
 	putTestCorrespondent(t, store, correspondentEntry{
 		LocalAddress: "owner@example.com", Correspondent: "sender@example.net",
-		WhitelistType: whitelistManual, LearnedAt: now.Add(-48 * time.Hour), LastActivityAt: staleActivity,
+		CorrespondentType: whitelistManual, LearnedAt: now.Add(-48 * time.Hour), LastActivityAt: staleActivity,
 	})
 
 	if err := store.touchInbound(context.Background(), "sender@example.net", []string{"owner@example.com"}); err != nil {
@@ -387,8 +387,8 @@ func TestCorrespondentCleanupRemovesOnlyStaleRelationships(t *testing.T) {
 	}, nil)
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "local@example.com", Correspondent: "stale@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-48 * time.Hour), LastActivityAt: now.Add(-25 * time.Hour)})
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "local@example.com", Correspondent: "current@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-48 * time.Hour), LastActivityAt: now.Add(-23 * time.Hour)})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "local@example.com", Correspondent: "stale@example.net", CorrespondentType: whitelistManual, LearnedAt: now.Add(-48 * time.Hour), LastActivityAt: now.Add(-25 * time.Hour)})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "local@example.com", Correspondent: "current@example.net", CorrespondentType: whitelistManual, LearnedAt: now.Add(-48 * time.Hour), LastActivityAt: now.Add(-23 * time.Hour)})
 	if deleted, err := store.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	} else if deleted != 1 {
@@ -429,9 +429,9 @@ func TestCorrespondentOutboundBatchPreservesRelationshipRules(t *testing.T) {
 	}, nil)
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "manual@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "candidate@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "stale@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-96 * time.Hour), LastActivityAt: now.Add(-49 * time.Hour)})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "manual@example.net", CorrespondentType: whitelistManual, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "candidate@example.net", CorrespondentType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "owner@example.com", Correspondent: "stale@example.net", CorrespondentType: whitelistManual, LearnedAt: now.Add(-96 * time.Hour), LastActivityAt: now.Add(-49 * time.Hour)})
 
 	if err := store.learn(context.Background(), "owner@example.com", []string{
 		"manual@example.net", "candidate@example.net", "stale@example.net", "new@example.net",
@@ -443,12 +443,12 @@ func TestCorrespondentOutboundBatchPreservesRelationshipRules(t *testing.T) {
 		t.Fatalf("batch learned %d relationships, want 4", len(records))
 	}
 	manual := records["owner@example.com\x00manual@example.net"]
-	if manual.WhitelistType != whitelistManual || !manual.LastActivityAt.Equal(now) {
+	if manual.CorrespondentType != whitelistManual || !manual.LastActivityAt.Equal(now) {
 		t.Fatalf("manual relationship changed unexpectedly: %+v", manual)
 	}
 	for _, correspondent := range []string{"candidate@example.net", "stale@example.net", "new@example.net"} {
 		entry := records["owner@example.com\x00"+correspondent]
-		if entry.WhitelistType != whitelistAuthenticatedOutbound || entry.LegitimateEmailCount != 0 || !entry.LastActivityAt.Equal(now) {
+		if entry.CorrespondentType != whitelistAuthenticatedOutbound || entry.LegitimateEmailCount != 0 || !entry.LastActivityAt.Equal(now) {
 			t.Errorf("outbound relationship %s = %+v", correspondent, entry)
 		}
 	}
@@ -470,13 +470,13 @@ func TestCorrespondentOutboundLearningRollsBackOnInsertFailure(t *testing.T) {
 	store.now = func() time.Time { return now }
 	candidate := correspondentEntry{
 		LocalAddress: "owner@example.com", Correspondent: "candidate@example.net",
-		WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2,
+		CorrespondentType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2,
 		LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour),
 	}
 	stale := correspondentEntry{
 		LocalAddress: "owner@example.com", Correspondent: "stale@example.net",
-		WhitelistType: whitelistManual,
-		LearnedAt:     now.Add(-96 * time.Hour), LastActivityAt: now.Add(-49 * time.Hour),
+		CorrespondentType: whitelistManual,
+		LearnedAt:         now.Add(-96 * time.Hour), LastActivityAt: now.Add(-49 * time.Hour),
 	}
 	putTestCorrespondent(t, store, candidate)
 	putTestCorrespondent(t, store, stale)
@@ -496,12 +496,12 @@ func TestCorrespondentOutboundLearningRollsBackOnInsertFailure(t *testing.T) {
 		t.Fatalf("partially committed outbound records = %#v", records)
 	}
 	gotCandidate := records["owner@example.com\x00candidate@example.net"]
-	if gotCandidate.WhitelistType != candidate.WhitelistType || gotCandidate.LegitimateEmailCount != candidate.LegitimateEmailCount ||
+	if gotCandidate.CorrespondentType != candidate.CorrespondentType || gotCandidate.LegitimateEmailCount != candidate.LegitimateEmailCount ||
 		!gotCandidate.LearnedAt.Equal(candidate.LearnedAt) || !gotCandidate.LastActivityAt.Equal(candidate.LastActivityAt) {
 		t.Fatalf("candidate conversion was not rolled back: %+v", gotCandidate)
 	}
 	gotStale := records["owner@example.com\x00stale@example.net"]
-	if gotStale.WhitelistType != stale.WhitelistType || !gotStale.LearnedAt.Equal(stale.LearnedAt) ||
+	if gotStale.CorrespondentType != stale.CorrespondentType || !gotStale.LearnedAt.Equal(stale.LearnedAt) ||
 		!gotStale.LastActivityAt.Equal(stale.LastActivityAt) {
 		t.Fatalf("stale deletion was not rolled back: %+v", gotStale)
 	}
@@ -519,9 +519,9 @@ func TestCorrespondentInboundBatchPreservesRelationshipRules(t *testing.T) {
 	}, nil)
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "candidate@example.com", Correspondent: "sender@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "manual@example.com", Correspondent: "sender@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "stale@example.com", Correspondent: "sender@example.net", WhitelistType: whitelistManual, LearnedAt: now.Add(-96 * time.Hour), LastActivityAt: now.Add(-49 * time.Hour)})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "candidate@example.com", Correspondent: "sender@example.net", CorrespondentType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "manual@example.com", Correspondent: "sender@example.net", CorrespondentType: whitelistManual, LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour)})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "stale@example.com", Correspondent: "sender@example.net", CorrespondentType: whitelistManual, LearnedAt: now.Add(-96 * time.Hour), LastActivityAt: now.Add(-49 * time.Hour)})
 
 	recipients := []string{"candidate@example.com", "manual@example.com", "stale@example.com", "new@example.com"}
 	if err := store.recordInboundClassification(context.Background(), "sender@example.net", recipients, true, "legitimate", .95, .9, true); err != nil {
@@ -534,12 +534,12 @@ func TestCorrespondentInboundBatchPreservesRelationshipRules(t *testing.T) {
 	if !store.match(t, context.Background(), "sender@example.net", []string{"candidate@example.com"}).Known {
 		t.Fatal("promoted candidate was not matched by the production qualification query")
 	}
-	if manual := records["manual@example.com\x00sender@example.net"]; manual.WhitelistType != whitelistManual {
+	if manual := records["manual@example.com\x00sender@example.net"]; manual.CorrespondentType != whitelistManual {
 		t.Fatalf("manual relationship changed unexpectedly: %+v", manual)
 	}
 	for _, recipient := range []string{"stale@example.com", "new@example.com"} {
 		entry := records[recipient+"\x00sender@example.net"]
-		if entry.WhitelistType != whitelistRepeatedLegitimate || entry.LegitimateEmailCount != 1 || !entry.LearnedAt.Equal(now) {
+		if entry.CorrespondentType != whitelistRepeatedLegitimate || entry.LegitimateEmailCount != 1 || !entry.LearnedAt.Equal(now) {
 			t.Errorf("new inbound candidate for %s = %+v", recipient, entry)
 		}
 	}
@@ -559,13 +559,13 @@ func TestCorrespondentInboundLearningRollsBackOnInsertFailure(t *testing.T) {
 	store.now = func() time.Time { return now }
 	candidate := correspondentEntry{
 		LocalAddress: "candidate@example.com", Correspondent: "sender@example.net",
-		WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2,
+		CorrespondentType: whitelistRepeatedLegitimate, LegitimateEmailCount: 2,
 		LearnedAt: now.Add(-24 * time.Hour), LastActivityAt: now.Add(-time.Hour),
 	}
 	stale := correspondentEntry{
 		LocalAddress: "stale@example.com", Correspondent: "sender@example.net",
-		WhitelistType: whitelistManual,
-		LearnedAt:     now.Add(-96 * time.Hour), LastActivityAt: now.Add(-49 * time.Hour),
+		CorrespondentType: whitelistManual,
+		LearnedAt:         now.Add(-96 * time.Hour), LastActivityAt: now.Add(-49 * time.Hour),
 	}
 	putTestCorrespondent(t, store, candidate)
 	putTestCorrespondent(t, store, stale)
@@ -585,12 +585,12 @@ func TestCorrespondentInboundLearningRollsBackOnInsertFailure(t *testing.T) {
 		t.Fatalf("partially committed inbound records = %#v", records)
 	}
 	gotCandidate := records["candidate@example.com\x00sender@example.net"]
-	if gotCandidate.WhitelistType != candidate.WhitelistType || gotCandidate.LegitimateEmailCount != candidate.LegitimateEmailCount ||
+	if gotCandidate.CorrespondentType != candidate.CorrespondentType || gotCandidate.LegitimateEmailCount != candidate.LegitimateEmailCount ||
 		!gotCandidate.LearnedAt.Equal(candidate.LearnedAt) || !gotCandidate.LastActivityAt.Equal(candidate.LastActivityAt) {
 		t.Fatalf("candidate promotion was not rolled back: %+v", gotCandidate)
 	}
 	gotStale := records["stale@example.com\x00sender@example.net"]
-	if gotStale.WhitelistType != stale.WhitelistType || !gotStale.LearnedAt.Equal(stale.LearnedAt) ||
+	if gotStale.CorrespondentType != stale.CorrespondentType || !gotStale.LearnedAt.Equal(stale.LearnedAt) ||
 		!gotStale.LastActivityAt.Equal(stale.LastActivityAt) {
 		t.Fatalf("stale deletion was not rolled back: %+v", gotStale)
 	}
@@ -600,7 +600,7 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	cfg := CorrespondentOptions{
 		LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true, UseAllowlist: true,
 		Scope: "per_sender", LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .99,
-		LegitimateSenderRequireDKIM: true, MaxEntries: 10,
+		LegitimateSenderRequireAuthentication: true, MaxEntries: 10,
 	}
 	store := newTestCorrespondentStore(t, cfg, nil)
 	record := func(classification string, score float64, dkim bool) {
@@ -611,7 +611,7 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	}
 	record("legitimate", 1, false)
 	if len(store.snapshot(t)) != 0 {
-		t.Fatal("message without required DKIM created candidate")
+		t.Fatal("message without required authentication created candidate")
 	}
 	record("legitimate", 1, true)
 	key := "owner@example.com\x00news@example.net"
@@ -641,7 +641,7 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	}
 	record("unwanted", 1, true)
 	entry := store.snapshot(t)[key]
-	if entry.WhitelistType != whitelistAuthenticatedOutbound || entry.LegitimateEmailCount != 0 {
+	if entry.CorrespondentType != whitelistAuthenticatedOutbound || entry.LegitimateEmailCount != 0 {
 		t.Fatalf("authenticated outbound promotion = %#v", entry)
 	}
 }
@@ -652,9 +652,9 @@ func TestUnwantedClassificationRemovesOnlyRecipientScopedLearnedCorrespondent(t 
 	}, nil)
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	for _, entry := range []correspondentEntry{
-		{LocalAddress: "first@example.com", Correspondent: "sender@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 3, LearnedAt: now, LastActivityAt: now},
-		{LocalAddress: "second@example.com", Correspondent: "sender@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 3, LearnedAt: now, LastActivityAt: now},
-		{LocalAddress: "third@example.com", Correspondent: "sender@example.net", WhitelistType: whitelistManual, LearnedAt: now, LastActivityAt: now},
+		{LocalAddress: "first@example.com", Correspondent: "sender@example.net", CorrespondentType: whitelistRepeatedLegitimate, LegitimateEmailCount: 3, LearnedAt: now, LastActivityAt: now},
+		{LocalAddress: "second@example.com", Correspondent: "sender@example.net", CorrespondentType: whitelistRepeatedLegitimate, LegitimateEmailCount: 3, LearnedAt: now, LastActivityAt: now},
+		{LocalAddress: "third@example.com", Correspondent: "sender@example.net", CorrespondentType: whitelistManual, LearnedAt: now, LastActivityAt: now},
 	} {
 		putTestCorrespondent(t, store, entry)
 	}
@@ -679,10 +679,10 @@ func TestListAllowlistIsScopedQualifiedAndOrdered(t *testing.T) {
 	store := newTestCorrespondentStore(t, cfg, nil)
 	older := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	newer := older.Add(time.Hour)
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "older@example.net", WhitelistType: whitelistManual, LearnedAt: older, LastActivityAt: older})
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "candidate@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 1, LearnedAt: newer, LastActivityAt: newer})
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "newer@example.net", WhitelistType: whitelistManual, LearnedAt: newer, LastActivityAt: newer})
-	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "bob@example.com", Correspondent: "bob@example.net", WhitelistType: whitelistManual, LearnedAt: newer, LastActivityAt: newer})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "older@example.net", CorrespondentType: whitelistManual, LearnedAt: older, LastActivityAt: older})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "candidate@example.net", CorrespondentType: whitelistRepeatedLegitimate, LegitimateEmailCount: 1, LearnedAt: newer, LastActivityAt: newer})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "newer@example.net", CorrespondentType: whitelistManual, LearnedAt: newer, LastActivityAt: newer})
+	putTestCorrespondent(t, store, correspondentEntry{LocalAddress: "bob@example.com", Correspondent: "bob@example.net", CorrespondentType: whitelistManual, LearnedAt: newer, LastActivityAt: newer})
 	alice, err := store.listAllowlist(context.Background(), "alice@example.com", time.Time{})
 	if err != nil {
 		t.Fatal(err)

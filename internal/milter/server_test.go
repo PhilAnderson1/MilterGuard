@@ -1746,26 +1746,36 @@ func TestAuthenticatedMessagesAreScannedWhenEnabled(t *testing.T) {
 
 func TestSenderDomainAllowlistBypassPolicy(t *testing.T) {
 	for _, test := range []struct {
-		name           string
-		from           string
-		authentication string
-		requireDKIM    bool
-		wantAICalls    int32
+		name                  string
+		from                  string
+		authentication        string
+		requireAuthentication bool
+		trustRequirement      string
+		wantAICalls           int32
 	}{
 		{name: "exact domain without authentication requirement", from: "Orders <orders@amazon.com>", wantAICalls: 0},
 		{name: "subdomain match", from: "Orders <orders@mail.amazon.com>", wantAICalls: 0},
 		{name: "unrelated domain", from: "Orders <orders@amazon.example>", wantAICalls: 1},
-		{name: "aligned trusted DKIM", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; dkim=pass header.d=amazon.com", requireDKIM: true, wantAICalls: 0},
-		{name: "missing DKIM", from: "Orders <orders@amazon.com>", requireDKIM: true, wantAICalls: 1},
-		{name: "unaligned DKIM", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; dkim=pass header.d=attacker.example", requireDKIM: true, wantAICalls: 1},
-		{name: "untrusted authentication results", from: "Orders <orders@amazon.com>", authentication: "attacker.example; dkim=pass header.d=amazon.com", requireDKIM: true, wantAICalls: 1},
-		{name: "DMARC alone is insufficient", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; dmarc=pass header.from=amazon.com", requireDKIM: true, wantAICalls: 1},
+		{name: "aligned trusted DKIM", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; dkim=pass header.d=amazon.com", requireAuthentication: true, trustRequirement: "dkim", wantAICalls: 0},
+		{name: "aligned trusted SPF", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; spf=pass smtp.mailfrom=bounce.amazon.com", requireAuthentication: true, trustRequirement: "spf", wantAICalls: 0},
+		{name: "either accepts SPF", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; spf=pass smtp.mailfrom=bounce.amazon.com", requireAuthentication: true, trustRequirement: "either", wantAICalls: 0},
+		{name: "both rejects DKIM alone", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; dkim=pass header.d=amazon.com", requireAuthentication: true, trustRequirement: "both", wantAICalls: 1},
+		{name: "both accepts SPF and DKIM", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; dkim=pass header.d=amazon.com; spf=pass smtp.mailfrom=bounce.amazon.com", requireAuthentication: true, trustRequirement: "both", wantAICalls: 0},
+		{name: "missing authentication", from: "Orders <orders@amazon.com>", requireAuthentication: true, trustRequirement: "dkim", wantAICalls: 1},
+		{name: "unaligned DKIM", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; dkim=pass header.d=attacker.example", requireAuthentication: true, trustRequirement: "dkim", wantAICalls: 1},
+		{name: "untrusted authentication results", from: "Orders <orders@amazon.com>", authentication: "attacker.example; dkim=pass header.d=amazon.com", requireAuthentication: true, trustRequirement: "dkim", wantAICalls: 1},
+		{name: "DMARC alone is insufficient", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; dmarc=pass header.from=amazon.com", requireAuthentication: true, trustRequirement: "dkim", wantAICalls: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 			server, conn, done := testServer(t, analyzer)
 			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.SenderDomainAllowlist = []string{"amazon.com"} })
-			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.SenderDomainAllowlistRequireDKIM = test.requireDKIM })
+			setTestFiltering(server, func(cfg *config.FilteringConfig) {
+				cfg.SenderDomainAllowlistRequireAuthentication = test.requireAuthentication
+			})
+			if test.trustRequirement != "" {
+				server.sessions.policy.trustRequirement = test.trustRequirement
+			}
 			server.sessions.policy.correspondentCfg.TrustedAuthservIDs = []string{"nl.invades.net"}
 			defer func() {
 				_ = conn.Close()
@@ -1950,7 +1960,7 @@ func TestKnownCorrespondentIsSuppliedAsAIEvidence(t *testing.T) {
 		"CORRESPONDENT INFORMATION:",
 		"Sender found in known correspondent database: yes",
 		"Basis: The visible From address was previously emailed from a relevant local address.",
-		"Sender authentication: no trusted aligned DKIM or DMARC result is available.",
+		"Sender authentication: no trusted aligned SPF, DKIM, or DMARC result is available.",
 	} {
 		if !strings.Contains(input.Text, want) {
 			t.Errorf("AI input missing %q:\n%s", want, input.Text)
@@ -2003,31 +2013,36 @@ func TestMultipleFromHeadersCannotBypassOrTeachSenderTrust(t *testing.T) {
 
 func TestKnownCorrespondentBypassAuthenticationPolicy(t *testing.T) {
 	for _, test := range []struct {
-		name             string
-		authentication   string
-		secondRecipient  string
-		recipientMatch   string
-		requireSPFOrDKIM bool
-		wantAICalls      int32
+		name                  string
+		authentication        string
+		secondRecipient       string
+		recipientMatch        string
+		requireAuthentication bool
+		trustRequirement      string
+		wantAICalls           int32
 	}{
-		{name: "trusted aligned DKIM", authentication: "nl.invades.net; dkim=pass header.d=example.com", recipientMatch: "all", requireSPFOrDKIM: true, wantAICalls: 0},
-		{name: "trusted aligned SPF", authentication: "nl.invades.net; spf=pass smtp.mailfrom=bounce.example.com", recipientMatch: "all", requireSPFOrDKIM: true, wantAICalls: 0},
-		{name: "untrusted DKIM", authentication: "attacker.example; dkim=pass header.d=example.com", recipientMatch: "all", requireSPFOrDKIM: true, wantAICalls: 1},
-		{name: "unaligned SPF", authentication: "nl.invades.net; spf=pass smtp.mailfrom=attacker.example", recipientMatch: "all", requireSPFOrDKIM: true, wantAICalls: 1},
-		{name: "DMARC alone is insufficient", authentication: "nl.invades.net; dmarc=pass header.from=example.com", recipientMatch: "all", requireSPFOrDKIM: true, wantAICalls: 1},
-		{name: "no authentication required", authentication: "", recipientMatch: "all", requireSPFOrDKIM: false, wantAICalls: 0},
-		{name: "partial match requiring all", authentication: "", secondRecipient: "other@invades.net", recipientMatch: "all", requireSPFOrDKIM: false, wantAICalls: 1},
-		{name: "partial match requiring any", authentication: "", secondRecipient: "other@invades.net", recipientMatch: "any", requireSPFOrDKIM: false, wantAICalls: 0},
+		{name: "trusted aligned DKIM", authentication: "nl.invades.net; dkim=pass header.d=example.com", recipientMatch: "all", requireAuthentication: true, trustRequirement: "dkim", wantAICalls: 0},
+		{name: "trusted aligned SPF", authentication: "nl.invades.net; spf=pass smtp.mailfrom=bounce.example.com", recipientMatch: "all", requireAuthentication: true, trustRequirement: "spf", wantAICalls: 0},
+		{name: "both rejects SPF alone", authentication: "nl.invades.net; spf=pass smtp.mailfrom=bounce.example.com", recipientMatch: "all", requireAuthentication: true, trustRequirement: "both", wantAICalls: 1},
+		{name: "untrusted DKIM", authentication: "attacker.example; dkim=pass header.d=example.com", recipientMatch: "all", requireAuthentication: true, trustRequirement: "dkim", wantAICalls: 1},
+		{name: "unaligned SPF", authentication: "nl.invades.net; spf=pass smtp.mailfrom=attacker.example", recipientMatch: "all", requireAuthentication: true, trustRequirement: "spf", wantAICalls: 1},
+		{name: "DMARC alone is insufficient", authentication: "nl.invades.net; dmarc=pass header.from=example.com", recipientMatch: "all", requireAuthentication: true, trustRequirement: "dkim", wantAICalls: 1},
+		{name: "no authentication required", authentication: "", recipientMatch: "all", requireAuthentication: false, wantAICalls: 0},
+		{name: "partial match requiring all", authentication: "", secondRecipient: "other@invades.net", recipientMatch: "all", requireAuthentication: false, wantAICalls: 1},
+		{name: "partial match requiring any", authentication: "", secondRecipient: "other@invades.net", recipientMatch: "any", requireAuthentication: false, wantAICalls: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 			server, conn, done := testServer(t, analyzer)
 			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: test.recipientMatch, BypassAI: true,
-				RequireSPFOrDKIMForBypass: test.requireSPFOrDKIM,
-				MaxEntries:                100, TrustedAuthservIDs: []string{"nl.invades.net"},
+				RequireAuthenticationForBypass: test.requireAuthentication,
+				MaxEntries:                     100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
 			setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
+			if test.trustRequirement != "" {
+				server.sessions.policy.trustRequirement = test.trustRequirement
+			}
 			if err := server.sessions.policy.correspondents.LearnAuthenticated(context.Background(), "philip@invades.net", []string{"alice@example.com"}); err != nil {
 				t.Fatal(err)
 			}
@@ -2076,7 +2091,7 @@ func TestMTAHostnameMacroExpandsTrustedAuthenticationService(t *testing.T) {
 			server, conn, done := testServer(t, analyzer)
 			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-				BypassAI: true, RequireSPFOrDKIMForBypass: true,
+				BypassAI: true, RequireAuthenticationForBypass: true,
 				MaxEntries: 100, TrustedAuthservIDs: []string{config.MTAHostnameAuthservID},
 			}
 			setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
@@ -2113,31 +2128,39 @@ func TestMTAHostnameMacroExpandsTrustedAuthenticationService(t *testing.T) {
 	}
 }
 
-func TestBypassedInboundActivityRequiresTrustedSPFOrDKIM(t *testing.T) {
+func TestBypassedInboundActivityRequiresConfiguredAuthentication(t *testing.T) {
 	for _, test := range []struct {
-		name             string
-		authentication   string
-		requireSPFOrDKIM bool
-		allowedDomain    string
-		wantRefresh      bool
+		name                        string
+		authentication              string
+		requireAuthentication       bool
+		trustRequirement            string
+		allowedDomain               string
+		domainRequireAuthentication bool
+		wantRefresh                 bool
 	}{
-		{name: "unauthenticated bypass is not refreshed", requireSPFOrDKIM: false},
-		{name: "trusted DKIM bypass is refreshed", authentication: "nl.invades.net; dkim=pass header.d=example.com", requireSPFOrDKIM: true, wantRefresh: true},
-		{name: "trusted SPF bypass is refreshed", authentication: "nl.invades.net; spf=pass smtp.mailfrom=example.com", requireSPFOrDKIM: true, wantRefresh: true},
-		{name: "trusted sender-domain bypass refreshes known correspondent", authentication: "nl.invades.net; dkim=pass header.d=example.com", requireSPFOrDKIM: true, allowedDomain: "example.com", wantRefresh: true},
+		{name: "unauthenticated bypass is not refreshed", requireAuthentication: false},
+		{name: "trusted DKIM bypass is refreshed", authentication: "nl.invades.net; dkim=pass header.d=example.com", requireAuthentication: true, trustRequirement: "dkim", wantRefresh: true},
+		{name: "trusted SPF bypass is refreshed", authentication: "nl.invades.net; spf=pass smtp.mailfrom=example.com", requireAuthentication: true, trustRequirement: "spf", wantRefresh: true},
+		{name: "DKIM sender-domain bypass refreshes known correspondent", authentication: "nl.invades.net; dkim=pass header.d=example.com", requireAuthentication: true, trustRequirement: "dkim", allowedDomain: "example.com", domainRequireAuthentication: true, wantRefresh: true},
+		{name: "SPF sender-domain bypass refreshes known correspondent", authentication: "nl.invades.net; spf=pass smtp.mailfrom=example.com", requireAuthentication: true, trustRequirement: "spf", allowedDomain: "example.com", domainRequireAuthentication: true, wantRefresh: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 			server, conn, done := testServer(t, analyzer)
 			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-				BypassAI: true, RequireSPFOrDKIMForBypass: test.requireSPFOrDKIM,
+				BypassAI: true, RequireAuthenticationForBypass: test.requireAuthentication,
 				MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
 			setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
+			if test.trustRequirement != "" {
+				server.sessions.policy.trustRequirement = test.trustRequirement
+			}
 			if test.allowedDomain != "" {
 				setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.SenderDomainAllowlist = []string{test.allowedDomain} })
-				setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.SenderDomainAllowlistRequireDKIM = true })
+				setTestFiltering(server, func(cfg *config.FilteringConfig) {
+					cfg.SenderDomainAllowlistRequireAuthentication = test.domainRequireAuthentication
+				})
 			}
 			learnedAt := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 			server.sessions.policy.correspondents.(*correspondentStore).now = func() time.Time { return learnedAt }
@@ -2177,35 +2200,48 @@ func TestBypassedInboundActivityRequiresTrustedSPFOrDKIM(t *testing.T) {
 }
 
 func TestAIResultLearnsInboundSender(t *testing.T) {
-	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
-	server, conn, done := testServer(t, analyzer)
-	cfg := config.CorrespondentsConfig{
-		LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-		LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
-		MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
-	}
-	setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
+	for _, test := range []struct {
+		name           string
+		authentication string
+	}{
+		{name: "aligned DKIM", authentication: "nl.invades.net; dkim=pass header.d=example.com"},
+		{name: "aligned SPF", authentication: "nl.invades.net; spf=pass smtp.mailfrom=example.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
+			server, conn, done := testServer(t, analyzer)
+			cfg := config.CorrespondentsConfig{
+				LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+				LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireAuthentication: true,
+				MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
+			}
+			setTestCorrespondents(server, cfg, newTestCorrespondentStore(t, cfg, server.log))
+			if test.name == "aligned SPF" {
+				server.sessions.policy.trustRequirement = config.AuthenticationTrustSPF
+			}
 
-	negotiate(t, conn)
-	sendContinueFrames(t, conn,
-		connectFrame('4', "127.0.0.1"),
-		envelopeFrame(commandMail, "news@example.com"),
-		envelopeFrame(commandRecipient, "philip@invades.net"),
-		headerFrame("From", "News <news@example.com>"),
-		headerFrame("Authentication-Results", "nl.invades.net; dkim=pass header.d=example.com"),
-		[]byte{commandEndHeaders},
-	)
-	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
-		t.Fatal(err)
-	}
-	expectFrame(t, conn, string([]byte{responseAccept}))
-	if err := writeFrame(conn, []byte{commandQuit}); err != nil {
-		t.Fatal(err)
-	}
-	<-done
-	_ = conn.Close()
-	if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); !match.Known {
-		t.Fatal("qualifying AI result did not create a known correspondent")
+			negotiate(t, conn)
+			sendContinueFrames(t, conn,
+				connectFrame('4', "127.0.0.1"),
+				envelopeFrame(commandMail, "news@example.com"),
+				envelopeFrame(commandRecipient, "philip@invades.net"),
+				headerFrame("From", "News <news@example.com>"),
+				headerFrame("Authentication-Results", test.authentication),
+				[]byte{commandEndHeaders},
+			)
+			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+				t.Fatal(err)
+			}
+			expectFrame(t, conn, string([]byte{responseAccept}))
+			if err := writeFrame(conn, []byte{commandQuit}); err != nil {
+				t.Fatal(err)
+			}
+			<-done
+			_ = conn.Close()
+			if match := testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.com", []string{"philip@invades.net"}); !match.Known {
+				t.Fatal("qualifying AI result did not create a known correspondent")
+			}
+		})
 	}
 }
 
@@ -2215,7 +2251,7 @@ func TestAcceptModeDoesNotLearnFromAIResultsOrDecayIPReputation(t *testing.T) {
 	setTestMode(server, "accept")
 	correspondentCfg := config.CorrespondentsConfig{
 		LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
-		LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
+		LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireAuthentication: true,
 		MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 	}
 	setTestCorrespondents(server, correspondentCfg, newTestCorrespondentStore(t, correspondentCfg, server.log))

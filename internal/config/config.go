@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math"
 	"net"
-	"net/mail"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"gopkg.in/yaml.v3"
 )
@@ -23,6 +23,10 @@ const (
 	MTAHostnameAuthservID            = "$mta_hostname"
 	AuthenticationModeTrustedHeaders = "trusted_headers"
 	AuthenticationModeInternal       = "internal"
+	AuthenticationTrustDKIM          = "dkim"
+	AuthenticationTrustSPF           = "spf"
+	AuthenticationTrustEither        = "either"
+	AuthenticationTrustBoth          = "both"
 	maxMilterMessageSize             = 100 << 20
 )
 
@@ -117,6 +121,7 @@ type MilterConfig struct {
 }
 type AuthenticationConfig struct {
 	Mode               string   `yaml:"mode"`
+	TrustRequirement   string   `yaml:"trust_requirement"`
 	Timeout            Duration `yaml:"timeout"`
 	MaxConcurrent      int      `yaml:"max_concurrent"`
 	MessageStorage     string   `yaml:"message_storage"`
@@ -145,16 +150,16 @@ type AIConfig struct {
 	OutputCostPerMillionTokens float64  `yaml:"output_cost_per_million_tokens"`
 }
 type FilteringConfig struct {
-	RejectScore                      float64  `yaml:"reject_score"`
-	LegitimateLowConfidenceScore     float64  `yaml:"legitimate_low_confidence_score"`
-	AddEmailHeaders                  bool     `yaml:"add_email_headers"`
-	AIErrorAction                    string   `yaml:"ai_error_action"`
-	RejectMessage                    string   `yaml:"reject_message"`
-	ScanAuthenticated                bool     `yaml:"scan_authenticated"`
-	AuthenticatedOnlySenderDomains   []string `yaml:"authenticated_only_sender_domains"`
-	SenderDomainAllowlistFile        string   `yaml:"sender_domain_allowlist"`
-	SenderDomainAllowlist            []string `yaml:"-"`
-	SenderDomainAllowlistRequireDKIM bool     `yaml:"sender_domain_allowlist_require_dkim"`
+	RejectScore                                float64  `yaml:"reject_score"`
+	LegitimateLowConfidenceScore               float64  `yaml:"legitimate_low_confidence_score"`
+	AddEmailHeaders                            bool     `yaml:"add_email_headers"`
+	AIErrorAction                              string   `yaml:"ai_error_action"`
+	RejectMessage                              string   `yaml:"reject_message"`
+	ScanAuthenticated                          bool     `yaml:"scan_authenticated"`
+	AuthenticatedOnlySenderDomains             []string `yaml:"authenticated_only_sender_domains"`
+	SenderDomainAllowlistFile                  string   `yaml:"sender_domain_allowlist"`
+	SenderDomainAllowlist                      []string `yaml:"-"`
+	SenderDomainAllowlistRequireAuthentication bool     `yaml:"sender_domain_allowlist_require_authentication"`
 }
 type IPReputationConfig struct {
 	RejectMessage          string   `yaml:"reject_message"`
@@ -176,19 +181,19 @@ type LoggingConfig struct {
 }
 
 type CorrespondentsConfig struct {
-	LearnAuthenticatedRecipients bool     `yaml:"learn_authenticated_recipients"`
-	LearnLegitimateSenders       bool     `yaml:"learn_legitimate_senders"`
-	LegitimateSenderMinMessages  int      `yaml:"legitimate_sender_min_messages"`
-	LegitimateSenderMinScore     float64  `yaml:"legitimate_sender_min_score"`
-	LegitimateSenderRequireDKIM  bool     `yaml:"legitimate_sender_require_dkim"`
-	UseAllowlist                 bool     `yaml:"use_allowlist"`
-	Scope                        string   `yaml:"scope"`
-	RecipientMatch               string   `yaml:"recipient_match"`
-	BypassAI                     bool     `yaml:"bypass_ai"`
-	RequireSPFOrDKIMForBypass    bool     `yaml:"require_spf_or_dkim_for_bypass"`
-	TrustedAuthservIDs           []string `yaml:"trusted_authserv_ids"`
-	MaxEntries                   int      `yaml:"max_entries"`
-	StaleAfter                   Duration `yaml:"stale_after"`
+	LearnAuthenticatedRecipients          bool     `yaml:"learn_authenticated_recipients"`
+	LearnLegitimateSenders                bool     `yaml:"learn_legitimate_senders"`
+	LegitimateSenderMinMessages           int      `yaml:"legitimate_sender_min_messages"`
+	LegitimateSenderMinScore              float64  `yaml:"legitimate_sender_min_score"`
+	LegitimateSenderRequireAuthentication bool     `yaml:"legitimate_sender_require_authentication"`
+	UseAllowlist                          bool     `yaml:"use_allowlist"`
+	Scope                                 string   `yaml:"scope"`
+	RecipientMatch                        string   `yaml:"recipient_match"`
+	BypassAI                              bool     `yaml:"bypass_ai"`
+	RequireAuthenticationForBypass        bool     `yaml:"require_authentication_for_bypass"`
+	TrustedAuthservIDs                    []string `yaml:"trusted_authserv_ids"`
+	MaxEntries                            int      `yaml:"max_entries"`
+	StaleAfter                            Duration `yaml:"stale_after"`
 }
 
 // Load applies defaults, strictly decodes one YAML file, and validates the
@@ -247,7 +252,7 @@ func defaults() Config {
 		},
 		Authentication: AuthenticationConfig{
 			Mode: AuthenticationModeInternal, Timeout: Duration(10 * time.Second), MaxConcurrent: 8,
-			MessageStorage: "hybrid", MemoryMessageLimit: 8,
+			TrustRequirement: AuthenticationTrustEither, MessageStorage: "hybrid", MemoryMessageLimit: 8,
 		},
 		AI: AIConfig{
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
@@ -282,9 +287,9 @@ func defaults() Config {
 		Filtering: FilteringConfig{
 			RejectScore: .5, LegitimateLowConfidenceScore: .8, AddEmailHeaders: true,
 			AIErrorAction: "accept", RejectMessage: "Message rejected as suspected spam or fraud",
-			AuthenticatedOnlySenderDomains:   []string{},
-			SenderDomainAllowlistFile:        "/etc/milterguard/trusted-sender-domains.txt",
-			SenderDomainAllowlistRequireDKIM: true,
+			AuthenticatedOnlySenderDomains:             []string{},
+			SenderDomainAllowlistFile:                  "/etc/milterguard/trusted-sender-domains.txt",
+			SenderDomainAllowlistRequireAuthentication: true,
 		},
 		IPReputation: IPReputationConfig{
 			RejectMessage: "Message rejected because the sending IP address is blocked by this server",
@@ -302,10 +307,10 @@ func defaults() Config {
 		},
 		Correspondents: CorrespondentsConfig{
 			LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true,
-			LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .95, LegitimateSenderRequireDKIM: true,
+			LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .95, LegitimateSenderRequireAuthentication: true,
 			UseAllowlist: true,
 			Scope:        "per_sender", RecipientMatch: "all",
-			BypassAI: true, RequireSPFOrDKIMForBypass: true,
+			BypassAI: true, RequireAuthenticationForBypass: true,
 			TrustedAuthservIDs: []string{MTAHostnameAuthservID}, MaxEntries: 10000,
 			StaleAfter: Duration(365 * 24 * time.Hour),
 		},
@@ -342,6 +347,11 @@ func (c Config) Validate() error {
 	}
 	if c.Authentication.Mode != AuthenticationModeTrustedHeaders && c.Authentication.Mode != AuthenticationModeInternal {
 		return fmt.Errorf("authentication.mode must be trusted_headers or internal")
+	}
+	switch c.Authentication.TrustRequirement {
+	case AuthenticationTrustDKIM, AuthenticationTrustSPF, AuthenticationTrustEither, AuthenticationTrustBoth:
+	default:
+		return fmt.Errorf("authentication.trust_requirement must be dkim, spf, either, or both")
 	}
 	if c.Authentication.Timeout.Value() <= 0 {
 		return fmt.Errorf("authentication.timeout must be positive")
@@ -513,8 +523,8 @@ func (c Config) Validate() error {
 			return fmt.Errorf("invalid filtering.sender_domain_allowlist entry %q", domain)
 		}
 	}
-	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && len(c.Filtering.SenderDomainAllowlist) > 0 && c.Filtering.SenderDomainAllowlistRequireDKIM && len(c.Correspondents.TrustedAuthservIDs) == 0 {
-		return fmt.Errorf("filtering.sender_domain_allowlist_require_dkim requires correspondents.trusted_authserv_ids")
+	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && len(c.Filtering.SenderDomainAllowlist) > 0 && c.Filtering.SenderDomainAllowlistRequireAuthentication && len(c.Correspondents.TrustedAuthservIDs) == 0 {
+		return fmt.Errorf("filtering.sender_domain_allowlist_require_authentication requires correspondents.trusted_authserv_ids")
 	}
 	reputation := c.IPReputation
 	if reputation.BlockDuration.Value() < 0 {
@@ -576,11 +586,11 @@ func (c Config) Validate() error {
 	if allowlist.BypassAI && !allowlist.UseAllowlist {
 		return fmt.Errorf("correspondents.bypass_ai requires use_allowlist")
 	}
-	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && allowlist.BypassAI && allowlist.RequireSPFOrDKIMForBypass && len(allowlist.TrustedAuthservIDs) == 0 {
-		return fmt.Errorf("correspondents.require_spf_or_dkim_for_bypass requires trusted_authserv_ids")
+	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && allowlist.BypassAI && allowlist.RequireAuthenticationForBypass && len(allowlist.TrustedAuthservIDs) == 0 {
+		return fmt.Errorf("correspondents.require_authentication_for_bypass requires trusted_authserv_ids")
 	}
-	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && allowlist.LearnLegitimateSenders && allowlist.LegitimateSenderRequireDKIM && len(allowlist.TrustedAuthservIDs) == 0 {
-		return fmt.Errorf("correspondents.legitimate_sender_require_dkim requires trusted_authserv_ids when legitimate sender learning is enabled")
+	if c.Authentication.Mode == AuthenticationModeTrustedHeaders && allowlist.LearnLegitimateSenders && allowlist.LegitimateSenderRequireAuthentication && len(allowlist.TrustedAuthservIDs) == 0 {
+		return fmt.Errorf("correspondents.legitimate_sender_require_authentication requires trusted_authserv_ids when legitimate sender learning is enabled")
 	}
 	for _, authservID := range allowlist.TrustedAuthservIDs {
 		if authservID != MTAHostnameAuthservID && !validDomainName(authservID) {
@@ -634,8 +644,9 @@ func loadSenderDomainAllowlist(path string) ([]string, error) {
 }
 
 func validEmailAddress(value string) bool {
-	address, err := mail.ParseAddress(strings.TrimSpace(value))
-	return err == nil && address.Address == strings.TrimSpace(value) && strings.Contains(address.Address, "@")
+	value = strings.TrimSpace(value)
+	normalized := mailaddr.Normalize(value)
+	return normalized != "" && strings.EqualFold(value, normalized)
 }
 
 func validSMTPHost(value string) bool {

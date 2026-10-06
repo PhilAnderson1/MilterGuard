@@ -258,7 +258,19 @@ func TestValidateAuthentication(t *testing.T) {
 			t.Fatalf("storage %q rejected: %v", storage, err)
 		}
 	}
+	for _, requirement := range []string{"dkim", "spf", "either", "both"} {
+		cfg := validConfig()
+		cfg.Authentication.TrustRequirement = requirement
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("trust requirement %q rejected: %v", requirement, err)
+		}
+	}
 	cfg := validConfig()
+	cfg.Authentication.TrustRequirement = "dmarc"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "authentication.trust_requirement") {
+		t.Fatalf("invalid trust requirement error = %v", err)
+	}
+	cfg = validConfig()
 	cfg.Authentication.MessageStorage = "automatic"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "authentication.message_storage") {
 		t.Fatalf("invalid storage error = %v", err)
@@ -396,6 +408,9 @@ func TestAuthenticationDefaultsInternal(t *testing.T) {
 	if defaults().Authentication.Mode != AuthenticationModeInternal {
 		t.Fatal("authentication must default to internal verification")
 	}
+	if defaults().Authentication.TrustRequirement != AuthenticationTrustEither {
+		t.Fatal("authentication trust must default to aligned SPF or DKIM")
+	}
 }
 
 func TestOperationModeDefaultsAccept(t *testing.T) {
@@ -454,9 +469,16 @@ func TestValidateEmailCommands(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	cfg.EmailCommands.Recipient = "not-an-address"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "email_commands.recipient") {
-		t.Fatalf("invalid command recipient error = %v", err)
+	for _, recipient := range []string{
+		"not-an-address",
+		"MilterGuard <milterguard@example.com>",
+		"milterguard@bad_domain.example",
+		strings.Repeat("a", 250) + "@example.com",
+	} {
+		cfg.EmailCommands.Recipient = recipient
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "email_commands.recipient") {
+			t.Fatalf("invalid command recipient %q error = %v", recipient, err)
+		}
 	}
 	cfg = validConfig()
 	cfg.EmailCommands.Enabled = true
@@ -590,7 +612,7 @@ func TestValidateSenderDomainAllowlist(t *testing.T) {
 			name: "valid sender domains",
 			configure: func(cfg *Config) {
 				cfg.Filtering.SenderDomainAllowlist = []string{"amazon.com", "MAIL.EXAMPLE.ORG."}
-				cfg.Filtering.SenderDomainAllowlistRequireDKIM = true
+				cfg.Filtering.SenderDomainAllowlistRequireAuthentication = true
 			},
 		},
 		{
@@ -601,11 +623,11 @@ func TestValidateSenderDomainAllowlist(t *testing.T) {
 			wantError: "invalid filtering.sender_domain_allowlist",
 		},
 		{
-			name: "DKIM requirement needs trusted authentication service",
+			name: "authentication requirement needs trusted authentication service",
 			configure: func(cfg *Config) {
 				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Filtering.SenderDomainAllowlist = []string{"amazon.com"}
-				cfg.Filtering.SenderDomainAllowlistRequireDKIM = true
+				cfg.Filtering.SenderDomainAllowlistRequireAuthentication = true
 				cfg.Correspondents.TrustedAuthservIDs = nil
 			},
 			wantError: "requires correspondents.trusted_authserv_ids",
@@ -949,21 +971,21 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Correspondents.UseAllowlist = true
 				cfg.Correspondents.BypassAI = true
-				cfg.Correspondents.RequireSPFOrDKIMForBypass = true
+				cfg.Correspondents.RequireAuthenticationForBypass = true
 				cfg.Correspondents.TrustedAuthservIDs = nil
 			},
 			wantError: "requires trusted_authserv_ids",
 		},
 		{
-			name: "DKIM-required legitimate sender learning without trusted authentication service",
+			name: "authentication-required legitimate sender learning without trusted authentication service",
 			configure: func(cfg *Config) {
 				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Correspondents.BypassAI = false
 				cfg.Correspondents.LearnLegitimateSenders = true
-				cfg.Correspondents.LegitimateSenderRequireDKIM = true
+				cfg.Correspondents.LegitimateSenderRequireAuthentication = true
 				cfg.Correspondents.TrustedAuthservIDs = nil
 			},
-			wantError: "legitimate_sender_require_dkim requires trusted_authserv_ids",
+			wantError: "legitimate_sender_require_authentication requires trusted_authserv_ids",
 		},
 		{
 			name: "disabled legitimate sender learning does not require trusted authentication service",
@@ -971,7 +993,7 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 				cfg.Authentication.Mode = AuthenticationModeTrustedHeaders
 				cfg.Correspondents.BypassAI = false
 				cfg.Correspondents.LearnLegitimateSenders = false
-				cfg.Correspondents.LegitimateSenderRequireDKIM = true
+				cfg.Correspondents.LegitimateSenderRequireAuthentication = true
 				cfg.Correspondents.TrustedAuthservIDs = nil
 			},
 		},

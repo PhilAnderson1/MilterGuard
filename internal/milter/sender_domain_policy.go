@@ -30,7 +30,7 @@ func authenticatedOnlyFromDomain(msg *message.Message, configured []string) stri
 			addresses = recoverFromAddresses(value)
 		}
 		for _, address := range addresses {
-			if domain := allowedSenderDomain(emailAddressDomain(address.Address), configured); domain != "" {
+			if domain := allowedSenderDomain(mailaddr.Domain(address.Address), configured); domain != "" {
 				return domain
 			}
 		}

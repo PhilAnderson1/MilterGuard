@@ -205,9 +205,9 @@ func writeCorrespondentInformation(b *strings.Builder, info CorrespondentInfo) {
 		b.WriteString("Basis: The visible From address was previously emailed from a relevant local address.\n")
 	}
 	if info.AuthenticationAligned {
-		b.WriteString("Sender authentication: a trusted local DKIM or DMARC check passed and aligned with the visible From domain.\n")
+		b.WriteString("Sender authentication: a trusted SPF, DKIM, or DMARC result passed and aligned with the visible From domain.\n")
 	} else {
-		b.WriteString("Sender authentication: no trusted aligned DKIM or DMARC result is available.\n")
+		b.WriteString("Sender authentication: no trusted aligned SPF, DKIM, or DMARC result is available.\n")
 	}
 }
 

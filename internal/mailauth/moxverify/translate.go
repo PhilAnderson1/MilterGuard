@@ -8,7 +8,6 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 	"github.com/mjl-/mox/dkim"
 	"github.com/mjl-/mox/dmarc"
-	"github.com/mjl-/mox/dns"
 	"github.com/mjl-/mox/spf"
 )
 
@@ -18,7 +17,7 @@ func translateDKIM(source dkim.Result) mailauth.Result {
 		DNSAuthentic: source.RecordAuthentic,
 	}
 	if source.Sig != nil {
-		result.Domain = normalizeDomain(source.Sig.Domain)
+		result.Domain = mailauth.NormalizeDomain(source.Sig.Domain.ASCII)
 		result.Selector = bounded(source.Sig.Selector.ASCII, 253)
 		if source.Sig.Identity != nil {
 			result.Identity = bounded(source.Sig.Identity.String(), 320)
@@ -37,7 +36,7 @@ func translateDKIM(source dkim.Result) mailauth.Result {
 func translateDMARC(source dmarc.Result, visibleDomain string) mailauth.Result {
 	result := mailauth.Result{
 		Method: mailauth.MethodDMARC, Outcome: outcome(string(source.Status)),
-		Domain: normalizeDomain(source.Domain), PolicyDomain: normalizeDomain(source.Domain),
+		Domain: mailauth.NormalizeDomain(source.Domain.ASCII), PolicyDomain: mailauth.NormalizeDomain(source.Domain.ASCII),
 		DNSAuthentic: source.RecordAuthentic, AlignedSPFPass: source.AlignedSPFPass,
 		AlignedDKIMPass: source.AlignedDKIMPass,
 	}
@@ -64,10 +63,6 @@ func outcome(value string) mailauth.Outcome {
 	default:
 		return mailauth.OutcomePermerror
 	}
-}
-
-func normalizeDomain(domain dns.Domain) string {
-	return mailauth.NormalizeDomain(domain.ASCII)
 }
 
 func canonicalizations(value string) (string, string) {

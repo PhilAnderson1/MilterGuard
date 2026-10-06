@@ -23,7 +23,7 @@ func ParseArchived(raw []byte, maxBytes int64) (*Message, error) {
 		if strings.EqualFold(name, "X-MilterGuard-Archive-Truncated") {
 			for _, value := range values {
 				if strings.EqualFold(strings.TrimSpace(value), "yes") {
-					msg.ArchiveTruncated = true
+					msg.SavedArchiveTruncated = true
 					break
 				}
 			}

@@ -169,7 +169,7 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 		return nil
 	}
 
-	qualifying := r.options.LearnLegitimateSenders && input.Score >= r.options.LegitimateSenderMinScore && (!r.options.LegitimateSenderRequireDKIM || input.DKIMAligned)
+	qualifying := r.options.LearnLegitimateSenders && input.Score >= r.options.LegitimateSenderMinScore && (!r.options.LegitimateSenderRequireAuthentication || input.AuthenticationSatisfied)
 	type candidateEvent struct {
 		recipient string
 		count     int
@@ -406,7 +406,7 @@ func scanCorrespondent(row rowScanner) (stores.Correspondent, error) {
 	var entry stores.Correspondent
 	var learnedAt, activityAt int64
 	err := row.Scan(&entry.ID, &entry.LocalAddress, &entry.Correspondent, &learnedAt,
-		&activityAt, &entry.WhitelistType, &entry.LegitimateEmailCount)
+		&activityAt, &entry.CorrespondentType, &entry.LegitimateEmailCount)
 	if err == nil {
 		entry.LearnedAt, entry.LastActivityAt = timeFromMillis(learnedAt), timeFromMillis(activityAt)
 	}

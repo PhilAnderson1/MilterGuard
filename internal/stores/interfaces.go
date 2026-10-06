@@ -30,17 +30,27 @@ type RejectionRepository interface {
 	RejectionByID(context.Context, uint64, RecipientScope) (Rejection, bool, error)
 }
 
-// IPReputationRepository exposes automatic and manual sending-IP reputation
-// operations to filtering policy and administration commands.
-type IPReputationRepository interface {
+// IPReputationPolicyRepository exposes automatic sending-IP reputation
+// operations used while filtering live mail.
+type IPReputationPolicyRepository interface {
 	RecordRejection(context.Context, netip.Addr) (IPBlock, error)
 	RecordLegitimate(context.Context, netip.Addr) error
 	// ActiveBlock may atomically extend an active repeat block when sliding
 	// expiry is enabled by the repository's policy options.
 	ActiveBlock(context.Context, netip.Addr) (IPBlock, bool, error)
+}
+
+// IPReputationAdminRepository exposes manual block and listing operations used
+// by administration commands.
+type IPReputationAdminRepository interface {
 	AddManualBlock(context.Context, netip.Addr) (IPBlock, error)
 	Delete(context.Context, netip.Addr) (bool, error)
 	ListActiveBlocks(context.Context, IPBlockListQuery) (IPBlockPage, error)
+}
+
+type IPReputationRepository interface {
+	IPReputationPolicyRepository
+	IPReputationAdminRepository
 }
 
 // DomainRegistrationRepository stores cached RDAP registration evidence.

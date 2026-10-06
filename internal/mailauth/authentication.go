@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -162,6 +163,29 @@ func NewEvidence(results []Result, visibleDomain string) Evidence {
 	return evidence
 }
 
+// EvidenceWithUnavailableMethods preserves existing authentication results and
+// adds an internal temporary-error result for each requested method that is
+// absent.
+func EvidenceWithUnavailableMethods(results []Result, visibleDomain, reason string, methods ...Method) Evidence {
+	results = append([]Result(nil), results...)
+	for _, method := range methods {
+		found := false
+		for _, result := range results {
+			if result.Method == method {
+				found = true
+				break
+			}
+		}
+		if !found {
+			results = append(results, Result{
+				Method: method, Outcome: OutcomeTemperror,
+				ErrorCategory: ErrorInternal, Reason: reason,
+			})
+		}
+	}
+	return NewEvidence(results, visibleDomain)
+}
+
 // AnyAligned reports whether DKIM, SPF or DMARC authenticated the visible domain.
 func (e Evidence) AnyAligned() bool { return e.DKIMAligned || e.SPFAligned || e.DMARCAligned }
 
@@ -245,21 +269,7 @@ func normalizeHeaderOutcome(method Method, value string) Outcome {
 // NormalizeDomain normalizes and validates a domain found in authentication
 // evidence. Underscores are accepted because they occur in deployed mail data.
 func NormalizeDomain(value string) string {
-	value = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
-	if value == "" || len(value) > 253 {
-		return ""
-	}
-	for _, label := range strings.Split(value, ".") {
-		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
-			return ""
-		}
-		for _, r := range label {
-			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '_' {
-				return ""
-			}
-		}
-	}
-	return value
+	return netsafety.NormalizeDNSName(value, true)
 }
 
 // DomainFromIdentity extracts and normalizes the domain from a mailbox or
@@ -340,6 +350,8 @@ func normalizedAuthservIDs(values []string) map[string]bool {
 }
 
 func normalizeAuthservID(value string) string {
+	// Authentication service identifiers are comparison keys, not necessarily
+	// DNS hostnames, so canonicalize them without imposing hostname syntax.
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
 }
 

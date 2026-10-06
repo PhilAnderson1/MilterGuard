@@ -370,7 +370,7 @@ endpoint:
   requires an aligned SPF or DKIM pass for the visible `From:` domain.
 - A visible `From:` domain in the trusted sender-domain allowlist can bypass AI
   analysis when its configured authentication requirements—normally trusted,
-  aligned DKIM—are met.
+  aligned SPF or DKIM—are met.
 
 See [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
 for how MilterGuard learns and verifies correspondents and configures trusted
@@ -533,13 +533,23 @@ Authenticated submission client addresses are never blocked or otherwise
 modified by IP reputation, even when authenticated mail scanning is enabled.
 MilterGuard can also learn inbound senders that repeatedly receive a
 high-confidence legitimate classification and pass the configured authentication
-checks.
+checks. The supplied configuration requires either SPF or DKIM to pass and align
+with the visible `From:` domain before an inbound result contributes toward
+automatic learning.
 
 This reduces cost and avoids repeatedly classifying routine mail. Entire email
 domains can also be allowlisted in the configured trusted-sender domains file.
 The supplied file contains a curated low-risk sender list whose messages bypass
-scanning only when trusted, aligned DKIM authentication passes. Merely forging
-an address in one of these domains therefore does not bypass filtering.
+scanning only when trusted, aligned SPF or DKIM authentication passes. Merely
+forging an address in one of these domains therefore does not bypass filtering.
+
+The `authentication.trust_requirement` setting controls which aligned result
+these trust-based policies accept: `dkim`, `spf`, `either` (SPF or DKIM), or
+`both` (SPF and DKIM). The default `either` policy offers the broadest practical
+compatibility. Select `dkim` for a stricter policy that cannot be satisfied by
+an excessively permissive SPF record. The individual
+`require_authentication` settings can disable this check for automatic inbound
+learning, correspondent bypass, or trusted sender-domain bypass independently.
 
 For visible `From:` domains supported by a trusted DKIM, SPF, or DMARC pass, the
 optional `domain_registration` feature obtains the registrable domain's creation
@@ -746,9 +756,10 @@ new domains conservatively because matching, authenticated mail bypasses AI
 analysis. List one lowercase, exact domain per line; wildcards are not accepted.
 An entry such as `amazon.com` also matches its subdomains, but regional domains
 such as `amazon.co.uk` and `amazon.de` must be listed separately. With
-`sender_domain_allowlist_require_dkim` enabled, a matching domain bypasses AI
-only when MilterGuard receives a trusted, aligned DKIM pass. Restart
-MilterGuard after changing the file.
+`sender_domain_allowlist_require_authentication` enabled, a matching domain
+bypasses AI only when MilterGuard receives the aligned authentication selected
+by `authentication.trust_requirement`. Restart MilterGuard after changing the
+file.
 
 If the trusted-domain file is missing, empty, or unreadable, MilterGuard logs a
 warning and continues with trusted-domain bypass disabled.

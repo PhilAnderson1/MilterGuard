@@ -51,7 +51,7 @@ type IPHostnameResolver interface {
 type Dependencies struct {
 	Correspondents  stores.CorrespondentAdminRepository
 	Rejections      stores.RejectionRepository
-	IPReputation    stores.IPReputationRepository
+	IPReputation    stores.IPReputationAdminRepository
 	Activity        stores.ActivityRepository
 	MessageSource   RejectionMessageSource
 	IPResolver      IPHostnameResolver
@@ -65,7 +65,7 @@ type Dependencies struct {
 type Processor struct {
 	correspondents  stores.CorrespondentAdminRepository
 	rejections      stores.RejectionRepository
-	ipReputation    stores.IPReputationRepository
+	ipReputation    stores.IPReputationAdminRepository
 	activity        stores.ActivityRepository
 	messageSource   RejectionMessageSource
 	ipResolver      IPHostnameResolver

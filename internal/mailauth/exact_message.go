@@ -25,8 +25,8 @@ type ExactMessage interface {
 	Close() error
 }
 
-// NewExactMessage returns a bounded exact-message store. Supported storage
-// modes are "memory" and "file".
+// NewExactMessage returns a bounded direct exact-message store. It supports
+// "memory" and "file"; use ExactMessageFactory.New for "hybrid" storage.
 func NewExactMessage(storage string, maxBytes int64) (ExactMessage, error) {
 	if maxBytes < 1 {
 		return nil, fmt.Errorf("exact message maximum must be positive")

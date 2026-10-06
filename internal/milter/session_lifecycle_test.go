@@ -323,6 +323,20 @@ func TestExactMessageClosesOnAbortAndDisconnect(t *testing.T) {
 	}
 }
 
+func TestMissingExactMessageFactoryIsReported(t *testing.T) {
+	ss := &session{deps: &sessionDependencies{
+		authenticationMode: config.AuthenticationModeInternal,
+		protocol:           protocolOptions{maxMessageSize: 1024, exactStorage: "hybrid"},
+	}}
+	ss.resetMessage(phaseEnvelope)
+	if ss.exactMessage != nil {
+		t.Fatal("missing factory unexpectedly created an exact-message store")
+	}
+	if ss.exactMessageErr == nil || !strings.Contains(ss.exactMessageErr.Error(), "factory is unavailable") {
+		t.Fatalf("missing factory error = %v", ss.exactMessageErr)
+	}
+}
+
 func TestExactMessageClosesAfterAcceptAndReject(t *testing.T) {
 	for _, test := range []struct {
 		name     string

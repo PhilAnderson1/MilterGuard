@@ -49,7 +49,7 @@ func formatActivity(pd period, before time.Time, retention time.Duration, summar
 		body.WriteString("No activity was recorded for this period.\n\n")
 	}
 	totalRejected := summary.ScanRejections + summary.IPRejections + summary.AttachmentRejections + summary.ProtectedSenderDomainRejections
-	totalAccepted := summary.ScanAccepted + summary.WhitelistAccepts + summary.TrustedDomainAccepts
+	totalAccepted := summary.ScanAccepted + summary.CorrespondentAccepts + summary.TrustedDomainAccepts
 	fmt.Fprintf(&body, "Total rejected: %d\n", totalRejected)
 	fmt.Fprintf(&body, "  AI classification: %d\n", summary.ScanRejections)
 	fmt.Fprintf(&body, "  IP reputation: %d\n", summary.IPRejections)
@@ -57,7 +57,7 @@ func formatActivity(pd period, before time.Time, retention time.Duration, summar
 	fmt.Fprintf(&body, "  Protected sender-domain policy: %d\n\n", summary.ProtectedSenderDomainRejections)
 	fmt.Fprintf(&body, "Total accepted: %d\n", totalAccepted)
 	fmt.Fprintf(&body, "  AI classification: %d\n", summary.ScanAccepted)
-	fmt.Fprintf(&body, "  Correspondent whitelist: %d\n", summary.WhitelistAccepts)
+	fmt.Fprintf(&body, "  Correspondent whitelist: %d\n", summary.CorrespondentAccepts)
 	fmt.Fprintf(&body, "  Trusted sender domain: %d\n\n", summary.TrustedDomainAccepts)
 	fmt.Fprintf(&body, "Total AI scans: %d\n", summary.ScanTotal)
 	fmt.Fprintf(&body, "AI evaluations failed: %d\n\n", summary.AIEvaluationsFailed)
@@ -101,7 +101,7 @@ func durationPart(value int64, unit string) string {
 }
 
 func activitySummaryEmpty(summary stores.ActivitySummary) bool {
-	return summary.ScanTotal == 0 && summary.IPRejections == 0 && summary.WhitelistAccepts == 0 &&
+	return summary.ScanTotal == 0 && summary.IPRejections == 0 && summary.CorrespondentAccepts == 0 &&
 		summary.TrustedDomainAccepts == 0 && summary.AttachmentRejections == 0 &&
 		summary.ProtectedSenderDomainRejections == 0
 }
@@ -124,7 +124,7 @@ func formatAllowlist(entries []stores.Correspondent, includeRecipient, truncated
 		if includeRecipient {
 			fmt.Fprintf(&record, "Recipient: %s\n", entry.LocalAddress)
 		}
-		fmt.Fprintf(&record, "Added: %s\n\n", allowlistAddedDescription(entry.WhitelistType))
+		fmt.Fprintf(&record, "Added: %s\n\n", allowlistAddedDescription(entry.CorrespondentType))
 		if !AppendBoundedResponse(&body, record.String()) {
 			return body.String()
 		}

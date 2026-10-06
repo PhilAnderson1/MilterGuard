@@ -1,5 +1,5 @@
 # Low-risk organization and controlled-platform sender domains.
-# Bypass requires trusted, aligned DKIM; each entry also covers its subdomains.
+# Bypass requires the configured aligned authentication; each entry also covers its subdomains.
 # User-triggered notifications are included only for constrained platform activity.
 # Restart MilterGuard after changing this file.
 

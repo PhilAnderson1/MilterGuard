@@ -30,7 +30,7 @@ func TestActivityRepositoryAggregatesAndAppliesRetention(t *testing.T) {
 		{OccurredAt: now.Add(-2 * time.Hour), EventType: stores.ActivityEventScan, Outcome: stores.ActivityOutcomeRejected, AnalysisFailed: true, TokenCost: .2},
 		{OccurredAt: now.Add(-3 * time.Hour), EventType: stores.ActivityEventScan, Outcome: stores.ActivityOutcomeTempfailed, AnalysisFailed: true, TokenCost: .3},
 		{OccurredAt: now.Add(-4 * time.Hour), EventType: stores.ActivityEventIPRejection, Outcome: stores.ActivityOutcomeRejected},
-		{OccurredAt: now.Add(-5 * time.Hour), EventType: stores.ActivityEventWhitelistAccept, Outcome: stores.ActivityOutcomeAccepted},
+		{OccurredAt: now.Add(-5 * time.Hour), EventType: stores.ActivityEventCorrespondentAccept, Outcome: stores.ActivityOutcomeAccepted},
 		{OccurredAt: now.Add(-6 * time.Hour), EventType: stores.ActivityEventTrustedDomainAccept, Outcome: stores.ActivityOutcomeAccepted},
 		{OccurredAt: now.Add(-7 * time.Hour), EventType: stores.ActivityEventAttachmentRejection, Outcome: stores.ActivityOutcomeRejected},
 		{OccurredAt: now.Add(-8 * time.Hour), EventType: stores.ActivityEventProtectedSenderDomainRejection, Outcome: stores.ActivityOutcomeRejected},
@@ -46,7 +46,7 @@ func TestActivityRepositoryAggregatesAndAppliesRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	if summary.ScanTotal != 3 || summary.ScanAccepted != 1 || summary.ScanRejections != 1 || summary.AIEvaluationsFailed != 2 ||
-		summary.IPRejections != 1 || summary.WhitelistAccepts != 1 || summary.TrustedDomainAccepts != 1 ||
+		summary.IPRejections != 1 || summary.CorrespondentAccepts != 1 || summary.TrustedDomainAccepts != 1 ||
 		summary.AttachmentRejections != 1 || summary.ProtectedSenderDomainRejections != 1 || summary.TokenCost != .6 {
 		t.Fatalf("summary = %+v", summary)
 	}
@@ -111,7 +111,7 @@ func TestActivityRepositoryEnforcesEventConstraints(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	repository, _ := newTestActivityRepository(t, now, time.Hour)
 	for _, event := range []stores.ActivityEvent{
-		{EventType: stores.ActivityEventWhitelistAccept, Outcome: stores.ActivityOutcomeRejected},
+		{EventType: stores.ActivityEventCorrespondentAccept, Outcome: stores.ActivityOutcomeRejected},
 		{EventType: stores.ActivityEventAttachmentRejection, Outcome: stores.ActivityOutcomeAccepted},
 		{EventType: 99, Outcome: stores.ActivityOutcomeAccepted},
 	} {

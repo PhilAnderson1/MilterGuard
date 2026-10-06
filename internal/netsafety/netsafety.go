@@ -49,6 +49,13 @@ func AddressRoutable(addr netip.Addr) bool {
 // DNSHostname normalizes a DNS hostname and returns an empty string when it is
 // not a syntactically safe ASCII hostname.
 func DNSHostname(value string) string {
+	return NormalizeDNSName(value, false)
+}
+
+// NormalizeDNSName normalizes and validates an ASCII DNS name. Underscores
+// are accepted only when allowUnderscore is true for protocols whose deployed
+// domain-like values permit them.
+func NormalizeDNSName(value string, allowUnderscore bool) string {
 	value = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
 	if value == "" || len(value) > 253 {
 		return ""
@@ -58,7 +65,7 @@ func DNSHostname(value string) string {
 			return ""
 		}
 		for _, char := range label {
-			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' && (!allowUnderscore || char != '_') {
 				return ""
 			}
 		}

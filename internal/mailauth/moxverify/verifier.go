@@ -223,7 +223,7 @@ func (v *Verifier) verifySPF(ctx context.Context, transaction mailauth.Transacti
 	received, domain, _, authentic, verifyErr := spf.Verify(ctx, slog.New(slog.DiscardHandler), v.resolver, args)
 	result := mailauth.Result{
 		Method: mailauth.MethodSPF, Outcome: outcome(string(received.Result)),
-		Domain: normalizeDomain(domain), DNSAuthentic: authentic,
+		Domain: mailauth.NormalizeDomain(domain.ASCII), DNSAuthentic: authentic,
 		SPFIdentity: bounded(string(received.Identity), 16), SPFMechanism: bounded(received.Mechanism, 256),
 	}
 	result.ErrorCategory, result.Reason = classifySPF(received.Result, verifyErr)
@@ -270,17 +270,12 @@ func addressIP(address netip.Addr) net.IP {
 	return net.IP(append([]byte(nil), address.AsSlice()...))
 }
 
-func unavailableResult(method mailauth.Method, reason string) mailauth.Result {
-	return mailauth.Result{Method: method, Outcome: mailauth.OutcomeTemperror, ErrorCategory: mailauth.ErrorInternal, Reason: reason}
-}
-
 func unavailableMessageEvidence(results []mailauth.Result, visibleDomain, reason string, cause error) (mailauth.Evidence, error) {
-	results = append(results, unavailableResult(mailauth.MethodDKIM, reason), unavailableResult(mailauth.MethodDMARC, reason))
 	err := ErrMessageUnavailable
 	if cause != nil {
 		err = fmt.Errorf("%w: %v", ErrMessageUnavailable, cause)
 	}
-	return mailauth.NewEvidence(results, visibleDomain), err
+	return mailauth.EvidenceWithUnavailableMethods(results, visibleDomain, reason, mailauth.MethodDKIM, mailauth.MethodDMARC), err
 }
 
 type observedReaderAt struct {

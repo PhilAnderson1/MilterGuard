@@ -47,13 +47,6 @@ type ipReputationRepositoryStub struct {
 	err     error
 }
 
-func (*ipReputationRepositoryStub) RecordRejection(context.Context, netip.Addr) (stores.IPBlock, error) {
-	return stores.IPBlock{}, nil
-}
-func (*ipReputationRepositoryStub) RecordLegitimate(context.Context, netip.Addr) error { return nil }
-func (*ipReputationRepositoryStub) ActiveBlock(context.Context, netip.Addr) (stores.IPBlock, bool, error) {
-	return stores.IPBlock{}, false, nil
-}
 func (r *ipReputationRepositoryStub) AddManualBlock(_ context.Context, address netip.Addr) (stores.IPBlock, error) {
 	r.address = address
 	return r.block, r.err
@@ -134,7 +127,7 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	repository := &activityRepositoryStub{
 		summary: stores.ActivitySummary{
 			ScanTotal: 30, ScanRejections: 20, ScanAccepted: 10, AIEvaluationsFailed: 1,
-			IPRejections: 2, WhitelistAccepts: 1, TokenCost: .0197,
+			IPRejections: 2, CorrespondentAccepts: 1, TokenCost: .0197,
 		},
 		status: stores.ServiceStatus{StartedAt: now.Add(-time.Hour), Mode: stores.ServiceModeAccept}, found: true,
 	}
