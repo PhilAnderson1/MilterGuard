@@ -370,10 +370,11 @@ func TestBoundedCommandReplyPayloadLimitsPlainText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(body) > admincmd.MaxResponseBytes {
-		t.Fatalf("reply body length = %d, want at most %d", len(body), admincmd.MaxResponseBytes)
+	logicalBody := strings.ReplaceAll(string(body), "\r\n", "\n")
+	if len(logicalBody) > admincmd.MaxResponseBytes {
+		t.Fatalf("logical reply body length = %d, want at most %d", len(logicalBody), admincmd.MaxResponseBytes)
 	}
-	if !strings.Contains(string(body), "Command reply was truncated at 1 MiB.") {
+	if !strings.Contains(logicalBody, "Command reply was truncated at 1 MiB.") {
 		t.Fatal("bounded reply does not report truncation")
 	}
 }

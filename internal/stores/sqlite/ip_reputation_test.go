@@ -90,6 +90,42 @@ func TestIPRepositoryManualOperationsAndCleanup(t *testing.T) {
 	}
 }
 
+func TestIPRepositoryRejectionDoesNotWeakenActiveManualBlock(t *testing.T) {
+	tests := []struct {
+		name          string
+		shortDuration time.Duration
+	}{
+		{name: "automatic short block would be weaker", shortDuration: time.Hour},
+		{name: "automatic rejection would not block", shortDuration: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+			repository := testIPRepository(t, IPReputationOptions{
+				BlockDuration: test.shortDuration, RepeatThreshold: 3, RepeatWindow: 24 * time.Hour,
+				RepeatBlockDuration: 30 * 24 * time.Hour, MaxEntries: 10, Now: func() time.Time { return now },
+			})
+			addr := netip.MustParseAddr("192.0.2.21")
+			manual, err := repository.AddManualBlock(context.Background(), addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			now = now.Add(5 * time.Minute) // Simulate a delivery already in progress when the block was added.
+			updated, err := repository.RecordRejection(context.Background(), addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.Level != stores.IPBlockLevelRepeat || !updated.ExpiresAt.Equal(manual.ExpiresAt) {
+				t.Fatalf("block after rejection = %+v, want existing manual block %+v", updated, manual)
+			}
+			if updated.StrikeCount != 1 {
+				t.Fatalf("strike count = %d, want 1", updated.StrikeCount)
+			}
+		})
+	}
+}
+
 func TestIPRepositoryListsActiveBlocksInAddressOrder(t *testing.T) {
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	repository := testIPRepository(t, IPReputationOptions{

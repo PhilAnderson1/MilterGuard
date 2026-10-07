@@ -126,6 +126,71 @@ func TestParseReceivedSPFFallback(t *testing.T) {
 	}
 }
 
+func TestParseReceivedSPFUsesStructuredEnvelopeParameter(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{
+			name:   "comment decoy ignored",
+			header: `pass receiver=mx.example (envelope-from=a@x.example); envelope-from="quoted@y.example"`,
+			want:   "y.example",
+		},
+		{
+			name:   "angle-bracket mailbox",
+			header: `pass receiver=mx.example; envelope-from=<sender@example.com>`,
+			want:   "example.com",
+		},
+		{
+			name:   "escaped quoted mailbox",
+			header: `pass receiver=mx.example; envelope-from="quoted\"news@example.net"`,
+			want:   "example.net",
+		},
+		{
+			name:   "similarly named parameter ignored",
+			header: `pass receiver=mx.example; x-envelope-from=attacker.example; envelope-from=sender@example.org`,
+			want:   "example.org",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := Input{ReceivedSPF: []string{test.header}, TrustedAuthservIDs: []string{"mx.example"}}
+			want := []Result{{Method: MethodSPF, Outcome: OutcomePass, Domain: test.want}}
+			if got := Parse(input); !reflect.DeepEqual(got, want) {
+				t.Fatalf("Parse() = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestParseAuthenticationResultsSPFIdentityProperties(t *testing.T) {
+	tests := []struct {
+		name   string
+		clause string
+		want   string
+	}{
+		{name: "quoted mailfrom", clause: `spf=pass smtp.mailfrom="quoted+news@example.com"`, want: "example.com"},
+		{name: "escaped quoted mailfrom", clause: `spf=pass smtp.mailfrom="quoted\\+news@example.com"`, want: "example.com"},
+		{name: "HELO identity", clause: `spf=pass smtp.helo=Mail.Example.COM`, want: "mail.example.com"},
+		{name: "null mailfrom uses HELO", clause: `spf=pass smtp.mailfrom=<> smtp.helo=mail.example.com`, want: "mail.example.com"},
+		{name: "similar property ignored", clause: `spf=pass x-smtp.mailfrom=attacker.example smtp.helo=mail.example.com`, want: "mail.example.com"},
+		{name: "quoted decoy ignored", clause: `spf=pass reason="smtp.mailfrom=attacker.example" smtp.helo=mail.example.com`, want: "mail.example.com"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := Input{
+				AuthenticationResults: []string{"mx.example; " + test.clause},
+				TrustedAuthservIDs:    []string{"mx.example"},
+			}
+			want := []Result{{Method: MethodSPF, Outcome: OutcomePass, Domain: test.want}}
+			if got := Parse(input); !reflect.DeepEqual(got, want) {
+				t.Fatalf("Parse() = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
 func TestParseNormalizesOpenDMARCSPFTempfail(t *testing.T) {
 	tests := []Input{
 		{

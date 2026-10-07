@@ -37,6 +37,42 @@ func TestClientReadsRegistrationAndExpirationEvents(t *testing.T) {
 	}
 }
 
+func TestClientNormalizesLookupDomain(t *testing.T) {
+	for _, domain := range []string{"Example.COM", " example.com. "} {
+		t.Run(domain, func(t *testing.T) {
+			client := New(time.Second)
+			client.services = map[string][]string{"com": {"https://rdap.example"}}
+			client.bootstrapLoadedAt = client.now()
+			client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path != "/domain/example.com" {
+					t.Fatalf("unexpected normalized RDAP path %q", r.URL.Path)
+				}
+				return response(http.StatusOK, `{"events":[{"eventAction":"registration","eventDate":"2026-09-01T00:00:00Z"}]}`), nil
+			})
+			if _, _, err := client.Lookup(context.Background(), domain); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestClientRejectsInvalidLookupDomainBeforeBootstrap(t *testing.T) {
+	var calls atomic.Int32
+	client := New(time.Second)
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("unexpected network request")
+	})
+	for _, domain := range []string{"", "example..com", "bad_domain.com", "-bad.example"} {
+		if _, _, err := client.Lookup(context.Background(), domain); err == nil || err.Error() != "invalid RDAP domain" {
+			t.Errorf("Lookup(%q) error = %v, want invalid RDAP domain", domain, err)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("invalid domains caused %d network requests", calls.Load())
+	}
+}
+
 func TestClientAcceptsRegistrationWithoutExpirationEvent(t *testing.T) {
 	client := New(time.Second)
 	client.services = map[string][]string{"com": {"https://rdap.example"}}

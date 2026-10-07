@@ -8,7 +8,6 @@ import (
 var (
 	authenticationMethodPattern = regexp.MustCompile(`(?i)^\s*(dkim|spf|dmarc)\s*=\s*([a-z][a-z0-9_-]{0,31})\b`)
 	dkimDomainPattern           = regexp.MustCompile(`(?i)\bheader\s*\.\s*d\s*=\s*([a-z0-9_.-]+)`)
-	spfDomainPattern            = regexp.MustCompile(`(?i)\bsmtp\s*\.\s*mailfrom\s*=\s*<?([a-z0-9_.@+-]+)>?`)
 	dmarcDomainPattern          = regexp.MustCompile(`(?i)\bheader\s*\.\s*from\s*=\s*([a-z0-9_.-]+)`)
 )
 
@@ -52,7 +51,7 @@ func Parse(input Input) []Result {
 			case MethodDKIM:
 				result.Domain = matchedDomain(dkimDomainPattern, clause)
 			case MethodSPF:
-				result.Domain = DomainFromIdentity(matchedValue(spfDomainPattern, clause))
+				result.Domain = authenticationResultsSPFDomain(clause)
 				hasAuthenticationResultsSPF = true
 			case MethodDMARC:
 				result.Domain = matchedDomain(dmarcDomainPattern, clause)
@@ -65,6 +64,126 @@ func Parse(input Input) []Result {
 		return results
 	}
 	return appendReceivedSPF(results, input.ReceivedSPF, trusted)
+}
+
+// authenticationResultsSPFDomain returns the RFC 7208 identity recorded in a
+// trusted Authentication-Results SPF clause. MAIL FROM is preferred; HELO is
+// the applicable fallback for checks made against the HELO identity, including
+// messages with a null reverse path.
+func authenticationResultsSPFDomain(clause string) string {
+	if identity, ok := authenticationProperty(clause, "smtp", "mailfrom"); ok {
+		if domain := DomainFromIdentity(identity); domain != "" {
+			return domain
+		}
+	}
+	if identity, ok := authenticationProperty(clause, "smtp", "helo"); ok {
+		return DomainFromIdentity(identity)
+	}
+	return ""
+}
+
+// authenticationProperty extracts an exact ptype.property value while
+// ignoring property-like text embedded in quoted strings. Values may be an
+// Authentication-Results token, a quoted string, or the commonly emitted
+// angle-bracket form of an SMTP mailbox.
+func authenticationProperty(clause, wantType, wantProperty string) (string, bool) {
+	for offset := 0; offset < len(clause); {
+		if clause[offset] == '"' {
+			if _, next, ok := readAuthenticationQuotedValue(clause, offset); ok {
+				offset = next
+				continue
+			}
+			return "", false
+		}
+		if !isAuthenticationNameByte(clause[offset]) {
+			offset++
+			continue
+		}
+		start := offset
+		for offset < len(clause) && isAuthenticationNameByte(clause[offset]) {
+			offset++
+		}
+		if !strings.EqualFold(clause[start:offset], wantType) {
+			continue
+		}
+
+		cursor := skipAuthenticationWhitespace(clause, offset)
+		if cursor >= len(clause) || clause[cursor] != '.' {
+			continue
+		}
+		cursor = skipAuthenticationWhitespace(clause, cursor+1)
+		propertyStart := cursor
+		for cursor < len(clause) && isAuthenticationNameByte(clause[cursor]) {
+			cursor++
+		}
+		if propertyStart == cursor || !strings.EqualFold(clause[propertyStart:cursor], wantProperty) {
+			continue
+		}
+		cursor = skipAuthenticationWhitespace(clause, cursor)
+		if cursor >= len(clause) || clause[cursor] != '=' {
+			continue
+		}
+		cursor = skipAuthenticationWhitespace(clause, cursor+1)
+		if cursor >= len(clause) {
+			return "", false
+		}
+
+		switch clause[cursor] {
+		case '"':
+			value, _, ok := readAuthenticationQuotedValue(clause, cursor)
+			return value, ok
+		case '<':
+			end := strings.IndexByte(clause[cursor+1:], '>')
+			if end < 0 {
+				return "", false
+			}
+			return clause[cursor+1 : cursor+1+end], true
+		default:
+			end := cursor
+			for end < len(clause) && clause[end] != ' ' && clause[end] != '\t' {
+				end++
+			}
+			if end == cursor {
+				return "", false
+			}
+			return clause[cursor:end], true
+		}
+	}
+	return "", false
+}
+
+func readAuthenticationQuotedValue(value string, offset int) (string, int, bool) {
+	if offset >= len(value) || value[offset] != '"' {
+		return "", offset, false
+	}
+	var decoded strings.Builder
+	for offset++; offset < len(value); offset++ {
+		switch value[offset] {
+		case '\\':
+			offset++
+			if offset >= len(value) {
+				return "", offset, false
+			}
+			decoded.WriteByte(value[offset])
+		case '"':
+			return decoded.String(), offset + 1, true
+		default:
+			decoded.WriteByte(value[offset])
+		}
+	}
+	return "", offset, false
+}
+
+func skipAuthenticationWhitespace(value string, offset int) int {
+	for offset < len(value) && (value[offset] == ' ' || value[offset] == '\t') {
+		offset++
+	}
+	return offset
+}
+
+func isAuthenticationNameByte(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9' || value == '_' || value == '-'
 }
 
 // normalizeHeaderOutcome translates known implementation-specific aliases at

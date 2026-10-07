@@ -17,11 +17,13 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
+	"net/url"
 	"path"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"golang.org/x/net/html/charset"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -156,7 +158,7 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 			if mediaType == "multipart/digest" && strings.TrimSpace(partContentType) == "" {
 				partContentType = "message/rfc822"
 			}
-			if filename := attachmentFilename(part.Header.Get("Content-Disposition"), partContentType); filename != "" {
+			if filename, _ := attachmentFilename(part.Header.Get("Content-Disposition"), partContentType); filename != "" {
 				partLocation = joinLocation(location, filename)
 			}
 			finding, scanErr := s.scanMIME(partContentType, part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-Disposition"), partData, partLocation, mimeDepth+1, state)
@@ -172,7 +174,10 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 		}
 	}
 
-	filename := attachmentFilename(contentDisposition, contentType)
+	filename, filenameErr := attachmentFilename(contentDisposition, contentType)
+	if filenameErr != nil {
+		return nil, &ScanError{Path: cleanLocation(location), Malformed: true, Err: filenameErr}
+	}
 	if filename != "" {
 		location = replaceLocationBase(location, filename)
 		if extension := s.blockedExtension(filename); extension != "" {
@@ -201,10 +206,14 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 	if filename == "" && (mediaType == "text/plain" || mediaType == "text/html") {
 		// A nested MIME entity without any Content-Type defaults to text/plain,
 		// but it may still contain an executable or archive. Scan that nested
-		// part as a file before applying the shortcut for visible text. Keep
-		// the top-level body exempt so a script sample in ordinary mail is not
-		// treated as an attachment.
+		// part as a file before applying the shortcut for visible text. A part
+		// that declares a text type can likewise conceal binary executable or
+		// archive data, but ordinary inline text (including encoded code samples)
+		// remains exempt. An explicit attachment is always scanned normally.
 		if mimeDepth > 0 && strings.TrimSpace(contentType) == "" {
+			return s.scanFile(location, "", mediaType, decoded, 0, state)
+		}
+		if explicitAttachment(contentDisposition) || mimeDepth > 0 && s.disguisedBinaryContent(decoded) {
 			return s.scanFile(location, "", mediaType, decoded, 0, state)
 		}
 		return nil, nil
@@ -285,7 +294,7 @@ func (s *Scanner) scanFile(location, filename, mediaType string, data []byte, ar
 		}
 		innerName := ""
 		if storedName != "" {
-			innerName = cleanName(storedName)
+			innerName = normalizeName(storedName)
 		} else {
 			innerName = stripCompressionExtension(filename, ".gz", ".gzip")
 		}
@@ -515,7 +524,9 @@ func (s *Scanner) beginArchiveFile(declaredSize uint64, state *scanState) error 
 }
 
 func (s *Scanner) blockedExtension(filename string) string {
-	filename = strings.ToLower(cleanName(filename))
+	// Use the complete normalized name for policy checks. cleanName truncates
+	// display paths, which must not be allowed to hide a suffix after rune 255.
+	filename = strings.ToLower(normalizeName(filename))
 	// Colons can introduce NTFS alternate data streams, but are ordinary
 	// filename characters on other systems. Apply extension policy to every
 	// colon-delimited filename segment so neither invoice.exe::$DATA nor
@@ -532,31 +543,154 @@ func (s *Scanner) blockedExtension(filename string) string {
 	return ""
 }
 
-func attachmentFilename(contentDisposition, contentType string) string {
+var attachmentWordDecoder = &mime.WordDecoder{
+	CharsetReader: func(label string, input io.Reader) (io.Reader, error) {
+		return charset.NewReaderLabel(label, input)
+	},
+}
+
+func attachmentFilename(contentDisposition, contentType string) (string, error) {
 	for _, header := range []string{contentDisposition, contentType} {
 		_, params, err := mime.ParseMediaType(header)
 		if err != nil {
+			if hasFilenameParameter(header) {
+				return "", fmt.Errorf("invalid encoded attachment filename: %w", err)
+			}
 			continue
 		}
 		for _, key := range []string{"filename", "name"} {
 			raw := strings.TrimSpace(params[key])
-			if raw == "" {
-				continue
+			if raw != "" {
+				decoded, decodeErr := decodeFilename(raw)
+				if decodeErr != nil {
+					return "", decodeErr
+				}
+				return decoded, nil
 			}
-			return decodeFilename(raw)
+
+			// mime.ParseMediaType only decodes RFC 2231 parameters declared as
+			// UTF-8 or US-ASCII. Recover other supported character sets rather
+			// than silently losing a security-relevant filename.
+			extended, present, extendedErr := extendedFilenameParameter(header, key)
+			if extendedErr != nil {
+				return "", extendedErr
+			}
+			if present {
+				return extended, nil
+			}
 		}
 	}
-	return ""
+	return "", nil
 }
 
-func decodeFilename(value string) string {
-	if decoded, err := new(mime.WordDecoder).DecodeHeader(value); err == nil {
+func decodeFilename(value string) (string, error) {
+	decoded, err := attachmentWordDecoder.DecodeHeader(value)
+	if err != nil {
+		if strings.Contains(value, "=?") || strings.Contains(value, "?=") {
+			return "", fmt.Errorf("cannot decode encoded attachment filename: %w", err)
+		}
+	} else {
 		value = decoded
 	}
-	return cleanName(value)
+	return normalizeName(value), nil
 }
 
-func cleanName(value string) string {
+// extendedFilenameParameter recovers a single-part RFC 2231 filename or name
+// parameter that mime.ParseMediaType could not decode. It rejects continuations
+// rather than allowing a supplied filename to disappear from policy checks.
+func extendedFilenameParameter(header, baseKey string) (string, bool, error) {
+	for _, parameter := range splitMIMEParameters(header) {
+		key, raw, found := strings.Cut(parameter, "=")
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == baseKey+"*" {
+			if !found {
+				return "", true, errors.New("encoded attachment filename has no value")
+			}
+			decoded, err := decodeExtendedFilename(strings.TrimSpace(raw))
+			if err != nil {
+				return "", true, err
+			}
+			return normalizeName(decoded), true, nil
+		}
+		if strings.HasPrefix(key, baseKey+"*") {
+			return "", true, errors.New("unsupported continued attachment filename encoding")
+		}
+	}
+	return "", false, nil
+}
+
+func decodeExtendedFilename(value string) (string, error) {
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		value = value[1 : len(value)-1]
+	}
+	label, remainder, ok := strings.Cut(value, "'")
+	if !ok || strings.TrimSpace(label) == "" {
+		return "", errors.New("encoded attachment filename has no character set")
+	}
+	_, encoded, ok := strings.Cut(remainder, "'")
+	if !ok {
+		return "", errors.New("encoded attachment filename has no language separator")
+	}
+	bytesValue, err := url.PathUnescape(encoded)
+	if err != nil {
+		return "", fmt.Errorf("cannot unescape encoded attachment filename: %w", err)
+	}
+	reader, err := charset.NewReaderLabel(label, strings.NewReader(bytesValue))
+	if err != nil {
+		return "", fmt.Errorf("unsupported attachment filename character set %q: %w", label, err)
+	}
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		return "", fmt.Errorf("cannot decode attachment filename character set %q: %w", label, err)
+	}
+	return string(decoded), nil
+}
+
+func hasFilenameParameter(header string) bool {
+	for _, parameter := range splitMIMEParameters(header) {
+		key, _, _ := strings.Cut(parameter, "=")
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "filename" || key == "name" || strings.HasPrefix(key, "filename*") || strings.HasPrefix(key, "name*") {
+			return true
+		}
+	}
+	return false
+}
+
+func splitMIMEParameters(header string) []string {
+	var parameters []string
+	start := 0
+	quoted := false
+	escaped := false
+	for index := 0; index < len(header); index++ {
+		switch {
+		case escaped:
+			escaped = false
+		case quoted && header[index] == '\\':
+			escaped = true
+		case header[index] == '"':
+			quoted = !quoted
+		case header[index] == ';' && !quoted:
+			parameters = append(parameters, header[start:index])
+			start = index + 1
+		}
+	}
+	return append(parameters, header[start:])
+}
+
+func explicitAttachment(contentDisposition string) bool {
+	disposition, _, err := mime.ParseMediaType(contentDisposition)
+	return err == nil && strings.EqualFold(disposition, "attachment")
+}
+
+func (s *Scanner) disguisedBinaryContent(data []byte) bool {
+	if s.options.InspectSignatures && binaryExecutableSignature(data) != "" {
+		return true
+	}
+	return s.options.InspectArchives && archiveFormat("", "", data) != ""
+}
+
+func normalizeName(value string) string {
 	value = strings.ToValidUTF8(value, "�")
 	value = norm.NFKC.String(value)
 	value = strings.ReplaceAll(value, "\\", "/")
@@ -572,6 +706,11 @@ func cleanName(value string) string {
 	if value == "." || value == ".." || value == "/" || value == "" {
 		return "unnamed"
 	}
+	return value
+}
+
+func cleanName(value string) string {
+	value = normalizeName(value)
 	if utf8.RuneCountInString(value) > 255 {
 		value = string([]rune(value)[:255])
 	}
@@ -605,13 +744,13 @@ func replaceLocationBase(location, filename string) string {
 }
 
 func stripCompressionExtension(filename string, extensions ...string) string {
-	filename = cleanName(filename)
+	filename = normalizeName(filename)
 	lower := strings.ToLower(filename)
 	for _, extension := range extensions {
 		if strings.HasSuffix(lower, extension) {
 			name := strings.TrimSpace(filename[:len(filename)-len(extension)])
 			if name != "" {
-				return cleanName(name)
+				return normalizeName(name)
 			}
 		}
 	}
@@ -643,6 +782,16 @@ func archiveFormat(filename, mediaType string, data []byte) string {
 }
 
 func executableSignature(data []byte) string {
+	if signature := binaryExecutableSignature(data); signature != "" {
+		return signature
+	}
+	if interpreter := scriptInterpreter(data); interpreter != "" {
+		return "executable script signature (" + interpreter + ")"
+	}
+	return ""
+}
+
+func binaryExecutableSignature(data []byte) string {
 	if len(data) >= 2 && data[0] == 'M' && data[1] == 'Z' {
 		return "DOS/Windows executable signature"
 	}
@@ -659,9 +808,6 @@ func executableSignature(data []byte) string {
 			[4]byte{0xca, 0xfe, 0xba, 0xbf}, [4]byte{0xbf, 0xba, 0xfe, 0xca}:
 			return "Mach-O universal executable signature"
 		}
-	}
-	if interpreter := scriptInterpreter(data); interpreter != "" {
-		return "executable script signature (" + interpreter + ")"
 	}
 	return ""
 }

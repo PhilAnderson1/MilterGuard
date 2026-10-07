@@ -37,6 +37,36 @@ func TestEnvelopeRecipientLimitIsIndependentAndMarksTruncation(t *testing.T) {
 	}
 }
 
+func TestMalformedEnvelopeRecipientMarksRecipientSetIncomplete(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+	ss := newSession(&sessionDependencies{log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		protocol: protocolOptions{timeout: time.Second, maxMessageSize: 1024}}, serverConn)
+	ss.phase = phaseEnvelope
+	ss.connected = true
+
+	frames := [][]byte{
+		envelopeFrame(commandRecipient, "valid@example.net"),
+		append([]byte{commandRecipient}, []byte("missing-nul@example.net")...),
+	}
+	for _, frame := range frames {
+		finished := make(chan bool, 1)
+		go func() { finished <- ss.handleCommand(context.Background(), frame[0], frame[1:]) }()
+		expectFrame(t, clientConn, string([]byte{responseContinue}))
+		if !<-finished {
+			t.Fatal("recipient frame closed the session")
+		}
+	}
+
+	if len(ss.envelopeRecipients) != 1 || ss.envelopeRecipients[0] != "<valid@example.net>" {
+		t.Fatalf("recipients = %#v, want only the valid recipient", ss.envelopeRecipients)
+	}
+	if !ss.envelopeRecipientsTruncated || ss.recipientSetComplete() {
+		t.Fatalf("malformed recipient did not mark the recipient set incomplete")
+	}
+}
+
 func TestBelowThresholdUnwantedAddsTrustedResultHeaders(t *testing.T) {
 	analyzer := fixedAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 0.85, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)

@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
-	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
@@ -16,23 +15,21 @@ func (ss *session) applyAuthenticatedOnlySenderDomain(ctx context.Context) (bool
 	if ss.authentication.Authenticated {
 		return false, true
 	}
-	domain := authenticatedOnlyFromDomain(ss.message, ss.deps.filtering.AuthenticatedOnlySenderDomains)
+	domain := ss.protectedSenderDomain
 	if domain == "" {
 		return false, true
 	}
 	return true, ss.finishAuthenticatedOnlySenderDomain(ctx, domain)
 }
 
-func authenticatedOnlyFromDomain(msg *message.Message, configured []string) string {
-	for _, value := range msg.HeaderValues("From") {
-		addresses, err := mail.ParseAddressList(value)
-		if err != nil {
-			addresses = recoverFromAddresses(value)
-		}
-		for _, address := range addresses {
-			if domain := allowedSenderDomain(mailaddr.Domain(address.Address), configured); domain != "" {
-				return domain
-			}
+func authenticatedOnlyFromValue(value string, configured []string) string {
+	addresses, err := mail.ParseAddressList(value)
+	if err != nil {
+		addresses = recoverFromAddresses(value)
+	}
+	for _, address := range addresses {
+		if domain := allowedSenderDomain(mailaddr.Domain(address.Address), configured); domain != "" {
+			return domain
 		}
 	}
 	return ""

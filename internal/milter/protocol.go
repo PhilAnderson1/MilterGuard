@@ -208,6 +208,7 @@ func parseSessionMacros(payload []byte) (target byte, values sessionMacroValues,
 	if remainder[len(remainder)-1] != 0 {
 		return target, values, false
 	}
+	var daemonAddressFound, interfaceAddressFound bool
 	for pairs := 0; len(remainder) > 0; pairs++ {
 		if pairs >= maxMacroPairs {
 			return target, values, false
@@ -236,9 +237,21 @@ func parseSessionMacros(payload []byte) (target byte, values sessionMacroValues,
 			values.MTAHostname = string(value)
 			values.MTAHostnameFound = true
 		case strings.EqualFold(macroName, "daemon_addr"):
-			if values.ReceiverAddressFound || len(value) > 64 {
+			if daemonAddressFound || len(value) > 64 {
 				return target, values, false
 			}
+			daemonAddressFound = true
+			if !interfaceAddressFound {
+				values.ReceiverAddress = string(value)
+			}
+			values.ReceiverAddressFound = true
+		case strings.EqualFold(macroName, "if_addr"):
+			if interfaceAddressFound || len(value) > 64 {
+				return target, values, false
+			}
+			// Sendmail supplies the receiving interface as {if_addr}. Prefer
+			// that specific value if an MTA also supplies {daemon_addr}.
+			interfaceAddressFound = true
 			values.ReceiverAddress = string(value)
 			values.ReceiverAddressFound = true
 		}

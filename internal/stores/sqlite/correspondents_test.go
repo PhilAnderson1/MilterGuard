@@ -134,9 +134,12 @@ func TestManualCorrespondentOperationsRequireAvailableAllowlist(t *testing.T) {
 
 func TestCorrespondentPolicyRejectsInvalidVocabulary(t *testing.T) {
 	store := newTestCorrespondentRepository(t, CorrespondentOptions{
-		UseAllowlist: true, Scope: "invalid", MaxEntries: 10,
+		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "invalid", MaxEntries: 10,
 	}, nil)
 	ctx := context.Background()
+	if err := store.LearnAuthenticated(ctx, "owner@example.com", []string{"sender@example.net"}); err == nil {
+		t.Fatal("LearnAuthenticated accepted an invalid correspondent scope")
+	}
 	if err := store.TouchInbound(ctx, "sender@example.net", []string{"owner@example.com"}); err == nil {
 		t.Fatal("TouchInbound accepted an invalid correspondent scope")
 	}

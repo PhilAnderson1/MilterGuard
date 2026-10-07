@@ -87,8 +87,10 @@ func TestRejectedMailCleanupRunsImmediatelyAtStartup(t *testing.T) {
 		Directory: root, Retention: 24 * time.Hour, MaxTotalBytes: 1 << 20,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))}
 	ctx, cancel := context.WithCancel(context.Background())
-	service.startDailyCleanup(ctx)
+	var wg sync.WaitGroup
+	service.startDailyCleanup(ctx, &wg)
 	cancel()
+	wg.Wait()
 
 	if _, err := os.Lstat(filepath.Join(root, "2000")); !os.IsNotExist(err) {
 		t.Fatalf("expired archive tree remains after startup cleanup: %v", err)
@@ -112,10 +114,56 @@ func TestDailyActivityCleanupRunsWhenArchiveIsDisabled(t *testing.T) {
 	}
 	service := &maintenanceService{activity: repository, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	ctx, cancel := context.WithCancel(context.Background())
-	service.startDailyCleanup(ctx)
+	var wg sync.WaitGroup
+	service.startDailyCleanup(ctx, &wg)
 	cancel()
+	wg.Wait()
 	if count, err := repository.Count(context.Background()); err != nil || count != 0 {
 		t.Fatalf("activity count after daily cleanup = %d, err = %v", count, err)
+	}
+}
+
+type blockingMaintenanceRepository struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingMaintenanceRepository) Cleanup(context.Context) (int64, error) {
+	close(r.started)
+	<-r.release
+	return 0, nil
+}
+
+func (*blockingMaintenanceRepository) Count(context.Context) (int, error) { return 0, nil }
+
+func TestDailyCleanupLoopIsJoinedDuringShutdown(t *testing.T) {
+	repository := &blockingMaintenanceRepository{started: make(chan struct{}), release: make(chan struct{})}
+	service := &maintenanceService{activity: repository, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	service.startDailyCleanupLoop(ctx, &wg, time.Millisecond)
+
+	select {
+	case <-repository.started:
+	case <-time.After(time.Second):
+		t.Fatal("daily cleanup did not start")
+	}
+	cancel()
+	waited := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatal("shutdown stopped waiting while daily cleanup was still active")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(repository.release)
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("daily cleanup loop did not finish after cleanup returned")
 	}
 }
 

@@ -32,7 +32,7 @@ type extractedImage struct {
 
 func extractMIME(contentType, encoding, contentID string, data []byte, depth int) extractedContent {
 	if depth > 8 {
-		return extractedContent{Text: "[MIME nesting limit reached]"}
+		return extractedContent{Text: "[MIME nesting limit reached]", MIMEIncomplete: true}
 	}
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil || mediaType == "" {
@@ -239,7 +239,9 @@ func decodeTransferRecovering(encoding string, data []byte) ([]byte, bool) {
 			return decoded, err != nil
 		}
 		return data, true
-	default:
+	case "", "7bit", "8bit", "binary":
 		return data, false
+	default:
+		return data, len(data) > 0
 	}
 }

@@ -160,10 +160,19 @@ func (v *Verifier) verifyTransaction(ctx context.Context, transaction mailauth.T
 		}
 	}
 
+	if transaction.VisibleFromInvalid {
+		results = append(results, mailauth.Result{
+			Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomePermerror,
+			ErrorCategory: mailauth.ErrorSyntax, Reason: "invalid or ambiguous visible From identity",
+		})
+		return mailauth.NewEvidence(results, transaction.VisibleFromDomain), nil
+	}
+
 	fromDomain, fromErr := parseDomain(transaction.VisibleFromDomain)
 	if fromErr != nil {
 		result := mailauth.Result{Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomeNone}
 		if strings.TrimSpace(transaction.VisibleFromDomain) != "" {
+			result.Outcome = mailauth.OutcomePermerror
 			result.ErrorCategory = mailauth.ErrorSyntax
 			result.Reason = "invalid visible From domain"
 		}

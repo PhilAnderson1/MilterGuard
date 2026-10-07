@@ -328,6 +328,42 @@ func TestParseConnectIP(t *testing.T) {
 	}
 }
 
+func TestUnusableConnectIPLogsUnavailableIPFeatures(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	cfg := config.Config{
+		Mode:      "enforce",
+		Milter:    config.MilterConfig{Timeout: config.Duration(200 * time.Millisecond), MaxMessageSize: 1024},
+		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
+		Filtering: config.FilteringConfig{RejectScore: 0.9, AIErrorAction: "accept", RejectMessage: "blocked"},
+	}
+	serverConn, clientConn := net.Pipe()
+	server := NewServer(cfg, fixedAnalyzer{}, logger)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer serverConn.Close()
+		server.handle(context.Background(), serverConn)
+	}()
+	defer func() {
+		_ = clientConn.Close()
+		<-done
+	}()
+
+	negotiate(t, clientConn)
+	sendContinueFrames(t, clientConn, connectFrame('4', "not-an-ip"))
+
+	logged := output.String()
+	for _, want := range []string{
+		`"level":"WARN"`,
+		`"msg":"milter CONNECT did not provide a usable client IP address; IP reputation, reverse DNS and IP-based authentication checks are unavailable for this connection"`,
+	} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("CONNECT warning missing %s: %s", want, logged)
+		}
+	}
+}
+
 func TestParseAndCleanConnectAndHELOIdentities(t *testing.T) {
 	frame := connectFrameWithHostname("claimed.example", '4', "192.0.2.25")
 	if got, ok := parseConnectHostname(frame[1:]); !ok || got != "claimed.example" {
@@ -378,5 +414,17 @@ func TestParseMTAHostnameMacro(t *testing.T) {
 	}
 	if got := canonicalMacroIP("not-an-address"); got.IsValid() {
 		t.Fatalf("invalid receiver address accepted as %s", got)
+	}
+
+	_, values, valid = parseSessionMacros(macroFrame(commandConnect,
+		"j", "sendmail.example.com", "{if_addr}", "192.0.2.26")[1:])
+	if !valid || !values.ReceiverAddressFound || values.ReceiverAddress != "192.0.2.26" {
+		t.Fatalf("Sendmail receiver macro = values=%#v valid=%v", values, valid)
+	}
+
+	_, values, valid = parseSessionMacros(macroFrame(commandConnect,
+		"{if_addr}", "192.0.2.27", "{daemon_addr}", "192.0.2.28")[1:])
+	if !valid || values.ReceiverAddress != "192.0.2.27" {
+		t.Fatalf("receiving interface did not take precedence: values=%#v valid=%v", values, valid)
 	}
 }

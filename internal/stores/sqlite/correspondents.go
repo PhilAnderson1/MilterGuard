@@ -50,6 +50,9 @@ func (r *correspondentRepository) LearnAuthenticated(ctx context.Context, localA
 	if r == nil || r.db == nil || !r.options.LearnAuthenticatedRecipients {
 		return nil
 	}
+	if err := r.validateScope(); err != nil {
+		return err
+	}
 	localAddress = mailaddr.Normalize(localAddress)
 	if localAddress == "" {
 		return fmt.Errorf("authenticated envelope sender is unavailable or invalid")

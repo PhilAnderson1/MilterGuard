@@ -695,6 +695,16 @@ func TestLoadSenderDomainAllowlistFile(t *testing.T) {
 	}
 }
 
+func TestLoadSenderDomainAllowlistRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trusted-sender-domains.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("#", maxSenderDomainAllowlistBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadSenderDomainAllowlist(path); err == nil || !strings.Contains(err.Error(), "exceeds 1 MiB") {
+		t.Fatalf("oversized allowlist error = %v", err)
+	}
+}
+
 func TestLoadWarnsWhenEmailCommandSenderOwnershipDependsOnPostfix(t *testing.T) {
 	for _, test := range []struct {
 		name        string

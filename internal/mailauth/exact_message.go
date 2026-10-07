@@ -94,6 +94,8 @@ type exactMessageWriter interface {
 }
 
 func addExactHeader(store exactMessageWriter, name, value string) error {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
 	value = strings.ReplaceAll(value, "\n", "\r\n")
 	return store.append([]byte(name + ": " + value + "\r\n"))
 }

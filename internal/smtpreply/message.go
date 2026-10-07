@@ -54,8 +54,10 @@ func Build(message Message) ([]byte, error) {
 		}
 	}
 	if len(message.Attachments) == 0 {
-		payload.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
-		payload.WriteString(message.Text)
+		payload.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n")
+		if err := writeCRLFText(&payload, message.Text); err != nil {
+			return nil, err
+		}
 		return payload.Bytes(), nil
 	}
 
@@ -69,7 +71,7 @@ func Build(message Message) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := io.WriteString(part, message.Text); err != nil {
+	if err := writeCRLFText(part, message.Text); err != nil {
 		return nil, err
 	}
 	for _, attachment := range message.Attachments {
@@ -92,6 +94,29 @@ func Build(message Message) ([]byte, error) {
 		return nil, err
 	}
 	return payload.Bytes(), nil
+}
+
+// writeCRLFText canonicalizes LF, CRLF, and lone CR line endings without
+// otherwise changing the UTF-8 message text.
+func writeCRLFText(writer io.Writer, text string) error {
+	start := 0
+	for index := 0; index < len(text); index++ {
+		if text[index] != '\r' && text[index] != '\n' {
+			continue
+		}
+		if _, err := io.WriteString(writer, text[start:index]); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(writer, "\r\n"); err != nil {
+			return err
+		}
+		if text[index] == '\r' && index+1 < len(text) && text[index+1] == '\n' {
+			index++
+		}
+		start = index + 1
+	}
+	_, err := io.WriteString(writer, text[start:])
+	return err
 }
 
 func writeHeader(writer io.Writer, header Header) error {

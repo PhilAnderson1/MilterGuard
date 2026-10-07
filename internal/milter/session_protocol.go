@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
@@ -134,7 +135,7 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 			ss.peerIP = addr
 			ss.startConnectionDNS(ctx)
 		} else {
-			ss.deps.log.Debug("milter CONNECT did not provide a usable IP address")
+			ss.deps.log.Warn("milter CONNECT did not provide a usable client IP address; IP reputation, reverse DNS and IP-based authentication checks are unavailable for this connection")
 		}
 		return ss.sendContinue(command)
 	case commandHelo:
@@ -163,9 +164,11 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		if ss.phase != phaseEnvelope {
 			return ss.protocolError("milter transaction command outside message", "command", commandName(command))
 		}
-		if recipient, ok := parseEnvelopeAddress(payload); ok && len(ss.envelopeRecipients) < maxEnvelopeRecipients {
+		if recipient, ok := parseEnvelopeAddress(payload); !ok {
+			ss.envelopeRecipientsTruncated = true
+		} else if len(ss.envelopeRecipients) < maxEnvelopeRecipients {
 			ss.envelopeRecipients = append(ss.envelopeRecipients, recipient)
-		} else if ok {
+		} else {
 			ss.envelopeRecipientsTruncated = true
 		}
 		return ss.sendContinue(command)
@@ -249,6 +252,11 @@ func (ss *session) addHeader(payload []byte) bool {
 	if !ok {
 		return ss.protocolError("malformed milter header command")
 	}
+	if strings.EqualFold(strings.TrimSpace(name), "From") && ss.protectedSenderDomain == "" {
+		ss.protectedSenderDomain = authenticatedOnlyFromValue(
+			value, ss.deps.filtering.AuthenticatedOnlySenderDomains,
+		)
+	}
 	ss.message.AddHeader(name, value)
 	ss.captureExact(func(exact mailauth.ExactMessage) error { return exact.AddHeader(name, value) })
 	return ss.sendContinue(commandHeader)
@@ -263,6 +271,8 @@ func (ss *session) resetMessage(phase protocolPhase) {
 	ss.envelopeRecipientsTruncated = false
 	ss.visibleSender = ""
 	ss.visibleSenderDomain = ""
+	ss.visibleFromInvalid = false
+	ss.protectedSenderDomain = ""
 	ss.smtpUTF8 = false
 	ss.phase = phase
 	if phase != phaseEnvelope || !ss.requiresExactMessage() {

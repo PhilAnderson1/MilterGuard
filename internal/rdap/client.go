@@ -123,6 +123,10 @@ func (c *Client) dialContext(ctx context.Context, network, endpoint string) (net
 // Lookup discovers the authoritative RDAP services for domain and returns its
 // registration event and, when provided, its expiration event.
 func (c *Client) Lookup(ctx context.Context, domain string) (time.Time, time.Time, error) {
+	domain = netsafety.DNSHostname(domain)
+	if domain == "" {
+		return time.Time{}, time.Time{}, errors.New("invalid RDAP domain")
+	}
 	services, err := c.rdapServices(ctx)
 	if err != nil {
 		return time.Time{}, time.Time{}, err

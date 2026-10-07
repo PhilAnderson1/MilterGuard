@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/admincmd"
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
@@ -117,6 +118,29 @@ func TestRunCommandModeRedirectedInputSuppressesPrompts(t *testing.T) {
 	}
 }
 
+func TestCommandModeCancellationClosesInputAndStopsScanner(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader, writer := io.Pipe()
+	stopInterrupt := interruptCommandInputOnCancellation(ctx, reader)
+	defer stopInterrupt()
+	defer writer.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- runCommandMode(ctx, reader, io.Discard, &scriptedCommandProcessor{})
+	}()
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("runCommandMode() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runCommandMode did not stop after cancellation")
+	}
+}
+
 type scriptedLineEditor struct {
 	lines   []string
 	errors  []error
@@ -162,6 +186,19 @@ func TestTerminalCommandModeKeepsSessionHistory(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "Error: bad command") {
 		t.Fatalf("terminal output = %q", output.String())
+	}
+}
+
+func TestTerminalCommandModeChecksCancellationBeforePrompt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	editor := &scriptedLineEditor{}
+	err := runTerminalCommandMode(ctx, io.Discard, &scriptedCommandProcessor{}, editor)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runTerminalCommandMode() error = %v, want context.Canceled", err)
+	}
+	if len(editor.prompts) != 0 {
+		t.Fatalf("Prompt called %d times after cancellation", len(editor.prompts))
 	}
 }
 

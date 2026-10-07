@@ -95,7 +95,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	startedAt := time.Now().UTC()
 	s.setServiceStatus(startedAt)
 	defer s.clearServiceStatus()
-	s.maintenance.startDailyCleanup(sessionCtx)
+	s.maintenance.startDailyCleanup(sessionCtx, &s.wg)
 	if cleanupInterval := s.maintenance.cleanupInterval; cleanupInterval > 0 {
 		maintenanceCtx, stopMaintenance := context.WithCancel(sessionCtx)
 		maintenanceDone := make(chan struct{})

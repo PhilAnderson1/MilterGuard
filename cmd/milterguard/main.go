@@ -106,6 +106,7 @@ func run() int {
 			return 1
 		}
 		var commandErr error
+		stopInputInterrupt := interruptCommandInputOnCancellation(ctx, os.Stdin)
 		if inputIsTerminal(os.Stdin) && inputIsTerminal(os.Stdout) {
 			line := liner.NewLiner()
 			commandErr = runTerminalCommandMode(ctx, os.Stdout, processor, line)
@@ -113,6 +114,7 @@ func run() int {
 		} else {
 			commandErr = runCommandMode(ctx, os.Stdin, os.Stdout, processor)
 		}
+		stopInputInterrupt()
 		return reportCommandModeCompletion(os.Stderr, commandErr, closeProcessor())
 	}
 	if len(flag.Args()) != 0 {
@@ -187,12 +189,33 @@ func inputIsTerminal(input *os.File) bool {
 	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 }
 
+// interruptCommandInputOnCancellation closes command mode's input when a
+// termination signal cancels the process context, unblocking terminal and
+// redirected reads. The returned function stops the watcher after normal exit.
+func interruptCommandInputOnCancellation(ctx context.Context, input io.Closer) func() {
+	stopped := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = input.Close()
+		case <-stopped:
+		}
+	}()
+	return func() { close(stopped) }
+}
+
 // runTerminalCommandMode provides in-memory command history on a real terminal.
 func runTerminalCommandMode(ctx context.Context, output io.Writer, processor interactiveCommandProcessor, editor commandLineEditor) error {
 	fmt.Fprintln(output, "MilterGuard command mode. Type HELP for commands; EXIT to quit.")
 	actor := admincmd.Actor{Administrator: true, CommandMode: true, DefaultRecipient: "*", NewestLast: true}
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		line, err := editor.Prompt("milterguard> ")
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
 		if errors.Is(err, io.EOF) {
 			fmt.Fprintln(output)
 			return nil
@@ -219,7 +242,13 @@ func runCommandMode(ctx context.Context, input io.Reader, output io.Writer, proc
 	scanner.Buffer(make([]byte, 4096), 1<<20)
 	actor := admincmd.Actor{Administrator: true, CommandMode: true, DefaultRecipient: "*", NewestLast: true}
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if err := scanner.Err(); err != nil {
 				return err
 			}

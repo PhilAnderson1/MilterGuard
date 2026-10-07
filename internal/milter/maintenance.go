@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
@@ -80,10 +81,16 @@ func wrapStoreError(operation string, err error) error {
 	return fmt.Errorf("%s: %w", operation, err)
 }
 
-func (s *maintenanceService) startDailyCleanup(ctx context.Context) {
+func (s *maintenanceService) startDailyCleanup(ctx context.Context, wg *sync.WaitGroup) {
 	s.runDailyCleanup(ctx)
+	s.startDailyCleanupLoop(ctx, wg, dailyCleanupInterval)
+}
+
+func (s *maintenanceService) startDailyCleanupLoop(ctx context.Context, wg *sync.WaitGroup, interval time.Duration) {
+	wg.Add(1)
 	go func() {
-		ticker := time.NewTicker(dailyCleanupInterval)
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {

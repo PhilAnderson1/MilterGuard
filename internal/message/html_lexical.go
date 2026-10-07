@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strings"
 	"unicode"
+
+	xhtml "golang.org/x/net/html"
 )
 
 var markdownURLReplacer = strings.NewReplacer(
@@ -15,6 +17,8 @@ var markdownURLReplacer = strings.NewReplacer(
 	"<", "%3C",
 	">", "%3E",
 )
+
+const lexicalVisibilityNestingLimit = 64
 
 type lexicalAnchor struct {
 	href       string
@@ -166,6 +170,15 @@ func htmlToText(source string) extractedContent {
 // frequently malformed or deliberately adversarial, so it scans tag
 // boundaries while retaining only the evidence needed by the AI prompt.
 func extractLexicalHTML(source string) extractedContent {
+	return extractLexicalHTMLWithBase(source, nil, false, 0)
+}
+
+func extractLexicalHTMLWithBase(
+	source string,
+	inheritedBase *url.URL,
+	inheritedBaseSeen bool,
+	visibilityDepth int,
+) extractedContent {
 	// HTML syntax is ASCII. Keep this copy byte-for-byte aligned with source so
 	// byte offsets found in one string are always safe to use in the other.
 	lower := lexicalASCIILower(source)
@@ -173,8 +186,8 @@ func extractLexicalHTML(source string) extractedContent {
 	var text lexicalOutput
 	var links lexicalLinkCollector
 	var imageRefs imageRefCollector
-	var baseURL *url.URL
-	baseSeen := false
+	baseURL := inheritedBase
+	baseSeen := inheritedBaseSeen
 	rememberBase := func(rawTag string) {
 		if baseSeen {
 			return
@@ -241,20 +254,34 @@ func extractLexicalHTML(source string) extractedContent {
 			text.appendByte(' ')
 			continue
 		}
-		if !isClosing && lexicalExactOpeningTag(rawTag, name) && lexicalVisiblyHidden(rawTag) {
+		visibility := lexicalElementVisibility(rawTag)
+		if name == "img" {
+			visibility.hidden &^= lexicalFontSizeHidden
+		}
+		if !isClosing && lexicalExactOpeningTag(rawTag, name) && visibility.hidden != lexicalNotHidden {
 			// Remove unambiguously hidden HTML from both the AI body and the
 			// visible-text count used to decide whether images need analysis.
 			// The closing tag and its contents are skipped as one subtree. Base
 			// elements remain effective HTML metadata even inside a CSS-hidden
 			// subtree, so retain the first applicable base before skipping it.
 			blockEnd, found := lexicalHiddenSubtreeEnd(source, lower, closing+1, name)
-			if !found {
-				break
+			limit := len(source)
+			if found {
+				limit = blockEnd
 			}
 			if !baseSeen {
-				if hiddenBase, present := lexicalFirstBaseTag(source, lower, opening, blockEnd); present {
+				if hiddenBase, present := lexicalFirstBaseTag(source, lower, opening, limit); present {
 					rememberBase(hiddenBase)
 				}
+			}
+			if visibility.hidden&lexicalDisplayHidden == 0 {
+				overrides := extractLexicalHiddenOverrides(
+					source[closing+1:limit], baseURL, baseSeen, visibilityDepth+1, visibility.hidden,
+				)
+				appendLexicalExtracted(&text, &links, &imageRefs, overrides)
+			}
+			if !found {
+				break
 			}
 			offset = blockEnd
 			text.appendByte(' ')
@@ -270,10 +297,16 @@ func extractLexicalHTML(source string) extractedContent {
 		if !isClosing && lexicalExactOpeningTag(rawTag, name) && lexicalVisibleRawElement(name) {
 			closingStart, blockEnd, found := lexicalElementEnd(source, lower, closing+1, name)
 			if !found {
+				contentEnd := len(source)
+				if closingStart >= closing+1 {
+					// HTML tokenizers do not emit an unfinished matching end tag
+					// when EOF arrives before its closing angle bracket.
+					contentEnd = closingStart
+				}
 				if name == "textarea" {
-					lexicalWriteDecodedText(&text, source[closing+1:])
+					lexicalWriteDecodedText(&text, source[closing+1:contentEnd])
 				} else {
-					text.WriteUntrustedString(source[closing+1:])
+					text.WriteUntrustedString(source[closing+1 : contentEnd])
 				}
 				offset = len(source)
 				continue
@@ -347,6 +380,180 @@ func extractLexicalHTML(source string) extractedContent {
 	visibleText := lexicalVisibleText(text.visible.String())
 	links.AddAll(findHTTPURLs(flatText))
 	return extractedContent{Text: flatText, VisibleText: visibleText, Links: links.links, ImageRefs: imageRefs.refs}
+}
+
+// extractLexicalHiddenOverrides scans content hidden by inherited visibility
+// or font size and extracts only descendants that explicitly restore every
+// hidden dimension. Display-hidden and inert subtrees remain wholly suppressed.
+func extractLexicalHiddenOverrides(
+	source string,
+	baseURL *url.URL,
+	baseSeen bool,
+	visibilityDepth int,
+	inherited lexicalHiddenKind,
+) extractedContent {
+	if visibilityDepth > lexicalVisibilityNestingLimit {
+		return extractedContent{}
+	}
+	lower := lexicalASCIILower(source)
+	var text, visible strings.Builder
+	var links lexicalLinkCollector
+	var imageRefs imageRefCollector
+	appendPart := func(part extractedContent) {
+		if part.Text != "" {
+			text.WriteByte(' ')
+			text.WriteString(part.Text)
+			text.WriteByte(' ')
+		}
+		if part.VisibleText != "" {
+			visible.WriteByte(' ')
+			visible.WriteString(part.VisibleText)
+			visible.WriteByte(' ')
+		}
+		links.AddAll(part.Links)
+		imageRefs.AddAll(part.ImageRefs)
+	}
+
+	for offset := 0; offset < len(source); {
+		relative := strings.IndexByte(source[offset:], '<')
+		if relative < 0 {
+			break
+		}
+		opening := offset + relative
+		if strings.HasPrefix(lower[opening:], "<!--") {
+			commentEnd, found := lexicalCommentEnd(source, opening+4)
+			if !found {
+				break
+			}
+			offset = commentEnd
+			continue
+		}
+		if !lexicalMarkupStart(source, opening) {
+			offset = opening + 1
+			continue
+		}
+		closing, found := lexicalTagEnd(source, opening+1)
+		if !found {
+			break
+		}
+		rawTag := source[opening+1 : closing]
+		name, isClosing := lexicalTagName(rawTag)
+		if isClosing || !lexicalExactOpeningTag(rawTag, name) {
+			offset = closing + 1
+			continue
+		}
+		if lexicalHiddenElement(name) {
+			var blockEnd int
+			if name == "template" {
+				blockEnd, found = lexicalTemplateEnd(source, lower, closing+1)
+			} else {
+				_, blockEnd, found = lexicalElementEnd(source, lower, closing+1, name)
+			}
+			if !found {
+				break
+			}
+			offset = blockEnd
+			continue
+		}
+
+		visibility := lexicalElementVisibility(rawTag)
+		if visibility.hidden&lexicalDisplayHidden != 0 {
+			blockEnd, found := lexicalHiddenSubtreeEnd(source, lower, closing+1, name)
+			if !found {
+				break
+			}
+			offset = blockEnd
+			continue
+		}
+		hidden := inherited
+		if visibility.explicitlyVisible {
+			hidden &^= lexicalVisibilityHidden
+		}
+		if visibility.explicitlyNonzeroFont {
+			hidden &^= lexicalFontSizeHidden
+		}
+		// A zero inherited font size suppresses text but does not make a
+		// replaced image invisible. Preserve its image reference and URL
+		// evidence without allowing surrounding zero-sized text into the
+		// visible-text count.
+		hidden |= visibility.hidden
+		if name == "img" {
+			hidden &^= lexicalFontSizeHidden
+		}
+		if hidden == lexicalNotHidden {
+			blockEnd := closing + 1
+			if !lexicalVoidElement(name) {
+				if end, complete := lexicalHiddenSubtreeEnd(source, lower, closing+1, name); complete {
+					blockEnd = end
+				} else {
+					blockEnd = len(source)
+				}
+			}
+			appendPart(extractLexicalHTMLWithBase(source[opening:blockEnd], baseURL, baseSeen, visibilityDepth))
+			offset = blockEnd
+			continue
+		}
+		if visibility.hidden != lexicalNotHidden || visibility.explicitlyVisible || visibility.explicitlyNonzeroFont {
+			blockEnd := closing + 1
+			if !lexicalVoidElement(name) {
+				if end, complete := lexicalHiddenSubtreeEnd(source, lower, closing+1, name); complete {
+					blockEnd = end
+				} else {
+					blockEnd = len(source)
+				}
+			}
+			part := extractLexicalHiddenOverrides(
+				source[closing+1:blockEnd], baseURL, baseSeen, visibilityDepth+1, hidden,
+			)
+			appendPart(part)
+			offset = blockEnd
+			continue
+		}
+		if name == "plaintext" {
+			break
+		}
+		if lexicalRawTextElement(name) {
+			_, blockEnd, complete := lexicalElementEnd(source, lower, closing+1, name)
+			if !complete {
+				break
+			}
+			offset = blockEnd
+			continue
+		}
+		offset = closing + 1
+	}
+
+	return extractedContent{
+		Text:        strings.Join(strings.Fields(text.String()), " "),
+		VisibleText: lexicalVisibleText(visible.String()),
+		Links:       links.links,
+		ImageRefs:   imageRefs.refs,
+	}
+}
+
+func appendLexicalExtracted(
+	output *lexicalOutput,
+	links *lexicalLinkCollector,
+	imageRefs *imageRefCollector,
+	content extractedContent,
+) {
+	if content.Text != "" {
+		if output.anchor == nil {
+			output.text.WriteByte(' ')
+			output.text.WriteString(content.Text)
+			output.text.WriteByte(' ')
+		} else {
+			output.anchor.label.WriteString(markdownLabelText(" " + content.VisibleText + " "))
+			output.anchor.plainLabel.WriteString(" " + content.VisibleText + " ")
+		}
+	}
+	if content.VisibleText != "" {
+		output.visible.WriteByte(' ')
+		output.visible.WriteString(content.VisibleText)
+		output.visible.WriteByte(' ')
+	}
+	links.AddAll(content.Links)
+	imageRefs.AddAll(content.ImageRefs)
 }
 
 func lexicalWriteDecodedText(text *lexicalOutput, value string) {
@@ -440,7 +647,10 @@ func lexicalTagEnd(source string, offset int) (end int, found bool) {
 				// A valid quoted value containing '>' and '<' remains untouched.
 				if quotedTagEnd >= 0 && quotedTagContainsMarkup && offset+1 < len(source) &&
 					!lexicalSpace(source[offset+1]) && source[offset+1] != '>' && source[offset+1] != '/' {
-					return quotedTagEnd, true
+					if !lexicalAttributeNameByte(source[offset+1]) ||
+						lexicalQuotedMarkupNeedsRecovery(source[quotedTagEnd+1:offset]) {
+						return quotedTagEnd, true
+					}
 				}
 				quote = 0
 				quotedTagEnd = -1
@@ -511,6 +721,35 @@ func lexicalTagEnd(source string, offset int) (end int, found bool) {
 	return 0, false
 }
 
+// lexicalQuotedMarkupNeedsRecovery preserves the legacy recovery needed by
+// broken email HTML that swallows actual non-rendered elements into an
+// unterminated quoted attribute. Unknown tag-like text inside an otherwise
+// valid quoted value is not enough to override normal HTML tokenization.
+func lexicalQuotedMarkupNeedsRecovery(value string) bool {
+	for offset := 0; offset < len(value); {
+		relative := strings.IndexByte(value[offset:], '<')
+		if relative < 0 {
+			return false
+		}
+		opening := offset + relative
+		if !lexicalMarkupStart(value, opening) {
+			offset = opening + 1
+			continue
+		}
+		end := strings.IndexByte(value[opening+1:], '>')
+		if end < 0 {
+			end = len(value) - opening - 1
+		}
+		rawTag := value[opening+1 : opening+1+end]
+		name, isClosing := lexicalTagName(rawTag)
+		if !isClosing && lexicalExactOpeningTag(rawTag, name) && lexicalHiddenElement(name) {
+			return true
+		}
+		offset = opening + 1
+	}
+	return false
+}
+
 func lexicalExactOpeningTag(rawTag, name string) bool {
 	rawTag = strings.TrimLeft(rawTag, " \t\r\n\f")
 	if name == "" || strings.HasPrefix(rawTag, "/") || len(rawTag) < len(name) || !strings.EqualFold(rawTag[:len(name)], name) {
@@ -540,7 +779,7 @@ func lexicalClosingTagStart(lower string, offset int, name string) int {
 		}
 		candidate := offset + relative
 		afterName := candidate + len(prefix)
-		if afterName < len(lower) && (lower[afterName] == '>' || lower[afterName] == '/' || lexicalSpace(lower[afterName])) {
+		if afterName == len(lower) || afterName < len(lower) && (lower[afterName] == '>' || lower[afterName] == '/' || lexicalSpace(lower[afterName])) {
 			return candidate
 		}
 		offset = candidate + len(prefix)
@@ -555,7 +794,7 @@ func lexicalElementEnd(source, lower string, offset int, name string) (closingSt
 	}
 	closingEnd, found := lexicalTagEnd(source, closingStart+1)
 	if !found {
-		return 0, 0, false
+		return closingStart, 0, false
 	}
 	return closingStart, closingEnd + 1, true
 }
@@ -677,14 +916,10 @@ func lexicalTagName(raw string) (string, bool) {
 		raw = strings.TrimLeft(raw[1:], " \t\r\n")
 	}
 	end := 0
-	for end < len(raw) {
-		c := raw[end]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
-			break
-		}
+	for end < len(raw) && !lexicalSpace(raw[end]) && raw[end] != '/' {
 		end++
 	}
-	return strings.ToLower(raw[:end]), isClosing
+	return lexicalASCIILower(raw[:end]), isClosing
 }
 
 func lexicalAttribute(raw, wanted string) string {
@@ -743,10 +978,40 @@ func lexicalAttributeValue(raw, wanted string) (string, bool) {
 			valueEnd = offset
 		}
 		if strings.EqualFold(name, wanted) {
-			return strings.TrimSpace(stdhtml.UnescapeString(raw[valueStart:valueEnd])), true
+			return strings.TrimSpace(lexicalUnescapeAttribute(raw[valueStart:valueEnd])), true
 		}
 	}
 	return "", false
+}
+
+// lexicalUnescapeAttribute applies the HTML tokenizer's attribute-value
+// character-reference rules. These differ from text decoding for legacy named
+// references without a semicolon when the following byte is alphanumeric or
+// '='. Numeric references still decode in that situation.
+func lexicalUnescapeAttribute(value string) string {
+	if !strings.Contains(value, "&") {
+		return value
+	}
+
+	// Parse only a synthetic tag rather than passing the complete, potentially
+	// malformed message through a DOM parser. Encode literal double quotes so
+	// they remain part of the extracted value.
+	fragment := `<x data-value="` + strings.ReplaceAll(value, `"`, `&quot;`) + `">`
+	tokenizer := xhtml.NewTokenizer(strings.NewReader(fragment))
+	for {
+		switch tokenizer.Next() {
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+			token := tokenizer.Token()
+			for _, attribute := range token.Attr {
+				if attribute.Key == "data-value" {
+					return attribute.Val
+				}
+			}
+			return value
+		case xhtml.ErrorToken:
+			return value
+		}
+	}
 }
 
 func lexicalSpace(value byte) bool {

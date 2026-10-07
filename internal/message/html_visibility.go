@@ -1,25 +1,48 @@
 package message
 
-import "strings"
+import (
+	"math"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
 
-// lexicalVisiblyHidden recognizes only explicit, high-confidence hiding on
-// the element itself. It does not try to compute stylesheet rules or layout.
-func lexicalVisiblyHidden(rawTag string) bool {
-	if _, present := lexicalAttributeValue(rawTag, "hidden"); present {
-		return true
-	}
+type lexicalHiddenKind uint8
+
+const (
+	lexicalNotHidden     lexicalHiddenKind = 0
+	lexicalDisplayHidden lexicalHiddenKind = 1 << iota
+	lexicalVisibilityHidden
+	lexicalFontSizeHidden
+)
+
+type lexicalVisibilityDecision struct {
+	hidden                lexicalHiddenKind
+	explicitlyVisible     bool
+	explicitlyNonzeroFont bool
+}
+
+// lexicalElementVisibility recognizes only explicit, high-confidence
+// visibility on the element itself. It does not try to compute stylesheet
+// rules or layout.
+func lexicalElementVisibility(rawTag string) lexicalVisibilityDecision {
+	hiddenValue, hidden := lexicalAttributeValue(rawTag, "hidden")
+	hiddenUntilFound := hidden && strings.EqualFold(strings.TrimSpace(hiddenValue), "until-found")
 	style, present := lexicalAttributeValue(rawTag, "style")
 	if !present {
-		return false
+		if hidden {
+			return lexicalVisibilityDecision{hidden: lexicalDisplayHidden}
+		}
+		return lexicalVisibilityDecision{}
 	}
-	var display, visibility lexicalCSSChoice
+	var display, visibility, opacity, fontSize lexicalCSSChoice
 	for _, declaration := range lexicalCSSDeclarations(style) {
-		property, value, found := strings.Cut(declaration, ":")
+		property, value, found := lexicalCSSDeclaration(declaration)
 		if !found {
 			continue
 		}
-		property = strings.ToLower(strings.TrimSpace(property))
-		value = strings.ToLower(strings.TrimSpace(value))
+		property = strings.ToLower(strings.TrimSpace(lexicalCSSUnescape(property)))
+		value = strings.ToLower(strings.TrimSpace(lexicalCSSUnescape(value)))
 		important := false
 		if before, suffix, found := strings.Cut(value, "!"); found && strings.TrimSpace(suffix) == "important" {
 			value = strings.TrimSpace(before)
@@ -27,12 +50,181 @@ func lexicalVisiblyHidden(rawTag string) bool {
 		}
 		switch property {
 		case "display":
-			display.set(value, important)
+			if lexicalValidDisplay(value) {
+				display.set(value, important)
+			}
 		case "visibility":
-			visibility.set(value, important)
+			if lexicalValidVisibility(value) {
+				visibility.set(value, important)
+			}
+		case "opacity":
+			if lexicalValidOpacity(value) {
+				opacity.set(value, important)
+			}
+		case "font-size":
+			if lexicalFontSizeState(value) != lexicalFontSizeUnknown {
+				fontSize.set(value, important)
+			}
 		}
 	}
-	return display.value == "none" || visibility.value == "hidden" || visibility.value == "collapse"
+	if display.value == "none" || lexicalZeroOpacity(opacity.value) ||
+		hiddenUntilFound || hidden && !lexicalDisplayOverridesHidden(display.value) {
+		return lexicalVisibilityDecision{hidden: lexicalDisplayHidden}
+	}
+	decision := lexicalVisibilityDecision{
+		explicitlyVisible:     visibility.value == "visible" || visibility.value == "initial",
+		explicitlyNonzeroFont: lexicalFontSizeState(fontSize.value) == lexicalFontSizeNonzero,
+	}
+	if visibility.value == "hidden" || visibility.value == "collapse" {
+		decision.hidden |= lexicalVisibilityHidden
+	}
+	if lexicalFontSizeState(fontSize.value) == lexicalFontSizeZero {
+		decision.hidden |= lexicalFontSizeHidden
+	}
+	return decision
+}
+
+func lexicalValidOpacity(value string) bool {
+	if value == "initial" || value == "inherit" || value == "unset" || value == "revert" || value == "revert-layer" {
+		return true
+	}
+	percentage := strings.HasSuffix(value, "%")
+	if percentage {
+		value = strings.TrimSpace(strings.TrimSuffix(value, "%"))
+	}
+	number, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(number) || math.IsInf(number, 0) {
+		return false
+	}
+	return true
+}
+
+func lexicalZeroOpacity(value string) bool {
+	if !lexicalValidOpacity(value) {
+		return false
+	}
+	value = strings.TrimSpace(strings.TrimSuffix(value, "%"))
+	number, err := strconv.ParseFloat(value, 64)
+	return err == nil && !math.IsNaN(number) && number <= 0
+}
+
+type lexicalFontSize uint8
+
+const (
+	lexicalFontSizeUnknown lexicalFontSize = iota
+	lexicalFontSizeZero
+	lexicalFontSizeNonzero
+)
+
+// lexicalFontSizeState recognizes only values whose effect is unambiguous
+// without computed styles. Relative em/ex/% values cannot restore text below
+// a zero-sized parent, while ordinary absolute lengths and keywords can.
+func lexicalFontSizeState(value string) lexicalFontSize {
+	switch value {
+	case "xx-small", "x-small", "small", "medium", "large", "x-large", "xx-large", "xxx-large", "initial":
+		return lexicalFontSizeNonzero
+	case "inherit", "unset", "revert", "revert-layer", "smaller", "larger", "":
+		return lexicalFontSizeUnknown
+	}
+
+	unit := ""
+	for _, candidate := range []string{"vmax", "vmin", "rem", "rlh", "cap", "ch", "em", "ex", "lh", "px", "pt", "pc", "in", "cm", "mm", "q", "vw", "vh", "%"} {
+		if strings.HasSuffix(value, candidate) {
+			unit = candidate
+			value = strings.TrimSpace(strings.TrimSuffix(value, candidate))
+			break
+		}
+	}
+	number, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(number) || math.IsInf(number, 0) || number < 0 {
+		return lexicalFontSizeUnknown
+	}
+	if number == 0 {
+		// CSS accepts a unitless zero as well as zero in any valid length.
+		return lexicalFontSizeZero
+	}
+	if unit == "" || unit == "em" || unit == "ex" || unit == "ch" || unit == "cap" || unit == "lh" || unit == "rlh" || unit == "%" {
+		return lexicalFontSizeUnknown
+	}
+	return lexicalFontSizeNonzero
+}
+
+// lexicalDisplayOverridesHidden reports whether a valid inline display value
+// definitely replaces the user-agent display:none rule for the ordinary
+// hidden state. Values that fall back to lower cascade origins remain
+// conservative because an external stylesheet is intentionally not computed.
+func lexicalDisplayOverridesHidden(value string) bool {
+	return value != "" && value != "none" && value != "revert" && value != "revert-layer"
+}
+
+func lexicalValidVisibility(value string) bool {
+	switch value {
+	case "visible", "hidden", "collapse", "initial", "inherit", "unset", "revert", "revert-layer":
+		return true
+	default:
+		return false
+	}
+}
+
+// lexicalValidDisplay recognizes the CSS display grammar needed to avoid an
+// invalid later declaration overriding an earlier valid declaration. It covers
+// the standard single-keyword, legacy, internal, and multi-keyword forms.
+func lexicalValidDisplay(value string) bool {
+	fields := strings.Fields(value)
+	if len(fields) == 1 {
+		switch fields[0] {
+		case "none", "contents",
+			"block", "inline", "run-in",
+			"flow", "flow-root", "table", "flex", "grid", "ruby", "math",
+			"list-item",
+			"inline-block", "inline-table", "inline-flex", "inline-grid",
+			"table-row-group", "table-header-group", "table-footer-group", "table-row",
+			"table-cell", "table-column-group", "table-column", "table-caption",
+			"ruby-base", "ruby-text", "ruby-base-container", "ruby-text-container",
+			"initial", "inherit", "unset", "revert", "revert-layer":
+			return true
+		default:
+			return false
+		}
+	}
+	if len(fields) < 2 || len(fields) > 3 {
+		return false
+	}
+	var outside, inside, listItem bool
+	for _, field := range fields {
+		switch field {
+		case "block", "inline", "run-in":
+			if outside {
+				return false
+			}
+			outside = true
+		case "flow", "flow-root", "table", "flex", "grid", "ruby", "math":
+			if inside {
+				return false
+			}
+			inside = true
+		case "list-item":
+			if listItem {
+				return false
+			}
+			listItem = true
+		default:
+			return false
+		}
+	}
+	if listItem {
+		return !inside || fieldsContainOnlyListInside(fields)
+	}
+	return outside && inside
+}
+
+func fieldsContainOnlyListInside(fields []string) bool {
+	for _, field := range fields {
+		if field == "table" || field == "flex" || field == "grid" || field == "ruby" || field == "math" {
+			return false
+		}
+	}
+	return true
 }
 
 type lexicalCSSChoice struct {
@@ -45,6 +237,131 @@ func (choice *lexicalCSSChoice) set(value string, important bool) {
 		choice.value = value
 		choice.important = important
 	}
+}
+
+// lexicalCSSDeclaration separates a property from its value at a literal CSS
+// colon token. An escaped colon remains part of an identifier and must not be
+// promoted into declaration syntax by unescaping it first.
+func lexicalCSSDeclaration(declaration string) (string, string, bool) {
+	var quote byte
+	for offset := 0; offset < len(declaration); offset++ {
+		value := declaration[offset]
+		if value == '\\' {
+			offset = lexicalCSSEscapeEnd(declaration, offset) - 1
+			continue
+		}
+		if quote != 0 {
+			if value == quote {
+				quote = 0
+			}
+			continue
+		}
+		if value == '\'' || value == '"' {
+			quote = value
+			continue
+		}
+		if value == ':' {
+			return declaration[:offset], declaration[offset+1:], true
+		}
+	}
+	return "", "", false
+}
+
+// lexicalCSSUnescape implements CSS escaped-code-point handling for the small
+// inline-style subset used by visibility detection. Structural punctuation is
+// located before this runs, so decoded punctuation cannot become CSS syntax.
+func lexicalCSSUnescape(value string) string {
+	if !strings.Contains(value, `\`) {
+		return value
+	}
+	var decoded strings.Builder
+	decoded.Grow(len(value))
+	for offset := 0; offset < len(value); {
+		if value[offset] != '\\' {
+			decoded.WriteByte(value[offset])
+			offset++
+			continue
+		}
+		offset++
+		if offset >= len(value) {
+			decoded.WriteRune(utf8.RuneError)
+			break
+		}
+		if lexicalCSSNewlineLength(value, offset) > 0 {
+			offset += lexicalCSSNewlineLength(value, offset)
+			continue
+		}
+		if !lexicalCSSHex(value[offset]) {
+			decoded.WriteByte(value[offset])
+			offset++
+			continue
+		}
+		hexStart := offset
+		for offset < len(value) && offset-hexStart < 6 && lexicalCSSHex(value[offset]) {
+			offset++
+		}
+		codePoint, err := strconv.ParseUint(value[hexStart:offset], 16, 32)
+		if err != nil || codePoint == 0 || codePoint > utf8.MaxRune || codePoint >= 0xd800 && codePoint <= 0xdfff {
+			decoded.WriteRune(utf8.RuneError)
+		} else {
+			decoded.WriteRune(rune(codePoint))
+		}
+		if offset < len(value) {
+			if newlineLength := lexicalCSSNewlineLength(value, offset); newlineLength > 0 {
+				offset += newlineLength
+			} else if value[offset] == ' ' || value[offset] == '\t' {
+				offset++
+			}
+		}
+	}
+	return decoded.String()
+}
+
+func lexicalCSSEscapeEnd(value string, offset int) int {
+	offset++
+	if offset >= len(value) {
+		return offset
+	}
+	if newlineLength := lexicalCSSNewlineLength(value, offset); newlineLength > 0 {
+		return offset + newlineLength
+	}
+	if !lexicalCSSHex(value[offset]) {
+		return offset + 1
+	}
+	hexStart := offset
+	for offset < len(value) && offset-hexStart < 6 && lexicalCSSHex(value[offset]) {
+		offset++
+	}
+	if offset < len(value) {
+		if newlineLength := lexicalCSSNewlineLength(value, offset); newlineLength > 0 {
+			return offset + newlineLength
+		}
+		if value[offset] == ' ' || value[offset] == '\t' {
+			return offset + 1
+		}
+	}
+	return offset
+}
+
+func lexicalCSSNewlineLength(value string, offset int) int {
+	if offset >= len(value) {
+		return 0
+	}
+	switch value[offset] {
+	case '\n', '\f':
+		return 1
+	case '\r':
+		if offset+1 < len(value) && value[offset+1] == '\n' {
+			return 2
+		}
+		return 1
+	default:
+		return 0
+	}
+}
+
+func lexicalCSSHex(value byte) bool {
+	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
 }
 
 // lexicalCSSDeclarations separates inline declarations without splitting
@@ -72,6 +389,12 @@ func lexicalCSSDeclarations(style string) []string {
 				continue
 			}
 			break
+		}
+		if value == '\\' {
+			end := lexicalCSSEscapeEnd(style, offset)
+			clean.WriteString(style[offset:end])
+			offset = end - 1
+			continue
 		}
 		switch value {
 		case '\'', '"':

@@ -2,6 +2,7 @@ package milter
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -175,6 +176,29 @@ func TestProtectedDomainPolicyChecksEveryFromMailbox(t *testing.T) {
 		connectFrame('4', "192.0.2.10"),
 		[]byte{commandMail},
 		headerFrame("From", "Criminal <criminal@example.org>, Support <support@invades.net>"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
+	if got := analyzer.calls.Load(); got != 0 {
+		t.Fatalf("AI analysis calls = %d, want 0", got)
+	}
+}
+
+func TestProtectedDomainPolicyUsesCompleteRawFromHeader(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+	server, conn, done := testServer(t, analyzer)
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AuthenticatedOnlySenderDomains = []string{"invades.net"} })
+	defer func() { _ = conn.Close(); <-done }()
+
+	from := strings.Repeat("Long display name ", 600) + `<support@invades.net>`
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "192.0.2.10"),
+		[]byte{commandMail},
+		headerFrame("From", from),
 		[]byte{commandEndHeaders},
 	)
 	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {

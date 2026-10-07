@@ -316,6 +316,8 @@ func defaults() Config {
 	}
 }
 
+const maxSenderDomainAllowlistBytes = 1 << 20
+
 var errSenderDomainAllowlistEmpty = errors.New("filtering.sender_domain_allowlist contains no domains")
 
 type senderDomainAllowlistUnavailableError struct {
@@ -330,11 +332,16 @@ func (e *senderDomainAllowlistUnavailableError) Error() string {
 func (e *senderDomainAllowlistUnavailableError) Unwrap() error { return e.err }
 
 func loadSenderDomainAllowlist(path string) ([]string, error) {
-	b, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, &senderDomainAllowlistUnavailableError{path: path, err: err}
 	}
-	if len(b) > 1<<20 {
+	defer file.Close()
+	b, err := io.ReadAll(io.LimitReader(file, maxSenderDomainAllowlistBytes+1))
+	if err != nil {
+		return nil, &senderDomainAllowlistUnavailableError{path: path, err: err}
+	}
+	if len(b) > maxSenderDomainAllowlistBytes {
 		return nil, fmt.Errorf("filtering.sender_domain_allowlist exceeds 1 MiB")
 	}
 	domains := make([]string, 0)

@@ -88,6 +88,40 @@ func TestVerifySPFDKIMNoneAndDMARCPass(t *testing.T) {
 	}
 }
 
+func TestInvalidVisibleFromIdentityIsDMARCPermerror(t *testing.T) {
+	message := []byte("From: malformed sender\r\nSubject: test\r\n\r\nbody\r\n")
+	verifier := newTestVerifier(t, dns.MockResolver{})
+	transaction := testTransaction(message)
+	transaction.VisibleFromDomain = ""
+	transaction.VisibleFromInvalid = true
+
+	evidence, err := verifier.Verify(t.Context(), transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultFor(t, evidence, mailauth.MethodDMARC, 0)
+	if result.Outcome != mailauth.OutcomePermerror || result.ErrorCategory != mailauth.ErrorSyntax ||
+		result.Reason != "invalid or ambiguous visible From identity" {
+		t.Fatalf("DMARC result = %#v", result)
+	}
+}
+
+func TestAbsentVisibleFromIdentityRemainsDMARCNone(t *testing.T) {
+	message := []byte("Subject: test\r\n\r\nbody\r\n")
+	verifier := newTestVerifier(t, dns.MockResolver{})
+	transaction := testTransaction(message)
+	transaction.VisibleFromDomain = ""
+
+	evidence, err := verifier.Verify(t.Context(), transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultFor(t, evidence, mailauth.MethodDMARC, 0)
+	if result.Outcome != mailauth.OutcomeNone || result.ErrorCategory != mailauth.ErrorNone {
+		t.Fatalf("DMARC result = %#v", result)
+	}
+}
+
 func TestVerifyExactDKIMFixture(t *testing.T) {
 	message := readFixture(t, "signed-canonicalizations.eml")
 	record := strings.TrimSpace(string(readFixture(t, "dkim-record.txt")))

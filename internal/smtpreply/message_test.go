@@ -14,7 +14,7 @@ import (
 func TestBuildPlainReplyHeaders(t *testing.T) {
 	payload, err := Build(Message{
 		From: "milterguard@example.com", To: "local@example.com", Subject: "Results",
-		Date: "Sun, 13 Sep 2026 07:00:00 +0000", Text: "Result text\n",
+		Date: "Sun, 13 Sep 2026 07:00:00 +0000", Text: "Result café\nsecond\r\nthird\rfourth",
 		Headers: []Header{{Name: "X-MilterGuard-Internal", Value: "token"}},
 	})
 	if err != nil {
@@ -28,13 +28,15 @@ func TestBuildPlainReplyHeaders(t *testing.T) {
 		"From": "MilterGuard <milterguard@example.com>", "To": "local@example.com",
 		"Subject": "Results", "Auto-Submitted": "auto-replied",
 		"X-Auto-Response-Suppress": "All", "X-MilterGuard-Internal": "token",
+		"MIME-Version": "1.0", "Content-Type": "text/plain; charset=UTF-8",
+		"Content-Transfer-Encoding": "8bit",
 	} {
 		if got := message.Header.Get(name); got != want {
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
 	}
 	body, err := io.ReadAll(message.Body)
-	if err != nil || string(body) != "Result text\n" {
+	if err != nil || string(body) != "Result café\r\nsecond\r\nthird\r\nfourth" {
 		t.Fatalf("body = %q, err=%v", body, err)
 	}
 }
@@ -43,7 +45,7 @@ func TestBuildReplyWithAttachment(t *testing.T) {
 	original := []byte("From: sender@example.net\r\n\r\nOriginal body\r\n")
 	payload, err := Build(Message{
 		From: "milterguard@example.com", To: "local@example.com", Subject: "Results", Date: "date",
-		Text: "Rejection details\n", Attachments: []Attachment{{
+		Text: "Rejection café\nsecond\rthird", Attachments: []Attachment{{
 			Filename: "rejection-12.eml", MediaType: "application/octet-stream", Contents: original,
 		}},
 	})
@@ -64,7 +66,7 @@ func TestBuildReplyWithAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	textBody, err := io.ReadAll(textPart)
-	if err != nil || !strings.Contains(string(textBody), "Rejection details") {
+	if err != nil || string(textBody) != "Rejection café\r\nsecond\r\nthird" {
 		t.Fatalf("text part = %q, err=%v", textBody, err)
 	}
 	part, err := reader.NextPart()

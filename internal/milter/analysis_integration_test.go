@@ -87,6 +87,40 @@ func TestAuthenticationProviderReceivesExactTransactionAndFeedsPrompt(t *testing
 	expectFrame(t, conn, string([]byte{responseAccept}))
 }
 
+func TestAuthenticationTransactionMarksMalformedFromInvalid(t *testing.T) {
+	verifier := &recordingVerifier{observations: make(chan authenticationObservation, 1)}
+	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 1)}
+	server, conn, done := testServer(t, analyzer)
+	server.sessions.authenticationMode = config.AuthenticationModeInternal
+	server.sessions.authentication = verifier
+	defer func() { _ = conn.Close(); <-done }()
+
+	negotiate(t, conn)
+	if err := writeFrame(conn, macroFrame(commandConnect, "j", "mx.example.net", "{daemon_addr}", "192.0.2.25")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "198.51.100.9"),
+		append([]byte{commandHelo}, []byte("helo.example.net\x00")...),
+		envelopeFrame(commandMail, "bounce@example.net"),
+		envelopeFrame(commandRecipient, "recipient@example.net"),
+		headerFrame("From", "malformed sender identity"),
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("body")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+
+	transaction := (<-verifier.observations).transaction
+	if !transaction.VisibleFromInvalid || transaction.VisibleFromDomain != "" {
+		t.Fatalf("authentication transaction = %#v", transaction)
+	}
+	<-analyzer.inputs
+	expectFrame(t, conn, string([]byte{responseAccept}))
+}
+
 func TestCompletedScanRecordsActivityAndTokenCost(t *testing.T) {
 	cfg := config.Config{
 		Mode:   "enforce",

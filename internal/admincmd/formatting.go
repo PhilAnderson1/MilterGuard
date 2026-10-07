@@ -9,10 +9,9 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
-const (
-	listTruncatedNotice     = "Results were limited to 1,000 matching records.\n"
-	responseTruncatedNotice = "\nCommand reply was truncated at 1 MiB.\n"
-)
+const responseTruncatedNotice = "\nCommand reply was truncated at 1 MiB.\n"
+
+var listTruncatedNotice = fmt.Sprintf("Results were limited to %d matching records.\n", MaxListRows)
 
 func formatUTC(value time.Time) string {
 	return value.UTC().Format(time.DateTime) + " UTC"

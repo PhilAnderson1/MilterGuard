@@ -6,13 +6,12 @@ import (
 )
 
 var (
-	receivedSPFResultPattern   = regexp.MustCompile(`(?i)^\s*([a-z][a-z0-9_-]{0,31})\b`)
-	receivedSPFEnvelopePattern = regexp.MustCompile(`(?i)\benvelope-from\s*=\s*<?([a-z0-9_.@+-]+)>?`)
+	receivedSPFResultPattern = regexp.MustCompile(`(?i)^\s*([a-z][a-z0-9_-]{0,31})\b`)
 )
 
 func appendReceivedSPF(results []Result, headers []string, trusted map[string]bool) []Result {
 	for _, header := range headers {
-		receiver, ok := receivedSPFReceiver(header)
+		receiver, ok := receivedSPFParameter(header, "receiver")
 		if !ok || !trusted[normalizeAuthservID(receiver)] {
 			continue
 		}
@@ -23,15 +22,21 @@ func appendReceivedSPF(results []Result, headers []string, trusted map[string]bo
 		results = appendUnique(results, Result{
 			Method:  MethodSPF,
 			Outcome: normalizeHeaderOutcome(MethodSPF, match[1]),
-			Domain:  DomainFromIdentity(matchedValue(receivedSPFEnvelopePattern, header)),
+			Domain:  receivedSPFEnvelopeDomain(header),
 		})
 	}
 	return results
 }
 
-// receivedSPFReceiver extracts receiver= only from the parameter list of a
-// Received-SPF field. Comments and quoted values cannot manufacture a receiver.
-func receivedSPFReceiver(value string) (string, bool) {
+func receivedSPFEnvelopeDomain(header string) string {
+	identity, _ := receivedSPFParameter(header, "envelope-from")
+	return DomainFromIdentity(identity)
+}
+
+// receivedSPFParameter extracts an exact parameter from a Received-SPF field.
+// Comments and quoted values cannot manufacture parameter names, while quoted
+// and angle-bracketed parameter values remain available to their caller.
+func receivedSPFParameter(value, wanted string) (string, bool) {
 	i := 0
 	skipWhitespace := func() {
 		for i < len(value) && (value[i] == ' ' || value[i] == '\t') {
@@ -83,7 +88,7 @@ func receivedSPFReceiver(value string) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		if strings.EqualFold(key, "receiver") {
+		if strings.EqualFold(key, wanted) {
 			return parameter, true
 		}
 	}

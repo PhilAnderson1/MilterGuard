@@ -47,6 +47,35 @@ func TestTransferDecodingRecoversMalformedInput(t *testing.T) {
 	}
 }
 
+func TestTransferDecodingReportsUnsupportedEncoding(t *testing.T) {
+	for _, encoding := range []string{"", "7bit", "8bit", "binary"} {
+		decoded, incomplete := decodeTransferRecovering(encoding, []byte("plain text"))
+		if string(decoded) != "plain text" || incomplete {
+			t.Errorf("standard identity encoding %q = %q, incomplete=%v", encoding, decoded, incomplete)
+		}
+	}
+	for _, encoding := range []string{"base-64", "uuencode", "x-unknown"} {
+		decoded, incomplete := decodeTransferRecovering(encoding, []byte("encoded data"))
+		if string(decoded) != "encoded data" || !incomplete {
+			t.Errorf("unsupported encoding %q = %q, incomplete=%v", encoding, decoded, incomplete)
+		}
+	}
+	if decoded, incomplete := decodeTransferRecovering("x-unknown", nil); len(decoded) != 0 || incomplete {
+		t.Errorf("empty unsupported encoding = %q, incomplete=%v", decoded, incomplete)
+	}
+}
+
+func TestPromptReportsUnsupportedTransferEncoding(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/plain")
+	m.AddHeader("Content-Transfer-Encoding", "base-64")
+	m.AddBody([]byte("aGVsbG8="))
+	prompt := m.Prompt(1000)
+	if !strings.Contains(prompt, "A MIME part could not be fully transfer-decoded") || !strings.Contains(prompt, "aGVsbG8=") {
+		t.Fatalf("unsupported transfer encoding was not retained and reported: %s", prompt)
+	}
+}
+
 func TestPromptReportsIncompleteTransferDecoding(t *testing.T) {
 	m := New(10000)
 	m.AddHeader("Content-Type", "text/plain")
@@ -84,7 +113,7 @@ func TestPromptReportsIncompleteMultipartParsing(t *testing.T) {
 	m.AddHeader("Content-Type", `multipart/mixed; boundary="x"`)
 	m.AddBody([]byte("--x\r\nContent-Type: text/plain\r\n\r\nFirst part\r\n--x\r\ninvalid header\r\n\r\nSecond part\r\n--x--\r\n"))
 	prompt := m.Prompt(1000)
-	if !strings.Contains(prompt, "Multipart content could not be fully parsed") || !strings.Contains(prompt, "First part") {
+	if !strings.Contains(prompt, "MIME content could not be fully parsed") || !strings.Contains(prompt, "First part") {
 		t.Fatalf("partial multipart parse was not reported: %s", prompt)
 	}
 }
@@ -97,7 +126,7 @@ func TestPromptReportsMultipartWithoutBoundary(t *testing.T) {
 	if !strings.Contains(prompt, "[multipart message has no boundary]") {
 		t.Fatalf("missing-boundary marker was not included: %s", prompt)
 	}
-	if !strings.Contains(prompt, "Multipart content could not be fully parsed") {
+	if !strings.Contains(prompt, "MIME content could not be fully parsed") {
 		t.Fatalf("missing-boundary limitation was not included: %s", prompt)
 	}
 }
@@ -224,8 +253,21 @@ func TestMIMEAttachedMessageRecursionLimit(t *testing.T) {
 	}
 
 	beyondLimit := extractMIME("message/rfc822", "", "", nestedMessage(9), 0)
-	if beyondLimit.Text != "[MIME nesting limit reached]" {
-		t.Fatalf("content beyond MIME nesting limit = %q, want limit marker", beyondLimit.Text)
+	if beyondLimit.Text != "[MIME nesting limit reached]" || !beyondLimit.MIMEIncomplete {
+		t.Fatalf("content beyond MIME nesting limit = %#v, want incomplete limit marker", beyondLimit)
+	}
+
+	m := New(10000)
+	m.AddHeader("Content-Type", "message/rfc822")
+	m.AddBody(nestedMessage(9))
+	prompt := m.Prompt(1000)
+	for _, want := range []string{
+		"[MIME nesting limit reached]",
+		"MIME content could not be fully parsed; nested or later parts may be missing.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("depth-limited prompt missing %q: %s", want, prompt)
+		}
 	}
 }
 

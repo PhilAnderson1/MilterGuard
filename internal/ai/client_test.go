@@ -337,6 +337,30 @@ func TestAnalyzeRetriesMalformedDecision(t *testing.T) {
 	}
 }
 
+func TestAnalyzeDoesNotRetryOversizedSuccessfulResponse(t *testing.T) {
+	var attempts atomic.Int32
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", int(maxEndpointResponseBytes)+1))),
+		}, nil
+	})
+	client := retryTestClient(transport, 3)
+	_, err := client.Analyze(context.Background(), Input{Text: "test"})
+	var endpointErr *EndpointError
+	if !errors.As(err, &endpointErr) || endpointErr.Kind != ErrorResponse {
+		t.Fatalf("error = %v, want ErrorResponse", err)
+	}
+	if !strings.Contains(err.Error(), "exceeds 1048576-byte limit") {
+		t.Fatalf("error = %v, want response-size detail", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts.Load())
+	}
+}
+
 func TestAnalyzeAccumulatesUsageAcrossRetriesAndErrors(t *testing.T) {
 	var attempts atomic.Int32
 	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {

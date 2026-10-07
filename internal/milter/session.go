@@ -34,6 +34,8 @@ type session struct {
 	envelopeRecipientsTruncated bool
 	visibleSender               string
 	visibleSenderDomain         string
+	visibleFromInvalid          bool
+	protectedSenderDomain       string
 	connectionDNS               connectionDNSResult
 	connectionDNSPending        <-chan connectionDNSResult
 	message                     *message.Message
@@ -62,10 +64,12 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		return false
 	}
 	if count := ss.message.FromHeaderCount(); count > 1 {
+		ss.visibleFromInvalid = true
 		ss.deps.log.WarnContext(ctx, "message has ambiguous sender identity", "message_id", ss.message.Header("Message-ID"), "from_header_count", count)
-	} else {
+	} else if count == 1 {
 		ss.visibleSender = mailaddr.Normalize(ss.message.Header("From"))
 		ss.visibleSenderDomain = mailaddr.Domain(ss.visibleSender)
+		ss.visibleFromInvalid = ss.visibleSenderDomain == ""
 	}
 	if ss.isInternalMessage() {
 		return ss.finishInternalMessage(ctx)
@@ -146,7 +150,8 @@ func (ss *session) verifyAuthenticationWithProgress(ctx context.Context) (mailau
 	transaction := mailauth.Transaction{
 		RemoteIP: ss.peerIP, HELO: ss.heloIdentity, EnvelopeSender: envelopeSender,
 		ReceiverHostname: ss.mtaHostname, ReceiverIP: ss.receiverIP, VisibleFromDomain: ss.visibleSenderDomain,
-		SMTPUTF8: ss.smtpUTF8,
+		VisibleFromInvalid: ss.visibleFromInvalid,
+		SMTPUTF8:           ss.smtpUTF8,
 	}
 	if !ss.internalAuthentication() {
 		transaction.AuthenticationResults = ss.message.HeaderValues("Authentication-Results")

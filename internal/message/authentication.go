@@ -46,6 +46,11 @@ func authenticationResultForPrompt(result mailauth.Result) bool {
 
 func writeAuthenticationResult(b *strings.Builder, result mailauth.Result, visibleDomain string) {
 	method := strings.ToUpper(string(result.Method))
+	if result.Method == mailauth.MethodDMARC && result.Outcome == mailauth.OutcomePermerror &&
+		result.ErrorCategory == mailauth.ErrorSyntax && result.Reason == "invalid or ambiguous visible From identity" {
+		b.WriteString("DMARC: cannot evaluate because the visible From identity is invalid or ambiguous\n")
+		return
+	}
 	if result.Outcome == mailauth.OutcomeNone {
 		switch result.Method {
 		case mailauth.MethodDKIM:

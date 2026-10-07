@@ -84,11 +84,15 @@ func (r *ipReputationRepository) RecordRejection(
 			return err
 		}
 		var id int64
+		var existingLevel sql.NullString
+		var existingBlockedUntil sql.NullInt64
 		if err := tx.QueryRowContext(ctx, `INSERT INTO ip_reputation
 			(ip, legitimate_count, last_activity_at_ms) VALUES (?, 0, ?)
 			ON CONFLICT(ip) DO UPDATE SET legitimate_count=0,
 				last_activity_at_ms=excluded.last_activity_at_ms
-			RETURNING id`, addr.String(), unixMillis(now)).Scan(&id); err != nil {
+			RETURNING id,block_level,blocked_until_ms`, addr.String(), unixMillis(now)).Scan(
+			&id, &existingLevel, &existingBlockedUntil,
+		); err != nil {
 			return err
 		}
 		if r.repeatThreshold > 0 {
@@ -109,40 +113,39 @@ func (r *ipReputationRepository) RecordRejection(
 		} else if _, err := tx.ExecContext(ctx, `DELETE FROM ip_strikes WHERE ip_reputation_id=?`, id); err != nil {
 			return err
 		}
-		var level sql.NullString
-		var blockedUntil sql.NullInt64
-		repeatEnabled, shortEnabled := r.repeatThreshold > 0, r.shortDuration > 0
-		err := tx.QueryRowContext(ctx, `UPDATE ip_reputation SET
-			block_level=CASE
-				WHEN :repeat_enabled AND (
-					SELECT count(*) FROM ip_strikes WHERE ip_reputation_id=:id
-				)>=:repeat_threshold THEN 'repeat'
-				WHEN :short_enabled THEN 'short' ELSE NULL END,
-			blocked_until_ms=CASE
-				WHEN :repeat_enabled AND (
-					SELECT count(*) FROM ip_strikes WHERE ip_reputation_id=:id
-				)>=:repeat_threshold THEN :repeat_until
-				WHEN :short_enabled THEN :short_until ELSE NULL END,
-			legitimate_count=0,last_activity_at_ms=:now
-			WHERE id=:id
-			RETURNING block_level,blocked_until_ms,
-				(SELECT count(*) FROM ip_strikes WHERE ip_reputation_id=:id)`,
-			sql.Named("repeat_enabled", repeatEnabled),
-			sql.Named("id", id),
-			sql.Named("repeat_threshold", r.repeatThreshold),
-			sql.Named("short_enabled", shortEnabled),
-			sql.Named("repeat_until", unixMillis(now.Add(r.repeatDuration))),
-			sql.Named("short_until", unixMillis(now.Add(r.shortDuration))),
-			sql.Named("now", unixMillis(now)),
-		).Scan(&level, &blockedUntil, &strikeCount)
-		if err != nil {
+		if err := tx.QueryRowContext(ctx,
+			`SELECT count(*) FROM ip_strikes WHERE ip_reputation_id=?`, id,
+		).Scan(&strikeCount); err != nil {
+			return err
+		}
+
+		level := ""
+		var blockedUntil time.Time
+		switch {
+		case r.repeatThreshold > 0 && strikeCount >= r.repeatThreshold:
+			level, blockedUntil = string(stores.IPBlockLevelRepeat), now.Add(r.repeatDuration)
+		case r.shortDuration > 0:
+			level, blockedUntil = string(stores.IPBlockLevelShort), now.Add(r.shortDuration)
+		}
+		if existingLevel.Valid && existingBlockedUntil.Valid {
+			existingUntil := timeFromMillis(existingBlockedUntil.Int64)
+			if existingUntil.After(now) && (blockedUntil.IsZero() || existingUntil.After(blockedUntil) ||
+				existingUntil.Equal(blockedUntil) && existingLevel.String == string(stores.IPBlockLevelRepeat) && level != string(stores.IPBlockLevelRepeat)) {
+				level, blockedUntil = existingLevel.String, existingUntil
+			}
+		}
+		var storedLevel, storedBlockedUntil any
+		if level != "" {
+			storedLevel = level
+			storedBlockedUntil = unixMillis(blockedUntil)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE ip_reputation SET
+			block_level=?,blocked_until_ms=?,legitimate_count=0,last_activity_at_ms=?
+			WHERE id=?`, storedLevel, storedBlockedUntil, unixMillis(now), id); err != nil {
 			return err
 		}
 		record.ID = uint64(id)
-		record.BlockLevel, record.LegitimateCount = level.String, 0
-		if blockedUntil.Valid {
-			record.BlockedUntil = timeFromMillis(blockedUntil.Int64)
-		}
+		record.BlockLevel, record.BlockedUntil, record.LegitimateCount = level, blockedUntil, 0
 		return nil
 	})
 	if err != nil {

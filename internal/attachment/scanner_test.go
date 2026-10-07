@@ -72,6 +72,39 @@ func TestDirectAttachmentBlockedByDecodedFilename(t *testing.T) {
 	}
 }
 
+func TestDirectAttachmentBlockedExtensionAfterDisplayLimit(t *testing.T) {
+	filename := strings.Repeat("a", 300) + ".exe"
+	finding, err := testScanner().Scan(
+		"application/octet-stream", "", `attachment; filename="`+filename+`"`, []byte("harmless bytes"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Detection != "blocked extension .exe" {
+		t.Fatalf("finding = %#v", finding)
+	}
+	if len([]rune(finding.Path)) != 255 {
+		t.Fatalf("display path length = %d runes, want 255", len([]rune(finding.Path)))
+	}
+}
+
+func TestArchiveEntryBlockedExtensionAfterDisplayLimit(t *testing.T) {
+	filename := strings.Repeat("a", 300) + ".js"
+	archive := makeZIP(t, map[string][]byte{filename: []byte("harmless bytes")})
+	finding, err := testScanner().Scan(
+		"application/zip", "", `attachment; filename="files.zip"`, archive,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Detection != "blocked extension .js" {
+		t.Fatalf("finding = %#v", finding)
+	}
+	if len([]rune(strings.TrimPrefix(finding.Path, "files.zip/"))) != 255 {
+		t.Fatalf("display path = %q, want a 255-rune entry name", finding.Path)
+	}
+}
+
 func TestDirectAttachmentBlockedByContentTypeName(t *testing.T) {
 	finding, err := testScanner().Scan(
 		`application/x-msdownload; name="invoice.exe"`, "", "", []byte("harmless bytes"),
@@ -97,8 +130,54 @@ func TestContentTypeNameUsedWhenDispositionHasNoFilename(t *testing.T) {
 }
 
 func TestAttachmentFilenameAbsentWithoutFilenameParameters(t *testing.T) {
-	if got := attachmentFilename("inline", "application/octet-stream"); got != "" {
+	got, err := attachmentFilename("inline", "application/octet-stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
 		t.Fatalf("attachmentFilename() = %q, want empty", got)
+	}
+}
+
+func TestDirectAttachmentBlockedByNonUTF8EncodedWordFilename(t *testing.T) {
+	finding, err := testScanner().Scan(
+		"application/octet-stream", "", `attachment; filename="=?Big5?B?aW52b2ljZS5leGU=?="`, []byte("harmless bytes"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Path != "invoice.exe" || finding.Detection != "blocked extension .exe" {
+		t.Fatalf("finding = %#v", finding)
+	}
+}
+
+func TestDirectAttachmentBlockedByNonUTF8ExtendedFilename(t *testing.T) {
+	finding, err := testScanner().Scan(
+		"application/octet-stream", "", `attachment; filename*=Big5''invoice.exe`, []byte("harmless bytes"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Path != "invoice.exe" || finding.Detection != "blocked extension .exe" {
+		t.Fatalf("finding = %#v", finding)
+	}
+}
+
+func TestUndecodableAttachmentFilenameIsMalformed(t *testing.T) {
+	for _, disposition := range []string{
+		`attachment; filename="=?unknown-charset?B?aW52b2ljZS5leGU=?="`,
+		`attachment; filename*=unknown-charset''invoice.exe`,
+		`attachment; filename*=Big5''invoice%ZZexe`,
+	} {
+		t.Run(disposition, func(t *testing.T) {
+			finding, err := testScanner().Scan(
+				"application/octet-stream", "", disposition, []byte("harmless bytes"),
+			)
+			var scanErr *ScanError
+			if finding != nil || !errors.As(err, &scanErr) || !scanErr.Malformed {
+				t.Fatalf("scan = finding %#v, error %#v; want malformed MIME ScanError", finding, err)
+			}
+		})
 	}
 }
 
@@ -315,6 +394,53 @@ func TestHeaderlessNestedPartArchiveIsInspected(t *testing.T) {
 	}
 	if finding == nil || finding.Detection != "blocked extension .exe" || finding.Path != "message/part-1/payload.exe" {
 		t.Fatalf("headerless ZIP finding = %#v", finding)
+	}
+}
+
+func TestDeclaredTextNestedPartWithExecutableMagicIsInspected(t *testing.T) {
+	const boundary = "parts"
+	payload := base64.StdEncoding.EncodeToString([]byte("MZnonstandard executable content"))
+	body := fmt.Sprintf("--%s\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n%s\r\n--%s--\r\n", boundary, payload, boundary)
+	finding, err := testScanner().Scan(`multipart/mixed; boundary="`+boundary+`"`, "", "", []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Detection != "DOS/Windows executable signature" {
+		t.Fatalf("finding = %#v", finding)
+	}
+}
+
+func TestDeclaredTextNestedPartWithArchiveMagicIsInspected(t *testing.T) {
+	const boundary = "parts"
+	archive := makeZIP(t, map[string][]byte{"payload.exe": []byte("archived executable")})
+	payload := base64.StdEncoding.EncodeToString(archive)
+	body := fmt.Sprintf("--%s\r\nContent-Type: text/html\r\nContent-Transfer-Encoding: base64\r\n\r\n%s\r\n--%s--\r\n", boundary, payload, boundary)
+	finding, err := testScanner().Scan(`multipart/mixed; boundary="`+boundary+`"`, "", "", []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Detection != "blocked extension .exe" {
+		t.Fatalf("finding = %#v", finding)
+	}
+}
+
+func TestDeclaredTextNestedPartWithOrdinaryBase64TextIsAllowed(t *testing.T) {
+	const boundary = "parts"
+	payload := base64.StdEncoding.EncodeToString([]byte("#!/bin/sh\necho this is a quoted code sample\n"))
+	body := fmt.Sprintf("--%s\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n%s\r\n--%s--\r\n", boundary, payload, boundary)
+	finding, err := testScanner().Scan(`multipart/alternative; boundary="`+boundary+`"`, "", "", []byte(body))
+	if err != nil || finding != nil {
+		t.Fatalf("finding = %#v, error = %v", finding, err)
+	}
+}
+
+func TestFilenameLessTextAttachmentIsScannedNormally(t *testing.T) {
+	finding, err := testScanner().Scan("text/plain", "", "attachment", []byte("#!/bin/sh\necho bad\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.Detection != "executable script signature (sh)" {
+		t.Fatalf("finding = %#v", finding)
 	}
 }
 

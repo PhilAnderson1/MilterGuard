@@ -45,6 +45,41 @@ func TestExactMessageImplementationsPreserveCallbackRepresentation(t *testing.T)
 	}
 }
 
+func TestExactMessageCanonicalizesFoldedHeaderLineEndings(t *testing.T) {
+	for _, storage := range []string{"memory", "file"} {
+		for _, test := range []struct {
+			name  string
+			value string
+		}{
+			{name: "LF", value: "first\n\tsecond"},
+			{name: "CRLF", value: "first\r\n\tsecond"},
+			{name: "CR", value: "first\r\tsecond"},
+		} {
+			t.Run(storage+"/"+test.name, func(t *testing.T) {
+				message, err := NewExactMessage(storage, 1024)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = message.Close() })
+				if err := message.AddHeader("Subject", test.value); err != nil {
+					t.Fatal(err)
+				}
+				reader, size, err := message.ReaderAt()
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := make([]byte, size)
+				if _, err := reader.ReadAt(got, 0); err != nil {
+					t.Fatal(err)
+				}
+				if want := "Subject: first\r\n\tsecond\r\n"; string(got) != want {
+					t.Fatalf("exact folded header = %q, want %q", got, want)
+				}
+			})
+		}
+	}
+}
+
 func TestExactMessageSizeAndCloseAreEnforced(t *testing.T) {
 	for _, storage := range []string{"memory", "file"} {
 		t.Run(storage, func(t *testing.T) {
