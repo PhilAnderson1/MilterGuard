@@ -13,6 +13,20 @@ const (
 	CorrespondentKindManual                    CorrespondentKind = "manual"
 )
 
+type CorrespondentScope string
+
+const (
+	CorrespondentScopeGlobal    CorrespondentScope = "global"
+	CorrespondentScopePerSender CorrespondentScope = "per_sender"
+)
+
+type InboundVerdict string
+
+const (
+	InboundVerdictLegitimate InboundVerdict = "legitimate"
+	InboundVerdictUnwanted   InboundVerdict = "unwanted"
+)
+
 type IPBlockLevel string
 
 const (
@@ -61,28 +75,28 @@ type DomainRegistration struct {
 type ActivityEventType uint8
 
 const (
-	ActivityEventScan ActivityEventType = iota + 1
-	ActivityEventIPRejection
-	ActivityEventCorrespondentAccept
-	ActivityEventTrustedDomainAccept
-	ActivityEventAttachmentRejection
-	ActivityEventProtectedSenderDomainRejection
+	ActivityEventScan                           ActivityEventType = 1
+	ActivityEventIPRejection                    ActivityEventType = 2
+	ActivityEventCorrespondentAccept            ActivityEventType = 3
+	ActivityEventTrustedDomainAccept            ActivityEventType = 4
+	ActivityEventAttachmentRejection            ActivityEventType = 5
+	ActivityEventProtectedSenderDomainRejection ActivityEventType = 6
 )
 
 type ActivityOutcome uint8
 
 const (
-	ActivityOutcomeAccepted ActivityOutcome = iota + 1
-	ActivityOutcomeRejected
-	ActivityOutcomeTempfailed
-	ActivityOutcomeResponseFailed
+	ActivityOutcomeAccepted       ActivityOutcome = 1
+	ActivityOutcomeRejected       ActivityOutcome = 2
+	ActivityOutcomeTempfailed     ActivityOutcome = 3
+	ActivityOutcomeResponseFailed ActivityOutcome = 4
 )
 
 type ServiceMode uint8
 
 const (
-	ServiceModeAccept ServiceMode = iota + 1
-	ServiceModeEnforce
+	ServiceModeAccept  ServiceMode = 1
+	ServiceModeEnforce ServiceMode = 2
 )
 
 type ActivityEvent struct {

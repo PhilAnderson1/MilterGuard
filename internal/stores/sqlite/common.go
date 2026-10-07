@@ -50,3 +50,13 @@ func sortedSet(values map[string]bool) []string {
 	sort.Strings(result)
 	return result
 }
+
+// limitedPage trims the extra row fetched by bounded list queries and reports
+// whether more entries were available.
+func limitedPage[T any](entries []T, limit int) ([]T, bool) {
+	truncated := len(entries) > limit
+	if truncated {
+		entries = entries[:limit]
+	}
+	return entries, truncated
+}

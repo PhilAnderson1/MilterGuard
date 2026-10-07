@@ -123,7 +123,7 @@ func (r *recordingIPReputationRepository) RecordLegitimate(context.Context, neti
 	return nil
 }
 
-func (r *recordingIPReputationRepository) ActiveBlock(context.Context, netip.Addr) (stores.IPBlock, bool, error) {
+func (r *recordingIPReputationRepository) ActiveBlockForAttempt(context.Context, netip.Addr) (stores.IPBlock, bool, error) {
 	return stores.IPBlock{}, false, nil
 }
 

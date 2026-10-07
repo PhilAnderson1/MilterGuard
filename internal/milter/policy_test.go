@@ -16,6 +16,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 func TestApplyPolicy(t *testing.T) {
@@ -64,6 +65,23 @@ func TestApplyPolicy(t *testing.T) {
 				t.Fatalf("actions = (%s, %s), want (%s, %s)", proposed, selected, test.proposed, test.selected)
 			}
 		})
+	}
+}
+
+func TestCorrespondentVerdictMapsValidatedAIClassifications(t *testing.T) {
+	for _, test := range []struct {
+		classification ai.Classification
+		want           stores.InboundVerdict
+		valid          bool
+	}{
+		{classification: ai.ClassificationLegitimate, want: stores.InboundVerdictLegitimate, valid: true},
+		{classification: ai.ClassificationUnwanted, want: stores.InboundVerdictUnwanted, valid: true},
+		{classification: "invalid"},
+	} {
+		got, valid := correspondentVerdict(test.classification)
+		if got != test.want || valid != test.valid {
+			t.Errorf("correspondentVerdict(%q) = (%q, %t), want (%q, %t)", test.classification, got, valid, test.want, test.valid)
+		}
 	}
 }
 

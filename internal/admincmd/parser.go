@@ -15,6 +15,8 @@ type period string
 
 type recipientAuthorization uint8
 
+type commandKind uint8
+
 const (
 	periodDay   period = "day"
 	periodWeek  period = "week"
@@ -30,11 +32,27 @@ const (
 	recipientOtherDenied
 )
 
+const (
+	commandUnknown commandKind = iota
+	commandParseError
+	commandHelp
+	commandActivity
+	commandRejections
+	commandRejection
+	commandAllowlistList
+	commandIPList
+	commandIPListLookup
+	commandIPAdd
+	commandIPDelete
+	commandAllowlist
+)
+
 type Command struct {
-	kind, verb, sender, recipient, canonical, errorText string
-	ip                                                  netip.Addr
-	period                                              period
-	rejectionID                                         uint64
+	kind                                          commandKind
+	verb, sender, recipient, canonical, errorText string
+	ip                                            netip.Addr
+	period                                        period
+	rejectionID                                   uint64
 }
 
 func (c Command) Canonical() string { return c.canonical }
@@ -46,7 +64,7 @@ func RecognizedLine(line string) bool {
 }
 
 func ParseError(line, text string) Command {
-	return Command{kind: "parse_error", canonical: line, errorText: text}
+	return Command{kind: commandParseError, canonical: line, errorText: text}
 }
 
 func normalizeRecipient(value string) string {
@@ -122,7 +140,7 @@ func (p period) description() string {
 func parse(text, authenticatedSender string, admin bool) (Command, error) {
 	fields := strings.Fields(text)
 	if len(fields) == 1 && strings.EqualFold(fields[0], "HELP") {
-		return Command{kind: "help", canonical: "HELP"}, nil
+		return Command{kind: commandHelp, canonical: "HELP"}, nil
 	}
 	if len(fields) >= 1 && strings.EqualFold(fields[0], "ACTIVITY") {
 		if !admin {
@@ -132,7 +150,7 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 		if err != nil {
 			return Command{}, fmt.Errorf("ACTIVITY period must be day, week, month, year, or all")
 		}
-		return Command{kind: "activity", canonical: "ACTIVITY " + string(pd), period: pd}, nil
+		return Command{kind: commandActivity, canonical: "ACTIVITY " + string(pd), period: pd}, nil
 	}
 	if len(fields) >= 1 && strings.EqualFold(fields[0], "REJECTION") {
 		if len(fields) != 2 {
@@ -142,16 +160,16 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 		if err != nil || id == 0 {
 			return Command{}, fmt.Errorf("REJECTION requires one positive rejection ID")
 		}
-		return Command{kind: "rejection", canonical: "REJECTION " + strconv.FormatUint(id, 10), rejectionID: id}, nil
+		return Command{kind: commandRejection, canonical: "REJECTION " + strconv.FormatUint(id, 10), rejectionID: id}, nil
 	}
 	if len(fields) >= 1 && strings.EqualFold(fields[0], "IP") {
 		if !admin {
 			return Command{}, fmt.Errorf("IP commands are restricted to administrators")
 		}
 		if len(fields) >= 2 && strings.EqualFold(fields[1], "LIST") {
-			kind, canonical, index := "ip_list", "IP LIST", 2
+			kind, canonical, index := commandIPList, "IP LIST", 2
 			if len(fields) >= 3 && strings.EqualFold(fields[2], "LOOKUP") {
-				kind, canonical, index = "ip_list_lookup", "IP LIST LOOKUP", 3
+				kind, canonical, index = commandIPListLookup, "IP LIST LOOKUP", 3
 			}
 			pd, err := listPeriod(fields, index)
 			if err != nil {
@@ -168,7 +186,11 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 		}
 		addr = netsafety.CanonicalIP(addr)
 		verb := strings.ToUpper(fields[1])
-		return Command{kind: "ip_" + strings.ToLower(verb), canonical: "IP " + verb + " " + addr.String(), ip: addr}, nil
+		kind := commandIPAdd
+		if verb == "DELETE" {
+			kind = commandIPDelete
+		}
+		return Command{kind: kind, canonical: "IP " + verb + " " + addr.String(), ip: addr}, nil
 	}
 	if len(fields) >= 1 && strings.EqualFold(fields[0], "REJECTIONS") {
 		if len(fields) > 3 {
@@ -199,7 +221,7 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 			canonical += " " + recipient
 		}
 		canonical += " " + string(pd)
-		return Command{kind: "rejections", recipient: recipient, canonical: canonical, period: pd}, nil
+		return Command{kind: commandRejections, recipient: recipient, canonical: canonical, period: pd}, nil
 	}
 	if len(fields) >= 2 && strings.EqualFold(fields[0], "WHITELIST") && strings.EqualFold(fields[1], "LIST") {
 		if len(fields) > 4 {
@@ -230,7 +252,7 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 			canonical += " " + recipient
 		}
 		canonical += " " + string(pd)
-		return Command{kind: "whitelist_list", recipient: recipient, canonical: canonical, period: pd}, nil
+		return Command{kind: commandAllowlistList, recipient: recipient, canonical: canonical, period: pd}, nil
 	}
 	if len(fields) != 3 && len(fields) != 4 {
 		return Command{}, fmt.Errorf("invalid command; send HELP for syntax")
@@ -264,7 +286,7 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 		return Command{}, fmt.Errorf("users may modify only their authenticated envelope sender address")
 	}
 	canonical := fmt.Sprintf("WHITELIST %s %s %s", verb, sender, recipient)
-	return Command{kind: "whitelist", verb: verb, sender: sender, recipient: recipient, canonical: canonical}, nil
+	return Command{kind: commandAllowlist, verb: verb, sender: sender, recipient: recipient, canonical: canonical}, nil
 }
 
 func listPeriod(fields []string, index int) (period, error) {

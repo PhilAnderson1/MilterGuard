@@ -81,14 +81,14 @@ func wrapStoreError(operation string, err error) error {
 }
 
 func (s *maintenanceService) startDailyCleanup(ctx context.Context) {
-	s.runDailyCleanup()
+	s.runDailyCleanup(ctx)
 	go func() {
 		ticker := time.NewTicker(dailyCleanupInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				s.runDailyCleanup()
+				s.runDailyCleanup(ctx)
 			case <-ctx.Done():
 				return
 			}
@@ -98,25 +98,28 @@ func (s *maintenanceService) startDailyCleanup(ctx context.Context) {
 
 // runDailyCleanup independently applies rejected-message archive limits and
 // activity retention without coupling either failure to the other.
-func (s *maintenanceService) runDailyCleanup() {
+func (s *maintenanceService) runDailyCleanup(ctx context.Context) {
 	s.runMaintenance("daily cleanup", func() {
 		if s.archive != nil {
-			if err := s.archive.Cleanup(); err != nil {
+			if err := s.archive.Cleanup(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.log.Warn("cannot clean rejected mail archive", "error", err)
 			}
 		}
 		if s.activity == nil {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), maintenanceDatabaseTimeout)
+		cleanupCtx, cancel := context.WithTimeout(ctx, maintenanceDatabaseTimeout)
 		defer cancel()
-		deleted, err := s.activity.CleanupActivity(ctx)
+		deleted, err := s.activity.Cleanup(cleanupCtx)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
 			s.log.Warn("cannot clean activity history", "error", err)
 			return
 		}
-		if s.log != nil && s.log.Enabled(ctx, slog.LevelDebug) {
-			count, countErr := s.activity.CountActivity(ctx)
+		if s.log != nil && s.log.Enabled(cleanupCtx, slog.LevelDebug) {
+			count, countErr := s.activity.Count(cleanupCtx)
 			s.log.Debug("activity cleanup completed", "activity_deleted", deleted, "activity_records", count)
 			if countErr != nil {
 				s.log.Warn("cannot count activity history", "error", countErr)

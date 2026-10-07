@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
@@ -22,6 +23,7 @@ type inboundEvidence struct {
 	bypassAI            bool
 	allowedSenderDomain string
 	authenticatedDomain string
+	correspondent       message.CorrespondentInfo
 }
 
 // prepareInboundEvidence evaluates authentication, configured sender-domain
@@ -33,7 +35,7 @@ func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, curre
 		return evidence
 	}
 	if current.message.FromHeaderCount() > 1 {
-		current.message.Correspondent = message.CorrespondentInfo{Enabled: s.correspondentCfg.UseAllowlist, Scope: s.correspondentCfg.Scope}
+		evidence.correspondent = message.CorrespondentInfo{Enabled: s.correspondentCfg.UseAllowlist, Scope: s.correspondentCfg.Scope}
 		return evidence
 	}
 	evidence.alignedDKIM = authentication.DKIMAligned
@@ -58,7 +60,7 @@ func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, curre
 		known = evidence.recipientsComplete && match.AllRecipientsMatched
 	}
 	evidence.knownCorrespondent = known
-	current.message.Correspondent = message.CorrespondentInfo{
+	evidence.correspondent = message.CorrespondentInfo{
 		Enabled: true, Known: known, Scope: s.correspondentCfg.Scope,
 		AuthenticationAligned: known && authentication.AnyAligned(),
 	}
@@ -107,7 +109,7 @@ func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, cur
 			s.ipReputation.add(ctx, current.peerIP, current.connectionDNS)
 		}
 	}
-	if !current.authenticated && result.err == nil && result.classification == "legitimate" {
+	if !current.authenticated && result.err == nil && result.classification == ai.ClassificationLegitimate {
 		s.recordLegitimateIP(ctx, current.peerIP)
 	}
 	if result.selected == actionAccept && current.authenticated {
@@ -126,12 +128,30 @@ func (s *messagePolicyService) recordLegitimateIP(ctx context.Context, addr neti
 }
 
 func (s *messagePolicyService) recordInboundClassification(ctx context.Context, current messageContext, result evaluationResult, authenticationSatisfied bool, unwantedMinScore float64) {
+	verdict, ok := correspondentVerdict(result.classification)
+	if !ok {
+		if s.log != nil {
+			s.log.ErrorContext(ctx, "cannot update inbound correspondent learning", "error", "invalid AI classification", "classification", result.classification)
+		}
+		return
+	}
 	if err := s.correspondents.RecordInboundClassification(ctx, stores.InboundClassification{
 		Correspondent: current.visibleSender, Recipients: current.envelopeRecipients,
-		RecipientsComplete: current.recipientsComplete, Classification: result.classification,
+		RecipientsComplete: current.recipientsComplete, Verdict: verdict,
 		Score: result.score, UnwantedMinScore: unwantedMinScore, AuthenticationSatisfied: authenticationSatisfied,
 	}); err != nil {
 		s.log.ErrorContext(ctx, "cannot update inbound correspondent learning", "error", err)
+	}
+}
+
+func correspondentVerdict(classification ai.Classification) (stores.InboundVerdict, bool) {
+	switch classification {
+	case ai.ClassificationLegitimate:
+		return stores.InboundVerdictLegitimate, true
+	case ai.ClassificationUnwanted:
+		return stores.InboundVerdictUnwanted, true
+	default:
+		return "", false
 	}
 }
 

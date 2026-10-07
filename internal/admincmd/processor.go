@@ -23,11 +23,11 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 	now := p.now().UTC()
 	cutoff := command.period.cutoff(now)
 	switch command.kind {
-	case "parse_error":
+	case commandParseError:
 		return textResponse(func() string { return command.errorText + ".\n" }), nil
-	case "help":
+	case commandHelp:
 		return textResponse(func() string { return Help(admin, actor.CommandMode) }), nil
-	case "activity":
+	case commandActivity:
 		if !admin {
 			return nil, fmt.Errorf("ACTIVITY is restricted to administrators")
 		}
@@ -43,17 +43,22 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 		if err != nil {
 			return nil, err
 		}
-		status, statusAvailable, statusErr := p.activity.ServiceStatus(ctx)
-		if statusErr != nil {
-			statusAvailable = false
-			if p.log != nil {
-				p.log.WarnContext(ctx, "cannot read service status for activity report", "error", statusErr)
+		var status stores.ServiceStatus
+		statusAvailable := false
+		if p.serviceStatus != nil {
+			var statusErr error
+			status, statusAvailable, statusErr = p.serviceStatus.ServiceStatus(ctx)
+			if statusErr != nil {
+				statusAvailable = false
+				if p.log != nil {
+					p.log.WarnContext(ctx, "cannot read service status for activity report", "error", statusErr)
+				}
 			}
 		}
 		return textResponse(func() string {
 			return formatActivity(command.period, now, p.activityExpiry, summary, status, statusAvailable)
 		}), nil
-	case "rejections":
+	case commandRejections:
 		page, err := p.rejections.ListRejections(ctx, stores.RejectionListQuery{Recipients: recipientScope(command.recipient), RejectedSince: cutoff, Limit: MaxListRows})
 		if err != nil {
 			return nil, err
@@ -63,7 +68,7 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 			slices.Reverse(entries)
 		}
 		return textResponse(func() string { return formatRejectionHistory(entries, page.Truncated) }), nil
-	case "rejection":
+	case commandRejection:
 		scope := stores.RecipientScope{Address: normalizeRecipient(actor.DefaultRecipient)}
 		if admin {
 			scope = stores.RecipientScope{All: true}
@@ -78,7 +83,7 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 		return func() Response {
 			return p.rejectionDetail(entry)
 		}, nil
-	case "whitelist_list":
+	case commandAllowlistList:
 		page, err := p.correspondents.ListCorrespondents(ctx, stores.CorrespondentListQuery{Recipients: recipientScope(command.recipient), ActiveSince: cutoff, Limit: MaxListRows})
 		if err != nil {
 			return nil, err
@@ -88,7 +93,7 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 			slices.Reverse(entries)
 		}
 		return textResponse(func() string { return formatAllowlist(entries, admin && command.recipient == "*", page.Truncated) }), nil
-	case "ip_list", "ip_list_lookup":
+	case commandIPList, commandIPListLookup:
 		page, err := p.ipReputation.ListActiveBlocks(ctx, stores.IPBlockListQuery{ActiveSince: cutoff, Limit: MaxListRows})
 		if err != nil {
 			return nil, err
@@ -97,19 +102,19 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 		if actor.NewestLast {
 			slices.Reverse(entries)
 		}
-		lookup := command.kind == "ip_list_lookup"
+		lookup := command.kind == commandIPListLookup
 		if lookup && p.ipResolver != nil {
 			entries = p.ipResolver.ResolveActiveIPHostnames(ctx, entries)
 		}
 		return textResponse(func() string { return formatActiveIPBlocks(entries, lookup, page.Truncated) }), nil
-	case "ip_add":
+	case commandIPAdd:
 		block, err := p.ipReputation.AddManualBlock(ctx, command.ip)
 		if err != nil {
 			return nil, err
 		}
 		outcome := fmt.Sprintf("blocked %s; current expiry %s (delivery attempts may extend it when repeat-block refreshing is enabled)", block.Address, formatUTC(block.ExpiresAt))
 		return textResponse(func() string { return outcome + ".\n" }), nil
-	case "ip_delete":
+	case commandIPDelete:
 		removed, err := p.ipReputation.Delete(ctx, command.ip)
 		if err != nil {
 			return nil, err
@@ -119,7 +124,7 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 			outcome = "IP reputation record deleted"
 		}
 		return textResponse(func() string { return outcome + ".\n" }), nil
-	case "whitelist":
+	case commandAllowlist:
 		if command.verb == "ADD" {
 			created, err := p.correspondents.AddManual(ctx, command.sender, command.recipient)
 			if err != nil {

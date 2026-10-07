@@ -16,12 +16,12 @@ import (
 )
 
 func TestValidate(t *testing.T) {
-	for _, classification := range []string{"legitimate", "unwanted"} {
+	for _, classification := range []Classification{ClassificationLegitimate, ClassificationUnwanted} {
 		if err := validate(Decision{Classification: classification, Score: .98, Reasons: []string{"evidence"}}); err != nil {
 			t.Fatalf("valid classification %q rejected: %v", classification, err)
 		}
 	}
-	for _, classification := range []string{"spam", "scam", "uncertain", "evil"} {
+	for _, classification := range []Classification{"spam", "scam", "uncertain", "evil"} {
 		if err := validate(Decision{Classification: classification, Score: .5}); err == nil {
 			t.Fatalf("expected classification %q to be invalid", classification)
 		}
@@ -30,6 +30,12 @@ func TestValidate(t *testing.T) {
 		if err := validate(Decision{Classification: "unwanted", Score: score}); err == nil {
 			t.Fatalf("expected score %v to be invalid", score)
 		}
+	}
+}
+
+func TestClassificationValues(t *testing.T) {
+	if ClassificationLegitimate != "legitimate" || ClassificationUnwanted != "unwanted" {
+		t.Fatalf("classification values changed: legitimate=%q unwanted=%q", ClassificationLegitimate, ClassificationUnwanted)
 	}
 }
 

@@ -374,7 +374,7 @@ func TestExactMessageClosesAfterAcceptAndReject(t *testing.T) {
 			if _, err := readFrame(clientConn); err != nil {
 				t.Fatal(err)
 			}
-			if err := writeFrame(clientConn, []byte{commandQuit}); err != nil {
+			if err := writeFrame(clientConn, []byte{commandQuitMilterConnection}); err != nil {
 				t.Fatal(err)
 			}
 			select {
@@ -491,7 +491,7 @@ func TestCompletedCommandRemainsUsableAcrossReadTimeouts(t *testing.T) {
 		t.Fatalf("write command after completed processing: %v", err)
 	}
 	expectFrame(t, clientConn, string([]byte{responseContinue}))
-	if err := writeFrame(clientConn, []byte{commandQuit}); err != nil {
+	if err := writeFrame(clientConn, []byte{commandQuitMilterConnection}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -671,7 +671,7 @@ func TestAbortDoesNotDesynchronizeNextTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
-	if err := writeFrame(conn, []byte{commandQuit}); err != nil {
+	if err := writeFrame(conn, []byte{commandQuitMilterConnection}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -720,7 +720,7 @@ func TestIdleConnectionRemainsOpenAcrossReadTimeouts(t *testing.T) {
 	if len(reply) != 1 || reply[0] != 'c' {
 		t.Fatalf("unexpected reply: %q", reply)
 	}
-	if err := writeFrame(clientConn, []byte{commandQuit}); err != nil {
+	if err := writeFrame(clientConn, []byte{commandQuitMilterConnection}); err != nil {
 		t.Fatalf("write quit: %v", err)
 	}
 	select {

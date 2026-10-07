@@ -331,7 +331,7 @@ func TestValidateMilterAllowedPeerIPs(t *testing.T) {
 	if !reflect.DeepEqual(defaults.Milter.AllowedPeerIPs, []string{"127.0.0.0/8", "::1/128"}) {
 		t.Fatalf("default allowed Milter peers = %#v", defaults.Milter.AllowedPeerIPs)
 	}
-	for _, entry := range []string{"192.0.2.10", "10.0.0.0/8", "2001:db8::/32"} {
+	for _, entry := range []string{"192.0.2.10", "10.0.0.0/8", "2001:db8::/32", "::ffff:198.51.100.0/120"} {
 		cfg := validConfig()
 		cfg.Milter.AllowedPeerIPs = []string{entry}
 		if err := cfg.Validate(); err != nil {
@@ -346,6 +346,11 @@ func TestValidateMilterAllowedPeerIPs(t *testing.T) {
 		}
 	}
 	cfg := validConfig()
+	cfg.Milter.AllowedPeerIPs = []string{"::ffff:192.0.2.0/80"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "milter.allowed_peer_ips") {
+		t.Fatalf("unrepresentable mapped peer prefix error = %v", err)
+	}
+	cfg = validConfig()
 	cfg.Milter.Socket = "unix:/run/milterguard/milterguard.sock"
 	cfg.Milter.AllowedPeerIPs = nil
 	if err := cfg.Validate(); err != nil {

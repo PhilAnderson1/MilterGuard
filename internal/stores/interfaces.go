@@ -35,9 +35,9 @@ type RejectionRepository interface {
 type IPReputationPolicyRepository interface {
 	RecordRejection(context.Context, netip.Addr) (IPBlock, error)
 	RecordLegitimate(context.Context, netip.Addr) error
-	// ActiveBlock may atomically extend an active repeat block when sliding
-	// expiry is enabled by the repository's policy options.
-	ActiveBlock(context.Context, netip.Addr) (IPBlock, bool, error)
+	// ActiveBlockForAttempt returns an active block and may atomically extend a
+	// repeat block when sliding expiry is enabled by the repository's policy.
+	ActiveBlockForAttempt(context.Context, netip.Addr) (IPBlock, bool, error)
 }
 
 // IPReputationAdminRepository exposes manual block and listing operations used
@@ -89,14 +89,29 @@ type DomainRegistrationCache interface {
 	MaintainedRepository
 }
 
-// ActivityRepository records aggregateable filtering outcomes and the
-// singleton status of the currently serving process.
-type ActivityRepository interface {
+// ActivityRecorder persists aggregateable filtering outcomes.
+type ActivityRecorder interface {
 	AddActivity(context.Context, ActivityEvent) error
+}
+
+// ActivityReporter aggregates persisted filtering outcomes.
+type ActivityReporter interface {
 	ActivitySummary(context.Context, ActivityQuery) (ActivitySummary, error)
-	CleanupActivity(context.Context) (int64, error)
-	CountActivity(context.Context) (int, error)
+}
+
+// ServiceStatusStore manages the singleton status of the serving process.
+type ServiceStatusStore interface {
 	ServiceStatus(context.Context) (ServiceStatus, bool, error)
 	SetServiceStatus(context.Context, ServiceStatus) error
 	ClearServiceStatus(context.Context) error
+}
+
+// ActivityStore is the complete activity persistence implementation assembled
+// by the composition root. Consumers should depend on its narrower component
+// interfaces.
+type ActivityStore interface {
+	ActivityRecorder
+	ActivityReporter
+	ServiceStatusStore
+	MaintainedRepository
 }

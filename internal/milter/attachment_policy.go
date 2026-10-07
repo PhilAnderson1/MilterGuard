@@ -150,7 +150,7 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 			reason += ": " + path
 		}
 		persistCtx, cancel := postDecisionContext(ctx)
-		ss.deps.attachments.policy.recordRejection(persistCtx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, "attachment_policy")
+		ss.deps.policy.recordRejection(persistCtx, ss.message, ss.visibleSender, ss.envelopeSender, ss.envelopeRecipients, []string{reason}, "attachment_policy")
 		cancel()
 		if ipStrike && ss.deps.attachments.cfg.AddIPReputationStrike && !ss.authentication.Authenticated {
 			// Resolve the connection identity before updating reputation so the
@@ -159,7 +159,7 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 			dns := ss.awaitConnectionDNS(dnsCtx)
 			cancelDNS()
 			strikeCtx, cancelStrike := postDecisionContext(ctx)
-			ss.deps.attachments.policy.ipReputation.add(strikeCtx, ss.peerIP, dns)
+			ss.deps.policy.ipReputation.add(strikeCtx, ss.peerIP, dns)
 			cancelStrike()
 		}
 	}

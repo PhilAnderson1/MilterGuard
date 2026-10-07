@@ -121,7 +121,7 @@ func lexicalHiddenSubtreeEnd(source, lower string, offset int, name string) (int
 			offset = opening + 1
 			continue
 		}
-		closing, found, _ := lexicalTagEnd(source, opening+1)
+		closing, found := lexicalTagEnd(source, opening+1)
 		if !found {
 			break
 		}

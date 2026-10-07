@@ -8,11 +8,11 @@ import (
 	"net"
 	"net/netip"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
@@ -39,6 +39,7 @@ type Server struct {
 	startupErr         error
 	sessions           *sessionDependencies
 	maintenance        *maintenanceService
+	serviceStatus      stores.ServiceStatusStore
 }
 
 // NewServer assembles a Milter server without opening its listener. Callers
@@ -50,6 +51,7 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 		maxConnections: cfg.Milter.MaxConnections, includeConnections: cfg.Logging.IncludeConnections,
 		allowedPeerIPs: peerPrefixes(cfg.Milter.AllowedPeerIPs), database: runtime.database,
 		startupErr: runtime.err, sessions: runtime.sessions, maintenance: runtime.maintenance,
+		serviceStatus: runtime.serviceStatus,
 	}
 }
 
@@ -173,7 +175,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) setServiceStatus(startedAt time.Time) {
-	if s == nil || s.maintenance == nil || s.maintenance.activity == nil {
+	if s == nil || s.serviceStatus == nil {
 		return
 	}
 	mode := stores.ServiceModeAccept
@@ -182,18 +184,18 @@ func (s *Server) setServiceStatus(startedAt time.Time) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), commandDatabaseTimeout)
 	defer cancel()
-	if err := s.maintenance.activity.SetServiceStatus(ctx, stores.ServiceStatus{StartedAt: startedAt, Mode: mode}); err != nil && s.log != nil {
+	if err := s.serviceStatus.SetServiceStatus(ctx, stores.ServiceStatus{StartedAt: startedAt, Mode: mode}); err != nil && s.log != nil {
 		s.log.Warn("cannot record service status", "error", err)
 	}
 }
 
 func (s *Server) clearServiceStatus() {
-	if s == nil || s.maintenance == nil || s.maintenance.activity == nil {
+	if s == nil || s.serviceStatus == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), commandDatabaseTimeout)
 	defer cancel()
-	if err := s.maintenance.activity.ClearServiceStatus(ctx); err != nil && s.log != nil {
+	if err := s.serviceStatus.ClearServiceStatus(ctx); err != nil && s.log != nil {
 		s.log.Warn("cannot clear service status", "error", err)
 	}
 }
@@ -239,14 +241,8 @@ func (s *Server) acceptConnection(ctx context.Context, ln net.Listener) (net.Con
 func peerPrefixes(entries []string) []netip.Prefix {
 	prefixes := make([]netip.Prefix, 0, len(entries))
 	for _, entry := range entries {
-		entry = strings.TrimSpace(entry)
-		if prefix, err := netip.ParsePrefix(entry); err == nil {
-			prefixes = append(prefixes, prefix.Masked())
-			continue
-		}
-		if addr, err := netip.ParseAddr(entry); err == nil {
-			addr = addr.Unmap()
-			prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
+		if prefix, err := netsafety.ParseIPPrefix(entry); err == nil {
+			prefixes = append(prefixes, prefix)
 		}
 	}
 	return prefixes

@@ -7,11 +7,6 @@ import (
 	"unicode"
 )
 
-// lexicalHTMLExtractor deliberately does not construct a DOM. Email HTML is
-// frequently malformed or deliberately adversarial, so this extractor scans
-// tag boundaries while retaining only the evidence needed by the AI prompt.
-type lexicalHTMLExtractor struct{}
-
 var markdownURLReplacer = strings.NewReplacer(
 	"\\", "%5C",
 	" ", "%20",
@@ -164,10 +159,13 @@ func (output *lexicalOutput) finishAnchor(links *lexicalLinkCollector, markdown 
 }
 
 func htmlToText(source string) extractedContent {
-	return (lexicalHTMLExtractor{}).extract(source)
+	return extractLexicalHTML(source)
 }
 
-func (lexicalHTMLExtractor) extract(source string) extractedContent {
+// extractLexicalHTML deliberately does not construct a DOM. Email HTML is
+// frequently malformed or deliberately adversarial, so it scans tag
+// boundaries while retaining only the evidence needed by the AI prompt.
+func extractLexicalHTML(source string) extractedContent {
 	// HTML syntax is ASCII. Keep this copy byte-for-byte aligned with source so
 	// byte offsets found in one string are always safe to use in the other.
 	lower := lexicalASCIILower(source)
@@ -216,7 +214,7 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 			continue
 		}
 
-		closing, found, _ := lexicalTagEnd(source, opening+1)
+		closing, found := lexicalTagEnd(source, opening+1)
 		if !found {
 			// lexicalMarkupStart already excluded an ordinary lone '<'. A
 			// plausible tag that runs through EOF remains markup in HTML
@@ -416,7 +414,7 @@ func lexicalASCIILetter(value byte) bool {
 	return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z')
 }
 
-func lexicalTagEnd(source string, offset int) (end int, found, unterminatedQuote bool) {
+func lexicalTagEnd(source string, offset int) (end int, found bool) {
 	const (
 		lexicalTagName = iota
 		lexicalBeforeAttributeName
@@ -442,7 +440,7 @@ func lexicalTagEnd(source string, offset int) (end int, found, unterminatedQuote
 				// A valid quoted value containing '>' and '<' remains untouched.
 				if quotedTagEnd >= 0 && quotedTagContainsMarkup && offset+1 < len(source) &&
 					!lexicalSpace(source[offset+1]) && source[offset+1] != '>' && source[offset+1] != '/' {
-					return quotedTagEnd, true, false
+					return quotedTagEnd, true
 				}
 				quote = 0
 				quotedTagEnd = -1
@@ -456,14 +454,14 @@ func lexicalTagEnd(source string, offset int) (end int, found, unterminatedQuote
 		case lexicalTagName:
 			switch {
 			case value == '>':
-				return offset, true, false
+				return offset, true
 			case lexicalSpace(value):
 				state = lexicalBeforeAttributeName
 			}
 		case lexicalBeforeAttributeName:
 			switch {
 			case value == '>':
-				return offset, true, false
+				return offset, true
 			case lexicalSpace(value), value == '/':
 			default:
 				state = lexicalAttributeName
@@ -471,7 +469,7 @@ func lexicalTagEnd(source string, offset int) (end int, found, unterminatedQuote
 		case lexicalAttributeName:
 			switch {
 			case value == '>':
-				return offset, true, false
+				return offset, true
 			case lexicalSpace(value):
 				state = lexicalAfterAttributeName
 			case value == '=':
@@ -482,7 +480,7 @@ func lexicalTagEnd(source string, offset int) (end int, found, unterminatedQuote
 		case lexicalAfterAttributeName:
 			switch {
 			case value == '>':
-				return offset, true, false
+				return offset, true
 			case lexicalSpace(value), value == '/':
 			case value == '=':
 				state = lexicalBeforeAttributeValue
@@ -496,21 +494,21 @@ func lexicalTagEnd(source string, offset int) (end int, found, unterminatedQuote
 				quote = value
 				state = lexicalQuotedAttributeValue
 			case value == '>':
-				return offset, true, false
+				return offset, true
 			default:
 				state = lexicalUnquotedAttributeValue
 			}
 		case lexicalUnquotedAttributeValue:
 			switch {
 			case value == '>':
-				return offset, true, false
+				return offset, true
 			case lexicalSpace(value):
 				state = lexicalBeforeAttributeName
 			}
 		}
 		offset++
 	}
-	return 0, false, state == lexicalQuotedAttributeValue
+	return 0, false
 }
 
 func lexicalExactOpeningTag(rawTag, name string) bool {
@@ -555,7 +553,7 @@ func lexicalElementEnd(source, lower string, offset int, name string) (closingSt
 	if closingStart < 0 {
 		return 0, 0, false
 	}
-	closingEnd, found, _ := lexicalTagEnd(source, closingStart+1)
+	closingEnd, found := lexicalTagEnd(source, closingStart+1)
 	if !found {
 		return 0, 0, false
 	}
@@ -582,7 +580,7 @@ func lexicalTemplateEnd(source, lower string, offset int) (int, bool) {
 			offset = opening + 1
 			continue
 		}
-		closing, found, _ := lexicalTagEnd(source, opening+1)
+		closing, found := lexicalTagEnd(source, opening+1)
 		if !found {
 			return 0, false
 		}
@@ -636,7 +634,7 @@ func lexicalFirstBaseTag(source, lower string, offset, limit int) (string, bool)
 			offset = opening + 1
 			continue
 		}
-		closing, found, _ := lexicalTagEnd(source, opening+1)
+		closing, found := lexicalTagEnd(source, opening+1)
 		if !found || closing >= limit {
 			return "", false
 		}

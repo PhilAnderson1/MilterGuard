@@ -11,8 +11,8 @@ const maxRecipientGroupRunes = 255
 
 var emptyRecipientGroupPattern = regexp.MustCompile(`^\s*(.+)\s*:[ \t]*;[ \t]*$`)
 
-func writeRecipientInformation(b *strings.Builder, msg *Message) {
-	if msg.AuthenticatedSubmission {
+func writeRecipientInformation(b *strings.Builder, msg *Message, authenticatedSubmission bool) {
+	if authenticatedSubmission {
 		return
 	}
 	if !msg.toHeaderSeen {

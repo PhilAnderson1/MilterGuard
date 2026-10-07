@@ -81,11 +81,11 @@ func TestActivityRepositoryCleanupAndServiceStatus(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	deleted, err := repository.CleanupActivity(ctx)
+	deleted, err := repository.Cleanup(ctx)
 	if err != nil || deleted != 1 {
 		t.Fatalf("cleanup deleted %d, err = %v", deleted, err)
 	}
-	if count, err := repository.CountActivity(ctx); err != nil || count != 1 {
+	if count, err := repository.Count(ctx); err != nil || count != 1 {
 		t.Fatalf("count = %d, err = %v", count, err)
 	}
 	if _, found, err := repository.ServiceStatus(ctx); err != nil || found {

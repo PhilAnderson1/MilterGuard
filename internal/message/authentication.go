@@ -4,23 +4,19 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 )
 
 const maxAuthenticationResultsPerMethod = 10
 
-func writeAuthenticationInformation(b *strings.Builder, msg *Message) {
-	if msg.AuthenticatedSubmission {
+func writeAuthenticationInformation(b *strings.Builder, msg *Message, context AnalysisContext) {
+	if context.AuthenticatedSubmission {
 		b.WriteString("\nAUTHENTICATION INFORMATION:\n")
 		b.WriteString("Authenticated SMTP submission: yes\n")
 		return
 	}
-	fromDomain := ""
-	if msg.FromHeaderCount() == 1 {
-		fromDomain = visibleFromDomain(msg.Header("From"))
-	}
-	results := msg.Authentication.Results
+	fromDomain := context.Authentication.VisibleDomain
+	results := context.Authentication.Results
 
 	b.WriteString("\nAUTHENTICATION INFORMATION:\n")
 	if msg.FromHeaderCount() > 1 {
@@ -41,14 +37,14 @@ func writeAuthenticationInformation(b *strings.Builder, msg *Message) {
 			fmt.Fprintf(b, "%s: no trusted local result\n", strings.ToUpper(string(method)))
 		}
 	}
-	writeDomainRegistrationEvidence(b, msg.DomainRegistration)
+	writeDomainRegistrationEvidence(b, context.DomainRegistration)
 }
 
 func authenticationResultForPrompt(result mailauth.Result) bool {
 	return result.Method != mailauth.MethodDKIM || result.Outcome != mailauth.OutcomePolicy || !result.BodyLengthLimited
 }
 
-func writeAuthenticationResult(b *strings.Builder, result mailauth.Result, fromDomain string) {
+func writeAuthenticationResult(b *strings.Builder, result mailauth.Result, visibleDomain string) {
 	method := strings.ToUpper(string(result.Method))
 	if result.Outcome == mailauth.OutcomeNone {
 		switch result.Method {
@@ -57,16 +53,16 @@ func writeAuthenticationResult(b *strings.Builder, result mailauth.Result, fromD
 		case mailauth.MethodSPF:
 			fmt.Fprintf(b, "SPF: no SPF policy for envelope-sender domain %s\n", availableValue(result.Domain))
 		case mailauth.MethodDMARC:
-			fmt.Fprintf(b, "DMARC: no DMARC policy for visible From domain %s\n", availableValue(fromDomain))
+			fmt.Fprintf(b, "DMARC: no DMARC policy for visible From domain %s\n", availableValue(visibleDomain))
 		}
 		return
 	}
 	description := authenticationOutcomeDescription(result)
 	switch result.Method {
 	case mailauth.MethodDKIM:
-		fmt.Fprintf(b, "%s: %s for signing domain %s%s\n", method, description, availableValue(result.Domain), passAlignmentText(result, fromDomain))
+		fmt.Fprintf(b, "%s: %s for signing domain %s%s\n", method, description, availableValue(result.Domain), passAlignmentText(result))
 	case mailauth.MethodSPF:
-		fmt.Fprintf(b, "%s: %s for envelope-sender domain %s%s\n", method, description, availableValue(result.Domain), passAlignmentText(result, fromDomain))
+		fmt.Fprintf(b, "%s: %s for envelope-sender domain %s%s\n", method, description, availableValue(result.Domain), passAlignmentText(result))
 	case mailauth.MethodDMARC:
 		fmt.Fprintf(b, "%s: %s for visible From domain %s\n", method, description, availableValue(result.Domain))
 	}
@@ -93,11 +89,11 @@ func authenticationOutcomeDescription(result mailauth.Result) string {
 	return string(result.Outcome)
 }
 
-func passAlignmentText(result mailauth.Result, fromDomain string) string {
+func passAlignmentText(result mailauth.Result) string {
 	if result.Outcome != mailauth.OutcomePass {
 		return ""
 	}
-	return fmt.Sprintf(" (aligned with visible From domain: %s)", yesNo(mailauth.DomainAligned(result.Domain, fromDomain)))
+	return fmt.Sprintf(" (aligned with visible From domain: %s)", yesNo(result.Aligned))
 }
 
 func yesNo(value bool) string {
@@ -112,8 +108,4 @@ func availableValue(value string) string {
 		return "unavailable"
 	}
 	return value
-}
-
-func visibleFromDomain(value string) string {
-	return mailaddr.Domain(value)
 }

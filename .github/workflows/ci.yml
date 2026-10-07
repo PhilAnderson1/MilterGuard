@@ -27,4 +27,15 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Build
-        run: go build -trimpath ./cmd/milterguard
+        run: CGO_ENABLED=0 go build -trimpath ./cmd/milterguard
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: Race test
+        run: go test -race ./internal/milter ./internal/admincmd ./internal/stores/...

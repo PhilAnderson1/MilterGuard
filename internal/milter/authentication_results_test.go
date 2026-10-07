@@ -78,7 +78,7 @@ func TestAlignedSenderAuthentication(t *testing.T) {
 			msg := message.New(100)
 			msg.AddHeader("Authentication-Results", test.header)
 			authentication, err := (mailauth.HeaderVerifier{}).Verify(t.Context(), mailauth.Transaction{
-				AuthenticationResults: msg.Headers["authentication-results"],
+				AuthenticationResults: msg.HeaderValues("Authentication-Results"),
 				TrustedAuthservIDs:    test.trust, VisibleFromDomain: test.domain,
 			})
 			if err != nil {

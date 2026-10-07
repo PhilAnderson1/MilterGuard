@@ -1,12 +1,16 @@
 package sqlite
 
-import "time"
+import (
+	"time"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
+)
 
 type CorrespondentOptions struct {
 	LearnAuthenticatedRecipients          bool
 	LearnLegitimateSenders                bool
 	UseAllowlist                          bool
-	Scope                                 string
+	Scope                                 stores.CorrespondentScope
 	MaxEntries                            int
 	StaleAfter                            time.Duration
 	LegitimateSenderMinScore              float64

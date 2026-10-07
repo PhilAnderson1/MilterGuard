@@ -180,10 +180,7 @@ func (r *rejectionRepository) ListRejections(ctx context.Context, query stores.R
 }
 
 func rejectionPage(entries []stores.Rejection, limit int) stores.RejectionPage {
-	truncated := len(entries) > limit
-	if truncated {
-		entries = entries[:limit]
-	}
+	entries, truncated := limitedPage(entries, limit)
 	return stores.RejectionPage{Entries: entries, Truncated: truncated}
 }
 

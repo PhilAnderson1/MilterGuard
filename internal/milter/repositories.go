@@ -31,7 +31,7 @@ func newCorrespondentRepository(cfg config.CorrespondentsConfig, db *sqlitedb.St
 		LearnAuthenticatedRecipients:          cfg.LearnAuthenticatedRecipients,
 		LearnLegitimateSenders:                cfg.LearnLegitimateSenders,
 		UseAllowlist:                          cfg.UseAllowlist,
-		Scope:                                 cfg.Scope,
+		Scope:                                 stores.CorrespondentScope(cfg.Scope),
 		MaxEntries:                            cfg.MaxEntries,
 		StaleAfter:                            cfg.StaleAfter.Value(),
 		LegitimateSenderMinScore:              cfg.LegitimateSenderMinScore,
@@ -66,6 +66,6 @@ func newIPRepository(cfg config.IPReputationConfig, db *sqlitedb.Store, now func
 	}, log)
 }
 
-func newActivityRepository(cfg config.ActivityConfig, db *sqlitedb.Store, now func() time.Time) stores.ActivityRepository {
+func newActivityRepository(cfg config.ActivityConfig, db *sqlitedb.Store, now func() time.Time) stores.ActivityStore {
 	return storesqlite.NewActivity(db, storesqlite.ActivityOptions{Expiry: cfg.Expiry.Value(), Now: now})
 }

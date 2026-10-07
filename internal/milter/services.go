@@ -19,10 +19,11 @@ import (
 // protocolOptions contains immutable values used directly by the Milter state
 // machine. Feature policy belongs to the focused services below.
 type protocolOptions struct {
-	timeout          time.Duration
-	maxMessageSize   int64
-	progressInterval time.Duration
-	exactStorage     string
+	timeout                time.Duration
+	maxMessageSize         int64
+	progressInterval       time.Duration
+	exactStorage           string
+	protectInternalReplies bool
 }
 
 type analysisService struct {
@@ -36,7 +37,7 @@ type analysisService struct {
 }
 
 type activityService struct {
-	repository stores.ActivityRepository
+	repository stores.ActivityRecorder
 	log        *slog.Logger
 }
 
@@ -45,7 +46,7 @@ type messagePolicyService struct {
 	trustRequirement   string
 	log                *slog.Logger
 	ipReputation       *ipReputationStore
-	correspondents     stores.CorrespondentRepository
+	correspondents     stores.CorrespondentPolicyRepository
 	rejectionHistory   stores.RejectionHistoryRepository
 	domainRegistration *domainRegistrationStore
 	archive            *rejectedmail.Archive
@@ -67,7 +68,6 @@ type attachmentPolicyService struct {
 	cfg     config.AttachmentsConfig
 	scanner *attachment.Scanner
 	slots   chan struct{}
-	policy  *messagePolicyService
 }
 
 type emailCommandService struct {
@@ -111,7 +111,7 @@ type maintenanceService struct {
 	domains         *domainRegistrationStore
 	database        *sqlitedb.Store
 	archive         *rejectedmail.Archive
-	activity        stores.ActivityRepository
+	activity        stores.MaintainedRepository
 	cleanupInterval time.Duration
 	log             *slog.Logger
 }

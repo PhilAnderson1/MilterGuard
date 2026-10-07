@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -19,11 +20,11 @@ type activityRepository struct {
 
 // NewActivity binds activity-event aggregation, expiry, and serving-process
 // status to the shared SQLite database.
-func NewActivity(db *sqlitedb.Store, options ActivityOptions) stores.ActivityRepository {
+func NewActivity(db *sqlitedb.Store, options ActivityOptions) stores.ActivityStore {
 	return &activityRepository{db: db, expiry: options.Expiry, now: clock(options.Now)}
 }
 
-var _ stores.ActivityRepository = (*activityRepository)(nil)
+var _ stores.ActivityStore = (*activityRepository)(nil)
 
 func (r *activityRepository) available() bool {
 	return r != nil && r.db != nil && r.expiry > 0
@@ -68,28 +69,27 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 	}
 	var summary stores.ActivitySummary
 	err := r.db.QueryRow(ctx, `SELECT
-		count(*) FILTER (WHERE event_type = ?),
-		count(*) FILTER (WHERE event_type = ? AND outcome = ?),
-		count(*) FILTER (WHERE event_type = ? AND outcome = ?),
-		count(*) FILTER (WHERE event_type = ? AND analysis_failed = 1),
-		count(*) FILTER (WHERE event_type = ? AND outcome = ?),
-		count(*) FILTER (WHERE event_type = ? AND outcome = ?),
-		count(*) FILTER (WHERE event_type = ? AND outcome = ?),
-		count(*) FILTER (WHERE event_type = ? AND outcome = ?),
-		count(*) FILTER (WHERE event_type = ? AND outcome = ?),
-		coalesce(sum(token_cost) FILTER (WHERE event_type = ?), 0)
-		FROM activity WHERE occurred_at_ms >= ? AND occurred_at_ms < ?`,
-		stores.ActivityEventScan,
-		stores.ActivityEventScan, stores.ActivityOutcomeRejected,
-		stores.ActivityEventScan, stores.ActivityOutcomeAccepted,
-		stores.ActivityEventScan,
-		stores.ActivityEventIPRejection, stores.ActivityOutcomeRejected,
-		stores.ActivityEventCorrespondentAccept, stores.ActivityOutcomeAccepted,
-		stores.ActivityEventTrustedDomainAccept, stores.ActivityOutcomeAccepted,
-		stores.ActivityEventAttachmentRejection, stores.ActivityOutcomeRejected,
-		stores.ActivityEventProtectedSenderDomainRejection, stores.ActivityOutcomeRejected,
-		stores.ActivityEventScan,
-		unixMillis(since), unixMillis(before)).Scan(
+		count(*) FILTER (WHERE event_type = :scan),
+		count(*) FILTER (WHERE event_type = :scan AND outcome = :rejected),
+		count(*) FILTER (WHERE event_type = :scan AND outcome = :accepted),
+		count(*) FILTER (WHERE event_type = :scan AND analysis_failed = 1),
+		count(*) FILTER (WHERE event_type = :ip_rejection AND outcome = :rejected),
+		count(*) FILTER (WHERE event_type = :correspondent_accept AND outcome = :accepted),
+		count(*) FILTER (WHERE event_type = :trusted_domain_accept AND outcome = :accepted),
+		count(*) FILTER (WHERE event_type = :attachment_rejection AND outcome = :rejected),
+		count(*) FILTER (WHERE event_type = :protected_sender_domain_rejection AND outcome = :rejected),
+		coalesce(sum(token_cost) FILTER (WHERE event_type = :scan), 0)
+		FROM activity WHERE occurred_at_ms >= :since AND occurred_at_ms < :before`,
+		sql.Named("scan", stores.ActivityEventScan),
+		sql.Named("rejected", stores.ActivityOutcomeRejected),
+		sql.Named("accepted", stores.ActivityOutcomeAccepted),
+		sql.Named("ip_rejection", stores.ActivityEventIPRejection),
+		sql.Named("correspondent_accept", stores.ActivityEventCorrespondentAccept),
+		sql.Named("trusted_domain_accept", stores.ActivityEventTrustedDomainAccept),
+		sql.Named("attachment_rejection", stores.ActivityEventAttachmentRejection),
+		sql.Named("protected_sender_domain_rejection", stores.ActivityEventProtectedSenderDomainRejection),
+		sql.Named("since", unixMillis(since)),
+		sql.Named("before", unixMillis(before))).Scan(
 		&summary.ScanTotal, &summary.ScanRejections, &summary.ScanAccepted,
 		&summary.AIEvaluationsFailed, &summary.IPRejections, &summary.CorrespondentAccepts,
 		&summary.TrustedDomainAccepts, &summary.AttachmentRejections,
@@ -100,7 +100,7 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 	return summary, nil
 }
 
-func (r *activityRepository) CleanupActivity(ctx context.Context) (int64, error) {
+func (r *activityRepository) Cleanup(ctx context.Context) (int64, error) {
 	if !r.available() {
 		return 0, nil
 	}
@@ -115,7 +115,7 @@ func (r *activityRepository) CleanupActivity(ctx context.Context) (int64, error)
 	return deleted, nil
 }
 
-func (r *activityRepository) CountActivity(ctx context.Context) (int, error) {
+func (r *activityRepository) Count(ctx context.Context) (int, error) {
 	if !r.available() {
 		return 0, nil
 	}
@@ -133,7 +133,7 @@ func (r *activityRepository) ServiceStatus(ctx context.Context) (stores.ServiceS
 	var started int64
 	var mode stores.ServiceMode
 	err := r.db.QueryRow(ctx, `SELECT started_at_ms, mode FROM service_status WHERE id = 1`).Scan(&started, &mode)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return stores.ServiceStatus{}, false, nil
 	}
 	if err != nil {

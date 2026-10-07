@@ -19,10 +19,17 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
 
+type Classification string
+
+const (
+	ClassificationLegitimate Classification = "legitimate"
+	ClassificationUnwanted   Classification = "unwanted"
+)
+
 type Decision struct {
-	Classification string   `json:"classification"`
-	Score          float64  `json:"score"`
-	Reasons        []string `json:"reasons"`
+	Classification Classification `json:"classification"`
+	Score          float64        `json:"score"`
+	Reasons        []string       `json:"reasons"`
 }
 
 // Usage contains endpoint-reported token counts accumulated across every
@@ -244,9 +251,9 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Analysis, bool, 
 		}
 	}
 	var parsed struct {
-		Classification string   `json:"classification"`
-		Score          *float64 `json:"score"`
-		Reasons        []string `json:"reasons"`
+		Classification Classification `json:"classification"`
+		Score          *float64       `json:"score"`
+		Reasons        []string       `json:"reasons"`
 	}
 	dec := json.NewDecoder(strings.NewReader(envelope.Choices[0].Message.Content))
 	dec.DisallowUnknownFields()
@@ -419,7 +426,7 @@ func responseExcerpt(raw []byte) string {
 
 func validate(d Decision) error {
 	switch d.Classification {
-	case "legitimate", "unwanted":
+	case ClassificationLegitimate, ClassificationUnwanted:
 	default:
 		return fmt.Errorf("invalid classification %q", d.Classification)
 	}

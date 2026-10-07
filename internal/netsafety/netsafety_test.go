@@ -27,6 +27,33 @@ func TestCanonicalIP(t *testing.T) {
 	}
 }
 
+func TestParseIPPrefix(t *testing.T) {
+	tests := map[string]string{
+		"192.0.2.99/24":            "192.0.2.0/24",
+		"192.0.2.99":               "192.0.2.99/32",
+		"::ffff:198.51.100.99/120": "198.51.100.0/24",
+		"::ffff:198.51.100.99":     "198.51.100.99/32",
+		"2001:db8::1":              "2001:db8::1/128",
+		" 2001:db8:abcd::99/48 ":   "2001:db8:abcd::/48",
+		"fe80::1%submission":       "fe80::1/128",
+	}
+	for input, want := range tests {
+		got, err := ParseIPPrefix(input)
+		if err != nil {
+			t.Errorf("ParseIPPrefix(%q) error = %v", input, err)
+			continue
+		}
+		if got.String() != want {
+			t.Errorf("ParseIPPrefix(%q) = %q, want %q", input, got, want)
+		}
+	}
+	for _, input := range []string{"", "not-an-address", "::ffff:192.0.2.0/80"} {
+		if _, err := ParseIPPrefix(input); err == nil {
+			t.Errorf("ParseIPPrefix(%q) unexpectedly succeeded", input)
+		}
+	}
+}
+
 func TestAddressRoutable(t *testing.T) {
 	tests := map[string]bool{
 		"8.8.8.8": true, "2001:4860:4860::8888": true,

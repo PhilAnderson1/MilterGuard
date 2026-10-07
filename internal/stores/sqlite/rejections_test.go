@@ -15,61 +15,56 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
-const (
-	testMaxRejectionReasonRunes = 1000
-	testMaxRejectionRecipients  = 100
-)
-
-type rejectionHistoryStore = rejectionRepository
-type rejectionHistoryEntry = stores.Rejection
-
-func newRejectionHistoryStore(options RejectionOptions, db *sqlitedb.Store, log *slog.Logger) *rejectionHistoryStore {
+func newRejectionRepository(options RejectionOptions, db *sqlitedb.Store, log *slog.Logger) *rejectionRepository {
 	return NewRejections(db, options, log).(*rejectionRepository)
 }
 
-func (s *rejectionHistoryStore) addWithID(ctx context.Context, visible, envelope, subject string, recipients, reasons []string) (uint64, error) {
-	return s.AddRejection(ctx, stores.NewRejection{VisibleSender: visible, EnvelopeSender: envelope, Subject: subject, Recipients: recipients, Reasons: reasons})
+func addRejection(repository *rejectionRepository, ctx context.Context, visible, envelope, subject string, recipients, reasons []string) (uint64, error) {
+	return repository.AddRejection(ctx, stores.NewRejection{VisibleSender: visible, EnvelopeSender: envelope, Subject: subject, Recipients: recipients, Reasons: reasons})
 }
-func (s *rejectionHistoryStore) add(ctx context.Context, visible, envelope, subject string, recipients, reasons []string) error {
-	_, err := s.addWithID(ctx, visible, envelope, subject, recipients, reasons)
+
+func addRejectionWithoutID(repository *rejectionRepository, ctx context.Context, visible, envelope, subject string, recipients, reasons []string) error {
+	_, err := addRejection(repository, ctx, visible, envelope, subject, recipients, reasons)
 	return err
 }
-func (s *rejectionHistoryStore) list(ctx context.Context, recipient string, since time.Time) ([]stores.Rejection, error) {
+
+func listRejections(repository *rejectionRepository, ctx context.Context, recipient string, since time.Time) ([]stores.Rejection, error) {
 	scope := stores.RecipientScope{Address: recipient}
 	if recipient == "*" {
 		scope = stores.RecipientScope{All: true}
 	}
-	page, err := s.ListRejections(ctx, stores.RejectionListQuery{Recipients: scope, RejectedSince: since, Limit: 1000})
+	page, err := repository.ListRejections(ctx, stores.RejectionListQuery{Recipients: scope, RejectedSince: since, Limit: 1000})
 	return page.Entries, err
 }
-func (s *rejectionHistoryStore) getByID(ctx context.Context, id uint64, recipient string, admin bool) (stores.Rejection, bool, error) {
+
+func rejectionByID(repository *rejectionRepository, ctx context.Context, id uint64, recipient string, admin bool) (stores.Rejection, bool, error) {
 	scope := stores.RecipientScope{Address: recipient}
 	if admin {
 		scope = stores.RecipientScope{All: true}
 	}
-	return s.RejectionByID(ctx, id, scope)
+	return repository.RejectionByID(ctx, id, scope)
 }
-func (s *rejectionHistoryStore) cleanup(ctx context.Context) (int64, error) { return s.Cleanup(ctx) }
-func (s *rejectionHistoryStore) size(t *testing.T, ctx context.Context) int {
+
+func rejectionCount(t *testing.T, repository *rejectionRepository, ctx context.Context) int {
 	t.Helper()
-	count, err := s.Count(ctx)
+	count, err := repository.Count(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return count
 }
 
-func newTestRejectionHistoryStore(t *testing.T, cfg RejectionOptions) (*rejectionHistoryStore, *sqlitedb.Store) {
+func newTestRejectionRepository(t *testing.T, cfg RejectionOptions) (*rejectionRepository, *sqlitedb.Store) {
 	t.Helper()
 	db, err := sqlitedb.Open(context.Background(), filepath.Join(t.TempDir(), "milterguard.db"), sqlitedb.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return newRejectionHistoryStore(cfg, db, nil), db
+	return newRejectionRepository(cfg, db, nil), db
 }
 
-func rejectionEntries(t *testing.T, store stores.RejectionHistoryRepository, recipient string) []rejectionHistoryEntry {
+func rejectionEntries(t *testing.T, store stores.RejectionHistoryRepository, recipient string) []stores.Rejection {
 	t.Helper()
 	scope := stores.RecipientScope{Address: recipient}
 	if recipient == "*" {
@@ -90,9 +85,9 @@ func TestRejectionHistoryPersistsOneEventWithMultipleRecipients(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	store := newRejectionHistoryStore(cfg, db, nil)
+	store := newRejectionRepository(cfg, db, nil)
 	store.now = func() time.Time { return now }
-	id, err := store.addWithID(context.Background(), "Sender <NEWS@Example.NET>", "bounce@example.net", "Account alert", []string{"Alice@Example.com", "bob@example.com", "alice@example.com"}, []string{"Credential theft link"})
+	id, err := addRejection(store, context.Background(), "Sender <NEWS@Example.NET>", "bounce@example.net", "Account alert", []string{"Alice@Example.com", "bob@example.com", "alice@example.com"}, []string{"Credential theft link"})
 	if err != nil || id == 0 {
 		t.Fatalf("add ID = %d, err = %v", id, err)
 	}
@@ -115,14 +110,14 @@ func TestRejectionHistoryPersistsOneEventWithMultipleRecipients(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	reloaded := newRejectionHistoryStore(cfg, reopened, nil)
+	reloaded := newRejectionRepository(cfg, reopened, nil)
 	if got := rejectionEntries(t, reloaded, "bob@example.com"); len(got) != 1 || got[0].ID != id {
 		t.Fatalf("reloaded history = %#v", got)
 	}
 }
 
 func TestRejectionHistoryPreservesExplicitEventTimestamp(t *testing.T) {
-	store, _ := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: 365 * 24 * time.Hour, MaxEntries: 10})
+	store, _ := newTestRejectionRepository(t, RejectionOptions{Expiry: 365 * 24 * time.Hour, MaxEntries: 10})
 	store.now = func() time.Time { return time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC) }
 	eventTime := time.Date(2026, 9, 20, 23, 59, 59, 123456789, time.FixedZone("event-zone", -5*60*60))
 	id, err := store.AddRejection(context.Background(), stores.NewRejection{
@@ -144,16 +139,16 @@ func TestRejectionHistoryPreservesExplicitEventTimestamp(t *testing.T) {
 
 func TestRejectionHistoryListAppliesRequestedCutoff(t *testing.T) {
 	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
-	store, _ := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: 30 * 24 * time.Hour, MaxEntries: 10})
+	store, _ := newTestRejectionRepository(t, RejectionOptions{Expiry: 30 * 24 * time.Hour, MaxEntries: 10})
 	store.now = func() time.Time { return now.Add(-8 * 24 * time.Hour) }
-	if err := store.add(context.Background(), "old@example.net", "", "Old", []string{"local@example.com"}, []string{"unwanted"}); err != nil {
+	if err := addRejectionWithoutID(store, context.Background(), "old@example.net", "", "Old", []string{"local@example.com"}, []string{"unwanted"}); err != nil {
 		t.Fatal(err)
 	}
 	store.now = func() time.Time { return now }
-	if err := store.add(context.Background(), "new@example.net", "", "New", []string{"local@example.com"}, []string{"unwanted"}); err != nil {
+	if err := addRejectionWithoutID(store, context.Background(), "new@example.net", "", "New", []string{"local@example.com"}, []string{"unwanted"}); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := store.list(context.Background(), "local@example.com", now.Add(-7*24*time.Hour))
+	entries, err := listRejections(store, context.Background(), "local@example.com", now.Add(-7*24*time.Hour))
 	if err != nil || len(entries) != 1 || entries[0].Sender != "new@example.net" {
 		t.Fatalf("recent history = %#v, %v", entries, err)
 	}
@@ -161,38 +156,38 @@ func TestRejectionHistoryListAppliesRequestedCutoff(t *testing.T) {
 
 func TestRejectionHistoryGetByIDEnforcesRecipientAndExpiry(t *testing.T) {
 	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
-	store, _ := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: 24 * time.Hour, MaxEntries: 10})
+	store, _ := newTestRejectionRepository(t, RejectionOptions{Expiry: 24 * time.Hour, MaxEntries: 10})
 	store.now = func() time.Time { return now }
-	id, err := store.addWithID(context.Background(), "sender@example.net", "", "Subject", []string{"alice@example.com", "bob@example.com"}, []string{"Reason"})
+	id, err := addRejection(store, context.Background(), "sender@example.net", "", "Subject", []string{"alice@example.com", "bob@example.com"}, []string{"Reason"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, found, err := store.getByID(context.Background(), id, "ALICE@example.com", false)
+	entry, found, err := rejectionByID(store, context.Background(), id, "ALICE@example.com", false)
 	if err != nil || !found || !slices.Equal(entry.Recipients, []string{"alice@example.com"}) {
 		t.Fatalf("owner lookup = %#v, found=%v, err=%v", entry, found, err)
 	}
-	if _, found, err := store.getByID(context.Background(), id, "other@example.com", false); err != nil || found {
+	if _, found, err := rejectionByID(store, context.Background(), id, "other@example.com", false); err != nil || found {
 		t.Fatalf("unauthorized lookup: found=%v err=%v", found, err)
 	}
-	entry, found, err = store.getByID(context.Background(), id, "", true)
+	entry, found, err = rejectionByID(store, context.Background(), id, "", true)
 	if err != nil || !found || !slices.Equal(entry.Recipients, []string{"alice@example.com", "bob@example.com"}) {
 		t.Fatalf("administrator lookup = %#v, found=%v, err=%v", entry, found, err)
 	}
 	store.now = func() time.Time { return now.Add(24*time.Hour + time.Millisecond) }
-	if _, found, err := store.getByID(context.Background(), id, "alice@example.com", false); err != nil || found {
+	if _, found, err := rejectionByID(store, context.Background(), id, "alice@example.com", false); err != nil || found {
 		t.Fatalf("expired lookup: found=%v err=%v", found, err)
 	}
-	if _, found, err := store.getByID(context.Background(), id+1, "alice@example.com", false); err != nil || found {
+	if _, found, err := rejectionByID(store, context.Background(), id+1, "alice@example.com", false); err != nil || found {
 		t.Fatalf("missing lookup: found=%v err=%v", found, err)
 	}
 }
 
 func TestRejectionHistoryExpiryAndCapacityCascadeRecipients(t *testing.T) {
 	base := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
-	store, db := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 2})
+	store, db := newTestRejectionRepository(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 2})
 	store.now = func() time.Time { return base }
 	for _, sender := range []string{"one@example.net", "two@example.net", "three@example.net"} {
-		if err := store.add(context.Background(), sender, "", "", []string{"alice@example.com"}, []string{"unwanted"}); err != nil {
+		if err := addRejectionWithoutID(store, context.Background(), sender, "", "", []string{"alice@example.com"}, []string{"unwanted"}); err != nil {
 			t.Fatal(err)
 		}
 		base = base.Add(time.Minute)
@@ -200,7 +195,7 @@ func TestRejectionHistoryExpiryAndCapacityCascadeRecipients(t *testing.T) {
 	if got := rejectionEntries(t, store, "alice@example.com"); len(got) != 3 {
 		t.Fatalf("history was bounded before periodic cleanup: %#v", got)
 	}
-	if deleted, err := store.cleanup(context.Background()); err != nil {
+	if deleted, err := store.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	} else if deleted != 1 {
 		t.Fatalf("capacity cleanup deleted %d records, want 1", deleted)
@@ -217,7 +212,7 @@ func TestRejectionHistoryExpiryAndCapacityCascadeRecipients(t *testing.T) {
 	if got := rejectionEntries(t, store, "*"); len(got) != 0 {
 		t.Fatalf("expired history visible = %#v", got)
 	}
-	if deleted, err := store.cleanup(context.Background()); err != nil {
+	if deleted, err := store.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	} else if deleted != 2 {
 		t.Fatalf("deleted records = %d, want 2", deleted)
@@ -230,10 +225,10 @@ func TestRejectionHistoryExpiryAndCapacityCascadeRecipients(t *testing.T) {
 
 func TestRejectionHistorySameTimestampUsesNewestIDFirst(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
-	store, _ := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 10})
+	store, _ := newTestRejectionRepository(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 10})
 	store.now = func() time.Time { return now }
 	for _, sender := range []string{"older@example.net", "newer@example.net"} {
-		if err := store.add(context.Background(), sender, "", "", []string{"alice@example.com"}, nil); err != nil {
+		if err := addRejectionWithoutID(store, context.Background(), sender, "", "", []string{"alice@example.com"}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -245,46 +240,46 @@ func TestRejectionHistorySameTimestampUsesNewestIDFirst(t *testing.T) {
 
 func TestRejectionHistoryFormattingAndBounds(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 34, 56, 0, time.UTC)
-	store, _ := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 10})
+	store, _ := newTestRejectionRepository(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 10})
 	store.now = func() time.Time { return now }
-	if err := store.add(context.Background(), "news@example.net", "", "Urgent\naccount notice", []string{"alice@example.com", "bob@example.com"}, []string{"Phishing link", "Impersonated sender"}); err != nil {
+	if err := addRejectionWithoutID(store, context.Background(), "news@example.net", "", "Urgent\naccount notice", []string{"alice@example.com", "bob@example.com"}, []string{"Phishing link", "Impersonated sender"}); err != nil {
 		t.Fatal(err)
 	}
 	entry := rejectionEntries(t, store, "*")[0]
 	if entry.Subject != "Urgent account notice" || entry.Reason != "Phishing link; Impersonated sender" {
 		t.Fatalf("normalized entry = %#v", entry)
 	}
-	reason := rejectionReason([]string{"first\nreason", strings.Repeat("x", testMaxRejectionReasonRunes+100)})
-	if strings.ContainsAny(reason, "\r\n\t") || len([]rune(reason)) != testMaxRejectionReasonRunes+1 {
+	reason := rejectionReason([]string{"first\nreason", strings.Repeat("x", maxRejectionReasonRunes+100)})
+	if strings.ContainsAny(reason, "\r\n\t") || len([]rune(reason)) != maxRejectionReasonRunes+1 {
 		t.Fatalf("bounded reason = %q", reason)
 	}
 }
 
 func TestRejectionHistoryCapsRecipientsPerRecord(t *testing.T) {
-	store, _ := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 10})
-	recipients := make([]string, testMaxRejectionRecipients+10)
+	store, _ := newTestRejectionRepository(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 10})
+	recipients := make([]string, maxRejectionRecipients+10)
 	for i := range recipients {
 		recipients[i] = fmt.Sprintf("recipient-%03d@example.com", i)
 	}
-	if err := store.add(context.Background(), "sender@example.com", "", "test", recipients, nil); err != nil {
+	if err := addRejectionWithoutID(store, context.Background(), "sender@example.com", "", "test", recipients, nil); err != nil {
 		t.Fatal(err)
 	}
 	entries := rejectionEntries(t, store, "*")
-	if len(entries) != 1 || len(entries[0].Recipients) != testMaxRejectionRecipients {
+	if len(entries) != 1 || len(entries[0].Recipients) != maxRejectionRecipients {
 		t.Fatalf("stored entries = %#v", entries)
 	}
 }
 
 func TestRejectionHistoryConcurrentInsertions(t *testing.T) {
 	const count = 20
-	store, db := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: time.Hour, MaxEntries: count})
+	store, db := newTestRejectionRepository(t, RejectionOptions{Expiry: time.Hour, MaxEntries: count})
 	var wg sync.WaitGroup
 	errs := make(chan error, count)
 	for i := range count {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := store.addWithID(context.Background(), fmt.Sprintf("sender-%d@example.net", i), "", "test", []string{"local@example.com"}, nil)
+			_, err := addRejection(store, context.Background(), fmt.Sprintf("sender-%d@example.net", i), "", "test", []string{"local@example.com"}, nil)
 			errs <- err
 		}()
 	}
@@ -305,25 +300,25 @@ func TestRejectionHistoryConcurrentInsertions(t *testing.T) {
 }
 
 func TestRejectionHistoryRollsBackParentWhenRecipientInsertFails(t *testing.T) {
-	store, db := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 10})
+	store, db := newTestRejectionRepository(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 10})
 	if _, err := db.Exec(context.Background(), `CREATE TRIGGER reject_recipient BEFORE INSERT ON rejection_recipients
 		WHEN NEW.recipient = 'fail@example.com' BEGIN SELECT RAISE(ABORT, 'test failure'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.add(context.Background(), "sender@example.net", "", "test", []string{"ok@example.com", "fail@example.com"}, nil); err == nil {
+	if err := addRejectionWithoutID(store, context.Background(), "sender@example.net", "", "test", []string{"ok@example.com", "fail@example.com"}, nil); err == nil {
 		t.Fatal("recipient insertion failure was ignored")
 	}
-	if got := store.size(t, context.Background()); got != 0 {
+	if got := rejectionCount(t, store, context.Background()); got != 0 {
 		t.Fatalf("partially committed rejection count = %d", got)
 	}
 }
 
 func TestRejectionHistoryListReportsDatabaseFailure(t *testing.T) {
-	store, db := newTestRejectionHistoryStore(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 10})
+	store, db := newTestRejectionRepository(t, RejectionOptions{Expiry: time.Hour, MaxEntries: 10})
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.list(context.Background(), "local@example.com", time.Time{}); err == nil {
+	if _, err := listRejections(store, context.Background(), "local@example.com", time.Time{}); err == nil {
 		t.Fatal("closed database was reported as empty history")
 	}
 }

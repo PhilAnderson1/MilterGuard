@@ -20,7 +20,7 @@ type Analyzer interface {
 type evaluationResult struct {
 	proposed       action
 	selected       action
-	classification string
+	classification ai.Classification
 	score          float64
 	reasons        []string
 	visionImages   int
@@ -45,7 +45,7 @@ func (s *analysisService) analysisTimeout() time.Duration {
 
 // evaluate submits a prepared message to the analyzer and applies configured
 // mode and confidence thresholds to produce the final Milter action.
-func (s *analysisService) evaluate(parent context.Context, msg *message.Message, mode string, rejectScore float64, aiErrorAction string, includeAIInput bool) evaluationResult {
+func (s *analysisService) evaluate(parent context.Context, msg *message.Message, analysisContext message.AnalysisContext, mode string, rejectScore float64, aiErrorAction string, includeAIInput bool) evaluationResult {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(parent, ai.MaximumAnalysisDuration(s.ai))
 	defer cancel()
@@ -57,7 +57,7 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		return s.analysisFailure(ctx.Err(), started, mode, aiErrorAction)
 	}
 
-	prepared := msg.BuildAnalysis(s.ai.MaxBodyChars, message.VisionOptions{
+	prepared := msg.BuildAnalysis(analysisContext, s.ai.MaxBodyChars, message.VisionOptions{
 		Mode:         s.ai.VisionMode,
 		MinTextChars: s.ai.VisionMinTextChars,
 		MaxImages:    s.ai.MaxImages,
@@ -117,7 +117,7 @@ func (s *analysisService) logAIInput(msg *message.Message, input ai.Input, enabl
 
 func (s *analysisService) applyPolicy(decision ai.Decision, mode string, rejectScore float64) (action, action) {
 	proposed := actionAccept
-	if decision.Classification == "unwanted" && decision.Score >= rejectScore {
+	if decision.Classification == ai.ClassificationUnwanted && decision.Score >= rejectScore {
 		proposed = actionReject
 	}
 	return proposed, selectActionForMode(proposed, mode)

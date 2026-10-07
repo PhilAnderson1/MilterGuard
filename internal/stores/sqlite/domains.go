@@ -48,14 +48,11 @@ func (r *domainRepository) PutDomainRegistration(ctx context.Context, record sto
 	if r == nil || r.db == nil {
 		return fmt.Errorf("domain registration repository is unavailable")
 	}
-	err := r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO domain_registrations
-			(domain, registered_at_ms, expires_at_ms) VALUES (?, ?, ?)
-			ON CONFLICT(domain) DO UPDATE SET registered_at_ms = excluded.registered_at_ms,
-				expires_at_ms = excluded.expires_at_ms`, record.Domain,
-			unixMillis(record.RegisteredAt), unixMillis(record.ExpiresAt))
-		return err
-	})
+	_, err := r.db.Exec(ctx, `INSERT INTO domain_registrations
+		(domain, registered_at_ms, expires_at_ms) VALUES (?, ?, ?)
+		ON CONFLICT(domain) DO UPDATE SET registered_at_ms = excluded.registered_at_ms,
+			expires_at_ms = excluded.expires_at_ms`, record.Domain,
+		unixMillis(record.RegisteredAt), unixMillis(record.ExpiresAt))
 	if err != nil {
 		return fmt.Errorf("store domain registration: %w", err)
 	}

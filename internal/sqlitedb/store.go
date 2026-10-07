@@ -129,53 +129,48 @@ func sqliteDSN(path string, busyTimeout time.Duration) string {
 }
 
 func (s *Store) prepareSchema(ctx context.Context) error {
-	var version int
-	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return fmt.Errorf("read SQLite schema version: %w", err)
-	}
-	if version > CurrentSchemaVersion {
-		return fmt.Errorf("%w: database version %d is newer than supported version %d", ErrIncompatibleDatabase, version, CurrentSchemaVersion)
-	}
-	if version == 0 {
-		empty, err := s.databaseEmpty(ctx)
-		if err != nil {
-			return err
+	return s.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		var version int
+		if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+			return fmt.Errorf("read SQLite schema version: %w", err)
 		}
-		if !empty {
-			return fmt.Errorf("%w: unversioned database is not empty", ErrIncompatibleDatabase)
+		if version > CurrentSchemaVersion {
+			return fmt.Errorf("%w: database version %d is newer than supported version %d", ErrIncompatibleDatabase, version, CurrentSchemaVersion)
 		}
-	}
-	for next := version + 1; next <= CurrentSchemaVersion; next++ {
-		if err := s.applyMigration(ctx, next); err != nil {
-			return fmt.Errorf("apply SQLite schema migration %d: %w", next, err)
+		if version == 0 {
+			empty, err := databaseEmptyTx(ctx, tx)
+			if err != nil {
+				return err
+			}
+			if !empty {
+				return fmt.Errorf("%w: unversioned database is not empty", ErrIncompatibleDatabase)
+			}
 		}
-	}
-	return nil
+		for next := version + 1; next <= CurrentSchemaVersion; next++ {
+			name, script, err := migration(next)
+			if err != nil {
+				return fmt.Errorf("apply SQLite schema migration %d: %w", next, err)
+			}
+			if _, err := tx.ExecContext(ctx, script); err != nil {
+				return fmt.Errorf("apply SQLite schema migration %d: execute %s: %w", next, name, err)
+			}
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", next)); err != nil {
+				return fmt.Errorf("apply SQLite schema migration %d: set schema version: %w", next, err)
+			}
+		}
+		return nil
+	})
 }
 
-func (s *Store) databaseEmpty(ctx context.Context) (bool, error) {
+func databaseEmptyTx(ctx context.Context, tx *sql.Tx) (bool, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema
+	err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema
 		WHERE type IN ('table', 'index', 'trigger', 'view')
 		AND name NOT LIKE 'sqlite_%'`).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("inspect SQLite schema: %w", err)
 	}
 	return count == 0, nil
-}
-
-func (s *Store) applyMigration(ctx context.Context, version int) error {
-	name, script, err := migration(version)
-	if err != nil {
-		return err
-	}
-	return s.WithTx(ctx, nil, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, script); err != nil {
-			return fmt.Errorf("execute %s: %w", name, err)
-		}
-		_, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version))
-		return err
-	})
 }
 
 func migration(version int) (string, string, error) {

@@ -24,7 +24,7 @@ func (ss *session) applyAuthenticatedOnlySenderDomain(ctx context.Context) (bool
 }
 
 func authenticatedOnlyFromDomain(msg *message.Message, configured []string) string {
-	for _, value := range msg.Headers["from"] {
+	for _, value := range msg.HeaderValues("From") {
 		addresses, err := mail.ParseAddressList(value)
 		if err != nil {
 			addresses = recoverFromAddresses(value)

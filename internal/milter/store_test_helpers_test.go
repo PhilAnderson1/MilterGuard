@@ -131,7 +131,7 @@ const (
 	rejectedIPBlockRepeat          = stores.IPBlockLevelRepeat
 )
 
-func testCorrespondentMatch(t *testing.T, repository stores.CorrespondentRepository, ctx context.Context, correspondent string, recipients []string) stores.CorrespondentMatch {
+func testCorrespondentMatch(t *testing.T, repository stores.CorrespondentPolicyRepository, ctx context.Context, correspondent string, recipients []string) stores.CorrespondentMatch {
 	t.Helper()
 	result, err := repository.Match(ctx, correspondent, recipients)
 	if err != nil {
@@ -150,9 +150,9 @@ func (s *correspondentStore) touchInbound(ctx context.Context, correspondent str
 	return s.TouchInbound(ctx, correspondent, recipients)
 }
 
-func (s *correspondentStore) recordInboundClassification(ctx context.Context, correspondent string, recipients []string, complete bool, classification string, score, minimum float64, aligned bool) error {
+func (s *correspondentStore) recordInboundClassification(ctx context.Context, correspondent string, recipients []string, complete bool, verdict stores.InboundVerdict, score, minimum float64, aligned bool) error {
 	return s.RecordInboundClassification(ctx, stores.InboundClassification{Correspondent: correspondent, Recipients: recipients,
-		RecipientsComplete: complete, Classification: classification, Score: score, UnwantedMinScore: minimum, AuthenticationSatisfied: aligned})
+		RecipientsComplete: complete, Verdict: verdict, Score: score, UnwantedMinScore: minimum, AuthenticationSatisfied: aligned})
 }
 
 func (s *correspondentStore) match(t *testing.T, ctx context.Context, correspondent string, recipients []string) stores.CorrespondentMatch {

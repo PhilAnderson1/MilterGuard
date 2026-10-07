@@ -224,6 +224,17 @@ func TestHeaderVerifierRecognizesAlignedSPF(t *testing.T) {
 	}
 }
 
+func TestNewEvidenceUsesVerifiedDMARCAlignment(t *testing.T) {
+	evidence := NewEvidence([]Result{{
+		Method: MethodDMARC, Outcome: OutcomePass, Domain: "policy.example.net",
+		AlignedSPFPass: true,
+	}}, "sender.example.com")
+
+	if !evidence.DMARCAligned || !evidence.Results[0].Aligned {
+		t.Fatalf("verified DMARC alignment was discarded: %#v", evidence)
+	}
+}
+
 func TestEvidenceWithUnavailableMethodsPreservesExistingResults(t *testing.T) {
 	existing := []Result{{Method: MethodSPF, Outcome: OutcomePass, Domain: "example.com"}}
 	evidence := EvidenceWithUnavailableMethods(existing, "example.com", "authentication unavailable",

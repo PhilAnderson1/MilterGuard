@@ -1,6 +1,10 @@
 package milter
 
-import "strconv"
+import (
+	"strconv"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/ai"
+)
 
 const (
 	classificationHeader = "X-MilterGuard-Classification"
@@ -33,13 +37,14 @@ func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 		action := "accepted"
 		if result.proposed == actionReject {
 			action = acceptModeAction
-		} else if result.classification == "unwanted" {
+		} else if result.classification == ai.ClassificationUnwanted {
 			action = "accepted-below-threshold"
 		}
+		classification := string(result.classification)
 		headers = [][2]string{
-			{classificationHeader, result.classification},
+			{classificationHeader, classification},
 			{scoreHeader, strconv.FormatFloat(result.score, 'f', -1, 64)},
-			{confidenceHeader, ss.confidenceLabel(result.classification, result.score)},
+			{confidenceHeader, ss.confidenceLabel(classification, result.score)},
 			{actionHeader, action},
 		}
 	}

@@ -1,6 +1,7 @@
 package rejectedmail
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -66,7 +67,7 @@ func TestCleanupRemovesExpiredTreesHierarchically(t *testing.T) {
 	}
 	archive := New(Options{Directory: root, Retention: 30 * 24 * time.Hour, MaxTotalBytes: 1 << 20}, nil)
 	archive.now = func() time.Time { return time.Date(2026, 9, 7, 18, 0, 0, 0, time.UTC) }
-	if err := archive.Cleanup(); err != nil {
+	if err := archive.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	for _, relative := range []string{"2025", "2026/07", "2026/08/07"} {
@@ -78,6 +79,20 @@ func TestCleanupRemovesExpiredTreesHierarchically(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(relative))); err != nil {
 			t.Fatalf("retained path %s: %v", relative, err)
 		}
+	}
+}
+
+func TestCleanupHonorsCanceledContext(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "archive")
+	archive := New(Options{Directory: root, Retention: 24 * time.Hour, MaxTotalBytes: 1024}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := archive.Cleanup(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Cleanup() error = %v, want context cancellation", err)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("archive root created after cancellation: %v", err)
 	}
 }
 
@@ -93,10 +108,10 @@ func TestCleanupEnforcesTotalByteLimit(t *testing.T) {
 	if _, err := archive.Save([]byte("456")); err != nil {
 		t.Fatal(err)
 	}
-	if err := archive.Cleanup(); err != nil {
+	if err := archive.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	total, err := archive.archiveSize()
+	total, err := archive.archiveSize(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +135,7 @@ func TestCapacityCleanupIgnoresMessagesOutsideDateHierarchy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := archive.Cleanup(); err != nil {
+	if err := archive.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(validPath); err != nil {
@@ -129,7 +144,7 @@ func TestCapacityCleanupIgnoresMessagesOutsideDateHierarchy(t *testing.T) {
 	if _, err := os.Stat(strayPath); err != nil {
 		t.Fatalf("stray message outside date hierarchy was removed: %v", err)
 	}
-	total, err := archive.archiveSize()
+	total, err := archive.archiveSize(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +228,7 @@ func TestCapacityCleanupUsesModificationTime(t *testing.T) {
 	if _, err := archive.SaveWithRecordIDAt([]byte("newest"), 11, newTime.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := archive.Cleanup(); err != nil {
+	if err := archive.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {

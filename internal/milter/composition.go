@@ -19,14 +19,16 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/rdap"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 	"github.com/PhilAnderson1/MilterGuard/internal/systemdns"
 )
 
 type runtimeComponents struct {
-	sessions    *sessionDependencies
-	maintenance *maintenanceService
-	database    *sqlitedb.Store
-	err         error
+	sessions      *sessionDependencies
+	maintenance   *maintenanceService
+	serviceStatus stores.ServiceStatusStore
+	database      *sqlitedb.Store
+	err           error
 }
 
 // buildRuntime constructs the shared services used by Milter sessions and the
@@ -61,7 +63,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	domainRegistration := newDomainRegistrationStore(cfg.DomainRegistration, domainCache, domainLookup, log)
 
 	archive := newRejectedMailArchive(cfg.RejectionHistory, log)
-	commands := commandProcessor(cfg, correspondents, rejections, ipReputation, activityRepository, archive, systemdns.NewResolver(), log)
+	commands := commandProcessor(cfg, correspondents, rejections, ipReputation, activityRepository, activityRepository, archive, systemdns.NewResolver(), log)
 
 	var attachmentScanner *attachment.Scanner
 	if cfg.Attachments.BlockExecutables {
@@ -91,7 +93,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	}
 	attachments := &attachmentPolicyService{
 		cfg:     cfg.Attachments,
-		scanner: attachmentScanner, slots: make(chan struct{}, attachmentConcurrency(cfg.Milter.MaxConnections)), policy: policy,
+		scanner: attachmentScanner, slots: make(chan struct{}, attachmentConcurrency(cfg.Milter.MaxConnections)),
 	}
 	emailCommands := &emailCommandService{
 		cfg: cfg.EmailCommands, processor: commands, recipient: mailaddr.Normalize(cfg.EmailCommands.Recipient),
@@ -115,6 +117,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		protocol: protocolOptions{
 			timeout: cfg.Milter.Timeout.Value(), maxMessageSize: cfg.Milter.MaxMessageSize,
 			progressInterval: defaultMilterProgressInterval, exactStorage: cfg.Authentication.MessageStorage,
+			protectInternalReplies: cfg.EmailCommands.Enabled && cfg.EmailCommands.SendReplies,
 		},
 		analysis: analysis, activity: activity, policy: policy, attachments: attachments, commands: emailCommands,
 		dns:                &connectionDNSService{resolver: systemdns.NewResolver(), timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
@@ -128,7 +131,10 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		domains: domainRegistration, database: database, archive: archive, activity: activityRepository,
 		cleanupInterval: cfg.Persistence.CleanupInterval.Value(), log: log,
 	}
-	return runtimeComponents{sessions: sessions, maintenance: maintenance, database: database, err: errors.Join(tokenErr, databaseErr, authenticationErr)}
+	return runtimeComponents{
+		sessions: sessions, maintenance: maintenance, serviceStatus: activityRepository,
+		database: database, err: errors.Join(tokenErr, databaseErr, authenticationErr),
+	}
 }
 
 func attachmentConcurrency(maxConnections int) int {

@@ -84,13 +84,10 @@ type activityRepositoryStub struct {
 	found   bool
 }
 
-func (*activityRepositoryStub) AddActivity(context.Context, stores.ActivityEvent) error { return nil }
 func (r *activityRepositoryStub) ActivitySummary(_ context.Context, query stores.ActivityQuery) (stores.ActivitySummary, error) {
 	r.query = query
 	return r.summary, nil
 }
-func (*activityRepositoryStub) CleanupActivity(context.Context) (int64, error) { return 0, nil }
-func (*activityRepositoryStub) CountActivity(context.Context) (int, error)     { return 0, nil }
 func (r *activityRepositoryStub) ServiceStatus(context.Context) (stores.ServiceStatus, bool, error) {
 	return r.status, r.found, nil
 }
@@ -131,7 +128,7 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 		},
 		status: stores.ServiceStatus{StartedAt: now.Add(-time.Hour), Mode: stores.ServiceModeAccept}, found: true,
 	}
-	p := New(Dependencies{Activity: repository, ActivityExpiry: 365 * 24 * time.Hour, Now: func() time.Time { return now }})
+	p := New(Dependencies{Activity: repository, ServiceStatus: repository, ActivityExpiry: 365 * 24 * time.Hour, Now: func() time.Time { return now }})
 	response, err := p.ExecuteLine(context.Background(), "ACTIVITY", Actor{Administrator: true})
 	if err != nil {
 		t.Fatal(err)

@@ -180,12 +180,7 @@ func (v *Verifier) verifyTransaction(ctx context.Context, transaction mailauth.T
 	translatedDMARC := translateDMARC(dmarcResult, transaction.VisibleFromDomain)
 	translatedDMARC.PolicyApplied = useResult
 	results = append(results, translatedDMARC)
-	evidence := mailauth.NewEvidence(results, transaction.VisibleFromDomain)
-	if translatedDMARC.Outcome == mailauth.OutcomePass && (translatedDMARC.AlignedSPFPass || translatedDMARC.AlignedDKIMPass) {
-		evidence.DMARCAligned = true
-		evidence.Results[len(evidence.Results)-1].Aligned = true
-	}
-	return evidence, nil
+	return mailauth.NewEvidence(results, transaction.VisibleFromDomain), nil
 }
 
 func (v *Verifier) verifySPF(ctx context.Context, transaction mailauth.Transaction) (mailauth.Result, spf.Status, dns.Domain) {

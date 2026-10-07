@@ -13,19 +13,6 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
-func canonicalIPPrefix(prefix netip.Prefix) (netip.Prefix, bool) {
-	addr, bits := prefix.Addr(), prefix.Bits()
-	if addr.Is4In6() {
-		if bits < 96 {
-			return netip.Prefix{}, false
-		}
-		addr, bits = addr.Unmap(), bits-96
-	} else if addr.Is6() {
-		addr = addr.WithZone("")
-	}
-	return netip.PrefixFrom(addr, bits).Masked(), true
-}
-
 // ipReputationStore applies Milter policy around the persistent repository.
 type ipReputationStore struct {
 	repository      stores.IPReputationRepository
@@ -43,18 +30,8 @@ func newIPReputationStore(cfg config.IPReputationConfig, repository stores.IPRep
 		repository: repository, enabledFeature: ipReputationFeaturesEnabled(cfg), rejectMessage: cfg.RejectMessage, log: log,
 	}
 	for _, entry := range cfg.IPAllowlist {
-		if prefix, err := netip.ParsePrefix(entry); err == nil {
-			if prefix, ok := canonicalIPPrefix(prefix); ok {
-				policy.allowlist = append(policy.allowlist, prefix)
-			}
-			continue
-		}
-		if addr, err := netip.ParseAddr(entry); err == nil {
-			bits := 128
-			if addr.Is4() || addr.Is4In6() {
-				bits = 32
-			}
-			policy.allowlist = append(policy.allowlist, netip.PrefixFrom(netsafety.CanonicalIP(addr), bits))
+		if prefix, err := netsafety.ParseIPPrefix(entry); err == nil {
+			policy.allowlist = append(policy.allowlist, prefix)
 		}
 	}
 	for _, domain := range cfg.DomainAllowlist {
@@ -112,7 +89,7 @@ func (s *ipReputationStore) add(ctx context.Context, addr netip.Addr, dns connec
 }
 
 func (s *ipReputationStore) lookup(ctx context.Context, addr netip.Addr) (stores.IPBlock, bool) {
-	block, found, err := s.ActiveBlock(ctx, addr)
+	block, found, err := s.ActiveBlockForAttempt(ctx, addr)
 	if err != nil {
 		s.logDatabaseError("look up sending IP reputation", err)
 		return stores.IPBlock{}, false
@@ -127,7 +104,7 @@ func (s *ipReputationStore) RecordLegitimate(ctx context.Context, addr netip.Add
 	return s.repository.RecordLegitimate(ctx, netsafety.CanonicalIP(addr))
 }
 
-func (s *ipReputationStore) ActiveBlock(ctx context.Context, addr netip.Addr) (stores.IPBlock, bool, error) {
+func (s *ipReputationStore) ActiveBlockForAttempt(ctx context.Context, addr netip.Addr) (stores.IPBlock, bool, error) {
 	if !s.enabled() || !addr.IsValid() {
 		return stores.IPBlock{}, false, nil
 	}
@@ -135,7 +112,7 @@ func (s *ipReputationStore) ActiveBlock(ctx context.Context, addr netip.Addr) (s
 	if _, ok := s.allowed(addr); ok {
 		return stores.IPBlock{}, false, nil
 	}
-	return s.repository.ActiveBlock(ctx, addr)
+	return s.repository.ActiveBlockForAttempt(ctx, addr)
 }
 
 func (s *ipReputationStore) AddManualBlock(ctx context.Context, addr netip.Addr) (stores.IPBlock, error) {

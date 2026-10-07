@@ -1,6 +1,7 @@
 package rejectedmail
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -50,33 +51,39 @@ func New(opts Options, log *slog.Logger) *Archive {
 
 // Cleanup removes expired date directories, then deletes the oldest remaining
 // messages only when the archive exceeds its target maximum size.
-func (a *Archive) Cleanup() error {
-	if err := os.MkdirAll(a.opts.Directory, 0750); err != nil {
+func (a *Archive) Cleanup(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if err := os.MkdirAll(a.opts.Directory, 0750); err != nil {
+		return fmt.Errorf("create rejected mail archive root: %w", err)
 	}
 	cutoff := dateOnly(a.now().UTC().Add(-a.opts.Retention))
-	removedTrees, err := a.removeExpiredDateTrees(cutoff)
+	removedTrees, err := a.removeExpiredDateTrees(ctx, cutoff)
 	if err != nil {
-		return err
+		return fmt.Errorf("remove expired rejected mail: %w", err)
 	}
-	totalBytes, err := a.archiveSize()
+	totalBytes, err := a.archiveSize(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("measure rejected mail archive: %w", err)
 	}
 	removedCapacity := 0
 	if totalBytes > a.opts.MaxTotalBytes {
-		files, indexedBytes, err := a.indexFiles()
+		files, indexedBytes, err := a.indexFiles(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("index rejected mail archive: %w", err)
 		}
 		totalBytes = indexedBytes
 		sortStoredFiles(files)
 		for _, file := range files {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if totalBytes <= a.opts.MaxTotalBytes {
 				break
 			}
 			if err := os.Remove(file.path); err != nil {
-				return err
+				return fmt.Errorf("remove rejected mail message %q: %w", file.path, err)
 			}
 			totalBytes -= file.size
 			removedCapacity++
@@ -202,13 +209,16 @@ func openArchiveFile(path, directory string) (*os.File, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
 }
 
-func (a *Archive) removeExpiredDateTrees(cutoff time.Time) (int, error) {
+func (a *Archive) removeExpiredDateTrees(ctx context.Context, cutoff time.Time) (int, error) {
 	years, err := os.ReadDir(a.opts.Directory)
 	if err != nil {
 		return 0, err
 	}
 	removed := 0
 	for _, yearEntry := range years {
+		if err := ctx.Err(); err != nil {
+			return removed, err
+		}
 		year, ok := dateDirectoryNumber(yearEntry, 4, 1, 9999)
 		if !ok {
 			continue
@@ -226,6 +236,9 @@ func (a *Archive) removeExpiredDateTrees(cutoff time.Time) (int, error) {
 			return removed, err
 		}
 		for _, monthEntry := range months {
+			if err := ctx.Err(); err != nil {
+				return removed, err
+			}
 			monthNumber, ok := dateDirectoryNumber(monthEntry, 2, 1, 12)
 			if !ok {
 				continue
@@ -244,6 +257,9 @@ func (a *Archive) removeExpiredDateTrees(cutoff time.Time) (int, error) {
 				return removed, err
 			}
 			for _, dayEntry := range days {
+				if err := ctx.Err(); err != nil {
+					return removed, err
+				}
 				day, ok := validDayDirectory(dayEntry, year, month)
 				if !ok || !day.Before(cutoff) {
 					continue
@@ -260,9 +276,12 @@ func (a *Archive) removeExpiredDateTrees(cutoff time.Time) (int, error) {
 	return removed, nil
 }
 
-func (a *Archive) archiveSize() (int64, error) {
+func (a *Archive) archiveSize(ctx context.Context) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(a.opts.Directory, func(path string, entry fs.DirEntry, err error) error {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
 		if err != nil {
 			return err
 		}
@@ -285,10 +304,13 @@ func (a *Archive) archiveSize() (int64, error) {
 	return total, err
 }
 
-func (a *Archive) indexFiles() ([]storedFile, int64, error) {
+func (a *Archive) indexFiles(ctx context.Context) ([]storedFile, int64, error) {
 	var files []storedFile
 	var total int64
 	err := filepath.WalkDir(a.opts.Directory, func(path string, entry fs.DirEntry, err error) error {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
 		if err != nil {
 			return err
 		}

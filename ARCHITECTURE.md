@@ -6,8 +6,8 @@ when MilterGuard is changed.
 
 ## Executable and operating modes
 
-`cmd/milterguard` is the composition root. It loads and validates configuration,
-sets up logging, and selects one of three paths:
+`cmd/milterguard` is the executable entry point. It loads and validates
+configuration, sets up logging, and selects one of three paths:
 
 - Normal service mode constructs the AI client and Milter server, opens the
   configured listener, and serves Postfix connections.
@@ -17,7 +17,9 @@ sets up logging, and selects one of three paths:
   installation without starting the server.
 
 The executable should contain startup and presentation logic, not filtering
-policy or persistence queries.
+policy or persistence queries. Normal-service dependency composition occurs in
+`milter.buildRuntime`; standalone command mode has its own narrower composition
+path.
 
 ## Package map
 
@@ -41,9 +43,12 @@ policy or persistence queries.
 | `internal/stores/sqlite` | Implements the repository contracts with indexed SQLite operations. |
 | `internal/systemdns` | Constructs explicit resolvers for non-authentication DNS users, isolating them from dependency changes to the process-wide default resolver. |
 
-The dependency direction is intentional. Protocol and policy code depends on
-interfaces in `stores`; concrete SQL is confined to `stores/sqlite`, while
-connection-level database mechanics remain in `sqlitedb`.
+The dependency direction is intentional. Runtime protocol and policy logic
+depends on interfaces in `stores`; concrete SQL is confined to
+`stores/sqlite`, while connection-level database mechanics remain in
+`sqlitedb`. The Milter composition and lifecycle layer opens, owns, checkpoints,
+and closes the shared `sqlitedb.Store`, then injects repository interfaces into
+policy services.
 
 ## Service construction
 
@@ -156,9 +161,16 @@ Repository behavior lives in `internal/stores/sqlite`:
   singleton status row records the current serving process's start time and
   mode for administration reports.
 
-Expired rows and capacity excess are removed during periodic maintenance.
-Queries must independently exclude expired data when stale rows must not be
-visible between cleanup passes.
+Correspondent, IP-reputation, rejection-history, and domain-registration rows
+are cleaned at startup and at `persistence.cleanup_interval`; their maintenance
+also enforces configured capacity limits. Activity history is expiry-based and
+uncapped, and is cleaned at startup and once per day thereafter.
+
+Rejected messages are separate filesystem persistence managed by
+`internal/rejectedmail`, not SQLite. Its date-tree retention and target storage
+limit are enforced at startup and by the daily maintenance pass. Queries must
+independently exclude expired data when stale rows must not be visible between
+cleanup passes.
 
 The Milter service and standalone command mode may access the database
 concurrently. WAL mode, short transactions, the busy timeout, and bounded busy
@@ -240,6 +252,15 @@ protocol behavior. Cross-component Milter tests exercise complete session
 paths with injected services. Race tests cover the principal concurrent
 packages and repository use.
 
+Repository tools support broader validation:
+
+- `tools/replay_mailbox.py` replays `.eml` corpora through a running test
+  Milter and compares the responses with expected actions.
+- `tools/authcorpus` compares authentication results saved in `.eml` files
+  with fresh results from the internal verifier.
+- `tools/authstress` measures bounded exact-message storage under the
+  configured concurrency and message-size limits.
+
 For changes that affect runtime wiring, run at least:
 
 ```sh
@@ -248,5 +269,6 @@ go test -race ./internal/milter ./internal/admincmd ./internal/stores/...
 go vet ./cmd/... ./internal/...
 ```
 
-The release build is compiled statically and both distributed configuration
-files should pass `--check-config` before installation.
+The release build is compiled statically, and the distributed sample
+configuration in `configs/milterguard.yaml` should pass `--check-config`
+before installation.

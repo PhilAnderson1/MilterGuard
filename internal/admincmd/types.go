@@ -52,7 +52,8 @@ type Dependencies struct {
 	Correspondents  stores.CorrespondentAdminRepository
 	Rejections      stores.RejectionRepository
 	IPReputation    stores.IPReputationAdminRepository
-	Activity        stores.ActivityRepository
+	Activity        stores.ActivityReporter
+	ServiceStatus   stores.ServiceStatusStore
 	MessageSource   RejectionMessageSource
 	IPResolver      IPHostnameResolver
 	MaxMessageSize  int64
@@ -66,7 +67,8 @@ type Processor struct {
 	correspondents  stores.CorrespondentAdminRepository
 	rejections      stores.RejectionRepository
 	ipReputation    stores.IPReputationAdminRepository
-	activity        stores.ActivityRepository
+	activity        stores.ActivityReporter
+	serviceStatus   stores.ServiceStatusStore
 	messageSource   RejectionMessageSource
 	ipResolver      IPHostnameResolver
 	maxMessageSize  int64
@@ -89,6 +91,7 @@ func New(deps Dependencies) *Processor {
 		correspondents: deps.Correspondents, rejections: deps.Rejections,
 		ipReputation: deps.IPReputation, messageSource: deps.MessageSource,
 		activity:       deps.Activity,
+		serviceStatus:  deps.ServiceStatus,
 		ipResolver:     deps.IPResolver,
 		maxMessageSize: deps.MaxMessageSize, databaseTimeout: deps.DatabaseTimeout, activityExpiry: deps.ActivityExpiry,
 		now: deps.Now, log: deps.Logger,

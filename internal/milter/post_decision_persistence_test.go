@@ -82,7 +82,7 @@ func TestAttachmentRejectionPersistsAfterMessageContextCancellation(t *testing.T
 	defer clientConn.Close()
 	ss := newSession(&sessionDependencies{
 		mode: "enforce", log: log, analysis: &analysisService{}, protocol: protocolOptions{maxMessageSize: 1024},
-		attachments: &attachmentPolicyService{cfg: config.AttachmentsConfig{RejectMessage: "blocked"}, policy: policy},
+		attachments: &attachmentPolicyService{cfg: config.AttachmentsConfig{RejectMessage: "blocked"}}, policy: policy,
 	}, serverConn)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

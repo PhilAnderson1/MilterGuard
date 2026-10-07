@@ -23,6 +23,12 @@ type correspondentRepository struct {
 	log     *slog.Logger
 }
 
+type candidateEvent struct {
+	recipient string
+	count     int
+	promoted  bool
+}
+
 // NewCorrespondents binds correspondent policy and administration operations
 // to the shared SQLite database.
 func NewCorrespondents(db *sqlitedb.Store, options CorrespondentOptions, log *slog.Logger) stores.CorrespondentRepository {
@@ -30,6 +36,15 @@ func NewCorrespondents(db *sqlitedb.Store, options CorrespondentOptions, log *sl
 }
 
 var _ stores.CorrespondentRepository = (*correspondentRepository)(nil)
+
+func (r *correspondentRepository) validateScope() error {
+	switch r.options.Scope {
+	case stores.CorrespondentScopeGlobal, stores.CorrespondentScopePerSender:
+		return nil
+	default:
+		return fmt.Errorf("invalid correspondent scope %q", r.options.Scope)
+	}
+}
 
 func (r *correspondentRepository) LearnAuthenticated(ctx context.Context, localAddress string, recipients []string) error {
 	if r == nil || r.db == nil || !r.options.LearnAuthenticatedRecipients {
@@ -105,15 +120,18 @@ func (r *correspondentRepository) TouchInbound(ctx context.Context, corresponden
 	if r == nil || r.db == nil || !r.options.UseAllowlist {
 		return nil
 	}
+	if err := r.validateScope(); err != nil {
+		return err
+	}
 	if correspondent == "" {
 		return nil
 	}
 	now := r.now().UTC()
+	filter := r.qualifiedActiveFragment(now)
 	query := `UPDATE correspondents SET last_activity_at_ms = ?
-		WHERE correspondent = ? AND ` + r.qualifiedSQL() + r.notStaleSQL()
-	args := []any{unixMillis(now), correspondent, r.options.LegitimateSenderMinMessages}
-	args = append(args, r.notStaleArgs(now)...)
-	if r.options.Scope == "per_sender" {
+		WHERE correspondent = ? AND ` + filter.text
+	args := append([]any{unixMillis(now), correspondent}, filter.args...)
+	if r.options.Scope == stores.CorrespondentScopePerSender {
 		addresses := sortedSet(normalizedAddressSet(recipients, maxCorrespondentRecipients))
 		if len(addresses) == 0 {
 			return nil
@@ -136,6 +154,9 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 	if r == nil || r.db == nil || !input.RecipientsComplete {
 		return nil
 	}
+	if err := r.validateScope(); err != nil {
+		return err
+	}
 	correspondent := input.Correspondent
 	recipientSet := normalizedAddressSet(input.Recipients, maxCorrespondentRecipients)
 	if correspondent == "" || len(recipientSet) == 0 {
@@ -143,13 +164,21 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 	}
 	recipientList := sortedSet(recipientSet)
 	now := r.now().UTC()
-	if input.Classification == "unwanted" {
-		if input.Score < input.UnwantedMinScore {
-			return nil
-		}
+	action, err := stores.DecideInboundLearning(stores.InboundLearningPolicy{
+		LearnLegitimateSenders: r.options.LearnLegitimateSenders,
+		LegitimateMinScore:     r.options.LegitimateSenderMinScore,
+		RequireAuthentication:  r.options.LegitimateSenderRequireAuthentication,
+	}, input)
+	if err != nil {
+		return err
+	}
+	if action == stores.InboundLearningIgnore {
+		return nil
+	}
+	if action == stores.InboundLearningRemove {
 		query := `DELETE FROM correspondents WHERE correspondent = ? AND whitelist_type = ?`
 		args := []any{correspondent, stores.CorrespondentKindRepeatedLegitimateInbound}
-		if r.options.Scope == "per_sender" {
+		if r.options.Scope == stores.CorrespondentScopePerSender {
 			query += " AND local_address IN (" + placeholders(len(recipientList)) + ")"
 			for _, recipient := range recipientList {
 				args = append(args, recipient)
@@ -165,16 +194,8 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 		}
 		return nil
 	}
-	if input.Classification != "legitimate" {
-		return nil
-	}
 
-	qualifying := r.options.LearnLegitimateSenders && input.Score >= r.options.LegitimateSenderMinScore && (!r.options.LegitimateSenderRequireAuthentication || input.AuthenticationSatisfied)
-	type candidateEvent struct {
-		recipient string
-		count     int
-		promoted  bool
-	}
+	advance := action == stores.InboundLearningAdvance
 	var events []candidateEvent
 	target := `correspondent=? AND local_address IN (` + placeholders(len(recipientList)) + `)`
 	targetArgs := make([]any, 1, len(recipientList)+1)
@@ -184,7 +205,7 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 	}
 	var insertQuery string
 	var insertArgs []any
-	if qualifying {
+	if advance {
 		insertQuery = `INSERT INTO correspondents
 			(local_address, correspondent, learned_at_ms, last_activity_at_ms, whitelist_type, legitimate_email_count)
 			VALUES ` + valuePlaceholders(len(recipientList), 6) + `
@@ -195,7 +216,7 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 			insertArgs = append(insertArgs, recipient, correspondent, unixMillis(now), unixMillis(now), stores.CorrespondentKindRepeatedLegitimateInbound, 1)
 		}
 	}
-	err := r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+	err = r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		events = nil
 		if cutoff, enabled := r.staleCutoff(now); enabled {
 			args := append(append([]any{}, targetArgs...), cutoff)
@@ -203,7 +224,7 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 				return err
 			}
 		}
-		if qualifying {
+		if advance {
 			args := []any{unixMillis(now)}
 			args = append(args, targetArgs...)
 			args = append(args, stores.CorrespondentKindRepeatedLegitimateInbound, r.options.LegitimateSenderMinMessages)
@@ -214,49 +235,31 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 			if err != nil {
 				return err
 			}
-			for rows.Next() {
-				var event candidateEvent
-				if err := rows.Scan(&event.recipient, &event.count); err != nil {
-					rows.Close()
-					return err
-				}
-				event.promoted = event.count >= r.options.LegitimateSenderMinMessages
-				events = append(events, event)
-			}
-			if err := rows.Close(); err != nil {
+			updated, err := scanCandidateEvents(rows, r.options.LegitimateSenderMinMessages)
+			if err != nil {
 				return err
 			}
-			if err := rows.Err(); err != nil {
-				return err
-			}
+			events = append(events, updated...)
 		}
+		filter := r.qualifiedFragment()
 		args := []any{unixMillis(now)}
 		args = append(args, targetArgs...)
-		args = append(args, r.options.LegitimateSenderMinMessages, unixMillis(now))
+		args = append(args, filter.args...)
+		args = append(args, unixMillis(now))
 		if _, err := tx.ExecContext(ctx, `UPDATE correspondents SET last_activity_at_ms=?
-			WHERE `+target+` AND `+r.qualifiedSQL()+` AND last_activity_at_ms<>?`, args...); err != nil {
+			WHERE `+target+` AND `+filter.text+` AND last_activity_at_ms<>?`, args...); err != nil {
 			return err
 		}
-		if qualifying {
+		if advance {
 			rows, err := tx.QueryContext(ctx, insertQuery, insertArgs...)
 			if err != nil {
 				return err
 			}
-			for rows.Next() {
-				var event candidateEvent
-				if err := rows.Scan(&event.recipient, &event.count); err != nil {
-					rows.Close()
-					return err
-				}
-				event.promoted = event.count >= r.options.LegitimateSenderMinMessages
-				events = append(events, event)
-			}
-			if err := rows.Close(); err != nil {
+			inserted, err := scanCandidateEvents(rows, r.options.LegitimateSenderMinMessages)
+			if err != nil {
 				return err
 			}
-			if err := rows.Err(); err != nil {
-				return err
-			}
+			events = append(events, inserted...)
 		}
 		return nil
 	})
@@ -277,6 +280,27 @@ func (r *correspondentRepository) RecordInboundClassification(ctx context.Contex
 	return nil
 }
 
+func scanCandidateEvents(rows *sql.Rows, promotionCount int) ([]candidateEvent, error) {
+	var events []candidateEvent
+	for rows.Next() {
+		var event candidateEvent
+		if err := rows.Scan(&event.recipient, &event.count); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		event.promoted = event.count >= promotionCount
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
 // Match expects the canonical correspondent address derived for the current
 // message.
 func (r *correspondentRepository) Match(ctx context.Context, correspondent string, recipients []string) (stores.CorrespondentMatch, error) {
@@ -287,12 +311,15 @@ func (r *correspondentRepository) Match(ctx context.Context, correspondent strin
 	if correspondent == "" {
 		return result, nil
 	}
+	if err := r.validateScope(); err != nil {
+		return result, err
+	}
 	now := r.now().UTC()
-	if r.options.Scope == "global" {
+	filter := r.qualifiedActiveFragment(now)
+	if r.options.Scope == stores.CorrespondentScopeGlobal {
 		var found int
-		query := `SELECT EXISTS(SELECT 1 FROM correspondents WHERE correspondent = ? AND ` + r.qualifiedSQL() + r.notStaleSQL() + `)`
-		args := []any{correspondent, r.options.LegitimateSenderMinMessages}
-		args = append(args, r.notStaleArgs(now)...)
+		query := `SELECT EXISTS(SELECT 1 FROM correspondents WHERE correspondent = ? AND ` + filter.text + `)`
+		args := append([]any{correspondent}, filter.args...)
 		if err := r.db.QueryRow(ctx, query, args...).Scan(&found); err != nil {
 			return result, fmt.Errorf("match correspondent: %w", err)
 		}
@@ -303,10 +330,9 @@ func (r *correspondentRepository) Match(ctx context.Context, correspondent strin
 	if len(addresses) == 0 {
 		return result, nil
 	}
-	query := `SELECT count(*) FROM correspondents WHERE correspondent = ? AND ` + r.qualifiedSQL() + r.notStaleSQL() +
+	query := `SELECT count(*) FROM correspondents WHERE correspondent = ? AND ` + filter.text +
 		" AND local_address IN (" + placeholders(len(addresses)) + ")"
-	args := []any{correspondent, r.options.LegitimateSenderMinMessages}
-	args = append(args, r.notStaleArgs(now)...)
+	args := append([]any{correspondent}, filter.args...)
 	for _, address := range addresses {
 		args = append(args, address)
 	}
@@ -338,10 +364,10 @@ func (r *correspondentRepository) ListCorrespondents(ctx context.Context, list s
 		}
 	}
 	now := r.now().UTC()
+	filter := r.qualifiedActiveFragment(now)
 	query := `SELECT id, local_address, correspondent, learned_at_ms, last_activity_at_ms,
-		whitelist_type, legitimate_email_count FROM correspondents WHERE ` + r.qualifiedSQL() + r.notStaleSQL()
-	args := []any{r.options.LegitimateSenderMinMessages}
-	args = append(args, r.notStaleArgs(now)...)
+		whitelist_type, legitimate_email_count FROM correspondents WHERE ` + filter.text
+	args := append([]any(nil), filter.args...)
 	if !list.ActiveSince.IsZero() {
 		query += " AND last_activity_at_ms >= ?"
 		args = append(args, unixMillis(list.ActiveSince))
@@ -368,31 +394,30 @@ func (r *correspondentRepository) ListCorrespondents(ctx context.Context, list s
 	if err := rows.Err(); err != nil {
 		return stores.CorrespondentPage{}, fmt.Errorf("read correspondent allowlist: %w", err)
 	}
-	truncated := len(result) > list.Limit
-	if truncated {
-		result = result[:list.Limit]
-	}
+	result, truncated := limitedPage(result, list.Limit)
 	return stores.CorrespondentPage{Entries: result, Truncated: truncated}, nil
 }
 
-func (r *correspondentRepository) qualifiedSQL() string {
-	return `(whitelist_type IN ('authenticated_outbound', 'manual') OR
-		(whitelist_type = 'repeated_legitimate_inbound' AND legitimate_email_count >= ?))`
+type queryFragment struct {
+	text string
+	args []any
 }
 
-func (r *correspondentRepository) notStaleSQL() string {
-	if r.options.StaleAfter <= 0 {
-		return ""
+func (r *correspondentRepository) qualifiedFragment() queryFragment {
+	return queryFragment{
+		text: `(whitelist_type IN ('authenticated_outbound', 'manual') OR
+			(whitelist_type = 'repeated_legitimate_inbound' AND legitimate_email_count >= ?))`,
+		args: []any{r.options.LegitimateSenderMinMessages},
 	}
-	return " AND last_activity_at_ms >= ?"
 }
 
-func (r *correspondentRepository) notStaleArgs(now time.Time) []any {
-	cutoff, enabled := r.staleCutoff(now)
-	if !enabled {
-		return nil
+func (r *correspondentRepository) qualifiedActiveFragment(now time.Time) queryFragment {
+	fragment := r.qualifiedFragment()
+	if cutoff, enabled := r.staleCutoff(now); enabled {
+		fragment.text += " AND last_activity_at_ms >= ?"
+		fragment.args = append(fragment.args, cutoff)
 	}
-	return []any{cutoff}
+	return fragment
 }
 
 func (r *correspondentRepository) staleCutoff(now time.Time) (int64, bool) {

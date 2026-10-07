@@ -1,6 +1,7 @@
 package netsafety
 
 import (
+	"fmt"
 	"net/netip"
 	"strings"
 )
@@ -26,6 +27,31 @@ func CanonicalIP(addr netip.Addr) netip.Addr {
 		addr = addr.WithZone("")
 	}
 	return addr.Unmap()
+}
+
+// ParseIPPrefix parses an IP address or CIDR prefix and returns one canonical
+// prefix representation. IPv4-mapped IPv6 values become ordinary IPv4 so
+// configured prefixes and runtime addresses use the same address family.
+func ParseIPPrefix(value string) (netip.Prefix, error) {
+	value = strings.TrimSpace(value)
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		addr, bits := prefix.Addr(), prefix.Bits()
+		if addr.Is4In6() {
+			if bits < 96 {
+				return netip.Prefix{}, fmt.Errorf("IPv4-mapped prefix must be /96 or longer")
+			}
+			addr, bits = addr.Unmap(), bits-96
+		} else {
+			addr = CanonicalIP(addr)
+		}
+		return netip.PrefixFrom(addr, bits).Masked(), nil
+	}
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("parse IP address or prefix: %w", err)
+	}
+	addr = CanonicalIP(addr)
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
 }
 
 // AddressRoutable reports whether addr is a globally routable address that is

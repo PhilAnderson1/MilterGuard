@@ -51,7 +51,7 @@ type InboundClassification struct {
 	Correspondent           string
 	Recipients              []string
 	RecipientsComplete      bool
-	Classification          string
+	Verdict                 InboundVerdict
 	Score                   float64
 	UnwantedMinScore        float64
 	AuthenticationSatisfied bool

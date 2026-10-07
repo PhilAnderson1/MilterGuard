@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,6 +51,46 @@ func TestOpenCreatesAndReopensSchema(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("rejection count = %d, want 1", count)
+	}
+}
+
+func TestConcurrentOpenSerializesInitialSchemaMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "concurrent-open.db")
+	const openers = 8
+	start := make(chan struct{})
+	errorsByOpener := make(chan error, openers)
+	var ready sync.WaitGroup
+	ready.Add(openers)
+	for range openers {
+		go func() {
+			ready.Done()
+			<-start
+			store, err := Open(context.Background(), path, DefaultOptions())
+			if err == nil {
+				err = store.Close()
+			}
+			errorsByOpener <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	for range openers {
+		if err := <-errorsByOpener; err != nil {
+			t.Fatalf("concurrent Open() error = %v", err)
+		}
+	}
+
+	store, err := Open(context.Background(), path, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var version int
+	if err := store.QueryRow(context.Background(), "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != CurrentSchemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, CurrentSchemaVersion)
 	}
 }
 

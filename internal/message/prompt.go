@@ -28,10 +28,10 @@ var plainHTTPURL = regexp.MustCompile(`(?i)https?://[^\s<>"']+`)
 
 // BuildAnalysis produces the bounded text and optional decoded inline images
 // supplied to the AI client after MIME and HTML processing.
-func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
-	keys := make([]string, 0, len(m.Headers))
-	for key := range m.Headers {
-		if promptHeaders[key] && !(m.AuthenticatedSubmission && key == "from") {
+func (m *Message) BuildAnalysis(context AnalysisContext, maxChars int, vision VisionOptions) Analysis {
+	keys := make([]string, 0, len(m.headers))
+	for key := range m.headers {
+		if promptHeaders[key] && !(context.AuthenticatedSubmission && key == "from") {
 			keys = append(keys, key)
 		}
 	}
@@ -39,12 +39,12 @@ func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
 	var b strings.Builder
 	b.WriteString("ANALYSIS TIME:\n")
 	fmt.Fprintf(&b, "Server time: %s UTC\n\n", m.analysisTime.UTC().Format(time.DateTime))
-	if !m.AuthenticatedSubmission {
-		writeConnectionInformation(&b, m.Connection)
+	if !context.AuthenticatedSubmission {
+		writeConnectionInformation(&b, context.Connection)
 	}
-	writeCorrespondentInformation(&b, m.Correspondent)
-	writeRecipientInformation(&b, m)
-	writeAuthenticationInformation(&b, m)
+	writeCorrespondentInformation(&b, context.Correspondent)
+	writeRecipientInformation(&b, m, context.AuthenticatedSubmission)
+	writeAuthenticationInformation(&b, m, context)
 	b.WriteString("\nSELECTED HEADERS:\n")
 	if m.FromHeaderCount() > 1 {
 		fmt.Fprintf(&b, "Multiple From headers found: %d (sender identity ambiguous)\n", m.FromHeaderCount())

@@ -40,7 +40,7 @@ func TestIPRepositoryPromotesAndRefreshesRepeatBlock(t *testing.T) {
 	}
 	previousExpiry := second.ExpiresAt
 	now = now.Add(2 * time.Minute)
-	refreshed, found, err := repository.ActiveBlock(context.Background(), addr)
+	refreshed, found, err := repository.ActiveBlockForAttempt(context.Background(), addr)
 	if err != nil || !found || !refreshed.ExpiresAt.After(previousExpiry) || refreshed.StrikeCount != 2 {
 		t.Fatalf("refreshed block = %+v, found=%v, err=%v", refreshed, found, err)
 	}
