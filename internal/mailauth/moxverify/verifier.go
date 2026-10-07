@@ -150,6 +150,9 @@ func (v *Verifier) verifyTransaction(ctx context.Context, transaction mailauth.T
 			results = append(results, translateDKIM(result))
 		}
 		if len(dkimResults) > maxDKIMSignatures {
+			// Mox deliberately flattens policy-callback errors into ErrPolicy,
+			// and individual over-limit results are omitted above. This summary
+			// is therefore the authoritative resource-limit result.
 			results = append(results, mailauth.Result{
 				Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy,
 				ErrorCategory: mailauth.ErrorLimit, Reason: "additional DKIM signatures omitted",

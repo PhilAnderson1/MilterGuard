@@ -107,7 +107,7 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 		if err != nil {
 			return nil, err
 		}
-		outcome := fmt.Sprintf("blocked %s until %s", block.Address, formatUTC(block.ExpiresAt))
+		outcome := fmt.Sprintf("blocked %s; current expiry %s (delivery attempts may extend it when repeat-block refreshing is enabled)", block.Address, formatUTC(block.ExpiresAt))
 		return textResponse(func() string { return outcome + ".\n" }), nil
 	case "ip_delete":
 		removed, err := p.ipReputation.Delete(ctx, command.ip)

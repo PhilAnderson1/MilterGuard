@@ -102,6 +102,7 @@ func lexicalHiddenSubtreeEnd(source, lower string, offset int, name string) (int
 		return offset, true
 	}
 	depth := 1
+	var scope []string
 	for offset < len(source) {
 		relative := strings.IndexByte(source[offset:], '<')
 		if relative < 0 {
@@ -126,10 +127,20 @@ func lexicalHiddenSubtreeEnd(source, lower string, offset int, name string) (int
 		}
 		rawTag := source[opening+1 : closing]
 		tag, isClosing := lexicalTagName(rawTag)
-		if tag == "plaintext" && !isClosing && lexicalExactOpeningTag(rawTag, tag) {
+		isOpeningTag := !isClosing && lexicalExactOpeningTag(rawTag, tag)
+		isClosingTag := isClosing && lexicalExactClosingTag(rawTag, tag)
+		optionalEnd := lexicalOptionalEndElement(name)
+		if optionalEnd {
+			if end, found := lexicalImplicitHiddenEnd(name, tag, opening, closing, isOpeningTag, isClosingTag, scope); found {
+				return end, true
+			}
+		}
+		if tag == "plaintext" && isOpeningTag {
 			// PLAINTEXT changes the tokenizer state through EOF. Apparent closing
 			// tags after it remain children of the hidden element as text.
 			return 0, false
+		} else if optionalEnd {
+			scope = lexicalUpdateHiddenScope(scope, name, tag, isOpeningTag, isClosingTag)
 		} else if tag == name {
 			if isClosing && lexicalExactClosingTag(rawTag, name) {
 				depth--
@@ -150,6 +161,194 @@ func lexicalHiddenSubtreeEnd(source, lower string, offset int, name string) (int
 		offset = closing + 1
 	}
 	return 0, false
+}
+
+func lexicalOptionalEndElement(name string) bool {
+	switch name {
+	case "p", "li", "dt", "dd", "td", "th", "tr":
+		return true
+	default:
+		return false
+	}
+}
+
+// lexicalImplicitHiddenEnd mirrors the HTML tree builder's implied endings
+// for the optional-end elements that commonly structure email. It returns the
+// opening byte of an implied closer so the outer extractor reprocesses that
+// tag, or the byte after an explicit closing tag.
+func lexicalImplicitHiddenEnd(root, tag string, opening, closing int, isOpening, isClosing bool, scope []string) (int, bool) {
+	switch root {
+	case "p":
+		if isClosing && tag == root && len(scope) == 0 {
+			return closing + 1, true
+		}
+		if len(scope) != 0 {
+			return 0, false
+		}
+		if isOpening && lexicalClosesParagraph(tag) || isClosing && lexicalEndsParagraphContainer(tag) {
+			return opening, true
+		}
+	case "li":
+		if isClosing && tag == root && len(scope) == 0 {
+			return closing + 1, true
+		}
+		if isOpening && tag == root && len(scope) == 0 {
+			return opening, true
+		}
+		if isClosing && lexicalListContainer(tag) && !lexicalScopeContains(scope, lexicalListContainer) {
+			return opening, true
+		}
+	case "dt", "dd":
+		if isClosing && tag == root && len(scope) == 0 {
+			return closing + 1, true
+		}
+		if isOpening && (tag == "dt" || tag == "dd") && len(scope) == 0 {
+			return opening, true
+		}
+		if isClosing && tag == "dl" && !lexicalScopeContainsTag(scope, "dl") {
+			return opening, true
+		}
+	case "td", "th":
+		if isClosing && tag == root && len(scope) == 0 {
+			return closing + 1, true
+		}
+		if len(scope) == 0 && (isOpening && lexicalClosesTableCell(tag) || isClosing && lexicalEndsTableCell(tag)) {
+			return opening, true
+		}
+	case "tr":
+		if isClosing && tag == root && len(scope) == 0 {
+			return closing + 1, true
+		}
+		if len(scope) == 0 && (isOpening && lexicalClosesTableRow(tag) || isClosing && lexicalEndsTableRow(tag)) {
+			return opening, true
+		}
+	}
+	return 0, false
+}
+
+func lexicalUpdateHiddenScope(scope []string, root, tag string, isOpening, isClosing bool) []string {
+	if isClosing {
+		for index := len(scope) - 1; index >= 0; index-- {
+			if scope[index] == tag {
+				return scope[:index]
+			}
+		}
+		return scope
+	}
+	if !isOpening || lexicalVoidElement(tag) || !lexicalHiddenScopeBarrier(root, tag, len(scope) > 0) {
+		return scope
+	}
+	return append(scope, tag)
+}
+
+func lexicalHiddenScopeBarrier(root, tag string, insideBarrier bool) bool {
+	switch root {
+	case "p":
+		if tag == "p" && insideBarrier {
+			return true
+		}
+		switch tag {
+		case "applet", "button", "caption", "html", "marquee", "object", "table", "td", "template", "th":
+			return true
+		}
+	case "li", "dt", "dd":
+		return lexicalListItemScopeBarrier(tag)
+	case "td", "th", "tr":
+		return tag == "table" || tag == "template"
+	}
+	return false
+}
+
+func lexicalClosesParagraph(tag string) bool {
+	switch tag {
+	case "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl",
+		"fieldset", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header",
+		"hgroup", "hr", "form", "listing", "main", "menu", "nav", "ol", "p", "plaintext", "pre", "search",
+		"section", "summary", "table", "ul", "xmp":
+		return true
+	default:
+		return false
+	}
+}
+
+func lexicalEndsParagraphContainer(tag string) bool {
+	switch tag {
+	case "address", "article", "aside", "blockquote", "button", "center", "details", "dialog", "dir", "div",
+		"dl", "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "listing", "main", "menu",
+		"nav", "ol", "pre", "search", "section", "select", "summary", "ul":
+		return true
+	default:
+		return false
+	}
+}
+
+func lexicalListContainer(tag string) bool { return tag == "ol" || tag == "ul" || tag == "menu" }
+
+func lexicalListItemScopeBarrier(tag string) bool {
+	switch tag {
+	case "applet", "article", "aside", "blockquote", "button", "caption", "center", "details", "dialog", "dir",
+		"dl", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
+		"header", "hgroup", "html", "li", "listing", "main", "marquee", "menu", "nav", "object", "ol",
+		"pre", "search", "section", "select", "summary", "table", "tbody", "td", "template", "tfoot", "th",
+		"thead", "tr", "ul":
+		return true
+	default:
+		return false
+	}
+}
+
+func lexicalClosesTableCell(tag string) bool {
+	switch tag {
+	case "caption", "col", "colgroup", "tbody", "td", "tfoot", "th", "thead", "tr":
+		return true
+	default:
+		return false
+	}
+}
+
+func lexicalEndsTableCell(tag string) bool {
+	switch tag {
+	case "table", "tbody", "tfoot", "thead", "tr":
+		return true
+	default:
+		return false
+	}
+}
+
+func lexicalClosesTableRow(tag string) bool {
+	switch tag {
+	case "caption", "col", "colgroup", "tbody", "tfoot", "thead", "tr":
+		return true
+	default:
+		return false
+	}
+}
+
+func lexicalEndsTableRow(tag string) bool {
+	switch tag {
+	case "table", "tbody", "tfoot", "thead":
+		return true
+	default:
+		return false
+	}
+}
+
+func lexicalScopeContainsTag(scope []string, wanted string) bool {
+	for _, tag := range scope {
+		if tag == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func lexicalScopeContains(scope []string, predicate func(string) bool) bool {
+	for _, tag := range scope {
+		if predicate(tag) {
+			return true
+		}
+	}
+	return false
 }
 
 func lexicalVoidElement(name string) bool {

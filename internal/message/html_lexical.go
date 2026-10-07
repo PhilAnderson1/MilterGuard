@@ -177,6 +177,22 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 	var imageRefs imageRefCollector
 	var baseURL *url.URL
 	baseSeen := false
+	rememberBase := func(rawTag string) {
+		if baseSeen {
+			return
+		}
+		rawBase, present := lexicalAttributeValue(rawTag, "href")
+		if !present {
+			return
+		}
+		// HTML uses only the first base element with an href. Remember that
+		// occurrence even when it is invalid so a later attacker-controlled
+		// base cannot be interpreted differently from the recipient's client.
+		baseSeen = true
+		if absolute, valid := lexicalHTTPURL(rawBase); valid {
+			baseURL, _ = url.Parse(absolute)
+		}
+	}
 	for offset := 0; offset < len(source); {
 		opening := strings.IndexByte(source[offset:], '<')
 		if opening < 0 {
@@ -230,10 +246,17 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 		if !isClosing && lexicalExactOpeningTag(rawTag, name) && lexicalVisiblyHidden(rawTag) {
 			// Remove unambiguously hidden HTML from both the AI body and the
 			// visible-text count used to decide whether images need analysis.
-			// The closing tag and its contents are skipped as one subtree.
+			// The closing tag and its contents are skipped as one subtree. Base
+			// elements remain effective HTML metadata even inside a CSS-hidden
+			// subtree, so retain the first applicable base before skipping it.
 			blockEnd, found := lexicalHiddenSubtreeEnd(source, lower, closing+1, name)
 			if !found {
 				break
+			}
+			if !baseSeen {
+				if hiddenBase, present := lexicalFirstBaseTag(source, lower, opening, blockEnd); present {
+					rememberBase(hiddenBase)
+				}
 			}
 			offset = blockEnd
 			text.appendByte(' ')
@@ -268,17 +291,7 @@ func (lexicalHTMLExtractor) extract(source string) extractedContent {
 
 		switch {
 		case name == "base" && !isClosing:
-			// HTML uses only the first base element with an href. Remember that
-			// occurrence even when it is invalid so a later attacker-controlled
-			// base cannot be interpreted differently from the recipient's client.
-			if !baseSeen {
-				if rawBase, present := lexicalAttributeValue(rawTag, "href"); present {
-					baseSeen = true
-					if absolute, valid := lexicalHTTPURL(rawBase); valid {
-						baseURL, _ = url.Parse(absolute)
-					}
-				}
-			}
+			rememberBase(rawTag)
 		case name == "blockquote" && !isClosing:
 			text.writeQuoteMarker("\n[quoted content begins]\n")
 		case name == "blockquote" && isClosing:
@@ -600,6 +613,65 @@ func lexicalTemplateEnd(source, lower string, offset int) (int, bool) {
 	return 0, false
 }
 
+// lexicalFirstBaseTag returns the first base element with an href in a range
+// that the visible-text extractor is about to skip. Raw-text and inert template
+// contents are skipped because apparent tags inside them do not affect the
+// containing HTML document.
+func lexicalFirstBaseTag(source, lower string, offset, limit int) (string, bool) {
+	for offset < limit {
+		relative := strings.IndexByte(source[offset:limit], '<')
+		if relative < 0 {
+			return "", false
+		}
+		opening := offset + relative
+		if strings.HasPrefix(lower[opening:], "<!--") {
+			commentEnd, found := lexicalCommentEnd(source, opening+4)
+			if !found || commentEnd > limit {
+				return "", false
+			}
+			offset = commentEnd
+			continue
+		}
+		if !lexicalMarkupStart(source, opening) {
+			offset = opening + 1
+			continue
+		}
+		closing, found, _ := lexicalTagEnd(source, opening+1)
+		if !found || closing >= limit {
+			return "", false
+		}
+		rawTag := source[opening+1 : closing]
+		name, isClosing := lexicalTagName(rawTag)
+		isOpeningTag := !isClosing && lexicalExactOpeningTag(rawTag, name)
+		if isOpeningTag && name == "base" {
+			if _, present := lexicalAttributeValue(rawTag, "href"); present {
+				return rawTag, true
+			}
+		}
+		if isOpeningTag && name == "plaintext" {
+			return "", false
+		}
+		if isOpeningTag && name == "template" {
+			blockEnd, found := lexicalTemplateEnd(source, lower, closing+1)
+			if !found || blockEnd > limit {
+				return "", false
+			}
+			offset = blockEnd
+			continue
+		}
+		if isOpeningTag && lexicalRawTextElement(name) {
+			_, blockEnd, found := lexicalElementEnd(source, lower, closing+1, name)
+			if !found || blockEnd > limit {
+				return "", false
+			}
+			offset = blockEnd
+			continue
+		}
+		offset = closing + 1
+	}
+	return "", false
+}
+
 func lexicalTagName(raw string) (string, bool) {
 	raw = strings.TrimLeft(raw, " \t\r\n")
 	isClosing := strings.HasPrefix(raw, "/")
@@ -716,7 +788,57 @@ func lexicalResolvedHTTPURL(value string, base *url.URL) (string, bool) {
 }
 
 func lexicalBrowserURL(value string) string {
-	return strings.TrimSpace(strings.NewReplacer("\t", "", "\r", "", "\n", "").Replace(value))
+	value = strings.TrimSpace(strings.NewReplacer("\t", "", "\r", "", "\n", "").Replace(value))
+	value = strings.TrimFunc(value, func(value rune) bool { return value <= ' ' })
+	dataStart := lexicalURLDataStart(value)
+	control := -1
+	for offset := dataStart; offset < len(value); offset++ {
+		if value[offset] < 0x20 {
+			control = offset
+			break
+		}
+	}
+	if control < 0 {
+		return value
+	}
+	const hexadecimal = "0123456789ABCDEF"
+	var normalized strings.Builder
+	normalized.Grow(len(value) + 2)
+	normalized.WriteString(value[:control])
+	for offset := control; offset < len(value); offset++ {
+		current := value[offset]
+		if current < 0x20 {
+			normalized.WriteByte('%')
+			normalized.WriteByte(hexadecimal[current>>4])
+			normalized.WriteByte(hexadecimal[current&0x0f])
+		} else {
+			normalized.WriteByte(current)
+		}
+	}
+	return normalized.String()
+}
+
+// lexicalURLDataStart locates the path, query or fragment portion of a URL.
+// C0 controls in those components are percent-encoded by browsers, whereas a
+// control in the authority makes an HTTP(S) hostname invalid and must remain
+// visible to url.Parse so the candidate is rejected.
+func lexicalURLDataStart(value string) int {
+	authorityStart := -1
+	if strings.HasPrefix(value, "//") {
+		authorityStart = 2
+	} else if colon := strings.IndexByte(value, ':'); colon >= 0 {
+		firstDelimiter := strings.IndexAny(value, "/?#")
+		if (firstDelimiter < 0 || colon < firstDelimiter) && strings.HasPrefix(value[colon+1:], "//") {
+			authorityStart = colon + 3
+		}
+	}
+	if authorityStart < 0 {
+		return 0
+	}
+	if relative := strings.IndexAny(value[authorityStart:], "/?#"); relative >= 0 {
+		return authorityStart + relative
+	}
+	return len(value)
 }
 
 func markdownLabel(value string) string {

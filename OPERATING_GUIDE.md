@@ -628,8 +628,10 @@ EXIT
 - `IP LIST` shows active short and repeat-offender blocks. `IP LIST LOOKUP`
   also performs reverse-DNS lookups and includes each hostname or `(not found)`.
 - `IP ADD` creates a manual block using the configured repeat-offender duration,
-  or the short duration when repeat-offender blocking is disabled. `IP DELETE`
-  removes the IP reputation record.
+  or the short duration when repeat-offender blocking is disabled. When
+  `repeat_refresh_on_attempt` is enabled, delivery attempts extend a manual
+  block that uses repeat-offender behaviour in the same way as an automatically
+  created repeat-offender block. `IP DELETE` removes the IP reputation record.
 - `HELP` displays the command summary. `EXIT`, `QUIT`, or Ctrl-D closes the
   session.
 

@@ -40,6 +40,72 @@ func TestParseQuotedSemicolonDoesNotCreateMethod(t *testing.T) {
 	}
 }
 
+func TestParseAuthenticationResultsIgnoresRFCComments(t *testing.T) {
+	input := Input{
+		AuthenticationResults: []string{
+			`mx.example (local verifier); dkim=pass (signature verified; (nested key detail) escaped \) text) header.d=example.com; spf=pass (sender; verified) smtp.mailfrom=sender@example.com; dmarc=pass (policy; applied) header.from=example.com`,
+		},
+		TrustedAuthservIDs: []string{"mx.example"},
+	}
+	want := []Result{
+		{Method: MethodDKIM, Outcome: OutcomePass, Domain: "example.com"},
+		{Method: MethodSPF, Outcome: OutcomePass, Domain: "example.com"},
+		{Method: MethodDMARC, Outcome: OutcomePass, Domain: "example.com"},
+	}
+	if got := Parse(input); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse() = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseAuthenticationResultsDoesNotUsePropertiesInComments(t *testing.T) {
+	input := Input{
+		AuthenticationResults: []string{
+			`mx.example; dkim=fail (header.d=good.example but mismatch) header.d=evil.example`,
+		},
+		TrustedAuthservIDs: []string{"mx.example"},
+	}
+	want := []Result{{Method: MethodDKIM, Outcome: OutcomeFail, Domain: "evil.example"}}
+	if got := Parse(input); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse() = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseAuthenticationResultsAllowsCommentsAroundGrammar(t *testing.T) {
+	input := Input{
+		AuthenticationResults: []string{
+			`mx.example; dkim (method) = pass header (type) . (property) d (value) = example.com`,
+		},
+		TrustedAuthservIDs: []string{"mx.example"},
+	}
+	want := []Result{{Method: MethodDKIM, Outcome: OutcomePass, Domain: "example.com"}}
+	if got := Parse(input); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse() = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseAuthenticationResultsRejectsMalformedCommentsAndQuotes(t *testing.T) {
+	for _, header := range []string{
+		`mx.example; dkim=pass (unterminated header.d=example.com`,
+		`mx.example; dkim=pass unexpected) header.d=example.com`,
+		`mx.example; dkim=pass reason="unterminated header.d=example.com`,
+	} {
+		input := Input{AuthenticationResults: []string{header}, TrustedAuthservIDs: []string{"mx.example"}}
+		if got := Parse(input); len(got) != 0 {
+			t.Fatalf("malformed header %q returned results: %#v", header, got)
+		}
+	}
+
+	input := Input{
+		AuthenticationResults: []string{`mx.example; spf=pass (unterminated smtp.mailfrom=bad.example`},
+		ReceivedSPF:           []string{`pass receiver="mx.example"; envelope-from=sender@example.com`},
+		TrustedAuthservIDs:    []string{"mx.example"},
+	}
+	want := []Result{{Method: MethodSPF, Outcome: OutcomePass, Domain: "example.com"}}
+	if got := Parse(input); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Received-SPF fallback after malformed Authentication-Results = %#v, want %#v", got, want)
+	}
+}
+
 func TestParseReceivedSPFFallback(t *testing.T) {
 	base := Input{
 		ReceivedSPF: []string{
@@ -103,6 +169,14 @@ func TestDomainNormalizationAndAlignment(t *testing.T) {
 	}
 	if DomainAligned("example.net", "example.com") {
 		t.Fatal("unexpected alignment")
+	}
+	for _, domain := range []string{"com", "co.uk", "localhost"} {
+		if DomainAligned(domain, domain) {
+			t.Errorf("non-registrable domain %q unexpectedly aligned", domain)
+		}
+	}
+	if !DomainAligned("example.invalid", "example.invalid") {
+		t.Fatal("ordinary exact domain unexpectedly failed alignment")
 	}
 }
 

@@ -317,7 +317,8 @@ ip_reputation:
   repeat_window: 720h
   repeat_block_duration: 720h
 
-  # Extend the repeat-offender block after each delivery attempt.
+  # Extend repeat-offender blocks after delivery attempts. Blocks created with
+  # IP ADD also use repeat-offender behaviour when repeat blocking is enabled.
   repeat_refresh_on_attempt: true
 
   # Legitimate emails required to remove one IP strike. Set to 0 to disable.

@@ -96,8 +96,6 @@ func classifyDKIM(status dkim.Status, err error) (mailauth.ErrorCategory, string
 		return mailauth.ErrorNone, ""
 	}
 	switch {
-	case errors.Is(err, errTooManySignatures):
-		return mailauth.ErrorLimit, "DKIM signature limit exceeded"
 	case status == dkim.StatusPolicy || errors.Is(err, dkim.ErrPolicy):
 		return mailauth.ErrorPolicy, "signature rejected by DKIM policy"
 	case errors.Is(err, dkim.ErrSigExpired):

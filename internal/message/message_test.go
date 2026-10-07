@@ -1143,6 +1143,59 @@ func TestHTMLUnclosedHiddenSubtreeDoesNotLeakIntoAIText(t *testing.T) {
 	}
 }
 
+func TestHTMLHiddenOptionalEndElementsFollowImpliedClosures(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "paragraph block start", source: `<p hidden>forged<div>Visible paragraph successor</div>`, want: "Visible paragraph successor"},
+		{name: "paragraph ancestor end", source: `<div><p hidden>forged</div>Visible after container`, want: "Visible after container"},
+		{name: "paragraph before plaintext", source: `<p hidden>forged<plaintext>Visible plaintext`, want: "Visible plaintext"},
+		{name: "list item sibling", source: `<ul><li hidden>forged<li>Visible list item</ul>`, want: "Visible list item"},
+		{name: "definition sibling", source: `<dl><dt hidden>forged<dd>Visible definition</dl>`, want: "Visible definition"},
+		{name: "table cell sibling", source: `<table><tr><td hidden>forged<td>Visible cell</table>`, want: "Visible cell"},
+		{name: "table row sibling", source: `<table><tr hidden><td>forged<tr><td>Visible row</table>`, want: "Visible row"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := htmlToText(test.source)
+			if got.Text != test.want || got.VisibleText != test.want {
+				t.Fatalf("extracted content = %+v, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestHTMLHiddenOptionalEndElementsRespectNestedScopes(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "nested list",
+			source: `<ul><li hidden>outer<ul><li>nested <a href="https://hidden.example/list">link</a></li></ul>` +
+				`still hidden</li><li>Visible list item</li></ul>`,
+			want: "Visible list item",
+		},
+		{
+			name: "nested table",
+			source: `<table><tr><td hidden>outer<table><tr><td>nested <a href="https://hidden.example/table">link</a></td></tr></table>` +
+				`still hidden</td><td>Visible cell</td></tr></table>`,
+			want: "Visible cell",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := htmlToText(test.source)
+			if got.Text != test.want || got.VisibleText != test.want || len(got.Links) != 0 {
+				t.Fatalf("nested hidden subtree extraction = %+v, want %q without links", got, test.want)
+			}
+		})
+	}
+}
+
 func TestHiddenHTMLDoesNotSuppressFallbackImageAnalysis(t *testing.T) {
 	m := multipartRelatedMessage("Fallback", `<p>Short notice</p><div style="display:none">`+strings.Repeat("forged history ", 30)+`</div><img src="cid:scam-image" alt="Notice">`, "<scam-image>")
 	analysis := m.BuildAnalysis(1000, VisionOptions{
@@ -1515,6 +1568,53 @@ func TestHTMLURLsUseBrowserControlCharacterNormalization(t *testing.T) {
 	}
 }
 
+func TestHTMLURLsPercentEncodeC0ControlsOutsideAuthority(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "absolute path query and fragment",
+			source: "<a href=\"https://evil.example/p\x01ath?q=\x02#f\x03ragment\">Open</a>",
+			want:   "https://evil.example/p%01ath?q=%02#f%03ragment",
+		},
+		{
+			name:   "entity encoded path control",
+			source: `<a href="https://evil.example/p&#1;ath">Open</a>`,
+			want:   "https://evil.example/p%01ath",
+		},
+		{
+			name:   "relative reference",
+			source: "<base href=\"https://evil.example/root/\"><a href=\"p\x01ath?q=\x02#f\x03ragment\">Open</a>",
+			want:   "https://evil.example/root/p%01ath?q=%02#f%03ragment",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := htmlToText(test.source)
+			if got.Text != "[Open]("+test.want+")" {
+				t.Fatalf("normalized anchor text = %q, want URL %q", got.Text, test.want)
+			}
+			if len(got.Links) != 1 || got.Links[0] != test.want {
+				t.Fatalf("normalized link evidence = %v, want [%s]", got.Links, test.want)
+			}
+		})
+	}
+}
+
+func TestHTMLURLsRejectC0ControlsInAuthority(t *testing.T) {
+	for _, source := range []string{
+		"<a href=\"https://evil\x01.example/path\">Open</a>",
+		"<base href=\"https://base.example/\"><a href=\"//evil\x01.example/path\">Open</a>",
+	} {
+		got := htmlToText(source)
+		if got.Text != "Open" || len(got.Links) != 0 {
+			t.Fatalf("invalid authority surfaced as text=%q links=%v", got.Text, got.Links)
+		}
+	}
+}
+
 func TestHTMLBaseResolvesRelativeLinksAndImages(t *testing.T) {
 	got := htmlToText(`<base href="https://example.test/account/"><a href="pay-now">Pay now</a><a href="/help">Help</a><img src="//cdn.example.test/logo.png" alt="Logo">`)
 	want := `[Pay now](https://example.test/account/pay-now)[Help](https://example.test/help) ![Logo](https://cdn.example.test/logo.png)`
@@ -1543,6 +1643,44 @@ func TestHTMLUsesOnlyFirstBaseHref(t *testing.T) {
 	}
 	if len(got.Links) != 1 || got.Links[0] != "https://first.example/path/target" {
 		t.Fatalf("multiple-base evidence = %v", got.Links)
+	}
+}
+
+func TestHTMLBaseInsideHiddenElementStillResolvesLinks(t *testing.T) {
+	tests := []string{
+		`<div style="display:none"><base href="https://hidden.example/path/"></div><a href="target">Open</a>`,
+		`<div hidden><base href="https://hidden.example/path/"></div><a href="target">Open</a>`,
+		`<base hidden href="https://hidden.example/path/"><a href="target">Open</a>`,
+	}
+	for _, source := range tests {
+		got := htmlToText(source)
+		want := `[Open](https://hidden.example/path/target)`
+		if got.Text != want {
+			t.Fatalf("hidden base extracted as %q, want %q", got.Text, want)
+		}
+		if len(got.Links) != 1 || got.Links[0] != "https://hidden.example/path/target" {
+			t.Fatalf("hidden-base evidence = %v", got.Links)
+		}
+	}
+}
+
+func TestHTMLHiddenBaseRespectsFirstAndInertElements(t *testing.T) {
+	got := htmlToText(`<div hidden><base href="https://first.example/path/"></div><base href="https://second.example/"><a href="target">Open</a>`)
+	if got.Text != `[Open](https://first.example/path/target)` {
+		t.Fatalf("first hidden base extracted as %q", got.Text)
+	}
+
+	for _, source := range []string{
+		`<div hidden><!-- <base href="https://ignored.example/"> --></div><base href="https://visible.example/"><a href="target">Open</a>`,
+		`<div hidden><script><base href="https://ignored.example/"></script></div><base href="https://visible.example/"><a href="target">Open</a>`,
+		`<div hidden><style><base href="https://ignored.example/"></style></div><base href="https://visible.example/"><a href="target">Open</a>`,
+		`<div hidden><template><base href="https://ignored.example/"></template></div><base href="https://visible.example/"><a href="target">Open</a>`,
+	} {
+		got := htmlToText(source)
+		want := `[Open](https://visible.example/target)`
+		if got.Text != want {
+			t.Fatalf("inert hidden base extracted as %q, want %q", got.Text, want)
+		}
 	}
 }
 

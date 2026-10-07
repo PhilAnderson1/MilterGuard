@@ -516,17 +516,17 @@ func (s *Scanner) beginArchiveFile(declaredSize uint64, state *scanState) error 
 
 func (s *Scanner) blockedExtension(filename string) string {
 	filename = strings.ToLower(cleanName(filename))
-	// On Windows, the first colon after the basename introduces an NTFS
-	// alternate data stream. Extension policy must apply to the base file, so
-	// names such as invoice.exe::$DATA cannot disguise an executable suffix.
-	if stream := strings.IndexByte(filename, ':'); stream >= 0 {
-		filename = filename[:stream]
-	}
-	filename = strings.TrimRight(filename, ". ")
-	parts := strings.Split(filename, ".")
-	for _, extension := range parts[1:] {
-		if _, blocked := s.blocked[extension]; blocked {
-			return extension
+	// Colons can introduce NTFS alternate data streams, but are ordinary
+	// filename characters on other systems. Apply extension policy to every
+	// colon-delimited filename segment so neither invoice.exe::$DATA nor
+	// invoice:.js can hide a blocked suffix.
+	for _, segment := range strings.Split(filename, ":") {
+		segment = strings.TrimRight(segment, ". ")
+		parts := strings.Split(segment, ".")
+		for _, extension := range parts[1:] {
+			if _, blocked := s.blocked[extension]; blocked {
+				return extension
+			}
 		}
 	}
 	return ""

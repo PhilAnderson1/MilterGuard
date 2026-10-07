@@ -128,6 +128,35 @@ func TestNTFSStreamSuffixDoesNotHideBlockedExtension(t *testing.T) {
 	}
 }
 
+func TestColonBeforeBlockedExtensionDoesNotBypassAttachmentPolicy(t *testing.T) {
+	tests := map[string]string{
+		"invoice:.js":             ".js",
+		"safe.txt:payload.exe":    ".exe",
+		"recording 12:34:56.js":   ".js",
+		"document.txt:script.bat": ".bat",
+	}
+	for filename, extension := range tests {
+		t.Run(filename, func(t *testing.T) {
+			finding, err := testScanner().Scan(
+				"application/octet-stream", "", `attachment; filename="`+filename+`"`, []byte("harmless bytes"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finding == nil || finding.Detection != "blocked extension "+extension {
+				t.Fatalf("finding = %#v", finding)
+			}
+		})
+	}
+
+	finding, err := testScanner().Scan(
+		"application/octet-stream", "", `attachment; filename="exe:file.txt"`, []byte("harmless bytes"),
+	)
+	if err != nil || finding != nil {
+		t.Fatalf("ordinary colon-delimited basename = finding %#v, error %v", finding, err)
+	}
+}
+
 func TestNTFSStreamSuffixInsideArchiveDoesNotHideBlockedExtension(t *testing.T) {
 	archive := makeZIP(t, map[string][]byte{"script.bat:stream": []byte("harmless bytes")})
 	finding, err := testScanner().Scan("application/zip", "", `attachment; filename="files.zip"`, archive)
@@ -136,6 +165,50 @@ func TestNTFSStreamSuffixInsideArchiveDoesNotHideBlockedExtension(t *testing.T) 
 	}
 	if finding == nil || finding.Detection != "blocked extension .bat" {
 		t.Fatalf("finding = %#v", finding)
+	}
+}
+
+func TestColonBeforeBlockedExtensionInsideArchivesDoesNotBypassPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		mediaType string
+		filename  string
+		archive   func(*testing.T, string) []byte
+	}{
+		{
+			name: "ZIP", mediaType: "application/zip", filename: "files.zip",
+			archive: func(t *testing.T, name string) []byte {
+				return makeZIP(t, map[string][]byte{name: []byte("harmless bytes")})
+			},
+		},
+		{
+			name: "TAR", mediaType: "application/x-tar", filename: "files.tar",
+			archive: func(t *testing.T, name string) []byte {
+				var archive bytes.Buffer
+				writer := tar.NewWriter(&archive)
+				payload := []byte("harmless bytes")
+				if err := writer.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(payload))}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := writer.Write(payload); err != nil {
+					t.Fatal(err)
+				}
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				return archive.Bytes()
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			finding, err := testScanner().Scan(test.mediaType, "", `attachment; filename="`+test.filename+`"`, test.archive(t, "safe:payload.js"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finding == nil || finding.Detection != "blocked extension .js" {
+				t.Fatalf("finding = %#v", finding)
+			}
+		})
 	}
 }
 

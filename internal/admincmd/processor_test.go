@@ -270,7 +270,7 @@ func TestExecuteIPMutations(t *testing.T) {
 	actor := Actor{Administrator: true, DefaultRecipient: "admin@example.com"}
 
 	response, err := p.ExecuteLine(context.Background(), "IP ADD ::ffff:192.0.2.10", actor)
-	if err != nil || response.Text != "blocked 192.0.2.10 until 2026-10-20 12:34:56 UTC.\n" {
+	if err != nil || response.Text != "blocked 192.0.2.10; current expiry 2026-10-20 12:34:56 UTC (delivery attempts may extend it when repeat-block refreshing is enabled).\n" {
 		t.Fatalf("add response=%#v err=%v", response, err)
 	}
 	if repository.address != address {

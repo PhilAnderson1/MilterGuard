@@ -53,9 +53,9 @@ const (
 
 var (
 	authenticationMethodPattern = regexp.MustCompile(`(?i)^\s*(dkim|spf|dmarc)\s*=\s*([a-z][a-z0-9_-]{0,31})\b`)
-	dkimDomainPattern           = regexp.MustCompile(`(?i)\bheader\.d\s*=\s*([a-z0-9_.-]+)`)
-	spfDomainPattern            = regexp.MustCompile(`(?i)\bsmtp\.mailfrom\s*=\s*<?([a-z0-9_.@+-]+)>?`)
-	dmarcDomainPattern          = regexp.MustCompile(`(?i)\bheader\.from\s*=\s*([a-z0-9_.-]+)`)
+	dkimDomainPattern           = regexp.MustCompile(`(?i)\bheader\s*\.\s*d\s*=\s*([a-z0-9_.-]+)`)
+	spfDomainPattern            = regexp.MustCompile(`(?i)\bsmtp\s*\.\s*mailfrom\s*=\s*<?([a-z0-9_.@+-]+)>?`)
+	dmarcDomainPattern          = regexp.MustCompile(`(?i)\bheader\s*\.\s*from\s*=\s*([a-z0-9_.-]+)`)
 	receivedSPFResultPattern    = regexp.MustCompile(`(?i)^\s*([a-z][a-z0-9_-]{0,31})\b`)
 	receivedSPFEnvelopePattern  = regexp.MustCompile(`(?i)\benvelope-from\s*=\s*<?([a-z0-9_.@+-]+)>?`)
 )
@@ -205,6 +205,11 @@ func Parse(input Input) []Result {
 	hasAuthenticationResultsSPF := false
 
 	for _, header := range input.AuthenticationResults {
+		var valid bool
+		header, valid = stripAuthenticationComments(header)
+		if !valid {
+			continue
+		}
 		clauses := splitAuthenticationClauses(header)
 		if len(clauses) < 2 {
 			continue
@@ -291,10 +296,68 @@ func DomainAligned(authenticatedDomain, fromDomain string) bool {
 	}
 	authenticatedOrg, authenticatedErr := publicsuffix.EffectiveTLDPlusOne(authenticatedDomain)
 	fromOrg, fromErr := publicsuffix.EffectiveTLDPlusOne(fromDomain)
-	if authenticatedErr == nil && fromErr == nil {
-		return strings.EqualFold(authenticatedOrg, fromOrg)
+	if authenticatedErr != nil || fromErr != nil {
+		return false
 	}
-	return authenticatedDomain == fromDomain
+	return strings.EqualFold(authenticatedOrg, fromOrg)
+}
+
+// stripAuthenticationComments replaces RFC 5322 comments with whitespace so
+// semicolons and property-like text inside them cannot affect parsing. Quoted
+// strings remain intact; malformed comments or quoted strings reject the
+// complete Authentication-Results field rather than yielding partial evidence.
+func stripAuthenticationComments(value string) (string, bool) {
+	var clean strings.Builder
+	clean.Grow(len(value))
+	commentDepth := 0
+	quoted := false
+	escaped := false
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if commentDepth > 0 {
+			switch {
+			case escaped:
+				escaped = false
+			case char == '\\':
+				escaped = true
+			case char == '(':
+				commentDepth++
+			case char == ')':
+				commentDepth--
+				if commentDepth == 0 {
+					clean.WriteByte(' ')
+				}
+			}
+			continue
+		}
+		if quoted {
+			clean.WriteByte(char)
+			switch {
+			case escaped:
+				escaped = false
+			case char == '\\':
+				escaped = true
+			case char == '"':
+				quoted = false
+			}
+			continue
+		}
+		switch char {
+		case '(':
+			commentDepth = 1
+		case ')':
+			return "", false
+		case '"':
+			quoted = true
+			clean.WriteByte(char)
+		default:
+			clean.WriteByte(char)
+		}
+	}
+	if commentDepth != 0 || quoted || escaped {
+		return "", false
+	}
+	return clean.String(), true
 }
 
 func splitAuthenticationClauses(value string) []string {
