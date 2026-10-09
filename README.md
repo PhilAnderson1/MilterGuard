@@ -2,7 +2,7 @@
 
 <p align="center">
   <img src="assets/milterguard-logo.png"
-       alt="MilterGuard — A shrewd eye for suspicious mail"
+       alt="MilterGuard — A shrewd eye for unwanted mail"
        width="500">
 </p>
 
