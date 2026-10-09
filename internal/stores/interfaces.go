@@ -106,6 +106,31 @@ type ServiceStatusStore interface {
 	ClearServiceStatus(context.Context) error
 }
 
+// CommandHistoryRepository persists the small interactive command-mode history.
+type CommandHistoryRepository interface {
+	LoadCommandHistory(context.Context) ([]string, error)
+	SaveCommandHistory(context.Context, []string) error
+}
+
+// SenderBlocklistPolicyRepository performs one set-based lookup for a
+// message's visible senders and complete local-recipient set.
+type SenderBlocklistPolicyRepository interface {
+	MatchSenderBlocks(context.Context, SenderBlockMatchQuery) (SenderBlockMatch, error)
+}
+
+// SenderBlocklistAdminRepository exposes manually managed blocklist entries.
+type SenderBlocklistAdminRepository interface {
+	AddSenderBlock(context.Context, SenderBlockEntry) (bool, SenderBlockEntry, error)
+	DeleteSenderBlocks(context.Context, SenderBlockDeleteQuery) (int, error)
+	ListSenderBlocks(context.Context, SenderBlockListQuery) (SenderBlockPage, error)
+}
+
+type SenderBlocklistRepository interface {
+	SenderBlocklistPolicyRepository
+	SenderBlocklistAdminRepository
+	MaintainedRepository
+}
+
 // ActivityStore is the complete activity persistence implementation assembled
 // by the composition root. Consumers should depend on its narrower component
 // interfaces.

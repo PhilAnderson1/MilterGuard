@@ -225,7 +225,7 @@ func (ss *session) negotiate(payload []byte) bool {
 	}
 	// Request result-header capabilities even when result generation is disabled:
 	// sender-supplied X-MilterGuard result headers must still be removable.
-	requestedActions := offeredActions & resultHeaderActions
+	requestedActions := offeredActions & (resultHeaderActions | actionDeleteRecipient)
 	wantsResultHeaders := ss.deps.filtering.AddEmailHeaders
 	if wantsResultHeaders && offeredActions&actionAddHeaders == 0 {
 		ss.deps.log.Warn("result headers disabled for Milter connection because MTA did not offer add-header support",
@@ -257,6 +257,25 @@ func (ss *session) addHeader(payload []byte) bool {
 			value, ss.deps.filtering.AuthenticatedOnlySenderDomains,
 		)
 	}
+	if strings.EqualFold(strings.TrimSpace(name), "From") {
+		for _, sender := range strictVisibleFromMailboxes([]string{value}) {
+			seen := false
+			for _, existing := range ss.senderBlocklistFrom {
+				if existing == sender {
+					seen = true
+					break
+				}
+			}
+			if seen {
+				continue
+			}
+			if len(ss.senderBlocklistFrom) >= maxSenderBlockAddresses {
+				ss.senderBlocklistFromTruncated = true
+				break
+			}
+			ss.senderBlocklistFrom = append(ss.senderBlocklistFrom, sender)
+		}
+	}
 	ss.message.AddHeader(name, value)
 	ss.captureExact(func(exact mailauth.ExactMessage) error { return exact.AddHeader(name, value) })
 	return ss.sendContinue(commandHeader)
@@ -273,6 +292,9 @@ func (ss *session) resetMessage(phase protocolPhase) {
 	ss.visibleSenderDomain = ""
 	ss.visibleFromInvalid = false
 	ss.protectedSenderDomain = ""
+	ss.pendingSenderBlocks = nil
+	ss.senderBlocklistFrom = nil
+	ss.senderBlocklistFromTruncated = false
 	ss.smtpUTF8 = false
 	ss.phase = phase
 	if phase != phaseEnvelope || !ss.requiresExactMessage() {

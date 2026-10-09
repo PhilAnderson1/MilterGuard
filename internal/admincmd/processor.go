@@ -93,6 +93,21 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 			slices.Reverse(entries)
 		}
 		return textResponse(func() string { return formatAllowlist(entries, admin && command.recipient == "*", page.Truncated) }), nil
+	case commandBlocklistList:
+		if p.senderBlocklist == nil {
+			return nil, fmt.Errorf("sender blocklist repository is unavailable")
+		}
+		page, err := p.senderBlocklist.ListSenderBlocks(ctx, stores.SenderBlockListQuery{
+			Recipients: recipientScope(command.recipient), Limit: MaxListRows,
+		})
+		if err != nil {
+			return nil, err
+		}
+		entries := page.Entries
+		if actor.NewestLast {
+			slices.Reverse(entries)
+		}
+		return textResponse(func() string { return formatSenderBlocklist(entries, page.Truncated) }), nil
 	case commandIPList, commandIPListLookup:
 		page, err := p.ipReputation.ListActiveBlocks(ctx, stores.IPBlockListQuery{ActiveSince: cutoff, Limit: MaxListRows})
 		if err != nil {
@@ -142,6 +157,33 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 		}
 		outcome := fmt.Sprintf("removed %d allowlist entries", removed)
 		return textResponse(func() string { return outcome + ".\n" }), nil
+	case commandBlocklist:
+		if p.senderBlocklist == nil {
+			return nil, fmt.Errorf("sender blocklist repository is unavailable")
+		}
+		entry := stores.SenderBlockEntry{Recipient: command.recipient, SenderKind: command.senderKind, SenderValue: command.sender}
+		if command.verb == "ADD" {
+			created, saved, err := p.senderBlocklist.AddSenderBlock(ctx, entry)
+			if err != nil {
+				return nil, err
+			}
+			outcome := "sender blocklist entry already existed and was refreshed"
+			if created {
+				outcome = "sender blocklist entry added"
+			}
+			return textResponse(func() string { return fmt.Sprintf("%s; expires %s.\n", outcome, formatUTC(saved.ExpiresAt)) }), nil
+		}
+		scope := recipientScope(command.recipient)
+		if command.allRecipients {
+			scope = stores.RecipientScope{All: true}
+		}
+		removed, err := p.senderBlocklist.DeleteSenderBlocks(ctx, stores.SenderBlockDeleteQuery{
+			SenderKind: command.senderKind, SenderValue: command.sender, Recipients: scope,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return textResponse(func() string { return fmt.Sprintf("removed %d sender blocklist entries.\n", removed) }), nil
 	default:
 		return nil, fmt.Errorf("unsupported command")
 	}
@@ -164,6 +206,27 @@ func (p *Processor) ExecuteLine(ctx context.Context, line string, actor Actor) (
 	default:
 	}
 	return deferred(), nil
+}
+
+// LoadCommandHistory returns the oldest-to-newest interactive command history.
+func (p *Processor) LoadCommandHistory(parent context.Context) ([]string, error) {
+	if p.commandHistory == nil {
+		return nil, fmt.Errorf("command history repository is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(parent, p.databaseTimeout)
+	defer cancel()
+	return p.commandHistory.LoadCommandHistory(ctx)
+}
+
+// SaveCommandHistory atomically replaces the persisted interactive command
+// history with the supplied oldest-to-newest entries.
+func (p *Processor) SaveCommandHistory(parent context.Context, commands []string) error {
+	if p.commandHistory == nil {
+		return fmt.Errorf("command history repository is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(parent, p.databaseTimeout)
+	defer cancel()
+	return p.commandHistory.SaveCommandHistory(ctx, commands)
 }
 
 func recipientScope(recipient string) stores.RecipientScope {

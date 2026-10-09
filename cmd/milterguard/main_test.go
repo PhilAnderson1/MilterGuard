@@ -170,14 +170,18 @@ func TestTerminalCommandModeKeepsSessionHistory(t *testing.T) {
 		errors: []error{nil, nil, liner.ErrPromptAborted, nil, nil},
 	}
 	var output strings.Builder
-	if err := runTerminalCommandMode(context.Background(), &output, processor, editor); err != nil {
+	history, err := runTerminalCommandMode(context.Background(), &output, processor, editor, []string{"ACTIVITY"})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(processor.lines, ","); got != "HELP,BAD" {
 		t.Fatalf("executed commands = %q, want HELP,BAD", got)
 	}
-	if got := strings.Join(editor.history, ","); got != "HELP,BAD,EXIT" {
-		t.Fatalf("session history = %q, want HELP,BAD,EXIT", got)
+	if got := strings.Join(editor.history, ","); got != "ACTIVITY,HELP,BAD" {
+		t.Fatalf("editor history = %q, want ACTIVITY,HELP,BAD", got)
+	}
+	if got := strings.Join(history, ","); got != "ACTIVITY,HELP,BAD" {
+		t.Fatalf("saved history = %q, want ACTIVITY,HELP,BAD", got)
 	}
 	for _, prompt := range editor.prompts {
 		if prompt != "milterguard> " {
@@ -193,12 +197,31 @@ func TestTerminalCommandModeChecksCancellationBeforePrompt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	editor := &scriptedLineEditor{}
-	err := runTerminalCommandMode(ctx, io.Discard, &scriptedCommandProcessor{}, editor)
+	_, err := runTerminalCommandMode(ctx, io.Discard, &scriptedCommandProcessor{}, editor, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("runTerminalCommandMode() error = %v, want context.Canceled", err)
 	}
 	if len(editor.prompts) != 0 {
 		t.Fatalf("Prompt called %d times after cancellation", len(editor.prompts))
+	}
+}
+
+func TestCommandHistoryRetainsOnlyTenNewestCommands(t *testing.T) {
+	history := []string{"old", "EXIT", "same", "same"}
+	for index := range 12 {
+		history, _ = appendCommandHistory(history, fmt.Sprintf("command-%02d", index))
+	}
+	history = normalizeCommandHistory(history)
+	if len(history) != 10 {
+		t.Fatalf("history length = %d, want 10: %#v", len(history), history)
+	}
+	if history[0] != "command-02" || history[9] != "command-11" {
+		t.Fatalf("retained history = %#v", history)
+	}
+	for _, command := range history {
+		if command == "EXIT" {
+			t.Fatalf("exit command was retained: %#v", history)
+		}
 	}
 }
 

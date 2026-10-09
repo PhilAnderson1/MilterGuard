@@ -47,6 +47,12 @@ type ActivityOptions struct {
 	Now    func() time.Time
 }
 
+type SenderBlocklistOptions struct {
+	Expiry     time.Duration
+	MaxEntries int
+	Now        func() time.Time
+}
+
 func clock(value func() time.Time) func() time.Time {
 	if value != nil {
 		return value

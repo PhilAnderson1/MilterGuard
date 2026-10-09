@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+// CommandHistoryLimit is the number of interactive administration commands
+// retained between command-mode sessions.
+const CommandHistoryLimit = 10
+
 type CorrespondentKind string
 
 const (
@@ -33,6 +37,34 @@ const (
 	IPBlockLevelShort  IPBlockLevel = "short"
 	IPBlockLevelRepeat IPBlockLevel = "repeat"
 )
+
+type SenderBlockKind uint8
+
+const (
+	SenderBlockExactMailbox SenderBlockKind = 1
+	SenderBlockDomain       SenderBlockKind = 2
+)
+
+type SenderBlockEntry struct {
+	ID          uint64
+	Recipient   string
+	SenderKind  SenderBlockKind
+	SenderValue string
+	ExpiresAt   time.Time
+}
+
+func (e SenderBlockEntry) Pattern() string {
+	if e.SenderKind == SenderBlockDomain {
+		return "*@" + e.SenderValue
+	}
+	return e.SenderValue
+}
+
+type SenderBlockMatch struct {
+	BlockedRecipients []string
+	MatchedSender     string
+	MatchedKind       SenderBlockKind
+}
 
 type Correspondent struct {
 	ID                   uint64
@@ -81,6 +113,7 @@ const (
 	ActivityEventTrustedDomainAccept            ActivityEventType = 4
 	ActivityEventAttachmentRejection            ActivityEventType = 5
 	ActivityEventProtectedSenderDomainRejection ActivityEventType = 6
+	ActivityEventSenderBlocklist                ActivityEventType = 7
 )
 
 type ActivityOutcome uint8
@@ -105,19 +138,22 @@ type ActivityEvent struct {
 	Outcome        ActivityOutcome
 	AnalysisFailed bool
 	TokenCost      float64
+	Quantity       int64
 }
 
 type ActivitySummary struct {
-	ScanTotal                       int64
-	ScanRejections                  int64
-	ScanAccepted                    int64
-	AIEvaluationsFailed             int64
-	IPRejections                    int64
-	CorrespondentAccepts            int64
-	TrustedDomainAccepts            int64
-	AttachmentRejections            int64
-	ProtectedSenderDomainRejections int64
-	TokenCost                       float64
+	ScanTotal                        int64
+	ScanRejections                   int64
+	ScanAccepted                     int64
+	AIEvaluationsFailed              int64
+	IPRejections                     int64
+	CorrespondentAccepts             int64
+	TrustedDomainAccepts             int64
+	AttachmentRejections             int64
+	ProtectedSenderDomainRejections  int64
+	SenderBlocklistRejections        int64
+	SenderBlocklistRecipientRemovals int64
+	TokenCost                        float64
 }
 
 type ServiceStatus struct {
@@ -137,5 +173,10 @@ type RejectionPage struct {
 
 type IPBlockPage struct {
 	Entries   []IPBlock
+	Truncated bool
+}
+
+type SenderBlockPage struct {
+	Entries   []SenderBlockEntry
 	Truncated bool
 }

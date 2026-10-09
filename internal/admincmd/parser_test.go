@@ -12,7 +12,7 @@ func TestCommandAuthorizationAndCanonicalization(t *testing.T) {
 	p := New(Dependencies{})
 	user := Actor{DefaultRecipient: "Phil <phil@example.com>"}
 	admin := Actor{Administrator: true, DefaultRecipient: "phil@example.com"}
-	for _, line := range []string{"ACTIVITY", "WHITELIST DELETE news@example.net *", "REJECTIONS *", "WHITELIST LIST *", "IP LIST"} {
+	for _, line := range []string{"ACTIVITY", "WHITELIST DELETE news@example.net *", "BLOCKLIST ADD news@example.net *", "BLOCKLIST LIST *", "REJECTIONS *", "WHITELIST LIST *", "IP LIST"} {
 		if _, err := p.Parse(line, user); err == nil {
 			t.Errorf("ordinary user could issue %q", line)
 		}
@@ -26,6 +26,9 @@ func TestCommandAuthorizationAndCanonicalization(t *testing.T) {
 		"IP LIST LOOKUP all":                  "IP LIST LOOKUP all",
 		"IP ADD ::ffff:192.0.2.10":            "IP ADD 192.0.2.10",
 		"WHITELIST DELETE news@example.net *": "WHITELIST DELETE news@example.net *",
+		"BLOCKLIST ADD *@Example.NET *":       "BLOCKLIST ADD *@example.net *",
+		"BLOCKLIST DELETE *@Example.NET ALL":  "BLOCKLIST DELETE *@example.net ALL",
+		"BLOCKLIST LIST *":                    "BLOCKLIST LIST *",
 	}
 	for line, want := range tests {
 		command, err := p.Parse(line, admin)
@@ -33,10 +36,28 @@ func TestCommandAuthorizationAndCanonicalization(t *testing.T) {
 			t.Errorf("Parse(%q) = %q, %v; want %q", line, command.Canonical(), err, want)
 		}
 	}
-	for _, line := range []string{"ACTIVITY fortnight", "ACTIVITY week extra", "REJECTION", "REJECTION 0", "IP ADD invalid", "IP LIST fortnight", "WHITELIST LIST * month extra"} {
+	for _, line := range []string{"ACTIVITY fortnight", "ACTIVITY week extra", "REJECTION", "REJECTION 0", "IP ADD invalid", "IP LIST fortnight", "WHITELIST LIST * month extra", "BLOCKLIST ADD f*oo@example.net *", "BLOCKLIST ADD *@ *"} {
 		if _, err := p.Parse(line, admin); err == nil {
 			t.Errorf("invalid command %q accepted", line)
 		}
+	}
+}
+
+func TestSenderBlocklistScopeInferenceAndCommandModeRequirement(t *testing.T) {
+	p := New(Dependencies{})
+	user := Actor{DefaultRecipient: "owner@example.com"}
+	command, err := p.Parse("BLOCKLIST ADD Sender@Example.NET", user)
+	if err != nil || command.Canonical() != "BLOCKLIST ADD sender@example.net owner@example.com" {
+		t.Fatalf("user command = %q, %v", command.Canonical(), err)
+	}
+	if _, err := p.Parse("BLOCKLIST ADD sender@example.net", Actor{Administrator: true, CommandMode: true, DefaultRecipient: "*"}); err == nil {
+		t.Fatal("command mode accepted mutation without explicit scope")
+	}
+	if _, err := p.Parse("BLOCKLIST DELETE sender@example.net ALL", user); err == nil {
+		t.Fatal("ordinary user accepted for bulk deletion")
+	}
+	if _, err := p.Parse("BLOCKLIST ADD sender@example.net ALL", Actor{Administrator: true}); err == nil {
+		t.Fatal("ALL accepted for blocklist addition")
 	}
 }
 
@@ -60,6 +81,7 @@ func TestRecognizedLineMatchesOnlyCommandKeywords(t *testing.T) {
 		{"rejection 7", true},
 		{"REJECTIONS all", true},
 		{"Whitelist add sender@example.net", true},
+		{"blocklist add sender@example.net", true},
 		{"", false},
 		{"ordinary reply text", false},
 		{"HELPFUL", false},

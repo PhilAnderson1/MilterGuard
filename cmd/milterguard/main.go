@@ -22,6 +22,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/milter"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 	"github.com/mattn/go-isatty"
 	"github.com/peterh/liner"
 )
@@ -108,9 +109,17 @@ func run() int {
 		var commandErr error
 		stopInputInterrupt := interruptCommandInputOnCancellation(ctx, os.Stdin)
 		if inputIsTerminal(os.Stdin) && inputIsTerminal(os.Stdout) {
-			line := liner.NewLiner()
-			commandErr = runTerminalCommandMode(ctx, os.Stdout, processor, line)
-			line.Close()
+			history, historyErr := processor.LoadCommandHistory(ctx)
+			if historyErr != nil {
+				commandErr = fmt.Errorf("load command history: %w", historyErr)
+			} else {
+				line := liner.NewLiner()
+				history, commandErr = runTerminalCommandMode(ctx, os.Stdout, processor, line, history)
+				line.Close()
+				if saveErr := processor.SaveCommandHistory(context.Background(), history); saveErr != nil {
+					commandErr = errors.Join(commandErr, fmt.Errorf("save command history: %w", saveErr))
+				}
+			}
 		} else {
 			commandErr = runCommandMode(ctx, os.Stdin, os.Stdout, processor)
 		}
@@ -204,36 +213,66 @@ func interruptCommandInputOnCancellation(ctx context.Context, input io.Closer) f
 	return func() { close(stopped) }
 }
 
-// runTerminalCommandMode provides in-memory command history on a real terminal.
-func runTerminalCommandMode(ctx context.Context, output io.Writer, processor interactiveCommandProcessor, editor commandLineEditor) error {
+// runTerminalCommandMode restores and updates command history on a real
+// terminal. It returns the oldest-to-newest entries that should be persisted.
+func runTerminalCommandMode(ctx context.Context, output io.Writer, processor interactiveCommandProcessor, editor commandLineEditor, history []string) ([]string, error) {
+	history = normalizeCommandHistory(history)
+	for _, command := range history {
+		editor.AppendHistory(command)
+	}
 	fmt.Fprintln(output, "MilterGuard command mode. Type HELP for commands; EXIT to quit.")
 	actor := admincmd.Actor{Administrator: true, CommandMode: true, DefaultRecipient: "*", NewestLast: true}
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return history, err
 		}
 		line, err := editor.Prompt("milterguard> ")
 		if contextErr := ctx.Err(); contextErr != nil {
-			return contextErr
+			return history, contextErr
 		}
 		if errors.Is(err, io.EOF) {
 			fmt.Fprintln(output)
-			return nil
+			return history, nil
 		}
 		if errors.Is(err, liner.ErrPromptAborted) {
 			continue
 		}
 		if err != nil {
-			return err
+			return history, err
 		}
 		line = strings.TrimSpace(line)
-		if line != "" {
+		if commandModeExit(line) {
+			return history, nil
+		}
+		var appended bool
+		history, appended = appendCommandHistory(history, line)
+		if appended {
 			editor.AppendHistory(line)
 		}
 		if executeCommandModeLine(ctx, output, processor, actor, line) {
-			return nil
+			return history, nil
 		}
 	}
+}
+
+func normalizeCommandHistory(commands []string) []string {
+	history := make([]string, 0, min(len(commands), stores.CommandHistoryLimit))
+	for _, command := range commands {
+		history, _ = appendCommandHistory(history, command)
+	}
+	return history
+}
+
+func appendCommandHistory(history []string, command string) ([]string, bool) {
+	command = strings.TrimSpace(command)
+	if command == "" || commandModeExit(command) || len(history) > 0 && history[len(history)-1] == command {
+		return history, false
+	}
+	history = append(history, command)
+	if len(history) > stores.CommandHistoryLimit {
+		history = history[len(history)-stores.CommandHistoryLimit:]
+	}
+	return history, true
 }
 
 // runCommandMode processes redirected input without terminal prompts or history.
@@ -265,7 +304,7 @@ func executeCommandModeLine(ctx context.Context, output io.Writer, processor int
 	if line == "" {
 		return false
 	}
-	if strings.EqualFold(line, "EXIT") || strings.EqualFold(line, "QUIT") {
+	if commandModeExit(line) {
 		return true
 	}
 	response, err := processor.ExecuteLine(ctx, line, actor)
@@ -290,6 +329,10 @@ func executeCommandModeLine(ctx context.Context, output io.Writer, processor int
 		fmt.Fprintf(output, "Attachment available: %s (%d bytes; not written to the terminal)\n", attachment.Filename, len(attachment.Contents))
 	}
 	return false
+}
+
+func commandModeExit(line string) bool {
+	return strings.EqualFold(line, "EXIT") || strings.EqualFold(line, "QUIT")
 }
 
 type listenFunc func(network, address string) (net.Listener, error)

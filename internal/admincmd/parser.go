@@ -9,6 +9,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 type period string
@@ -45,6 +46,8 @@ const (
 	commandIPAdd
 	commandIPDelete
 	commandAllowlist
+	commandBlocklistList
+	commandBlocklist
 )
 
 type Command struct {
@@ -53,6 +56,8 @@ type Command struct {
 	ip                                            netip.Addr
 	period                                        period
 	rejectionID                                   uint64
+	senderKind                                    stores.SenderBlockKind
+	allRecipients                                 bool
 }
 
 func (c Command) Canonical() string { return c.canonical }
@@ -60,7 +65,7 @@ func (c Command) Canonical() string { return c.canonical }
 func RecognizedLine(line string) bool {
 	fields := strings.Fields(line)
 	return len(fields) > 0 && (strings.EqualFold(fields[0], "ACTIVITY") || strings.EqualFold(fields[0], "HELP") || strings.EqualFold(fields[0], "IP") ||
-		strings.EqualFold(fields[0], "REJECTION") || strings.EqualFold(fields[0], "REJECTIONS") || strings.EqualFold(fields[0], "WHITELIST"))
+		strings.EqualFold(fields[0], "BLOCKLIST") || strings.EqualFold(fields[0], "REJECTION") || strings.EqualFold(fields[0], "REJECTIONS") || strings.EqualFold(fields[0], "WHITELIST"))
 }
 
 func ParseError(line, text string) Command {
@@ -95,7 +100,7 @@ func (p *Processor) Parse(line string, actor Actor) (Command, error) {
 	if p == nil {
 		return Command{}, fmt.Errorf("command processor is unavailable")
 	}
-	return parse(strings.TrimSpace(line), normalizeRecipient(actor.DefaultRecipient), actor.Administrator)
+	return parse(strings.TrimSpace(line), normalizeRecipient(actor.DefaultRecipient), actor.Administrator, actor.CommandMode)
 }
 
 func parseCommandPeriod(value string) (period, bool) {
@@ -137,7 +142,7 @@ func (p period) description() string {
 	}
 }
 
-func parse(text, authenticatedSender string, admin bool) (Command, error) {
+func parse(text, authenticatedSender string, admin, commandMode bool) (Command, error) {
 	fields := strings.Fields(text)
 	if len(fields) == 1 && strings.EqualFold(fields[0], "HELP") {
 		return Command{kind: commandHelp, canonical: "HELP"}, nil
@@ -223,6 +228,77 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 		canonical += " " + string(pd)
 		return Command{kind: commandRejections, recipient: recipient, canonical: canonical, period: pd}, nil
 	}
+	if len(fields) >= 2 && strings.EqualFold(fields[0], "BLOCKLIST") && strings.EqualFold(fields[1], "LIST") {
+		if len(fields) > 3 {
+			return Command{}, fmt.Errorf("BLOCKLIST LIST accepts at most one recipient")
+		}
+		recipient := authenticatedSender
+		if len(fields) == 3 {
+			recipient = fields[2]
+		}
+		var authorization recipientAuthorization
+		recipient, authorization = authorizeRecipient(recipient, authenticatedSender, admin)
+		switch authorization {
+		case recipientInvalid:
+			return Command{}, fmt.Errorf("blocklist recipient must be a valid email address")
+		case recipientWildcardDenied:
+			return Command{}, fmt.Errorf("server-wide blocklist listing is restricted to administrators")
+		case recipientOtherDenied:
+			return Command{}, fmt.Errorf("users may view only their own blocklist")
+		}
+		return Command{kind: commandBlocklistList, recipient: recipient, canonical: "BLOCKLIST LIST " + recipient}, nil
+	}
+	if len(fields) >= 1 && strings.EqualFold(fields[0], "BLOCKLIST") {
+		if len(fields) != 3 && len(fields) != 4 {
+			return Command{}, fmt.Errorf("BLOCKLIST command must be BLOCKLIST ADD sender-pattern [recipient|*] or BLOCKLIST DELETE sender-pattern [recipient|*|ALL]")
+		}
+		verb := strings.ToUpper(fields[1])
+		if verb != "ADD" && verb != "DELETE" {
+			return Command{}, fmt.Errorf("BLOCKLIST operation must be ADD or DELETE")
+		}
+		if commandMode && len(fields) != 4 {
+			return Command{}, fmt.Errorf("BLOCKLIST %s requires an explicit recipient, *, or ALL in command mode", verb)
+		}
+		sender, kind, err := parseSenderBlockPattern(fields[2])
+		if err != nil {
+			return Command{}, err
+		}
+		recipient := authenticatedSender
+		if len(fields) == 4 {
+			recipient = fields[3]
+		}
+		allRecipients := strings.EqualFold(recipient, "ALL")
+		if allRecipients {
+			if verb != "DELETE" {
+				return Command{}, fmt.Errorf("ALL is supported only by BLOCKLIST DELETE")
+			}
+			if !admin {
+				return Command{}, fmt.Errorf("deleting blocklist entries for all recipients is restricted to administrators")
+			}
+			pattern := sender
+			if kind == stores.SenderBlockDomain {
+				pattern = "*@" + sender
+			}
+			return Command{kind: commandBlocklist, verb: verb, sender: sender, senderKind: kind, allRecipients: true,
+				canonical: fmt.Sprintf("BLOCKLIST DELETE %s ALL", pattern)}, nil
+		}
+		var authorization recipientAuthorization
+		recipient, authorization = authorizeRecipient(recipient, authenticatedSender, admin)
+		switch authorization {
+		case recipientInvalid:
+			return Command{}, fmt.Errorf("blocklist recipient must be a valid email address or *")
+		case recipientWildcardDenied:
+			return Command{}, fmt.Errorf("server-wide blocklist entries are restricted to administrators")
+		case recipientOtherDenied:
+			return Command{}, fmt.Errorf("users may modify only their own blocklist")
+		}
+		pattern := sender
+		if kind == stores.SenderBlockDomain {
+			pattern = "*@" + sender
+		}
+		return Command{kind: commandBlocklist, verb: verb, sender: sender, senderKind: kind, recipient: recipient,
+			canonical: fmt.Sprintf("BLOCKLIST %s %s %s", verb, pattern, recipient)}, nil
+	}
 	if len(fields) >= 2 && strings.EqualFold(fields[0], "WHITELIST") && strings.EqualFold(fields[1], "LIST") {
 		if len(fields) > 4 {
 			return Command{}, fmt.Errorf("WHITELIST LIST accepts at most one recipient and one period")
@@ -287,6 +363,28 @@ func parse(text, authenticatedSender string, admin bool) (Command, error) {
 	}
 	canonical := fmt.Sprintf("WHITELIST %s %s %s", verb, sender, recipient)
 	return Command{kind: commandAllowlist, verb: verb, sender: sender, recipient: recipient, canonical: canonical}, nil
+}
+
+func parseSenderBlockPattern(value string) (string, stores.SenderBlockKind, error) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "*@") {
+		if strings.Count(value, "*") != 1 {
+			return "", 0, fmt.Errorf("sender pattern must be an exact email address or *@domain")
+		}
+		domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(strings.TrimPrefix(value, "*@"))), ".")
+		if domain == "" || mailaddr.Domain("x@"+domain) != domain {
+			return "", 0, fmt.Errorf("sender pattern must contain a valid domain")
+		}
+		return domain, stores.SenderBlockDomain, nil
+	}
+	if strings.Contains(value, "*") {
+		return "", 0, fmt.Errorf("sender pattern supports only an exact email address or *@domain")
+	}
+	sender := mailaddr.Normalize(value)
+	if sender == "" {
+		return "", 0, fmt.Errorf("sender pattern must be a valid email address or *@domain")
+	}
+	return sender, stores.SenderBlockExactMailbox, nil
 }
 
 func listPeriod(fields []string, index int) (period, error) {

@@ -46,6 +46,7 @@ type Config struct {
 	Authentication     AuthenticationConfig     `yaml:"authentication"`
 	AI                 AIConfig                 `yaml:"ai"`
 	Activity           ActivityConfig           `yaml:"activity"`
+	SenderBlocklist    SenderBlocklistConfig    `yaml:"sender_blocklist"`
 	Filtering          FilteringConfig          `yaml:"filtering"`
 	Attachments        AttachmentsConfig        `yaml:"attachments"`
 	EmailCommands      EmailCommandsConfig      `yaml:"email_commands"`
@@ -65,6 +66,13 @@ type PersistenceConfig struct {
 
 type ActivityConfig struct {
 	Expiry Duration `yaml:"expiry"`
+}
+
+type SenderBlocklistConfig struct {
+	Expiry            Duration `yaml:"expiry"`
+	MaxEntries        int      `yaml:"max_entries"`
+	IncludeSubdomains bool     `yaml:"include_subdomains"`
+	RejectMessage     string   `yaml:"reject_message"`
 }
 
 type DomainRegistrationConfig struct {
@@ -262,6 +270,10 @@ func defaults() Config {
 			SiteURL: "https://github.com/PhilAnderson1/MilterGuard", AppName: "MilterGuard",
 		},
 		Activity: ActivityConfig{Expiry: Duration(365 * 24 * time.Hour)},
+		SenderBlocklist: SenderBlocklistConfig{
+			Expiry: Duration(365 * 24 * time.Hour), MaxEntries: 10000, IncludeSubdomains: true,
+			RejectMessage: "Message rejected by recipient sender blocklist",
+		},
 		Attachments: AttachmentsConfig{
 			BlockExecutables: true, AddIPReputationStrike: false,
 			BlockedExtensions: []string{"exe", "com", "scr", "pif", "bat", "cmd", "ps1", "vbs", "js", "jse", "msi", "dll", "jar", "lnk", "iso", "7z", "rar"},

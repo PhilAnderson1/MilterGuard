@@ -23,12 +23,16 @@ import (
 // and optional reverse-DNS enrichment shared by terminal and email commands.
 func commandProcessor(cfg config.Config, correspondents stores.CorrespondentAdminRepository,
 	rejections stores.RejectionRepository, ipReputation stores.IPReputationAdminRepository,
+	senderBlocklist stores.SenderBlocklistAdminRepository,
 	activity stores.ActivityReporter, serviceStatus stores.ServiceStatusStore,
+	commandHistory stores.CommandHistoryRepository,
 	archive *rejectedmail.Archive, resolver dnsResolver, log *slog.Logger) *admincmd.Processor {
 	return admincmd.New(admincmd.Dependencies{
 		Correspondents: correspondents, Rejections: rejections, IPReputation: ipReputation, Activity: activity,
-		ServiceStatus: serviceStatus,
-		MessageSource: commandArchiveSource{archive}, IPResolver: &commandIPResolver{resolver: resolver,
+		SenderBlocklist: senderBlocklist,
+		ServiceStatus:   serviceStatus,
+		CommandHistory:  commandHistory,
+		MessageSource:   commandArchiveSource{archive}, IPResolver: &commandIPResolver{resolver: resolver,
 			timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
 		MaxMessageSize: cfg.Milter.MaxMessageSize, DatabaseTimeout: commandDatabaseTimeout, ActivityExpiry: cfg.Activity.Expiry.Value(),
 		Logger: log,
@@ -70,8 +74,10 @@ func OpenCommandProcessor(cfg config.Config, log *slog.Logger) (*admincmd.Proces
 	ipRepository := newIPRepository(cfg.IPReputation, database, time.Now, log)
 	ipPolicy := newIPReputationStore(cfg.IPReputation, ipRepository, log)
 	activity := newActivityRepository(cfg.Activity, database, time.Now)
+	senderBlocklist := newSenderBlocklistRepository(cfg.SenderBlocklist, database, time.Now)
+	commandHistory := newCommandHistoryRepository(database)
 	archive := newRejectedMailArchive(cfg.RejectionHistory, log)
-	return commandProcessor(cfg, correspondents, rejections, ipPolicy, activity, activity, archive, systemdns.NewResolver(), log), closeProcessor, nil
+	return commandProcessor(cfg, correspondents, rejections, ipPolicy, senderBlocklist, activity, activity, commandHistory, archive, systemdns.NewResolver(), log), closeProcessor, nil
 }
 
 type commandIPResolver struct {

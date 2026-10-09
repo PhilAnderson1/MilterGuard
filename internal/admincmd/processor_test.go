@@ -47,6 +47,54 @@ type ipReputationRepositoryStub struct {
 	err     error
 }
 
+type senderBlocklistRepositoryStub struct {
+	added       stores.SenderBlockEntry
+	deleteQuery stores.SenderBlockDeleteQuery
+	listQuery   stores.SenderBlockListQuery
+	created     bool
+	removed     int
+	err         error
+}
+
+func (r *senderBlocklistRepositoryStub) AddSenderBlock(_ context.Context, entry stores.SenderBlockEntry) (bool, stores.SenderBlockEntry, error) {
+	r.added = entry
+	entry.ExpiresAt = time.Date(2027, 10, 9, 0, 0, 0, 0, time.UTC)
+	return r.created, entry, r.err
+}
+func (r *senderBlocklistRepositoryStub) DeleteSenderBlocks(_ context.Context, query stores.SenderBlockDeleteQuery) (int, error) {
+	r.deleteQuery = query
+	return r.removed, r.err
+}
+func (r *senderBlocklistRepositoryStub) ListSenderBlocks(_ context.Context, query stores.SenderBlockListQuery) (stores.SenderBlockPage, error) {
+	r.listQuery = query
+	return stores.SenderBlockPage{Entries: []stores.SenderBlockEntry{{
+		Recipient: "owner@example.com", SenderKind: stores.SenderBlockDomain, SenderValue: "blocked.example",
+		ExpiresAt: time.Date(2027, 10, 9, 0, 0, 0, 0, time.UTC),
+	}}}, r.err
+}
+
+func TestSenderBlocklistCommandsUseAuthorizedRepositoryOperations(t *testing.T) {
+	repository := &senderBlocklistRepositoryStub{created: true, removed: 1}
+	p := New(Dependencies{SenderBlocklist: repository})
+	actor := Actor{Administrator: true, CommandMode: true, DefaultRecipient: "*"}
+	response, err := p.ExecuteLine(context.Background(), "BLOCKLIST ADD *@Blocked.Example owner@example.com", actor)
+	if err != nil || repository.added.SenderKind != stores.SenderBlockDomain || repository.added.SenderValue != "blocked.example" || repository.added.Recipient != "owner@example.com" || !strings.Contains(response.Text, "entry added") {
+		t.Fatalf("add response=%q entry=%+v err=%v", response.Text, repository.added, err)
+	}
+	response, err = p.ExecuteLine(context.Background(), "BLOCKLIST DELETE *@blocked.example owner@example.com", actor)
+	if err != nil || repository.deleteQuery.SenderValue != "blocked.example" || repository.deleteQuery.Recipients.Address != "owner@example.com" || !strings.Contains(response.Text, "removed 1") {
+		t.Fatalf("delete response=%q query=%+v err=%v", response.Text, repository.deleteQuery, err)
+	}
+	response, err = p.ExecuteLine(context.Background(), "BLOCKLIST DELETE *@blocked.example ALL", actor)
+	if err != nil || !repository.deleteQuery.Recipients.All || !strings.Contains(response.Text, "removed 1") {
+		t.Fatalf("bulk delete response=%q query=%+v err=%v", response.Text, repository.deleteQuery, err)
+	}
+	response, err = p.ExecuteLine(context.Background(), "BLOCKLIST LIST owner@example.com", actor)
+	if err != nil || repository.listQuery.Recipients.Address != "owner@example.com" || !strings.Contains(response.Text, "Sender: *@blocked.example") {
+		t.Fatalf("list response=%q query=%+v err=%v", response.Text, repository.listQuery, err)
+	}
+}
+
 func (r *ipReputationRepositoryStub) AddManualBlock(_ context.Context, address netip.Addr) (stores.IPBlock, error) {
 	r.address = address
 	return r.block, r.err

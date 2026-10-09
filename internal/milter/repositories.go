@@ -69,3 +69,13 @@ func newIPRepository(cfg config.IPReputationConfig, db *sqlitedb.Store, now func
 func newActivityRepository(cfg config.ActivityConfig, db *sqlitedb.Store, now func() time.Time) stores.ActivityStore {
 	return storesqlite.NewActivity(db, storesqlite.ActivityOptions{Expiry: cfg.Expiry.Value(), Now: now})
 }
+
+func newSenderBlocklistRepository(cfg config.SenderBlocklistConfig, db *sqlitedb.Store, now func() time.Time) stores.SenderBlocklistRepository {
+	return storesqlite.NewSenderBlocklist(db, storesqlite.SenderBlocklistOptions{
+		Expiry: cfg.Expiry.Value(), MaxEntries: cfg.MaxEntries, Now: now,
+	})
+}
+
+func newCommandHistoryRepository(db *sqlitedb.Store) stores.CommandHistoryRepository {
+	return storesqlite.NewCommandHistory(db)
+}

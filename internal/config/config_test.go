@@ -163,6 +163,28 @@ func TestValidateActivityAndTokenPricing(t *testing.T) {
 	}
 }
 
+func TestDefaultSenderBlocklistSettings(t *testing.T) {
+	cfg := defaults()
+	if cfg.SenderBlocklist.Expiry.Value() != 365*24*time.Hour || cfg.SenderBlocklist.MaxEntries != 10000 ||
+		!cfg.SenderBlocklist.IncludeSubdomains || cfg.SenderBlocklist.RejectMessage != "Message rejected by recipient sender blocklist" {
+		t.Fatalf("sender blocklist defaults = %+v", cfg.SenderBlocklist)
+	}
+}
+
+func TestSenderBlocklistValidation(t *testing.T) {
+	for _, update := range []func(*Config){
+		func(c *Config) { c.SenderBlocklist.Expiry = Duration(23 * time.Hour) },
+		func(c *Config) { c.SenderBlocklist.MaxEntries = 0 },
+		func(c *Config) { c.SenderBlocklist.RejectMessage = " " },
+	} {
+		cfg := validConfig()
+		update(&cfg)
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "sender_blocklist") {
+			t.Fatalf("sender blocklist validation error = %v", err)
+		}
+	}
+}
+
 func TestValidateMilterTimeout(t *testing.T) {
 	for _, timeout := range []time.Duration{0, -time.Second} {
 		cfg := validConfig()

@@ -54,7 +54,7 @@ func TestOpenCreatesAndReopensSchema(t *testing.T) {
 	}
 }
 
-func TestConcurrentOpenSerializesInitialSchemaMigration(t *testing.T) {
+func TestConcurrentOpenSerializesInitialSchemaCreation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "concurrent-open.db")
 	const openers = 8
 	start := make(chan struct{})
@@ -94,42 +94,21 @@ func TestConcurrentOpenSerializesInitialSchemaMigration(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesVersionOneDatabaseWithoutLosingData(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "migration.db")
+func TestOpenRejectsObsoleteSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "obsolete.db")
 	store, err := Open(context.Background(), path, DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Exec(context.Background(), `INSERT INTO rejections
-		(sender, rejected_at_ms) VALUES (?, ?)`, "preserved@example.com", 1); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Exec(context.Background(), `DROP TABLE service_status`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Exec(context.Background(), `DROP TABLE activity`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Exec(context.Background(), `PRAGMA user_version = 1`); err != nil {
+	if _, err := store.Exec(context.Background(), "PRAGMA user_version = 3"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err = Open(context.Background(), path, DefaultOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	var rejectionCount, activityCount int
-	if err := store.QueryRow(context.Background(), `SELECT count(*) FROM rejections`).Scan(&rejectionCount); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.QueryRow(context.Background(), `SELECT count(*) FROM activity`).Scan(&activityCount); err != nil {
-		t.Fatal(err)
-	}
-	if rejectionCount != 1 || activityCount != 0 {
-		t.Fatalf("counts after migration: rejections=%d activity=%d", rejectionCount, activityCount)
+	_, err = Open(context.Background(), path, DefaultOptions())
+	if !errors.Is(err, ErrIncompatibleDatabase) {
+		t.Fatalf("Open() error = %v, want ErrIncompatibleDatabase", err)
 	}
 }
 

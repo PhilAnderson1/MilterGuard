@@ -3,15 +3,13 @@ package sqlitedb
 import (
 	"context"
 	"database/sql"
-	"embed"
+	_ "embed"
 	"errors"
 	"fmt"
-	"io/fs"
 	"math/rand/v2"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,11 +18,11 @@ import (
 	lib "modernc.org/sqlite/lib"
 )
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 4
 
 var (
-	//go:embed schema/*.sql
-	schemaFiles embed.FS
+	//go:embed schema/schema.sql
+	currentSchema string
 
 	ErrIncompatibleDatabase = errors.New("incompatible SQLite database format")
 )
@@ -74,8 +72,9 @@ type Row struct {
 	args  []any
 }
 
-// Open creates or opens the database, applies connection protections and all
-// pending embedded migrations, and refuses incompatible existing state.
+// Open creates or opens the database, applies connection protections, creates
+// the current embedded schema for an empty database, and refuses incompatible
+// existing state.
 func Open(ctx context.Context, path string, options Options) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("SQLite database path is empty")
@@ -145,18 +144,16 @@ func (s *Store) prepareSchema(ctx context.Context) error {
 			if !empty {
 				return fmt.Errorf("%w: unversioned database is not empty", ErrIncompatibleDatabase)
 			}
+			if _, err := tx.ExecContext(ctx, currentSchema); err != nil {
+				return fmt.Errorf("create SQLite schema version %d: %w", CurrentSchemaVersion, err)
+			}
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", CurrentSchemaVersion)); err != nil {
+				return fmt.Errorf("set SQLite schema version %d: %w", CurrentSchemaVersion, err)
+			}
+			return nil
 		}
-		for next := version + 1; next <= CurrentSchemaVersion; next++ {
-			name, script, err := migration(next)
-			if err != nil {
-				return fmt.Errorf("apply SQLite schema migration %d: %w", next, err)
-			}
-			if _, err := tx.ExecContext(ctx, script); err != nil {
-				return fmt.Errorf("apply SQLite schema migration %d: execute %s: %w", next, name, err)
-			}
-			if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", next)); err != nil {
-				return fmt.Errorf("apply SQLite schema migration %d: set schema version: %w", next, err)
-			}
+		if version < CurrentSchemaVersion {
+			return fmt.Errorf("%w: database version %d is older than supported version %d", ErrIncompatibleDatabase, version, CurrentSchemaVersion)
 		}
 		return nil
 	})
@@ -171,26 +168,6 @@ func databaseEmptyTx(ctx context.Context, tx *sql.Tx) (bool, error) {
 		return false, fmt.Errorf("inspect SQLite schema: %w", err)
 	}
 	return count == 0, nil
-}
-
-func migration(version int) (string, string, error) {
-	entries, err := fs.ReadDir(schemaFiles, "schema")
-	if err != nil {
-		return "", "", err
-	}
-	prefix := fmt.Sprintf("%03d_", version)
-	var names []string
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) && strings.HasSuffix(entry.Name(), ".sql") {
-			names = append(names, entry.Name())
-		}
-	}
-	sort.Strings(names)
-	if len(names) != 1 {
-		return "", "", fmt.Errorf("expected one embedded migration for version %d, found %d", version, len(names))
-	}
-	content, err := schemaFiles.ReadFile("schema/" + names[0])
-	return names[0], string(content), err
 }
 
 // Exec executes a statement with bounded retries for transient SQLite locking.

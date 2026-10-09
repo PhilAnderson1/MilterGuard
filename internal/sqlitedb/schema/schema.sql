@@ -1,5 +1,5 @@
--- Initial MilterGuard persistent-state schema. Timestamps are Unix
--- milliseconds in UTC.
+-- Complete MilterGuard persistent-state schema. Timestamps are Unix
+-- milliseconds in UTC. PRAGMA user_version is managed by sqlitedb.Store.
 
 CREATE TABLE ip_reputation (
     id                  INTEGER PRIMARY KEY,
@@ -75,3 +75,53 @@ CREATE TABLE domain_registrations (
 
 CREATE INDEX domain_registrations_expires_at_idx
     ON domain_registrations(expires_at_ms);
+
+CREATE TABLE activity (
+    id               INTEGER PRIMARY KEY,
+    occurred_at_ms   INTEGER NOT NULL,
+    event_type       INTEGER NOT NULL CHECK (event_type IN (1, 2, 3, 4, 5, 6, 7)),
+    outcome          INTEGER NOT NULL CHECK (outcome IN (1, 2, 3, 4)),
+    analysis_failed  INTEGER CHECK (analysis_failed IN (0, 1)),
+    token_cost       REAL CHECK (token_cost >= 0),
+    quantity         INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+    CHECK (
+        (event_type = 1 AND analysis_failed IS NOT NULL AND token_cost IS NOT NULL)
+        OR
+        (event_type IN (2, 3, 4, 5, 6, 7) AND analysis_failed IS NULL AND token_cost IS NULL)
+    ),
+    CHECK (
+        event_type = 1
+        OR (event_type IN (2, 5, 6) AND outcome IN (2, 4))
+        OR (event_type IN (3, 4) AND outcome IN (1, 4))
+        OR (event_type = 7 AND outcome IN (1, 2))
+    )
+);
+
+CREATE INDEX activity_occurred_at_idx ON activity(occurred_at_ms);
+
+CREATE TABLE service_status (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    started_at_ms INTEGER NOT NULL,
+    mode          INTEGER NOT NULL CHECK (mode IN (1, 2))
+);
+
+CREATE TABLE command_history (
+    position INTEGER PRIMARY KEY CHECK (position BETWEEN 1 AND 10),
+    command  TEXT NOT NULL CHECK (command <> '')
+);
+
+CREATE TABLE sender_blocklist (
+    id            INTEGER PRIMARY KEY,
+    recipient     TEXT NOT NULL,
+    sender_kind   INTEGER NOT NULL CHECK (sender_kind IN (1, 2)),
+    sender_value  TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    UNIQUE (recipient, sender_kind, sender_value)
+);
+
+CREATE INDEX sender_blocklist_match_idx
+    ON sender_blocklist(recipient, sender_kind, sender_value, expires_at_ms);
+CREATE INDEX sender_blocklist_recipient_expiry_idx
+    ON sender_blocklist(recipient, expires_at_ms DESC, id DESC);
+CREATE INDEX sender_blocklist_expiry_idx
+    ON sender_blocklist(expires_at_ms, id);

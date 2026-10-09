@@ -34,6 +34,8 @@ func TestActivityRepositoryAggregatesAndAppliesRetention(t *testing.T) {
 		{OccurredAt: now.Add(-6 * time.Hour), EventType: stores.ActivityEventTrustedDomainAccept, Outcome: stores.ActivityOutcomeAccepted},
 		{OccurredAt: now.Add(-7 * time.Hour), EventType: stores.ActivityEventAttachmentRejection, Outcome: stores.ActivityOutcomeRejected},
 		{OccurredAt: now.Add(-8 * time.Hour), EventType: stores.ActivityEventProtectedSenderDomainRejection, Outcome: stores.ActivityOutcomeRejected},
+		{OccurredAt: now.Add(-9 * time.Hour), EventType: stores.ActivityEventSenderBlocklist, Outcome: stores.ActivityOutcomeRejected},
+		{OccurredAt: now.Add(-10 * time.Hour), EventType: stores.ActivityEventSenderBlocklist, Outcome: stores.ActivityOutcomeAccepted, Quantity: 3},
 		{OccurredAt: now.Add(-8 * 24 * time.Hour), EventType: stores.ActivityEventScan, Outcome: stores.ActivityOutcomeAccepted, TokenCost: 99},
 	}
 	for _, event := range events {
@@ -47,7 +49,8 @@ func TestActivityRepositoryAggregatesAndAppliesRetention(t *testing.T) {
 	}
 	if summary.ScanTotal != 3 || summary.ScanAccepted != 1 || summary.ScanRejections != 1 || summary.AIEvaluationsFailed != 2 ||
 		summary.IPRejections != 1 || summary.CorrespondentAccepts != 1 || summary.TrustedDomainAccepts != 1 ||
-		summary.AttachmentRejections != 1 || summary.ProtectedSenderDomainRejections != 1 || summary.TokenCost != .6 {
+		summary.AttachmentRejections != 1 || summary.ProtectedSenderDomainRejections != 1 || summary.SenderBlocklistRejections != 1 ||
+		summary.SenderBlocklistRecipientRemovals != 3 || summary.TokenCost != .6 {
 		t.Fatalf("summary = %+v", summary)
 	}
 }

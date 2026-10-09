@@ -120,7 +120,11 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 		}
 	}
 	if err == nil {
-		err = writeFrame(ss.conn, response)
+		if selected == actionAccept {
+			err = ss.writePolicyResponse(selected, rejectMessage)
+		} else {
+			err = writeFrame(ss.conn, response)
+		}
 	}
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
@@ -144,6 +148,9 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 		return false
 	}
 	ss.deps.log.InfoContext(ctx, "attachment policy decision", attrs...)
+	if selected == actionAccept {
+		ss.completeSenderBlocklistRemoval(ctx)
+	}
 	if selected == actionReject {
 		reason := detection
 		if path != "" {

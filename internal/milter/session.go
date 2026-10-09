@@ -15,33 +15,36 @@ import (
 )
 
 type session struct {
-	deps                        *sessionDependencies
-	conn                        net.Conn
-	reader                      *bufio.Reader
-	phase                       protocolPhase
-	connected                   bool
-	peerIP                      netip.Addr
-	peerHostname                string
-	mtaHostname                 string
-	pendingMTAHostname          string
-	receiverIP                  netip.Addr
-	pendingReceiverIP           netip.Addr
-	heloIdentity                string
-	smtpUTF8                    bool
-	authentication              authenticationState
-	envelopeSender              string
-	envelopeRecipients          []string
-	envelopeRecipientsTruncated bool
-	visibleSender               string
-	visibleSenderDomain         string
-	visibleFromInvalid          bool
-	protectedSenderDomain       string
-	connectionDNS               connectionDNSResult
-	connectionDNSPending        <-chan connectionDNSResult
-	message                     *message.Message
-	exactMessage                mailauth.ExactMessage
-	exactMessageErr             error
-	negotiatedActions           uint32
+	deps                         *sessionDependencies
+	conn                         net.Conn
+	reader                       *bufio.Reader
+	phase                        protocolPhase
+	connected                    bool
+	peerIP                       netip.Addr
+	peerHostname                 string
+	mtaHostname                  string
+	pendingMTAHostname           string
+	receiverIP                   netip.Addr
+	pendingReceiverIP            netip.Addr
+	heloIdentity                 string
+	smtpUTF8                     bool
+	authentication               authenticationState
+	envelopeSender               string
+	envelopeRecipients           []string
+	envelopeRecipientsTruncated  bool
+	visibleSender                string
+	visibleSenderDomain          string
+	visibleFromInvalid           bool
+	protectedSenderDomain        string
+	connectionDNS                connectionDNSResult
+	connectionDNSPending         <-chan connectionDNSResult
+	message                      *message.Message
+	exactMessage                 mailauth.ExactMessage
+	exactMessageErr              error
+	negotiatedActions            uint32
+	pendingSenderBlocks          *pendingSenderBlocklist
+	senderBlocklistFrom          []string
+	senderBlocklistFromTruncated bool
 }
 
 // finishMessage runs policies that need the complete message, obtains an AI
@@ -78,6 +81,9 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		return keepConnection
 	}
 	if handled, keepConnection := ss.applyAuthenticatedOnlySenderDomain(ctx); handled {
+		return keepConnection
+	}
+	if handled, keepConnection := ss.applySenderBlocklist(ctx); handled {
 		return keepConnection
 	}
 	if ss.authentication.Authenticated && !ss.deps.filtering.ScanAuthenticated {
@@ -127,13 +133,14 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		err = ss.writeAcceptedResultHeaders(&result)
 	}
 	if err == nil {
-		err = writeFrame(ss.conn, responseForAction(result.selected, ss.deps.filtering.RejectMessage))
+		err = ss.writePolicyResponse(result.selected, ss.deps.filtering.RejectMessage)
 	}
 	ss.deps.analysis.logOutcome(ctx, ss.message, result, ss.deps.mode, ss.deps.logging.IncludeSubject, err == nil, err)
 	ss.deps.activity.recordScan(ctx, result, err)
 	if err != nil {
 		return false
 	}
+	ss.completeSenderBlocklistRemoval(ctx)
 	ss.applyPostDecisionUpdates(ctx, result, inbound)
 	ss.resetMessage(phaseConnection)
 	return true
@@ -294,9 +301,10 @@ func (ss *session) finishInternalMessage(ctx context.Context) bool {
 
 func (ss *session) knownCorrespondentLogAttrs() []any {
 	attrs := []any{"correspondent", ss.visibleSender}
-	seen := make(map[string]bool, len(ss.envelopeRecipients))
-	localAddresses := make([]string, 0, len(ss.envelopeRecipients))
-	for _, recipient := range ss.envelopeRecipients {
+	recipients := ss.policyEnvelopeRecipients()
+	seen := make(map[string]bool, len(recipients))
+	localAddresses := make([]string, 0, len(recipients))
+	for _, recipient := range recipients {
 		recipient = mailaddr.Normalize(recipient)
 		if recipient == "" || seen[recipient] {
 			continue
@@ -326,13 +334,17 @@ func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluati
 	if ss.deps.mode != "enforce" {
 		return
 	}
-	ss.deps.policy.applyPostDecisionUpdates(ctx, ss.messageContext(inbound.recipientsComplete), result, inbound, ss.deps.filtering.RejectScore)
+	current := ss.messageContext(inbound.recipientsComplete)
+	if result.selected == actionReject {
+		current.envelopeRecipients = append([]string(nil), ss.envelopeRecipients...)
+	}
+	ss.deps.policy.applyPostDecisionUpdates(ctx, current, result, inbound, ss.deps.filtering.RejectScore)
 }
 
 func (ss *session) finishBypassedMessage(ctx context.Context, source string, learn, touchInbound bool, extraAttrs ...any) bool {
 	err := ss.writeAcceptedBypassHeaders()
 	if err == nil {
-		err = writeFrame(ss.conn, responseForAction(actionAccept, ss.deps.filtering.RejectMessage))
+		err = ss.writePolicyResponse(actionAccept, ss.deps.filtering.RejectMessage)
 	}
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
@@ -354,6 +366,7 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 		ss.deps.log.ErrorContext(ctx, "message bypass response failed", attrs...)
 		return false
 	}
+	ss.completeSenderBlocklistRemoval(ctx)
 	if ss.deps.mode == "enforce" {
 		if !ss.authentication.Authenticated && (source == "known_correspondent" || source == "sender_domain_allowlist") {
 			ss.deps.policy.recordLegitimateIP(ctx, ss.peerIP)
@@ -375,11 +388,11 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 }
 
 func (ss *session) touchInboundCorrespondent(ctx context.Context) {
-	ss.deps.policy.touchInboundCorrespondent(ctx, ss.visibleSender, ss.envelopeRecipients)
+	ss.deps.policy.touchInboundCorrespondent(ctx, ss.visibleSender, ss.policyEnvelopeRecipients())
 }
 
 func (ss *session) learnAuthenticatedRecipients(ctx context.Context) {
-	ss.deps.policy.learnAuthenticatedRecipients(ctx, ss.envelopeSender, ss.envelopeRecipients)
+	ss.deps.policy.learnAuthenticatedRecipients(ctx, ss.envelopeSender, ss.policyEnvelopeRecipients())
 }
 
 func (ss *session) messageContext(recipientsComplete bool) messageContext {
@@ -387,8 +400,15 @@ func (ss *session) messageContext(recipientsComplete bool) messageContext {
 		message: ss.message, peerIP: ss.peerIP, connectionDNS: ss.connectionDNS,
 		authenticated: ss.authentication.Authenticated, visibleSender: ss.visibleSender,
 		visibleSenderDomain: ss.visibleSenderDomain, envelopeSender: ss.envelopeSender,
-		envelopeRecipients: append([]string(nil), ss.envelopeRecipients...), recipientsComplete: recipientsComplete,
+		envelopeRecipients: ss.policyEnvelopeRecipients(), recipientsComplete: recipientsComplete,
 	}
+}
+
+func (ss *session) policyEnvelopeRecipients() []string {
+	if ss.pendingSenderBlocks != nil {
+		return append([]string(nil), ss.pendingSenderBlocks.remainingRecipients...)
+	}
+	return append([]string(nil), ss.envelopeRecipients...)
 }
 
 func (ss *session) rejectReputationIP(ctx context.Context) (bool, bool) {

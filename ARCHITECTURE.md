@@ -38,7 +38,7 @@ path.
 | `internal/rdap` | Discovers and queries RDAP services with redirect, SSRF, and DNS-rebinding protection. |
 | `internal/rejectedmail` | Saves and cleans up rejected `.eml` files beneath the configured archive root. |
 | `internal/smtpreply` | Builds MIME command replies and submits them to the configured SMTP service. |
-| `internal/sqlitedb` | Owns SQLite connection setup, schema migration, WAL handling, busy retries, transactions, and checkpoints. |
+| `internal/sqlitedb` | Owns SQLite connection setup, schema creation and version validation, WAL handling, busy retries, transactions, and checkpoints. |
 | `internal/stores` | Defines SQL-independent repository interfaces, queries, and value types. |
 | `internal/stores/sqlite` | Implements the repository contracts with indexed SQLite operations. |
 | `internal/systemdns` | Constructs explicit resolvers for non-authentication DNS users, isolating them from dependency changes to the process-wide default resolver. |
@@ -90,10 +90,13 @@ phase transitions, and dispatches commands. `session.finishMessage` coordinates
 the end-of-message path and sends exactly one final Milter response.
 
 Deterministic policies run before AI analysis where possible. Examples include
-cached IP blocks, authenticated-only sender domains, prohibited attachments,
-trusted correspondents, authenticated-submission bypasses, and trusted sender
-domains. This avoids unnecessary endpoint work and keeps unambiguous security
-decisions independent of model output.
+cached IP blocks, authenticated-only sender domains, manual visible-sender
+blocks, prohibited attachments, trusted correspondents,
+authenticated-submission bypasses, and trusted sender domains. A partial
+sender-blocklist match is held as deferred session state: remaining-recipient
+policy is evaluated first, and delete-recipient frames are sent only immediately
+before the final acceptance. This avoids unnecessary endpoint work and keeps
+unambiguous security decisions independent of model output.
 
 ## Message and authentication processing
 
@@ -148,8 +151,8 @@ or correspondent state.
 ## Persistence
 
 `internal/sqlitedb` owns one process's SQLite connection pool and configures
-WAL mode, the busy timeout, schema versions, migrations, retryable busy
-handling, and checkpoints.
+WAL mode, the busy timeout, current-schema creation and version validation,
+retryable busy handling, and checkpoints.
 
 Repository behavior lives in `internal/stores/sqlite`:
 
@@ -157,6 +160,8 @@ Repository behavior lives in `internal/stores/sqlite`:
 - IP reputation stores strikes and active short or repeat blocks.
 - Rejections store one event with all affected local recipients.
 - Domain registrations cache registration and expiration dates.
+- Sender blocklist entries store manually managed exact-mailbox or domain rules
+  at recipient or server scope.
 - Activity stores filtering outcomes and estimated scan costs, while a
   singleton status row records the current serving process's start time and
   mode for administration reports.
@@ -175,6 +180,10 @@ cleanup passes.
 The Milter service and standalone command mode may access the database
 concurrently. WAL mode, short transactions, the busy timeout, and bounded busy
 retries coordinate that access.
+
+Interactive command mode restores and replaces a ten-entry command-history
+table when it starts and stops. Piped commands do not read or modify that
+history.
 
 ## Domain-registration lookup
 

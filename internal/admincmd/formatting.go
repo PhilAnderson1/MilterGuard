@@ -18,14 +18,31 @@ func formatUTC(value time.Time) string {
 }
 
 func Help(admin, commandMode bool) string {
-	text := "Send one or more commands, one per line:\n\nWHITELIST ADD sender@example.com\nWHITELIST DELETE sender@example.com\nWHITELIST LIST [day|week|month|year|all]\nREJECTIONS [day|week|month|year|all]\nREJECTION id\nHELP\n\nListing commands default to the previous week. The local address is taken from your authenticated envelope sender.\n"
+	text := "Send one or more commands, one per line:\n\nWHITELIST ADD sender@example.com\nWHITELIST DELETE sender@example.com\nWHITELIST LIST [day|week|month|year|all]\nBLOCKLIST ADD sender@example.com\nBLOCKLIST ADD *@example.com\nBLOCKLIST DELETE sender@example.com\nBLOCKLIST LIST\nREJECTIONS [day|week|month|year|all]\nREJECTION id\nHELP\n\nListing commands default to the previous week where applicable. The local address is taken from your authenticated envelope sender.\n"
 	if admin && commandMode {
-		return "Enter one command at a time:\n\nACTIVITY [day|week|month|year|all]\nWHITELIST ADD sender@example.com recipient@example.com\nWHITELIST DELETE sender@example.com [recipient@example.com|*]\nWHITELIST LIST [recipient@example.com|*] [day|week|month|year|all]\nREJECTIONS [recipient@example.com|*] [day|week|month|year|all]\nREJECTION id\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\nHELP\nEXIT\n\nListing commands default to the previous week and all local recipients. WHITELIST ADD requires an explicit local recipient.\n"
+		return "Enter one command at a time:\n\nACTIVITY [day|week|month|year|all]\nWHITELIST ADD sender@example.com recipient@example.com\nWHITELIST DELETE sender@example.com [recipient@example.com|*]\nWHITELIST LIST [recipient@example.com|*] [day|week|month|year|all]\nBLOCKLIST ADD sender-pattern recipient@example.com|*\nBLOCKLIST DELETE sender-pattern recipient@example.com|*|ALL\nBLOCKLIST LIST [recipient@example.com|*]\nREJECTIONS [recipient@example.com|*] [day|week|month|year|all]\nREJECTION id\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\nHELP\nEXIT\n\nSender patterns are exact addresses or *@domain. For blocklist mutations, * identifies the server-wide entry; DELETE with ALL removes matching entries at every recipient scope. Listing commands default to the previous week where applicable and all local recipients. WHITELIST ADD and BLOCKLIST mutations require an explicit scope.\n"
 	}
 	if admin {
-		text += "\nAdministrator commands:\nACTIVITY [day|week|month|year|all]\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\n\nAdministrators may append a local recipient address before the period in WHITELIST LIST and REJECTIONS commands, and to modification commands. They may use * with WHITELIST DELETE, WHITELIST LIST, or REJECTIONS. For example:\n\nWHITELIST LIST * month\nREJECTIONS * year\n"
+		text += "\nAdministrator commands:\nACTIVITY [day|week|month|year|all]\nBLOCKLIST ADD sender-pattern [recipient@example.com|*]\nBLOCKLIST DELETE sender-pattern [recipient@example.com|*|ALL]\nBLOCKLIST LIST [recipient@example.com|*]\nIP LIST [day|week|month|year|all]\nIP LIST LOOKUP [day|week|month|year|all]\nIP ADD 192.0.2.1\nIP DELETE 192.0.2.1\n\nAdministrators may append a local recipient address before the period in WHITELIST LIST and REJECTIONS commands, and to modification commands. In BLOCKLIST mutations, * identifies the server-wide entry; DELETE with ALL removes matching entries at every recipient scope. For example:\n\nBLOCKLIST ADD *@example.com *\nBLOCKLIST DELETE *@example.com ALL\nWHITELIST LIST * month\nREJECTIONS * year\n"
 	}
 	return text
+}
+
+func formatSenderBlocklist(entries []stores.SenderBlockEntry, truncated bool) string {
+	if len(entries) == 0 {
+		return "No active sender blocklist entries were found.\n"
+	}
+	var body strings.Builder
+	for _, entry := range entries {
+		record := fmt.Sprintf("Sender: %s\nRecipient: %s\nExpires: %s\n\n", entry.Pattern(), entry.Recipient, formatUTC(entry.ExpiresAt))
+		if !AppendBoundedResponse(&body, record) {
+			return body.String()
+		}
+	}
+	if truncated {
+		AppendBoundedResponse(&body, listTruncatedNotice)
+	}
+	return body.String()
 }
 
 func formatActivity(pd period, before time.Time, retention time.Duration, summary stores.ActivitySummary, status stores.ServiceStatus, statusAvailable bool) string {
@@ -47,17 +64,19 @@ func formatActivity(pd period, before time.Time, retention time.Duration, summar
 	if activitySummaryEmpty(summary) {
 		body.WriteString("No activity was recorded for this period.\n\n")
 	}
-	totalRejected := summary.ScanRejections + summary.IPRejections + summary.AttachmentRejections + summary.ProtectedSenderDomainRejections
+	totalRejected := summary.ScanRejections + summary.IPRejections + summary.AttachmentRejections + summary.ProtectedSenderDomainRejections + summary.SenderBlocklistRejections
 	totalAccepted := summary.ScanAccepted + summary.CorrespondentAccepts + summary.TrustedDomainAccepts
 	fmt.Fprintf(&body, "Total rejected: %d\n", totalRejected)
 	fmt.Fprintf(&body, "  AI classification: %d\n", summary.ScanRejections)
 	fmt.Fprintf(&body, "  IP reputation: %d\n", summary.IPRejections)
 	fmt.Fprintf(&body, "  Attachment policy: %d\n", summary.AttachmentRejections)
-	fmt.Fprintf(&body, "  Protected sender-domain policy: %d\n\n", summary.ProtectedSenderDomainRejections)
+	fmt.Fprintf(&body, "  Protected sender-domain policy: %d\n", summary.ProtectedSenderDomainRejections)
+	fmt.Fprintf(&body, "  Sender blocklist: %d\n\n", summary.SenderBlocklistRejections)
 	fmt.Fprintf(&body, "Total accepted: %d\n", totalAccepted)
 	fmt.Fprintf(&body, "  AI classification: %d\n", summary.ScanAccepted)
 	fmt.Fprintf(&body, "  Correspondent whitelist: %d\n", summary.CorrespondentAccepts)
 	fmt.Fprintf(&body, "  Trusted sender domain: %d\n\n", summary.TrustedDomainAccepts)
+	fmt.Fprintf(&body, "Recipient deliveries removed by sender blocklist: %d\n\n", summary.SenderBlocklistRecipientRemovals)
 	fmt.Fprintf(&body, "Total AI scans: %d\n", summary.ScanTotal)
 	fmt.Fprintf(&body, "AI evaluations failed: %d\n\n", summary.AIEvaluationsFailed)
 	body.WriteString("Token costs are estimates based on endpoint-reported usage and configured prices.\n")
@@ -102,12 +121,13 @@ func durationPart(value int64, unit string) string {
 func activitySummaryEmpty(summary stores.ActivitySummary) bool {
 	return summary.ScanTotal == 0 && summary.IPRejections == 0 && summary.CorrespondentAccepts == 0 &&
 		summary.TrustedDomainAccepts == 0 && summary.AttachmentRejections == 0 &&
-		summary.ProtectedSenderDomainRejections == 0
+		summary.ProtectedSenderDomainRejections == 0 && summary.SenderBlocklistRejections == 0 &&
+		summary.SenderBlocklistRecipientRemovals == 0
 }
 
 func activityHasRejections(summary stores.ActivitySummary) bool {
 	return summary.ScanRejections > 0 || summary.IPRejections > 0 || summary.AttachmentRejections > 0 ||
-		summary.ProtectedSenderDomainRejections > 0
+		summary.ProtectedSenderDomainRejections > 0 || summary.SenderBlocklistRejections > 0
 }
 
 func formatAllowlist(entries []stores.Correspondent, includeRecipient, truncated bool) string {

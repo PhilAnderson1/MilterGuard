@@ -399,6 +399,11 @@ them to the AI endpoint:
   unscannable, or malformed content. See
   [Basic virus protection](#basic-virus-protection) for the supported formats
   and configuration choices.
+- A manually added sender-blocklist entry rejects mail when every envelope
+  recipient has blocked a mailbox in the visible `From:` header. If only some
+  recipients have blocked it, MilterGuard continues normal filtering for the
+  others and removes the blocked recipients only if the message is ultimately
+  accepted. Authenticated SMTP submissions bypass this inbound policy.
 
 The above checks take place before AI analysis.
 
@@ -597,7 +602,8 @@ sudo milterguard --config /path/to/milterguard.yaml --command-mode
 Command mode permits administrative operations on the live database, so the
 MilterGuard service does not need to be stopped.
 Use the Up and Down arrow keys to revisit commands from the current session;
-history is not saved to disk.
+the ten most recent commands are restored from the SQLite database when the
+next interactive command-mode session starts.
 
 Available commands are:
 
@@ -606,6 +612,9 @@ ACTIVITY [day|week|month|year|all]
 WHITELIST ADD sender@example.com recipient@example.com
 WHITELIST DELETE sender@example.com [recipient@example.com|*]
 WHITELIST LIST [recipient@example.com|*] [day|week|month|year|all]
+BLOCKLIST ADD sender-pattern recipient@example.com|*
+BLOCKLIST DELETE sender-pattern recipient@example.com|*|ALL
+BLOCKLIST LIST [recipient@example.com|*]
 REJECTIONS [recipient@example.com|*] [day|week|month|year|all]
 REJECTION id
 IP LIST [day|week|month|year|all]
@@ -617,9 +626,17 @@ EXIT
 ```
 
 - `ACTIVITY` reports filtering activity, failed AI evaluations, estimated AI
-  cost, and service uptime. It is restricted to administrators.
+  cost, and service uptime. Full sender-blocklist rejections are counted as
+  rejected messages; selective matches are counted as removed recipient
+  deliveries. It is restricted to administrators.
 - `WHITELIST ADD`, `WHITELIST DELETE`, and `WHITELIST LIST` manage trusted
   correspondent addresses.
+- `BLOCKLIST ADD`, `BLOCKLIST DELETE`, and `BLOCKLIST LIST` manage manual
+  visible-sender blocks. A sender pattern is either one exact mailbox or
+  `*@example.com`; arbitrary wildcards are not supported. Command-line
+  additions and deletions require an explicit scope. For mutations, `*`
+  identifies the server-wide entry. Administrators can use `ALL` with
+  `BLOCKLIST DELETE` to remove the matching pattern from every recipient scope.
 - `REJECTIONS` lists rejected messages, including their rejection IDs and
   reasons.
 - `REJECTION <id>` displays the rejection information and decoded, cleaned
@@ -646,6 +663,18 @@ Each listing returns at most 1,000 matching records and reports when that limit
 has been reached; use a shorter date period or a recipient filter to narrow a
 large result.
 
+Sender-blocklist entries are recipient scoped and expire after
+`sender_blocklist.expiry`; adding the same entry again refreshes its expiry.
+Only administrators can use recipient `*` to create a server-wide rule. When
+`sender_blocklist.include_subdomains` is enabled, `*@example.com` also matches
+mailboxes beneath subdomains such as `sender@mail.example.com`. Changing that
+setting immediately changes the interpretation of all existing domain rules.
+Rules match only normalized mailboxes parsed from the visible `From:` header;
+they do not match the SMTP envelope sender, display name, `Reply-To:`, body
+text, or an AI inference. Periodic maintenance enforces
+`sender_blocklist.max_entries`, and `sender_blocklist.reject_message` controls
+the SMTP response used when every recipient blocks the sender.
+
 The processed body shown by `REJECTION <id>` is regenerated with the current
 MIME and HTML parser, so it may differ from the text originally supplied to the
 AI. Connection and authentication analysis is not reconstructed.
@@ -663,8 +692,17 @@ The optional email command interface supports the same commands and sends the
 results back by email. `ACTIVITY` and IP commands are administrator-only. For
 ordinary authenticated users, the local recipient address is inferred from the
 authenticated envelope sender, so it is omitted
-from `WHITELIST` and `REJECTIONS` commands. Administrators may specify another
+from `WHITELIST`, `BLOCKLIST`, and `REJECTIONS` commands. Administrators may specify another
 recipient or use `*`.
+
+For example, an ordinary user can send `BLOCKLIST ADD fred@example.com` or
+`BLOCKLIST ADD *@example.com`; the entry applies only to that user's verified
+mailbox. A selective block on a multi-recipient message is silent to the remote
+sender: Postfix accepts the transaction for unaffected recipients after
+MilterGuard removes the blocked recipients. If the MTA did not negotiate the
+standard delete-recipient capability, MilterGuard keeps every recipient,
+continues normal filtering, and logs a warning for every unenforced match
+rather than rejecting unrelated recipients or creating an indefinite retry.
 
 Enable and configure `email_commands` in
 `/etc/milterguard/milterguard.yaml`. Set `recipient` to the local command
@@ -780,8 +818,8 @@ connection-close debug messages are useful for troubleshooting.
 
 ### Data storage and maintenance
 
-Learned correspondents, rejection history, IP reputation, cached domain
-registration data, and activity history are stored in
+Learned correspondents, sender blocklist entries, rejection history, IP
+reputation, cached domain registration data, and activity history are stored in
 `/var/lib/milterguard/milterguard.db`. Stop
 MilterGuard before copying this SQLite database so the backup is complete and
 consistent. Back it up when moving the learned state to another machine.

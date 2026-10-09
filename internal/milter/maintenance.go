@@ -23,6 +23,7 @@ func (s *maintenanceService) cleanupPersistentStores(parent context.Context, tri
 	contactsDeleted, contactsErr := s.correspondents.Cleanup(ctx)
 	rejectionsDeleted, rejectionsErr := s.rejections.Cleanup(ctx)
 	domainsDeleted, domainsErr := s.domains.Cleanup(ctx)
+	senderBlocksDeleted, senderBlocksErr := s.senderBlocklist.Cleanup(ctx)
 	checkpoint, checkpointErr := sqlitedb.CheckpointResult{}, error(nil)
 	if s.database != nil {
 		checkpoint, checkpointErr = s.database.CheckpointPassive(ctx)
@@ -36,6 +37,7 @@ func (s *maintenanceService) cleanupPersistentStores(parent context.Context, tri
 		contactRecords, contactCountErr := s.correspondents.Count(ctx)
 		rejectionRecords, rejectionCountErr := s.rejections.Count(ctx)
 		domainRecords, domainCountErr := s.domains.Count(ctx)
+		senderBlockRecords, senderBlockCountErr := s.senderBlocklist.Count(ctx)
 		s.log.Debug("SQLite cleanup completed",
 			"trigger", trigger,
 			"ip_deleted", ipDeleted,
@@ -46,6 +48,8 @@ func (s *maintenanceService) cleanupPersistentStores(parent context.Context, tri
 			"rejections_records", rejectionRecords,
 			"domains_deleted", domainsDeleted,
 			"domains_records", domainRecords,
+			"sender_blocks_deleted", senderBlocksDeleted,
+			"sender_blocks_records", senderBlockRecords,
 			"wal_busy", checkpoint.Busy,
 			"wal_frames", checkpoint.LogFrames,
 			"wal_checkpointed_frames", checkpoint.CheckpointedFrames)
@@ -54,6 +58,7 @@ func (s *maintenanceService) cleanupPersistentStores(parent context.Context, tri
 			wrapStoreError("count correspondents", contactCountErr),
 			wrapStoreError("count rejections", rejectionCountErr),
 			wrapStoreError("count domain registrations", domainCountErr),
+			wrapStoreError("count sender blocklist", senderBlockCountErr),
 		); countErr != nil {
 			s.log.Warn("SQLite record counts failed", "trigger", trigger, "error", countErr)
 		}
@@ -64,6 +69,7 @@ func (s *maintenanceService) cleanupPersistentStores(parent context.Context, tri
 		wrapCleanupError("correspondents", contactsErr),
 		wrapCleanupError("rejection history", rejectionsErr),
 		wrapCleanupError("domain registrations", domainsErr),
+		wrapCleanupError("sender blocklist", senderBlocksErr),
 	)
 }
 

@@ -55,6 +55,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	rejections := newRejectionRepository(cfg.RejectionHistory, database, time.Now, log)
 	domainCache := newDomainRepository(cfg.DomainRegistration, database, time.Now)
 	activityRepository := newActivityRepository(cfg.Activity, database, time.Now)
+	senderBlocklist := newSenderBlocklistRepository(cfg.SenderBlocklist, database, time.Now)
 	ipReputation := newIPReputationStore(cfg.IPReputation, ipRepository, log)
 	var domainLookup domainRegistrationLookup
 	if domainRegistrationEnabled(cfg.DomainRegistration) {
@@ -63,7 +64,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	domainRegistration := newDomainRegistrationStore(cfg.DomainRegistration, domainCache, domainLookup, log)
 
 	archive := newRejectedMailArchive(cfg.RejectionHistory, log)
-	commands := commandProcessor(cfg, correspondents, rejections, ipReputation, activityRepository, activityRepository, archive, systemdns.NewResolver(), log)
+	commands := commandProcessor(cfg, correspondents, rejections, ipReputation, senderBlocklist, activityRepository, activityRepository, nil, archive, systemdns.NewResolver(), log)
 
 	var attachmentScanner *attachment.Scanner
 	if cfg.Attachments.BlockExecutables {
@@ -90,6 +91,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		correspondentCfg: cfg.Correspondents, trustRequirement: cfg.Authentication.TrustRequirement, log: log,
 		ipReputation: ipReputation, correspondents: correspondents, rejectionHistory: rejections,
 		domainRegistration: domainRegistration, archive: archive,
+		senderBlocklist: senderBlocklist, senderBlocklistCfg: cfg.SenderBlocklist,
 	}
 	attachments := &attachmentPolicyService{
 		cfg:     cfg.Attachments,
@@ -129,6 +131,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	maintenance := &maintenanceService{
 		ip: ipRepository, correspondents: correspondents, rejections: rejections,
 		domains: domainRegistration, database: database, archive: archive, activity: activityRepository,
+		senderBlocklist: senderBlocklist,
 		cleanupInterval: cfg.Persistence.CleanupInterval.Value(), log: log,
 	}
 	return runtimeComponents{

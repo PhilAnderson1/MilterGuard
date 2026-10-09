@@ -50,6 +50,8 @@ type messagePolicyService struct {
 	rejectionHistory   stores.RejectionHistoryRepository
 	domainRegistration *domainRegistrationStore
 	archive            *rejectedmail.Archive
+	senderBlocklist    stores.SenderBlocklistPolicyRepository
+	senderBlocklistCfg config.SenderBlocklistConfig
 }
 
 type messageContext struct {
@@ -112,6 +114,7 @@ type maintenanceService struct {
 	database        *sqlitedb.Store
 	archive         *rejectedmail.Archive
 	activity        stores.MaintainedRepository
+	senderBlocklist stores.MaintainedRepository
 	cleanupInterval time.Duration
 	log             *slog.Logger
 }

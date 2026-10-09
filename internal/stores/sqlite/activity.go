@@ -44,9 +44,12 @@ func (r *activityRepository) AddActivity(ctx context.Context, event stores.Activ
 	if event.EventType == stores.ActivityEventScan {
 		failed, cost = event.AnalysisFailed, event.TokenCost
 	}
+	if event.Quantity <= 0 {
+		event.Quantity = 1
+	}
 	_, err := r.db.Exec(ctx, `INSERT INTO activity
-		(occurred_at_ms, event_type, outcome, analysis_failed, token_cost)
-		VALUES (?, ?, ?, ?, ?)`, unixMillis(event.OccurredAt), event.EventType, event.Outcome, failed, cost)
+		(occurred_at_ms, event_type, outcome, analysis_failed, token_cost, quantity)
+		VALUES (?, ?, ?, ?, ?, ?)`, unixMillis(event.OccurredAt), event.EventType, event.Outcome, failed, cost, event.Quantity)
 	if err != nil {
 		return fmt.Errorf("insert activity event: %w", err)
 	}
@@ -78,6 +81,8 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 		count(*) FILTER (WHERE event_type = :trusted_domain_accept AND outcome = :accepted),
 		count(*) FILTER (WHERE event_type = :attachment_rejection AND outcome = :rejected),
 		count(*) FILTER (WHERE event_type = :protected_sender_domain_rejection AND outcome = :rejected),
+		coalesce(sum(quantity) FILTER (WHERE event_type = :sender_blocklist AND outcome = :rejected), 0),
+		coalesce(sum(quantity) FILTER (WHERE event_type = :sender_blocklist AND outcome = :accepted), 0),
 		coalesce(sum(token_cost) FILTER (WHERE event_type = :scan), 0)
 		FROM activity WHERE occurred_at_ms >= :since AND occurred_at_ms < :before`,
 		sql.Named("scan", stores.ActivityEventScan),
@@ -88,12 +93,14 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 		sql.Named("trusted_domain_accept", stores.ActivityEventTrustedDomainAccept),
 		sql.Named("attachment_rejection", stores.ActivityEventAttachmentRejection),
 		sql.Named("protected_sender_domain_rejection", stores.ActivityEventProtectedSenderDomainRejection),
+		sql.Named("sender_blocklist", stores.ActivityEventSenderBlocklist),
 		sql.Named("since", unixMillis(since)),
 		sql.Named("before", unixMillis(before))).Scan(
 		&summary.ScanTotal, &summary.ScanRejections, &summary.ScanAccepted,
 		&summary.AIEvaluationsFailed, &summary.IPRejections, &summary.CorrespondentAccepts,
 		&summary.TrustedDomainAccepts, &summary.AttachmentRejections,
-		&summary.ProtectedSenderDomainRejections, &summary.TokenCost)
+		&summary.ProtectedSenderDomainRejections, &summary.SenderBlocklistRejections,
+		&summary.SenderBlocklistRecipientRemovals, &summary.TokenCost)
 	if err != nil {
 		return stores.ActivitySummary{}, fmt.Errorf("aggregate activity: %w", err)
 	}

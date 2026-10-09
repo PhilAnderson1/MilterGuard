@@ -34,6 +34,9 @@ func (c Config) Validate() error {
 	if err := validateActivity(c.Activity); err != nil {
 		return err
 	}
+	if err := validateSenderBlocklist(c.SenderBlocklist); err != nil {
+		return err
+	}
 	if err := validateAttachments(c.Attachments); err != nil {
 		return err
 	}
@@ -168,6 +171,19 @@ func validateAI(c AIConfig) error {
 func validateActivity(c ActivityConfig) error {
 	if c.Expiry.Value() <= 0 {
 		return fmt.Errorf("activity.expiry must be positive")
+	}
+	return nil
+}
+
+func validateSenderBlocklist(c SenderBlocklistConfig) error {
+	if c.Expiry.Value() < 24*time.Hour {
+		return fmt.Errorf("sender_blocklist.expiry must be at least 24h")
+	}
+	if c.MaxEntries < 1 {
+		return fmt.Errorf("sender_blocklist.max_entries must be positive")
+	}
+	if strings.TrimSpace(c.RejectMessage) == "" {
+		return fmt.Errorf("sender_blocklist.reject_message must not be empty")
 	}
 	return nil
 }

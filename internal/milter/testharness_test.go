@@ -160,10 +160,7 @@ func negotiate(t *testing.T, conn net.Conn) {
 
 func negotiateWithActions(t *testing.T, conn net.Conn, actions uint32) {
 	t.Helper()
-	wantActions := uint32(0)
-	if actions&resultHeaderActions == resultHeaderActions {
-		wantActions = resultHeaderActions
-	}
+	wantActions := actions & (resultHeaderActions | actionDeleteRecipient)
 	negotiateWithExpectedActions(t, conn, actions, wantActions)
 }
 

@@ -128,6 +128,34 @@ func TestCommandProcessorsCanWriteSameLiveDatabase(t *testing.T) {
 	}
 }
 
+func TestCommandProcessorPersistsInteractiveHistory(t *testing.T) {
+	cfg := commandProcessorTestConfig(filepath.Join(t.TempDir(), "milterguard.db"))
+	first, closeFirst, err := OpenCommandProcessor(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := []string{"HELP", "ACTIVITY", "IP LIST"}
+	if err := first.SaveCommandHistory(context.Background(), commands); err != nil {
+		t.Fatal(err)
+	}
+	if err := closeFirst(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, closeSecond, err := OpenCommandProcessor(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSecond()
+	loaded, err := second.LoadCommandHistory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(loaded, "\n"), strings.Join(commands, "\n"); got != want {
+		t.Fatalf("restored history = %q, want %q", got, want)
+	}
+}
+
 func TestCommandProcessorHonorsCanceledContext(t *testing.T) {
 	cfg := commandProcessorTestConfig(filepath.Join(t.TempDir(), "milterguard.db"))
 	processor, closeProcessor, err := OpenCommandProcessor(cfg, nil)

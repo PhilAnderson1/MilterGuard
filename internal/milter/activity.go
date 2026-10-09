@@ -45,3 +45,7 @@ func (s *activityService) recordScan(ctx context.Context, result evaluationResul
 func (s *activityService) recordDeterministic(ctx context.Context, eventType stores.ActivityEventType, selected action, responseErr error) {
 	s.record(ctx, stores.ActivityEvent{EventType: eventType, Outcome: activityOutcome(selected, responseErr)})
 }
+
+func (s *activityService) recordSenderBlocklist(ctx context.Context, outcome stores.ActivityOutcome, quantity int) {
+	s.record(ctx, stores.ActivityEvent{EventType: stores.ActivityEventSenderBlocklist, Outcome: outcome, Quantity: int64(quantity)})
+}

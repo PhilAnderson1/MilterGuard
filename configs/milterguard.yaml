@@ -303,6 +303,23 @@ rejection_history:
   # oldest messages; the archive can therefore exceed this temporarily.
   message_max_total_bytes: 1073741824
 
+sender_blocklist:
+  # Manually added exact-address and *@domain entries expire after this period.
+  # Adding an existing entry again refreshes its expiry. Minimum: 24h.
+  expiry: 8760h
+
+  # Maximum stored entries. Periodic SQLite maintenance removes expired rows
+  # first, then entries with the earliest expiry when this limit is exceeded.
+  max_entries: 10000
+
+  # Make *@example.com match both example.com and its subdomains. Changing this
+  # setting immediately changes how every existing domain entry is interpreted.
+  include_subdomains: true
+
+  # Returned only when every recipient in the SMTP transaction has blocked the
+  # visible sender. Partial recipient removal is intentionally silent.
+  reject_message: Message rejected by recipient sender blocklist
+
 ip_reputation:
   # Text returned when mail is rejected because the sending IP is blocked.
   reject_message: Message rejected because the sending IP address is blocked by this server

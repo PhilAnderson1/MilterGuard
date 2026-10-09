@@ -61,3 +61,20 @@ type ActivityQuery struct {
 	Since  time.Time
 	Before time.Time
 }
+
+type SenderBlockMatchQuery struct {
+	VisibleSenders    []string
+	Recipients        []string
+	IncludeSubdomains bool
+}
+
+type SenderBlockListQuery struct {
+	Recipients RecipientScope
+	Limit      int
+}
+
+type SenderBlockDeleteQuery struct {
+	SenderKind  SenderBlockKind
+	SenderValue string
+	Recipients  RecipientScope
+}

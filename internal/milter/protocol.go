@@ -29,14 +29,15 @@ const (
 	commandUnknown              = byte('U')
 	commandQuitSMTPConnection   = byte('K')
 
-	responseAccept       = byte('a')
-	responseContinue     = byte('c')
-	responseDiscard      = byte('d')
-	responseTempfail     = byte('t')
-	responseReply        = byte('y')
-	responseAddHeader    = byte('h')
-	responseChangeHeader = byte('m')
-	responseProgress     = byte('p')
+	responseAccept          = byte('a')
+	responseContinue        = byte('c')
+	responseDiscard         = byte('d')
+	responseTempfail        = byte('t')
+	responseReply           = byte('y')
+	responseAddHeader       = byte('h')
+	responseChangeHeader    = byte('m')
+	responseDeleteRecipient = byte('-')
+	responseProgress        = byte('p')
 
 	minimumProtocolVersion   = uint32(2)
 	supportedProtocolVersion = uint32(6)
@@ -49,9 +50,10 @@ const (
 	maxMacroPairs          = 128
 	maxAuthenticationBytes = 1024
 
-	actionAddHeaders    = uint32(0x00000001)
-	actionChangeHeaders = uint32(0x00000010)
-	resultHeaderActions = actionAddHeaders | actionChangeHeaders
+	actionAddHeaders      = uint32(0x00000001)
+	actionChangeHeaders   = uint32(0x00000010)
+	actionDeleteRecipient = uint32(0x00000008)
+	resultHeaderActions   = actionAddHeaders | actionChangeHeaders
 )
 
 type action uint8
@@ -107,6 +109,11 @@ func deleteHeaderResponse(name string) []byte {
 	response = append(response, name...)
 	response = append(response, 0, 0)
 	return response
+}
+
+func deleteRecipientResponse(recipient string) []byte {
+	response := append([]byte{responseDeleteRecipient}, recipient...)
+	return append(response, 0)
 }
 
 func replyCode(code, enhanced, text string) []byte {
