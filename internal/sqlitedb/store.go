@@ -94,7 +94,7 @@ func Open(ctx context.Context, path string, options Options) (*Store, error) {
 	db.SetMaxOpenConns(options.MaxOpen)
 	db.SetMaxIdleConns(options.MaxOpen)
 	store := &Store{db: db, retries: options.BusyRetries, retryDelay: options.RetryDelay}
-	if err := db.PingContext(ctx); err != nil {
+	if err := store.retry(ctx, func() error { return db.PingContext(ctx) }); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("connect to SQLite database: %w", err)
 	}
