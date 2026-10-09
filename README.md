@@ -3,7 +3,7 @@
 <p align="center">
   <img src="assets/milterguard-logo.png"
        alt="MilterGuard — A shrewd eye for suspicious mail"
-       width="600">
+       width="500">
 </p>
 
 [![CI](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml)
