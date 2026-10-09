@@ -6,3 +6,5 @@
 /local-testing/
 __pycache__/
 *.pyc
+/html-extraction-projects/
+
