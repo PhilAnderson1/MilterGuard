@@ -26,7 +26,6 @@ type Result struct {
 	ColourKnownTextNodes     int      `json:"colour_known_text_nodes"`
 	ColourUnknownTextNodes   int      `json:"colour_unknown_text_nodes"`
 	ColourConcealedTextNodes int      `json:"colour_concealed_text_nodes"`
-	Repairs                  int      `json:"repairs"`
 	Rules                    int      `json:"rules"`
 	Selectors                int      `json:"selectors"`
 	Uncertainties            int      `json:"uncertainties"`
@@ -57,7 +56,7 @@ func Main(name string, factory Factory) { os.Exit(Run(name, factory)) }
 func Run(name string, factory Factory) int {
 	start := time.Now()
 	input := flag.String("input", "", "local HTML file (required)")
-	mode := flag.String("mode", "styles", "repair, parse or styles")
+	mode := flag.String("mode", "styles", "parse or styles")
 	iterations := flag.Int("iterations", 100, "fresh documents")
 	warmup := flag.Int("warmup", 3, "untimed fresh documents")
 	inspect := flag.String("inspect", "", "optional JSON inspection path, separate pass")
@@ -85,8 +84,8 @@ func Run(name string, factory Factory) int {
 		}
 		return code
 	}
-	if *input == "" || (*mode != "repair" && *mode != "parse" && *mode != "styles") || *iterations < 1 || *warmup < 0 || *maxInput < 1 || flag.NArg() != 0 {
-		return emit(fmt.Errorf("require --input, --mode=repair|parse|styles, iterations >= 1, warmup >= 0, no positional arguments"))
+	if *input == "" || (*mode != "parse" && *mode != "styles") || *iterations < 1 || *warmup < 0 || *maxInput < 1 || flag.NArg() != 0 {
+		return emit(fmt.Errorf("require --input, --mode=parse|styles, iterations >= 1, warmup >= 0, no positional arguments"))
 	}
 	for _, k := range []string{"GOGC", "GOMEMLIMIT"} {
 		v, ok := os.LookupEnv(k)
@@ -191,17 +190,13 @@ func Run(name string, factory Factory) int {
 	for _, warning := range last.Warnings {
 		fmt.Fprintln(os.Stderr, warning)
 	}
-	needsOutput := flag.Lookup("repaired-output") != nil && flag.Lookup("repaired-output").Value.String() != ""
-	if *inspect != "" || needsOutput {
+	if *inspect != "" {
 		res, e := processor.Process(data, *mode, true)
 		if e != nil {
 			return emit(fmt.Errorf("inspection: %w", e))
 		}
 		if res.Inspection == nil {
 			return emit(fmt.Errorf("inspection unavailable in this mode"))
-		}
-		if *inspect == "" {
-			return emit(nil)
 		}
 		b, e := json.MarshalIndent(res.Inspection, "", "  ")
 		if e == nil {

@@ -10,7 +10,7 @@ import (
 
 func colourText(t *testing.T, src string) Text {
 	t.Helper()
-	r, e := (Processor{false, DefaultLimits()}).Process([]byte(src), "styles", true)
+	r, e := (Processor{Limits: DefaultLimits()}).Process([]byte(src), "styles", true)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -244,9 +244,6 @@ func TestStandardParsingDecisions(t *testing.T) {
 	r, e := (Processor{Limits: DefaultLimits()}).Process(src, "styles", true)
 	if e != nil {
 		t.Fatal(e)
-	}
-	if r.Repairs != 0 {
-		t.Fatal(r)
 	}
 	in := r.Inspection.(Inspection)
 	findText(t, in, "Visible offer")

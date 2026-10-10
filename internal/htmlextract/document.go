@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract/harness"
-	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract/repair"
 	"golang.org/x/net/html"
 )
 
@@ -29,7 +28,6 @@ func DefaultLimits() Limits {
 }
 
 type Processor struct {
-	Repair bool
 	Limits Limits
 }
 
@@ -73,15 +71,14 @@ type Element struct {
 	OpacityKnown       bool       `json:"effective_opacity_known"`
 }
 type Inspection struct {
-	Root                *html.Node      `json:"-"`
-	Widths              []float64       `json:"viewing_widths_css_px"`
-	ConditionalFallback bool            `json:"conditional_fallback"`
-	Canvas              string          `json:"default_canvas"`
-	Repairs             []repair.Change `json:"repairs"`
-	Diagnostics         []string        `json:"uncertainty_reasons"`
-	Text                []Text          `json:"body_text"`
-	Elements            []Element       `json:"elements"`
-	Sources             []Source        `json:"excluded_source"`
+	Root                *html.Node `json:"-"`
+	Widths              []float64  `json:"viewing_widths_css_px"`
+	ConditionalFallback bool       `json:"conditional_fallback"`
+	Canvas              string     `json:"default_canvas"`
+	Diagnostics         []string   `json:"uncertainty_reasons"`
+	Text                []Text     `json:"body_text"`
+	Elements            []Element  `json:"elements"`
+	Sources             []Source   `json:"excluded_source"`
 }
 
 // Analyze parses and resolves a document once and retains the tree alongside
@@ -212,27 +209,7 @@ func (p Processor) Process(input []byte, mode string, inspect bool) (harness.Res
 		return res, fmt.Errorf("limit: input bytes > %d", p.Limits.InputBytes)
 	}
 	b := input
-	var log []repair.Change
-	if p.Repair {
-		var err error
-		b, log, err = repair.Apply(b)
-		if err != nil {
-			return res, err
-		}
-	}
-	res.Repairs = len(log)
-	if len(log) > p.Limits.Diagnostics {
-		return res, fmt.Errorf("limit: repair log volume")
-	}
 	h := digest(14695981039346656037)
-	if mode == "repair" {
-		h.add(string(b))
-		res.Checksum = fmt.Sprintf("%016x", h)
-		if inspect {
-			res.Inspection = Inspection{Repairs: log}
-		}
-		return res, nil
-	}
 	if err := preflight(b, p.Limits); err != nil {
 		return res, err
 	}
@@ -299,7 +276,7 @@ func (p Processor) Process(input []byte, mode string, inspect bool) (harness.Res
 	if s.err != nil {
 		return res, s.err
 	}
-	in := Inspection{Root: root, Repairs: log, Canvas: "opaque white (light-mode assumption)"}
+	in := Inspection{Root: root, Canvas: "opaque white (light-mode assumption)"}
 	if mode == "styles" {
 		for i := range s.rules {
 			r := &s.rules[i]

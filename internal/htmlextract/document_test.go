@@ -16,7 +16,7 @@ func inspectHTML(t *testing.T, src string) (Inspection, int) {
 	t.Helper()
 	// Existing four-property policy tests supply an explicit canvas. New colour
 	// tests below deliberately do not inject a background.
-	p := Processor{false, DefaultLimits()}
+	p := Processor{Limits: DefaultLimits()}
 	src = `<style>html{background-color:white}</style>` + src
 	r, e := p.Process([]byte(src), "styles", true)
 	if e != nil {
@@ -246,7 +246,7 @@ func TestAllFixtures(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			p := Processor{true, DefaultLimits()}
+			p := Processor{Limits: DefaultLimits()}
 			a, e := p.Process(b, "styles", false)
 			if e != nil {
 				t.Fatal(e)
@@ -285,7 +285,7 @@ func TestLimitSubprocess(t *testing.T) {
 		case "transitions":
 			src = strings.Repeat(`<p style="visibility:hidden"><span style="visibility:visible">T</span></p>`, 1000)
 		}
-		_, e := (Processor{true, l}).Process([]byte(src), "styles", false)
+		_, e := (Processor{Limits: l}).Process([]byte(src), "styles", false)
 		expected := name != "malformed" && name != "transitions" && name != "work"
 		if expected != (e != nil) {
 			t.Fatal(name, e)
@@ -314,7 +314,7 @@ func TestInspectionJSON(t *testing.T) {
 }
 func BenchmarkLargest(b *testing.B) {
 	src := []byte(`<style>.quiet{opacity:.005}</style><p>` + strings.Repeat(`<span class="quiet">padding</span> visible `, 24000) + `</p>`)
-	p := Processor{false, DefaultLimits()}
+	p := Processor{Limits: DefaultLimits()}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, e := p.Process(src, "styles", false); e != nil {
@@ -325,24 +325,20 @@ func BenchmarkLargest(b *testing.B) {
 
 func TestReferenceRegressions(t *testing.T) {
 	for _, c := range []struct {
-		file    string
-		repair  bool
-		want    string
-		changes int
+		file string
+		want string
 	}{
-		{"broken-quotes.original.html", false, "Before:visible", 0}, {"broken-quotes.original.html", true, "Before:visible", 0},
-		{"comment-unterminated.original.html", true, "before:visible", 0},
-		{"comments.original.html", true, "Hello:visible|visible:visible", 0},
-		{"missing-end.original.html", true, "Visible:visible|Forged correspondence:concealed", 0},
-		{"offer.original.html", true, "End of Summer Offers:visible", 1},
-		{"repair-trigger.html", true, "recovered:concealed", 1},
+		{"broken-quotes.original.html", "Before:visible"},
+		{"comment-unterminated.original.html", "before:visible"},
+		{"comments.original.html", "Hello:visible|visible:visible"},
+		{"missing-end.original.html", "Visible:visible|Forged correspondence:concealed"},
 	} {
 		t.Run(c.file, func(t *testing.T) {
 			b, e := os.ReadFile("testdata/" + c.file)
 			if e != nil {
 				t.Fatal(e)
 			}
-			r, e := (Processor{c.repair, DefaultLimits()}).Process(b, "styles", true)
+			r, e := (Processor{Limits: DefaultLimits()}).Process(b, "styles", true)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -352,8 +348,8 @@ func TestReferenceRegressions(t *testing.T) {
 					text = append(text, strings.TrimSpace(v.Text)+":"+v.Label)
 				}
 			}
-			if strings.Join(text, "|") != c.want || r.Repairs != c.changes {
-				t.Fatal(text, r.Repairs)
+			if strings.Join(text, "|") != c.want {
+				t.Fatal(text)
 			}
 		})
 	}
@@ -381,10 +377,9 @@ func TestAdditionalBoundsAndUnsupportedWinners(t *testing.T) {
 		src    string
 		limits Limits
 	}{
-		{strings.Repeat(`<img style="display:none;><style type="text/css">p{visibility:hidden}</style>`, 2), Limits{InputBytes: 10000, Depth: 128, Rules: 100, Selectors: 100, Diagnostics: 1, SelectorBytes: 2048, MatchWork: 1000000}},
 		{"<style>" + strings.Repeat("@media screen{", 200) + strings.Repeat("}", 200) + "</style>", DefaultLimits()},
 	} {
-		_, e := (Processor{true, c.limits}).Process([]byte(c.src), "styles", false)
+		_, e := (Processor{Limits: c.limits}).Process([]byte(c.src), "styles", false)
 		if e == nil || !strings.Contains(e.Error(), "limit:") {
 			t.Fatal(e)
 		}
