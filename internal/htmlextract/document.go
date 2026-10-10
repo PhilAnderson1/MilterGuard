@@ -1,4 +1,3 @@
-// Package htmlextract derives the presentation-relevant text of an HTML email.
 package htmlextract
 
 import (
