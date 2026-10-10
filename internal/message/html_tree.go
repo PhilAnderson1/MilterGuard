@@ -194,6 +194,7 @@ func extractTreeHTML(source string) extractedContent {
 		e.elements[state.Node] = state
 	}
 	e.findBase(inspection.Root)
+	comments := collectHTMLCommentStats(inspection.Root)
 	tagged := e.render(TagHidden)
 	stripped := ""
 	if tagged.hasConcealed {
@@ -202,8 +203,54 @@ func extractTreeHTML(source string) extractedContent {
 	return extractedContent{
 		Text: tagged.text, VisibleText: tagged.visible, StrippedText: stripped,
 		Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
-		Annotations: tagged.usage,
+		Annotations:  tagged.usage,
+		HTMLComments: comments,
 	}
+}
+
+type htmlCommentStats struct {
+	Characters  int
+	WithinWords int
+}
+
+func (s *htmlCommentStats) add(other htmlCommentStats) {
+	s.Characters += other.Characters
+	s.WithinWords += other.WithinWords
+}
+
+func collectHTMLCommentStats(root *xhtml.Node) htmlCommentStats {
+	var stats htmlCommentStats
+	var walk func(*xhtml.Node)
+	walk = func(node *xhtml.Node) {
+		if node == nil {
+			return
+		}
+		if node.Type == xhtml.CommentNode && !conditionalHTMLComment(node.Data) {
+			stats.Characters += utf8.RuneCountInString(node.Data)
+			if commentBetweenWordFragments(node) {
+				stats.WithinWords++
+			}
+			return
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(root)
+	return stats
+}
+
+func conditionalHTMLComment(value string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "[if ")
+}
+
+func commentBetweenWordFragments(comment *xhtml.Node) bool {
+	if comment.PrevSibling == nil || comment.NextSibling == nil || comment.PrevSibling.Type != xhtml.TextNode || comment.NextSibling.Type != xhtml.TextNode {
+		return false
+	}
+	left, _ := utf8.DecodeLastRuneInString(comment.PrevSibling.Data)
+	right, _ := utf8.DecodeRuneInString(comment.NextSibling.Data)
+	return (unicode.IsLetter(left) || unicode.IsNumber(left)) && (unicode.IsLetter(right) || unicode.IsNumber(right))
 }
 
 type renderedHTML struct {
@@ -371,7 +418,7 @@ func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode
 
 func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutput, visible *strings.Builder, usage *annotationUsage) {
 	trimmed := strings.TrimSpace(data)
-	if !strings.HasPrefix(strings.ToLower(trimmed), "[if ") {
+	if !conditionalHTMLComment(trimmed) {
 		return
 	}
 	start := strings.Index(trimmed, "]>")

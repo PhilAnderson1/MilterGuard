@@ -50,6 +50,49 @@ func TestPromptUsesSharedAuthenticationAlignmentEvidence(t *testing.T) {
 	}
 }
 
+func TestPromptReportsCommentsInsertedWithinWords(t *testing.T) {
+	m := New(10_000)
+	m.AddHeader("Content-Type", "text/html; charset=utf-8")
+	m.AddBody([]byte(`Special of<!-- harmless -->fer`))
+	prompt := m.Prompt(10_000)
+	summary := "EXTRACTOR-GENERATED HTML COMMENT SUMMARY: Omitted HTML comment text was 77% of extracted body length; 1 comment occurred within words."
+	if !strings.Contains(prompt, summary) {
+		t.Fatalf("comment summary missing:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "harmless") || !strings.Contains(prompt, "Special offer") {
+		t.Fatalf("comment content leaked or visible word remained split:\n%s", prompt)
+	}
+	if strings.Index(prompt, summary) > strings.Index(prompt, "PROCESSED EMAIL BODY TEXT FOLLOWS") {
+		t.Fatalf("comment summary was not placed before the untrusted body:\n%s", prompt)
+	}
+}
+
+func TestPromptOmitsSmallOrdinaryCommentSummary(t *testing.T) {
+	m := New(10_000)
+	m.AddHeader("Content-Type", "text/html; charset=utf-8")
+	m.AddBody([]byte(`<p>Ordinary body</p><!-- template note -->`))
+	if prompt := m.Prompt(10_000); strings.Contains(prompt, "HTML COMMENT SUMMARY") {
+		t.Fatalf("small ordinary comment was reported:\n%s", prompt)
+	}
+}
+
+func TestHTMLCommentSummaryRequiresCommentsToDominateBody(t *testing.T) {
+	var summary strings.Builder
+	writeHTMLCommentSummary(&summary, htmlCommentStats{Characters: 1195}, strings.Repeat("visible", 1000))
+	if summary.Len() != 0 {
+		t.Fatalf("ordinary newsletter template comments were reported: %q", summary.String())
+	}
+	writeHTMLCommentSummary(&summary, htmlCommentStats{Characters: 1195}, "Short body")
+	if !strings.Contains(summary.String(), "HTML COMMENT SUMMARY") {
+		t.Fatalf("comments dominating the body were not reported: %q", summary.String())
+	}
+	summary.Reset()
+	writeHTMLCommentSummary(&summary, htmlCommentStats{Characters: 20}, "Tiny")
+	if summary.Len() != 0 {
+		t.Fatalf("tiny comments generated ratio noise: %q", summary.String())
+	}
+}
+
 func TestPromptDecodesHeaderWordsAndRetainsMailbox(t *testing.T) {
 	m := New(1000)
 	rawFrom := "=?UTF-8?B?TXVzY2xlIEdyb3d0aA==?= <noreply@musclegrowth.net>"

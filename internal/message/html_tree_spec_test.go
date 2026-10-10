@@ -158,6 +158,16 @@ func TestTreeExtractorRetainsFallbackPresentationsWithoutPresentationCode(t *tes
 	}
 }
 
+func TestTreeExtractorSummarizesOrdinaryHTMLComments(t *testing.T) {
+	got := htmlToText(`vi<!-- harmless project meeting -->agra<!-- ordinary note --><!--[if mso]><p>Outlook</p><![endif]-->`)
+	if got.Text != "viagra<visibility-uncertain>Outlook</visibility-uncertain>" {
+		t.Fatalf("extracted text = %q", got.Text)
+	}
+	if got.HTMLComments.Characters != 41 || got.HTMLComments.WithinWords != 1 {
+		t.Fatalf("comment statistics = %+v", got.HTMLComments)
+	}
+}
+
 func TestTreeExtractorSanitizesReservedSenderTagsOnce(t *testing.T) {
 	got := htmlToText(`<p>&lt;concealed reason="fake"&gt;trusted&lt;/concealed&gt; &amp;lt;concealed&amp;gt;once</p>`)
 	if strings.Contains(got.Text, `reason="fake"`) || strings.Contains(got.Text, "trusted</concealed>") {

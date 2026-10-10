@@ -27,6 +27,7 @@ type extractedContent struct {
 	ExtractionIncomplete bool
 	HasConcealedContent  bool
 	Annotations          annotationUsage
+	HTMLComments         htmlCommentStats
 }
 
 type extractedImage struct {
@@ -123,6 +124,7 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 			combined.HasConcealedContent = combined.HasConcealedContent || part.HasConcealedContent
 			combined.ExtractionIncomplete = combined.ExtractionIncomplete || part.ExtractionIncomplete
 			combined.Annotations = mergeAnnotationUsage(combined.Annotations, part.Annotations)
+			combined.HTMLComments.add(part.HTMLComments)
 		}
 		combined.ImageRefs = imageRefs.refs
 		combined.Text = strings.Join(textParts, "\n\n")
