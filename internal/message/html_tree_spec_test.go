@@ -1,7 +1,6 @@
 package message
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -96,15 +95,18 @@ func TestTreeExtractorTreatsVisibilityCollapseAsConcealed(t *testing.T) {
 }
 
 func TestTreeExtractorLimitsUncertaintyInDecorativeSpamTemplate(t *testing.T) {
-	raw, err := os.ReadFile("../../local-testing/test_emails/spam/Claim Your Free YETI PATRIOTIC Bundle.eml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	parts := strings.SplitN(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n\n", 2)
-	if len(parts) != 2 {
-		t.Fatal("fixture has no message body")
-	}
-	got := htmlToText(parts[1]).Text
+	got := htmlToText(`<style>
+		:root { --text-dark: #111; }
+		.ppp { font-size:30px; color:var(--text-dark); }
+		.ppp-1 { background:linear-gradient(to bottom,#e09b7e,#ff7e5f,#dd2f46,#c10a4a); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+		.ppp-2,.ppp-3 { text-shadow:1px 1px 1px white; position:absolute; }
+		@media (max-width:500px) { .ppp-2 { left:20px; } }
+	</style>
+	<p class="ppp">YOU HAVE BEEN CHOSEN</p>
+	<p class="ppp">ANSWER&amp;WIN</p>
+	<p class="ppp ppp-1">A BRAND NEW</p>
+	<p class="ppp-2">You have been chosen to participate in our loyalty program for free!</p>
+	<p class="ppp-3">It will take you only a minute to recieve this fantastic price.</p>`).Text
 	for _, visible := range []string{
 		"YOU HAVE BEEN CHOSEN",
 		"ANSWER",
@@ -121,20 +123,19 @@ func TestTreeExtractorLimitsUncertaintyInDecorativeSpamTemplate(t *testing.T) {
 }
 
 func TestTreeExtractorUnderstandsLegacyDeviceWidthEmailCSS(t *testing.T) {
-	raw, err := os.ReadFile("../../local-testing/test_emails/legitimate/A Plague Tale_ Requiem from your Steam wishlist is now on sale!.eml")
-	if err != nil {
-		t.Fatal(err)
+	got := htmlToText(`<style>
+		@media only screen and (max-device-width:480px), only screen and (max-width:480px) {
+			.mfz-14 { font-size:14px !important; }
+			.mpx-20 { padding-left:20px !important; padding-right:20px !important; }
+		}
+	</style>
+	<p class="mfz-14">A Plague Tale: Requiem</p>
+	<a class="mpx-20" href="https://store.example/wishlist">View your Wishlist</a>`)
+	if strings.Contains(got.Text, "<visibility-uncertain>") {
+		t.Fatalf("legacy device-width query made ordinary Steam content uncertain: %s", got.Text)
 	}
-	message, err := ParseArchived(raw, 8<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	prompt := message.BuildAnalysis(AnalysisContext{}, 200000, VisionOptions{Mode: "off"}).Prompt
-	if strings.Contains(prompt, "<visibility-uncertain>") {
-		t.Fatalf("legacy device-width query made ordinary Steam content uncertain: %s", prompt)
-	}
-	if !strings.Contains(prompt, "A Plague Tale: Requiem") || !strings.Contains(prompt, "View your Wishlist") {
-		t.Fatalf("fixture content was not retained: %s", prompt)
+	if !strings.Contains(got.Text, "A Plague Tale: Requiem") || !strings.Contains(got.Text, "View your Wishlist") {
+		t.Fatalf("fixture content was not retained: %s", got.Text)
 	}
 }
 
