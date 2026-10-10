@@ -10,7 +10,7 @@ import (
 
 func colourText(t *testing.T, src string) Text {
 	t.Helper()
-	r, e := (processor{Limits: DefaultLimits()}).process([]byte(src))
+	r, e := (processor{Limits: DefaultLimits(), retainInspection: true}).process([]byte(src))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -85,11 +85,11 @@ func TestColourThreshold(t *testing.T) {
 	// Independent neutral-grey L differences straddle the fixed threshold.
 	inside := colourText(t, `<p style="color:#fefefe;background:white">T</p>`)
 	outside := colourText(t, `<p style="color:#fdfdfd;background:white">T</p>`)
-	if !inside.colour.Concealed || inside.Label != "concealed" || outside.colour.Concealed || outside.Label != "visible" {
+	if !inside.inspection.colour.Concealed || inside.Label != "concealed" || outside.inspection.colour.Concealed || outside.Label != "visible" {
 		t.Fatal(inside, outside)
 	}
-	near(t, *inside.colour.Distance, .00297480818, 2e-9)
-	near(t, *outside.colour.Distance, .00595183731, 2e-9)
+	near(t, *inside.inspection.colour.Distance, .00297480818, 2e-9)
+	near(t, *outside.inspection.colour.Distance, .00595183731, 2e-9)
 }
 func TestColourInheritanceAttributesAndCascade(t *testing.T) {
 	cases := []struct {
@@ -114,10 +114,59 @@ func TestColourInheritanceAttributesAndCascade(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			v := colourText(t, c.src)
-			if v.Label != c.want || v.colour.Known != c.known {
+			if v.Label != c.want || v.inspection.colour.Known != c.known {
 				t.Fatal(v)
 			}
 		})
+	}
+}
+
+func TestModernRGBAndHSLColours(t *testing.T) {
+	cases := []struct {
+		value string
+		want  RGBA
+	}{
+		{`rgb(100% 0 0 / 50%)`, RGBA{1, 0, 0, .5}},
+		{`rgba(255 0 0)`, RGBA{1, 0, 0, 1}},
+		{`rgb(255,0,0,.25)`, RGBA{1, 0, 0, .25}},
+		{`rgba(255,0,0)`, RGBA{1, 0, 0, 1}},
+		{`hsl(0 100% 50% / 25%)`, RGBA{1, 0, 0, .25}},
+		{`hsla(120,100%,25%,.5)`, RGBA{0, .5, 0, .5}},
+		{`hsl(.5turn 100 50)`, RGBA{0, 1, 1, 1}},
+		{`hsl(-120deg 100% 50%)`, RGBA{0, 0, 1, 1}},
+	}
+	for _, c := range cases {
+		t.Run(c.value, func(t *testing.T) {
+			got, status := readColour(c.value)
+			if status != 1 {
+				t.Fatalf("status = %d", status)
+			}
+			near(t, got.R, c.want.R, 1e-12)
+			near(t, got.G, c.want.G, 1e-12)
+			near(t, got.B, c.want.B, 1e-12)
+			near(t, got.A, c.want.A, 1e-12)
+		})
+	}
+
+	for _, value := range []string{
+		`rgb(0, 0%, 0)`,
+		`rgb(0, 0, 0 / .5)`,
+		`hsl(0, 100, 50%)`,
+		`rgb(0 0 / 1)`,
+	} {
+		if _, status := readColour(value); status != 0 {
+			t.Errorf("%q status = %d, want invalid", value, status)
+		}
+	}
+	for _, value := range []string{`rgb(none 0 0)`, `rgb(from red r g b)`, `lab(50% 0 0)`} {
+		if _, status := readColour(value); status != 2 {
+			t.Errorf("%q status = %d, want unresolved", value, status)
+		}
+	}
+
+	v := colourText(t, `<p style="background:rgb(255 255 255);color:hsl(0 0% 100%)">T</p>`)
+	if !v.inspection.colour.Known || v.Label != "concealed" {
+		t.Fatal(v)
 	}
 }
 func TestBackgroundLayersAndResets(t *testing.T) {
@@ -150,61 +199,61 @@ func TestBackgroundLayersAndResets(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			v := colourText(t, c.src)
-			if v.colour.Known != c.known || v.colour.Concealed != c.hidden {
+			if v.inspection.colour.Known != c.known || v.inspection.colour.Concealed != c.hidden {
 				t.Fatal(v)
 			}
-			if !c.known && (v.colour.Distance != nil || v.colour.Foreground != nil || v.Label != "unknown") {
+			if !c.known && (v.inspection.colour.Distance != nil || v.inspection.colour.Foreground != nil || v.Label != "unknown") {
 				t.Fatal(v)
 			}
 		})
 	}
 	v := colourText(t, `<div style="background:blue"><p style="color:rgba(255,0,0,.5);background:rgba(0,255,0,.5)">T</p></div>`)
-	expectRGBA(t, v.colour.Background, RGBA{0, .5, .5, 1})
-	expectRGBA(t, v.colour.Foreground, RGBA{.5, .25, .25, 1})
+	expectRGBA(t, v.inspection.colour.Background, RGBA{0, .5, .5, 1})
+	expectRGBA(t, v.inspection.colour.Foreground, RGBA{.5, .25, .25, 1})
 	if textStyle(v, "background-color").RGBA.A != .5 {
 		t.Fatal("background was incorrectly inherited/composited into property", v)
 	}
 }
 func TestGroupOpacity(t *testing.T) {
 	v := colourText(t, `<div style="background:white"><p style="background:white;color:black;opacity:.5">T</p></div>`)
-	expectRGBA(t, v.colour.Foreground, RGBA{.5, .5, .5, 1})
-	expectRGBA(t, v.colour.Background, RGBA{1, 1, 1, 1})
-	near(t, *v.colour.Distance, .4018192694731524, 5e-8)
+	expectRGBA(t, v.inspection.colour.Foreground, RGBA{.5, .5, .5, 1})
+	expectRGBA(t, v.inspection.colour.Background, RGBA{1, 1, 1, 1})
+	near(t, *v.inspection.colour.Distance, .4018192694731524, 5e-8)
 	v = colourText(t, `<div style="background:blue"><section style="background:white;opacity:.5"><p style="color:black;opacity:.5">T</p></section></div>`)
-	expectRGBA(t, v.colour.Foreground, RGBA{.25, .25, .75, 1})
-	expectRGBA(t, v.colour.Background, RGBA{.5, .5, 1, 1})
+	expectRGBA(t, v.inspection.colour.Foreground, RGBA{.25, .25, .75, 1})
+	expectRGBA(t, v.inspection.colour.Background, RGBA{.5, .5, 1, 1})
 	v = colourText(t, `<div style="background:blue"><p style="background:white;color:white;opacity:.5">T</p></div>`)
-	expectRGBA(t, v.colour.Foreground, RGBA{.5, .5, 1, 1})
-	expectRGBA(t, v.colour.Background, RGBA{.5, .5, 1, 1})
-	if !v.colour.Concealed {
+	expectRGBA(t, v.inspection.colour.Foreground, RGBA{.5, .5, 1, 1})
+	expectRGBA(t, v.inspection.colour.Background, RGBA{.5, .5, 1, 1})
+	if !v.inspection.colour.Concealed {
 		t.Fatal(v)
 	}
 	// Known transparent groups compose onto the agreed white canvas.
 	v = colourText(t, `<p style="background:white;color:white;opacity:.5">T</p>`)
-	if !v.colour.Known || v.Label != "concealed" {
+	if !v.inspection.colour.Known || v.Label != "concealed" {
 		t.Fatal(v)
 	}
 }
 func TestCompositionUncertaintyAndIndependentReasons(t *testing.T) {
 	for _, property := range []string{"filter:blur(1px)", "mix-blend-mode:multiply", "backdrop-filter:blur(1px)", "background-blend-mode:multiply", "mask-image:url(x)", "opacity:env(unknown)", "background-clip:text", "text-shadow:1px 1px red", "-webkit-text-fill-color:red", "transform:translateX(10px)", "position:absolute", "-webkit-text-stroke:1px red", "display:contents"} {
 		v := colourText(t, `<p style="background:white;color:white;`+property+`">T</p>`)
-		if v.colour.Known || v.Label != "unknown" {
+		if v.inspection.colour.Known || v.Label != "unknown" {
 			t.Fatal(property, v)
 		}
 		for _, independent := range []string{"display:none", "visibility:hidden", "font-size:0", "opacity:0"} {
 			// A later opacity:0 legitimately resolves an earlier opacity var().
 			v = colourText(t, `<p style="background-image:url(x);color:white;`+property+`;`+independent+`">T</p>`)
-			if v.Label != "concealed" || v.colour.Concealed {
+			if v.Label != "concealed" || v.inspection.colour.Concealed {
 				t.Fatal(property, independent, v)
 			}
 		}
 	}
 	v := colourText(t, `<div style="filter:blur(1px)"><p style="background:white;color:white">T</p></div>`)
-	if v.colour.Known {
+	if v.inspection.colour.Known {
 		t.Fatal(v)
 	}
 	v = colourText(t, `<p style="filter:blur(1px);filter:none;background:white;color:white">T</p>`)
-	if !v.colour.Concealed {
+	if !v.inspection.colour.Concealed {
 		t.Fatal(v)
 	}
 }
@@ -217,7 +266,7 @@ func TestDecorativeEffectsDoNotMakeReadableTextUncertain(t *testing.T) {
 		`text-shadow:1px 1px 1px white`,
 	} {
 		v := colourText(t, `<p style="color:black;`+property+`">T</p>`)
-		if !v.colour.Known || v.Label != "visible" {
+		if !v.inspection.colour.Known || v.Label != "visible" {
 			t.Errorf("%s: %+v", property, v)
 		}
 	}
@@ -225,14 +274,14 @@ func TestDecorativeEffectsDoNotMakeReadableTextUncertain(t *testing.T) {
 	// An unresolved effect still prevents a colour-based concealment claim
 	// when the solid fallback itself matches the foreground.
 	v := colourText(t, `<p style="color:white;background:white;background-image:url(x)">T</p>`)
-	if v.colour.Known || v.Label != "unknown" {
+	if v.inspection.colour.Known || v.Label != "unknown" {
 		t.Fatal(v)
 	}
 
 	// Transparent gradient-filled text genuinely depends on unsupported
 	// composition and remains uncertain.
 	v = colourText(t, `<p style="color:black;background:linear-gradient(red,blue);background-clip:text;-webkit-text-fill-color:transparent">T</p>`)
-	if v.colour.Known || v.Label != "unknown" {
+	if v.inspection.colour.Known || v.Label != "unknown" {
 		t.Fatal(v)
 	}
 }
@@ -248,7 +297,7 @@ func TestStandardParsingDecisions(t *testing.T) {
 	findText(t, in, "Visible offer")
 	foundCSS := false
 	for _, v := range in.Text {
-		if strings.Contains(v.Text, "@media") {
+		if v.Node != nil && strings.Contains(v.Node.Data, "@media") {
 			foundCSS = true
 		}
 	}
@@ -271,11 +320,11 @@ func TestStandardParsingDecisions(t *testing.T) {
 }
 func TestColourDecisionAndConsumption(t *testing.T) {
 	for _, src := range []string{`<p style="color:white;background:white">T</p>`, `<p style="color:white">T</p>`} {
-		in, e := (processor{Limits: DefaultLimits()}).process([]byte(src))
+		in, e := (processor{Limits: DefaultLimits(), retainInspection: true}).process([]byte(src))
 		if e != nil {
 			t.Fatal(e)
 		}
-		if colour := findText(t, in, "T").colour; colour.Distance == nil {
+		if colour := findText(t, in, "T").inspection.colour; colour.Distance == nil {
 			t.Fatal("missing colour-distance decision", colour)
 		}
 	}

@@ -45,7 +45,7 @@ type outputAnnotation struct {
 }
 
 type outputChunk struct {
-	text       string
+	start, end int
 	annotation outputAnnotation
 }
 
@@ -53,12 +53,15 @@ type outputChunk struct {
 // complete. This lets equal effective visibility states flow across element
 // boundaries, layout whitespace, and generated Markdown such as links.
 type annotatedOutput struct {
+	data   []byte
 	chunks []outputChunk
 }
 
 func (o *annotatedOutput) WriteString(value string) { o.write(outputAnnotation{}, value) }
 func (o *annotatedOutput) WriteByte(value byte) error {
-	o.write(outputAnnotation{}, string([]byte{value}))
+	start := len(o.data)
+	o.data = append(o.data, value)
+	o.extendChunk(outputAnnotation{}, start)
 	return nil
 }
 
@@ -66,26 +69,41 @@ func (o *annotatedOutput) write(annotation outputAnnotation, value string) {
 	if value == "" {
 		return
 	}
-	if len(o.chunks) > 0 && o.chunks[len(o.chunks)-1].annotation == annotation {
-		o.chunks[len(o.chunks)-1].text += value
+	start := len(o.data)
+	o.data = append(o.data, value...)
+	o.extendChunk(annotation, start)
+}
+
+func (o *annotatedOutput) writeBytes(annotation outputAnnotation, value []byte) {
+	if len(value) == 0 {
 		return
 	}
-	o.chunks = append(o.chunks, outputChunk{text: value, annotation: annotation})
+	start := len(o.data)
+	o.data = append(o.data, value...)
+	o.extendChunk(annotation, start)
+}
+
+func (o *annotatedOutput) extendChunk(annotation outputAnnotation, start int) {
+	if len(o.chunks) > 0 && o.chunks[len(o.chunks)-1].annotation == annotation {
+		o.chunks[len(o.chunks)-1].end = len(o.data)
+		return
+	}
+	o.chunks = append(o.chunks, outputChunk{start: start, end: len(o.data), annotation: annotation})
+}
+
+func (o *annotatedOutput) chunkBytes(chunk outputChunk) []byte {
+	return o.data[chunk.start:chunk.end]
 }
 
 func (o *annotatedOutput) plainText() string {
-	var out strings.Builder
-	for _, chunk := range o.chunks {
-		out.WriteString(chunk.text)
-	}
-	return out.String()
+	return string(o.data)
 }
 
 func (o *annotatedOutput) uniformAnnotation() (outputAnnotation, bool) {
 	var found outputAnnotation
 	haveContent := false
 	for _, chunk := range o.chunks {
-		if annotationWhitespaceOnly(chunk.text) {
+		if annotationWhitespaceOnlyBytes(o.chunkBytes(chunk)) {
 			continue
 		}
 		if !haveContent {
@@ -136,8 +154,9 @@ func (o *annotatedOutput) String() string {
 	}
 	lastWasStripped := false
 	for _, chunk := range o.chunks {
-		if annotationWhitespaceOnly(chunk.text) {
-			pending.WriteString(chunk.text)
+		value := o.chunkBytes(chunk)
+		if annotationWhitespaceOnlyBytes(value) {
+			pending.Write(value)
 			continue
 		}
 		if chunk.annotation.kind == "stripped" {
@@ -155,7 +174,7 @@ func (o *annotatedOutput) String() string {
 			closeActive()
 			out.WriteString(pending.String())
 			pending.Reset()
-			out.WriteString(chunk.text)
+			out.Write(value)
 			continue
 		}
 		if !haveActive || active != chunk.annotation {
@@ -169,7 +188,7 @@ func (o *annotatedOutput) String() string {
 			out.WriteString(pending.String())
 			pending.Reset()
 		}
-		out.WriteString(chunk.text)
+		out.Write(value)
 	}
 	closeActive()
 	out.WriteString(pending.String())
@@ -203,7 +222,6 @@ func extractTreeHTML(source string) extractedContent {
 	return extractedContent{
 		Text: tagged.text, VisibleText: tagged.visible, StrippedText: stripped,
 		Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
-		Annotations:  tagged.usage,
 		HTMLComments: comments,
 	}
 }
@@ -255,29 +273,21 @@ func commentBetweenWordFragments(comment *xhtml.Node) bool {
 
 type renderedHTML struct {
 	text, visible string
-	usage         annotationUsage
 	hasConcealed  bool
 }
 
 func (e *htmlExtraction) render(mode HTMLExtractionMode) renderedHTML {
 	var body annotatedOutput
 	var visible strings.Builder
-	usage := annotationUsage{}
-	e.walk(e.inspection.Root, mode, &body, &visible, &usage)
+	e.walk(e.inspection.Root, mode, &body, &visible)
 	text := normalizeHTMLText(body.String())
 	visibleText := normalizeHTMLText(visible.String())
-	usage = annotationUsage{
-		UsedConcealedTag:                      strings.Contains(text, "<concealed "),
-		UsedVisibilityVariesByViewportSizeTag: strings.Contains(text, "<visibility-varies-by-viewport-size>"),
-		UsedVisibilityUncertainTag:            strings.Contains(text, "<visibility-uncertain>"),
-		UsedHiddenContentStrippedTag:          strings.Contains(text, "<hidden-content-stripped/>"),
-	}
-	return renderedHTML{text: text, visible: visibleText, usage: usage, hasConcealed: e.hasConcealed()}
+	return renderedHTML{text: text, visible: visibleText, hasConcealed: e.hasConcealed()}
 }
 
 func (e *htmlExtraction) hasConcealed() bool {
 	for _, state := range e.inspection.Text {
-		if state.Label == "concealed" && strings.TrimSpace(state.Text) != "" {
+		if state.Label == "concealed" && state.Node != nil && strings.TrimSpace(state.Node.Data) != "" {
 			return true
 		}
 	}
@@ -292,16 +302,16 @@ func (e *htmlExtraction) hasConcealed() bool {
 	return false
 }
 
-func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder, usage *annotationUsage) {
+func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {
 	if n == nil {
 		return
 	}
 	if n.Type == xhtml.TextNode {
-		e.writeText(n, mode, out, visible, usage)
+		e.writeText(n, mode, out, visible)
 		return
 	}
 	if n.Type == xhtml.CommentNode {
-		e.writeConditionalComment(n.Data, out, visible, usage)
+		e.writeConditionalComment(n.Data, out, visible)
 		return
 	}
 	if n.Type != xhtml.ElementNode && n.Type != xhtml.DocumentNode {
@@ -312,14 +322,14 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 		return
 	}
 	if name == "img" {
-		e.writeImage(n, mode, out, visible, usage)
+		e.writeImage(n, mode, out, visible)
 		return
 	}
 	if name == "input" {
 		typ := strings.ToLower(strings.TrimSpace(firstAttr(n, "type")))
 		if typ == "submit" || typ == "button" || typ == "reset" {
 			label := sanitizeSenderText(firstAttr(n, "value"))
-			e.writeElementContent(n, label, mode, out, visible, usage)
+			e.writeElementContent(n, label, mode, out, visible)
 		}
 		return
 	}
@@ -340,7 +350,7 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 		var visibleLabel strings.Builder
 		e.anchorDepth++
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			e.walk(child, mode, &label, &visibleLabel, usage)
+			e.walk(child, mode, &label, &visibleLabel)
 		}
 		e.anchorDepth--
 		destination, ok := e.destination(firstAttr(n, "href"))
@@ -364,14 +374,14 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 			e.links.AddDestination(destination)
 		} else {
 			for _, chunk := range label.chunks {
-				out.write(chunk.annotation, chunk.text)
+				out.writeBytes(chunk.annotation, label.chunkBytes(chunk))
 			}
 		}
 		visible.WriteString(visibleLabel.String())
 		return
 	}
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		e.walk(child, mode, out, visible, usage)
+		e.walk(child, mode, out, visible)
 	}
 	if name == "blockquote" {
 		marker := "\n[quoted content ends]"
@@ -387,7 +397,7 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 	}
 }
 
-func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder, usage *annotationUsage) {
+func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {
 	if content == "" {
 		return
 	}
@@ -396,27 +406,23 @@ func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode
 	case "concealed":
 		if mode == StripHidden {
 			out.write(outputAnnotation{kind: "stripped"}, content)
-			usage.UsedHiddenContentStrippedTag = true
 			return
 		}
 		reason, value := elementConcealmentReason(state)
 		out.write(outputAnnotation{kind: "concealed", reason: reason, value: value}, content)
-		usage.UsedConcealedTag = true
 	case "client-dependent":
 		out.write(outputAnnotation{kind: "client-dependent"}, content)
 		visible.WriteString(content)
-		usage.UsedVisibilityVariesByViewportSizeTag = true
 	case "unknown":
 		out.write(outputAnnotation{kind: "unknown"}, content)
 		visible.WriteString(content)
-		usage.UsedVisibilityUncertainTag = true
 	default:
 		out.WriteString(content)
 		visible.WriteString(content)
 	}
 }
 
-func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutput, visible *strings.Builder, usage *annotationUsage) {
+func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutput, visible *strings.Builder) {
 	trimmed := strings.TrimSpace(data)
 	if !conditionalHTMLComment(trimmed) {
 		return
@@ -440,7 +446,6 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 	}
 	out.write(outputAnnotation{kind: "unknown"}, value)
 	visible.WriteString(value)
-	usage.UsedVisibilityUncertainTag = true
 }
 
 func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *strings.Builder) {
@@ -482,7 +487,7 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *strings.Builder
 	}
 }
 
-func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder, usage *annotationUsage) {
+func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {
 	text := compactFormattingPadding(sanitizeSenderText(n.Data))
 	if text == "" {
 		return
@@ -511,20 +516,16 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 	case "concealed":
 		if mode == StripHidden {
 			out.write(outputAnnotation{kind: "stripped"}, outText)
-			usage.UsedHiddenContentStrippedTag = true
 			return
 		}
 		reason, value := concealmentReason(state)
 		out.write(outputAnnotation{kind: "concealed", reason: reason, value: value}, outText)
-		usage.UsedConcealedTag = true
 	case "client-dependent":
 		out.write(outputAnnotation{kind: "client-dependent"}, outText)
 		visible.WriteString(text)
-		usage.UsedVisibilityVariesByViewportSizeTag = true
 	case "unknown":
 		out.write(outputAnnotation{kind: "unknown"}, outText)
 		visible.WriteString(text)
-		usage.UsedVisibilityUncertainTag = true
 	default:
 		out.WriteString(outText)
 		visible.WriteString(text)
@@ -537,6 +538,25 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 // the LLM input. Ordinary whitespace and short obfuscation runs are unchanged.
 func compactFormattingPadding(value string) string {
 	const threshold, retained = 32, 8
+	runLength := 0
+	hasFormat := false
+	needsCompaction := false
+	for _, r := range value {
+		if !preheaderPaddingRune(r) {
+			runLength = 0
+			hasFormat = false
+			continue
+		}
+		runLength++
+		hasFormat = hasFormat || !unicode.IsSpace(r)
+		if runLength >= threshold && hasFormat {
+			needsCompaction = true
+			break
+		}
+	}
+	if !needsCompaction {
+		return value
+	}
 	runes := []rune(value)
 	var out strings.Builder
 	for start := 0; start < len(runes); {
@@ -586,6 +606,20 @@ func annotationWhitespaceOnly(value string) bool {
 	return true
 }
 
+func annotationWhitespaceOnlyBytes(value []byte) bool {
+	if len(value) == 0 {
+		return false
+	}
+	for len(value) > 0 {
+		r, size := utf8.DecodeRune(value)
+		if !preheaderPaddingRune(r) {
+			return false
+		}
+		value = value[size:]
+	}
+	return true
+}
+
 func concealmentReason(state htmlextract.Text) (string, string) {
 	for _, reason := range state.ConcealmentReasons {
 		switch reason {
@@ -600,7 +634,7 @@ func concealmentReason(state htmlextract.Text) (string, string) {
 		case "opacity":
 			return "opacity", strconv.FormatFloat(state.EffectiveOpacity, 'g', 6, 64)
 		case "font-size":
-			return "font-size", state.FontSize.Text
+			return "font-size", state.FontSize
 		case "colour-distance":
 			return "color-match", ""
 		case "empty-clip":
@@ -610,7 +644,7 @@ func concealmentReason(state htmlextract.Text) (string, string) {
 	return "display:none", ""
 }
 
-func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder, usage *annotationUsage) {
+func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {
 	if explicitTrackingPixel(n) {
 		return
 	}
@@ -642,18 +676,14 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 	case "concealed":
 		if mode == StripHidden {
 			out.write(outputAnnotation{kind: "stripped"}, rendered)
-			usage.UsedHiddenContentStrippedTag = true
 			return
 		}
 		reason, value := elementConcealmentReason(state)
 		out.write(outputAnnotation{kind: "concealed", reason: reason, value: value}, rendered)
-		usage.UsedConcealedTag = true
 	case "client-dependent":
 		out.write(outputAnnotation{kind: "client-dependent"}, rendered)
-		usage.UsedVisibilityVariesByViewportSizeTag = true
 	case "unknown":
 		out.write(outputAnnotation{kind: "unknown"}, rendered)
-		usage.UsedVisibilityUncertainTag = true
 	default:
 		out.WriteString(rendered)
 	}
@@ -793,7 +823,12 @@ func isBlockElement(name string) bool {
 	return false
 }
 
-func sanitizeSenderText(value string) string { return reservedAnnotation.ReplaceAllString(value, "") }
+func sanitizeSenderText(value string) string {
+	if !strings.Contains(value, "<") {
+		return value
+	}
+	return reservedAnnotation.ReplaceAllString(value, "")
+}
 
 func normalizeHTMLText(value string) string {
 	value = strings.ToValidUTF8(value, "�")

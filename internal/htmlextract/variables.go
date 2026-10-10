@@ -1,10 +1,13 @@
 package htmlextract
 
 import (
-	"github.com/tdewolff/parse/v2"
-	"github.com/tdewolff/parse/v2/css"
+	"errors"
+	"io"
 	"sort"
 	"strings"
+
+	"github.com/tdewolff/parse/v2"
+	"github.com/tdewolff/parse/v2/css"
 )
 
 const maxValueBytes = 16384
@@ -40,6 +43,9 @@ func lexValue(s string) ([]valueToken, int) {
 	for {
 		k, v := l.Next()
 		if k == css.ErrorToken {
+			if !errors.Is(l.Err(), io.EOF) {
+				return nil, 2
+			}
 			break
 		}
 		if len(ts) >= maxValueTokens {
@@ -109,8 +115,9 @@ type variableValue struct {
 	status int
 }
 type variableScope struct {
-	parent *variableScope
-	values map[string]variableValue
+	parent     *variableScope
+	values     map[string]variableValue
+	unresolved map[string]declaration
 }
 
 func (s *variableScope) get(name string) variableValue {
@@ -118,8 +125,15 @@ func (s *variableScope) get(name string) variableValue {
 		if v, ok := s.values[name]; ok {
 			return v
 		}
+		if _, ok := s.unresolved[name]; ok {
+			return variableValue{status: 2}
+		}
 	}
 	return variableValue{status: 0}
+}
+
+func unresolvedVariableScope(parent *variableScope, defs map[string]declaration) *variableScope {
+	return &variableScope{parent: parent, unresolved: defs}
 }
 
 // A scope stores only this element's computed overrides. Parent references have
@@ -128,13 +142,10 @@ func buildVariables(parent *variableScope, defs map[string]declaration, budget *
 	if len(defs) == 0 {
 		return parent
 	}
-	s := &variableScope{parent: parent, values: make(map[string]variableValue)}
-	if len(defs) > 1024 {
-		for n := range defs {
-			s.values[n] = variableValue{status: 2}
-		}
-		return s
+	if len(defs) > 1024 || !budget.charge(len(defs)) {
+		return unresolvedVariableScope(parent, defs)
 	}
+	s := &variableScope{parent: parent, values: make(map[string]variableValue)}
 	var ordered []string
 	for n := range defs {
 		ordered = append(ordered, n)
@@ -146,19 +157,14 @@ func buildVariables(parent *variableScope, defs map[string]declaration, budget *
 	var path []string
 	for _, name := range ordered {
 		d := defs[name]
-		ts, status := lexValue(d.value)
-		if status != 1 || d.unsupported {
+		if !d.tokensReady || d.valueStatus != 1 || d.unsupported {
 			s.values[name] = variableValue{status: 2}
 		} else {
-			tokens[name] = ts
+			tokens[name] = d.valueTokens
 		}
 	}
 	var visit func(string, int)
 	visit = func(n string, depth int) {
-		if depth > maxExpressionDepth || !budget.charge(1) {
-			s.values[n] = variableValue{status: 2}
-			return
-		}
 		if states[n] == 2 {
 			return
 		}
@@ -173,6 +179,10 @@ func buildVariables(parent *variableScope, defs map[string]declaration, budget *
 			}
 			return
 		}
+		if depth > maxExpressionDepth || !budget.charge(1+len(tokens[n])) {
+			s.values[n] = variableValue{status: 2}
+			return
+		}
 		states[n] = 1
 		path = append(path, n)
 		for _, ref := range variableRefs(tokens[n]) {
@@ -185,6 +195,9 @@ func buildVariables(parent *variableScope, defs map[string]declaration, budget *
 	}
 	for _, n := range ordered {
 		visit(n, 0)
+		if budget.exhausted {
+			return unresolvedVariableScope(parent, defs)
+		}
 	}
 	for n := range cyclic {
 		s.values[n] = variableValue{status: 0}
@@ -202,7 +215,7 @@ func buildVariables(parent *variableScope, defs map[string]declaration, budget *
 			return variableValue{status: 2}
 		}
 		var v variableValue
-		switch strings.ToLower(strings.TrimSpace(d.value)) {
+		switch d.keyword {
 		case "inherit", "unset":
 			v = parent.get(n)
 		case "initial":
@@ -217,22 +230,24 @@ func buildVariables(parent *variableScope, defs map[string]declaration, budget *
 	}
 	for _, n := range ordered {
 		resolveName(n, 0)
+		if budget.exhausted {
+			return unresolvedVariableScope(parent, defs)
+		}
 	}
 	return s
 }
-func substitute(s string, vars *variableScope, budget *expressionBudget) variableValue {
-	if !hasVariables(s) {
-		return variableValue{s, 1}
+func substitute(d declaration, vars *variableScope, budget *expressionBudget) variableValue {
+	if !d.hasVars {
+		return variableValue{d.value, 1}
 	}
 	// Escaped identifiers require CSS unescaping beyond this bounded subset.
-	if strings.Contains(s, "\\") {
+	if d.hasEscape {
 		return variableValue{status: 2}
 	}
-	ts, status := lexValue(s)
-	if status != 1 {
-		return variableValue{status: status}
+	if !d.tokensReady || d.valueStatus != 1 {
+		return variableValue{status: d.valueStatus}
 	}
-	return substituteTokens(ts, vars.get, budget, 0)
+	return substituteTokens(d.valueTokens, vars.get, budget, 0)
 }
 func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget *expressionBudget, depth int) variableValue {
 	if depth > maxExpressionDepth || !budget.charge(len(ts)) {

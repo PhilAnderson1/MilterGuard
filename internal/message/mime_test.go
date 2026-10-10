@@ -180,6 +180,21 @@ func TestMIMEExtractionDecodesDeclaredBodyCharset(t *testing.T) {
 	}
 }
 
+func TestUTF8CharsetDecodingPreservesValidTextAndHandlesMalformedInput(t *testing.T) {
+	valid := []byte("café")
+	for _, label := range []string{"utf-8", "UTF8", "unicode-1-1-utf-8"} {
+		if got := decodeCharset(label, valid); got != string(valid) {
+			t.Errorf("decodeCharset(%q) = %q, want %q", label, got, valid)
+		}
+	}
+	if got := decodeCharset("utf-8", []byte{'a', 0xff, 'b'}); got != "a�b" {
+		t.Fatalf("malformed UTF-8 = %q, want replacement character", got)
+	}
+	if got := decodeHTMLCharset("utf-8", append([]byte("\xef\xbb\xbf"), valid...)); got != string(valid) {
+		t.Fatalf("BOM-prefixed HTML UTF-8 = %q, want %q", got, valid)
+	}
+}
+
 func TestHTMLCharsetSniffingWithoutUsableMIMECharset(t *testing.T) {
 	for _, contentType := range []string{"text/html", "text/html; charset=unknown-charset"} {
 		t.Run(contentType, func(t *testing.T) {

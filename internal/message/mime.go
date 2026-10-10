@@ -10,6 +10,7 @@ import (
 	"net/mail"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/net/html/charset"
 )
@@ -26,7 +27,6 @@ type extractedContent struct {
 	TransferIncomplete   bool
 	ExtractionIncomplete bool
 	HasConcealedContent  bool
-	Annotations          annotationUsage
 	HTMLComments         htmlCommentStats
 }
 
@@ -123,7 +123,6 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 			combined.HTML = combined.HTML || part.HTML
 			combined.HasConcealedContent = combined.HasConcealedContent || part.HasConcealedContent
 			combined.ExtractionIncomplete = combined.ExtractionIncomplete || part.ExtractionIncomplete
-			combined.Annotations = mergeAnnotationUsage(combined.Annotations, part.Annotations)
 			combined.HTMLComments.add(part.HTMLComments)
 		}
 		combined.ImageRefs = imageRefs.refs
@@ -166,15 +165,6 @@ func joinContent(left, right string) string {
 	return left + "\n\n" + right
 }
 
-func mergeAnnotationUsage(a, b annotationUsage) annotationUsage {
-	return annotationUsage{
-		UsedConcealedTag:                      a.UsedConcealedTag || b.UsedConcealedTag,
-		UsedVisibilityVariesByViewportSizeTag: a.UsedVisibilityVariesByViewportSizeTag || b.UsedVisibilityVariesByViewportSizeTag,
-		UsedVisibilityUncertainTag:            a.UsedVisibilityUncertainTag || b.UsedVisibilityUncertainTag,
-		UsedHiddenContentStrippedTag:          a.UsedHiddenContentStrippedTag || b.UsedHiddenContentStrippedTag,
-	}
-}
-
 func extractAttachedMessage(data []byte, depth int) extractedContent {
 	attached, err := mail.ReadMessage(bytes.NewReader(data))
 	if err != nil {
@@ -202,6 +192,11 @@ func decodeCharset(label string, data []byte) string {
 	if label == "" {
 		return string(data)
 	}
+	if utf8.Valid(data) {
+		if _, canonical := charset.Lookup(label); canonical == "utf-8" {
+			return string(data)
+		}
+	}
 	reader, err := charset.NewReaderLabel(label, bytes.NewReader(data))
 	if err != nil {
 		return string(data)
@@ -217,7 +212,10 @@ func decodeCharset(label string, data []byte) string {
 // one, HTML's own BOM or early meta declaration can identify its encoding;
 // this does not parse the document or change the HTML extractor.
 func decodeHTMLCharset(label string, data []byte) string {
-	if encoding, _ := charset.Lookup(strings.TrimSpace(label)); encoding != nil {
+	if encoding, canonical := charset.Lookup(strings.TrimSpace(label)); encoding != nil {
+		if canonical == "utf-8" && utf8.Valid(data) {
+			return strings.TrimPrefix(string(data), "\ufeff")
+		}
 		return strings.TrimPrefix(decodeCharset(label, data), "\ufeff")
 	}
 	reader, err := charset.NewReader(bytes.NewReader(data), "text/html")

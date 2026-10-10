@@ -5,6 +5,8 @@ import (
 	"html"
 	"strings"
 	"testing"
+
+	xhtml "golang.org/x/net/html"
 )
 
 func TestConditionalCases(t *testing.T) {
@@ -68,6 +70,45 @@ func TestViewingCasesHardCap(t *testing.T) {
 	}
 }
 
+func TestMediaCasesShareSelectorWorkBudget(t *testing.T) {
+	limits := DefaultLimits()
+	s := sheet{limits: limits}
+	s.parseCSS(`@media(max-width:500px){p{display:none}}@media(min-width:500px){p{display:block}}`, false)
+	var firstCaseWork int64
+	for ruleIndex := range s.rules {
+		rule := &s.rules[ruleIndex]
+		for _, selector := range rule.selectors {
+			cost := selectorCost(selector.String(), 1, 1, limits.MatchWork)
+			rule.costs = append(rule.costs, cost)
+			rule.fallbackScopes = append(rule.fallbackScopes, uncertainSelectorScope(selector.String()))
+			scopeCost := int64(len(selector.String()) + 1)
+			rule.scopeCosts = append(rule.scopeCosts, scopeCost)
+		}
+		firstCaseWork++ // rule visit, including media-inactive rules
+		if rule.mediaState(0, false) != mediaNo {
+			firstCaseWork += rule.scopeCosts[0] + rule.costs[0]
+		}
+	}
+
+	matches := matchBudget{limit: firstCaseWork}
+	expressions := expressionBudget{remaining: limits.ExpressionWork}
+	node := &xhtml.Node{Type: xhtml.ElementNode, Data: "p"}
+	first, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 0, false, &matches, &expressions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first[display].Known || first[display].Text != "none" {
+		t.Fatalf("first media case = %+v", first[display])
+	}
+	second, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1000, false, &matches, &expressions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matches.exhausted || second[display].Known {
+		t.Fatalf("media cases did not share budget: budget=%+v display=%+v", matches, second[display])
+	}
+}
+
 func TestEmptyClipping(t *testing.T) {
 	cases := []struct{ style, want string }{
 		{`clip-path:circle(0px)`, "concealed"},
@@ -126,6 +167,55 @@ func TestVariables(t *testing.T) {
 				t.Fatalf("want %s: %+v", c.want, v)
 			}
 		})
+	}
+}
+
+func TestDeclarationValueTokensAreCached(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	ds := s.declarations("--payload", "var(--missing, none)")
+	if len(ds) != 1 || !ds[0].tokensReady || ds[0].valueStatus != 1 || len(ds[0].valueTokens) == 0 {
+		t.Fatalf("declaration was not prepared: %+v", ds)
+	}
+
+	// Cascading copies declarations. Resolution must use the immutable token
+	// stream prepared by the parser rather than lexing the value again for each
+	// element.
+	d := ds[0]
+	d.value = strings.Repeat("x", maxValueBytes+1)
+	budget := expressionBudget{remaining: 100}
+	scope := buildVariables(nil, map[string]declaration{"--payload": d}, &budget)
+	if got := scope.get("--payload"); got.status != 1 || got.text != "none" {
+		t.Fatalf("cached value was not used: %+v", got)
+	}
+}
+
+func TestMalformedValueSuffixIsNotTruncated(t *testing.T) {
+	in := inspectHTML(t, `<p style="--x:none;display:block;display:var(--x)<junk>">T</p>`)
+	if got := findText(t, in, "T").Label; got == "concealed" {
+		t.Fatalf("malformed suffix was truncated to concealed content")
+	}
+
+	in = inspectHTML(t, `<p style='display:block;display:none"'>T</p>`)
+	if got := findText(t, in, "T").Label; got == "concealed" {
+		t.Fatalf("unterminated string was truncated to concealed content")
+	}
+
+	tokens, status := lexValue(`var(--x)<junk>`)
+	if status != 1 || tokenText(tokens) != `var(--x)<junk>` {
+		t.Fatalf("tokens = %+v, status = %d", tokens, status)
+	}
+}
+
+func TestExpressionBudgetStopsCachedVariableTraversal(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	d := s.declarations("--payload", "var(--a) var(--b) var(--c)")[0]
+	budget := expressionBudget{remaining: 1}
+	scope := buildVariables(nil, map[string]declaration{"--payload": d}, &budget)
+	if !budget.exhausted {
+		t.Fatal("expression budget was not exhausted")
+	}
+	if got := scope.get("--payload"); got.status != 2 {
+		t.Fatalf("value after budget exhaustion = %+v", got)
 	}
 }
 
@@ -209,7 +299,6 @@ func FuzzBoundedStyles(f *testing.F) {
 		src := `<p style="` + html.EscapeString(s) + `">T</p>`
 		l := DefaultLimits()
 		l.ExpressionWork = 10000
-		l.Diagnostics = 32
 		_, _ = (processor{Limits: l}).process([]byte(src))
 	})
 }

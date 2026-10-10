@@ -147,8 +147,7 @@ func extractBoundedHTMLFallback(source string) extractedContent {
 	}
 	links.AddAllHTTP(findHTTPURLs(value))
 	return extractedContent{Text: tagged, VisibleText: value,
-		Links: links.links, ImageRefs: images.refs, ExtractionIncomplete: !complete,
-		Annotations: annotationUsage{UsedVisibilityUncertainTag: value != ""}}
+		Links: links.links, ImageRefs: images.refs, ExtractionIncomplete: !complete}
 }
 
 func fallbackDestination(raw string, base *url.URL) (string, bool) {

@@ -15,7 +15,9 @@ type Value struct {
 }
 type Style [properties]Value
 
-func initial() Style {
+var initialStyle = makeInitialStyle()
+
+func makeInitialStyle() Style {
 	var s Style
 	s[display] = Value{Text: "inline", Known: true}
 	s[visibility] = Value{Text: "visible", Known: true}
@@ -38,6 +40,8 @@ func initial() Style {
 	s[clipPath] = Value{Text: "none", Known: true}
 	return s
 }
+
+func initial() Style      { return initialStyle }
 func inherits(p int) bool { return p == visibility || p == fontSize || p == color }
 func number(s string) (float64, bool) {
 	v, e := strconv.ParseFloat(s, 64)
@@ -51,7 +55,7 @@ func resolve(p int, s string, parent, root Style) (Value, int) {
 	if strings.HasPrefix(s, "\"") || strings.HasPrefix(s, "'") {
 		return Value{}, 0
 	}
-	def := initial()[p]
+	def := initialStyle[p]
 	switch s {
 	case "inherit":
 		return parent[p], 1
@@ -255,33 +259,16 @@ func readColour(s string) (RGBA, int) {
 				c[i] /= 255
 			}
 		}
-	} else if (strings.HasPrefix(s, "rgb(") || strings.HasPrefix(s, "rgba(")) && strings.HasSuffix(s, ")") {
-		parts := strings.Split(s[strings.IndexByte(s, '(')+1:len(s)-1], ",")
-		want := 3
-		if strings.HasPrefix(s, "rgba(") {
-			want = 4
-		}
-		if len(parts) != want {
+	} else if open := strings.IndexByte(s, '('); open > 0 && strings.HasSuffix(s, ")") {
+		name := s[:open]
+		body := s[open+1 : len(s)-1]
+		switch name {
+		case "rgb", "rgba":
+			return parseRGBFunction(body)
+		case "hsl", "hsla":
+			return parseHSLFunction(body)
+		default:
 			return RGBA{}, 2
-		}
-		for i, v := range parts {
-			v = strings.TrimSpace(v)
-			scale, hi := 1.0, 255.0
-			if i == 3 {
-				hi = 1
-			}
-			if strings.HasSuffix(v, "%") {
-				scale = hi / 100
-				v = strings.TrimSuffix(v, "%")
-			}
-			n, ok := number(v)
-			if !ok {
-				return RGBA{}, 0
-			}
-			c[i] = clamp(n*scale, hi)
-			if strings.HasSuffix(strings.TrimSpace(parts[i]), "%") {
-				c[i] = clamp(n/100*hi, hi)
-			}
 		}
 	} else {
 		if strings.Contains(s, "(") || strings.Contains(" canvas canvastext linktext visitedtext activetext buttonface buttontext buttonborder field fieldtext highlight highlighttext selecteditem selecteditemtext mark marktext graytext accentcolor accentcolortext ", " "+s+" ") {
@@ -294,6 +281,174 @@ func readColour(s string) (RGBA, int) {
 		return RGBA{}, 0
 	}
 	return RGBA{c[0] / 255, c[1] / 255, c[2] / 255, c[3]}, 1
+}
+
+func colourFunctionParts(body string) (channels []string, alpha string, legacy bool, status int) {
+	if strings.Contains(body, "(") || strings.Contains(strings.ToLower(body), "from") {
+		return nil, "", false, 2
+	}
+	if strings.Contains(body, ",") {
+		if strings.Contains(body, "/") {
+			return nil, "", true, 0
+		}
+		parts := strings.Split(body, ",")
+		if len(parts) != 3 && len(parts) != 4 {
+			return nil, "", true, 0
+		}
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+			if parts[i] == "" {
+				return nil, "", true, 0
+			}
+		}
+		if len(parts) == 4 {
+			alpha = parts[3]
+		}
+		return parts[:3], alpha, true, 1
+	}
+	if strings.Count(body, "/") > 1 {
+		return nil, "", false, 0
+	}
+	parts := strings.SplitN(body, "/", 2)
+	channels = strings.Fields(parts[0])
+	if len(channels) != 3 {
+		return nil, "", false, 0
+	}
+	if len(parts) == 2 {
+		alphaParts := strings.Fields(parts[1])
+		if len(alphaParts) != 1 {
+			return nil, "", false, 0
+		}
+		alpha = alphaParts[0]
+	}
+	return channels, alpha, false, 1
+}
+
+func colourNumber(component string, numberScale, hi float64) (float64, int) {
+	if component == "none" || strings.Contains(component, "(") {
+		return 0, 2
+	}
+	percentage := strings.HasSuffix(component, "%")
+	if percentage {
+		component = strings.TrimSuffix(component, "%")
+	}
+	n, ok := number(component)
+	if !ok {
+		return 0, 0
+	}
+	if percentage {
+		return clamp(n/100*hi, hi), 1
+	}
+	return clamp(n*numberScale, hi), 1
+}
+
+func parseAlpha(component string) (float64, int) {
+	if component == "" {
+		return 1, 1
+	}
+	return colourNumber(component, 1, 1)
+}
+
+func parseRGBFunction(body string) (RGBA, int) {
+	channels, alphaText, legacy, status := colourFunctionParts(body)
+	if status != 1 {
+		return RGBA{}, status
+	}
+	if legacy {
+		percent := strings.HasSuffix(channels[0], "%")
+		for _, channel := range channels[1:] {
+			if strings.HasSuffix(channel, "%") != percent {
+				return RGBA{}, 0
+			}
+		}
+	}
+	var c [3]float64
+	for i, channel := range channels {
+		c[i], status = colourNumber(channel, 1, 255)
+		if status != 1 {
+			return RGBA{}, status
+		}
+	}
+	a, status := parseAlpha(alphaText)
+	if status != 1 {
+		return RGBA{}, status
+	}
+	return RGBA{c[0] / 255, c[1] / 255, c[2] / 255, a}, 1
+}
+
+func parseHue(component string) (float64, int) {
+	if component == "none" || strings.Contains(component, "(") {
+		return 0, 2
+	}
+	factor := 1.0
+	switch {
+	case strings.HasSuffix(component, "turn"):
+		factor = 360
+		component = strings.TrimSuffix(component, "turn")
+	case strings.HasSuffix(component, "grad"):
+		factor = .9
+		component = strings.TrimSuffix(component, "grad")
+	case strings.HasSuffix(component, "rad"):
+		factor = 180 / math.Pi
+		component = strings.TrimSuffix(component, "rad")
+	case strings.HasSuffix(component, "deg"):
+		component = strings.TrimSuffix(component, "deg")
+	}
+	n, ok := number(component)
+	if !ok {
+		return 0, 0
+	}
+	n = math.Mod(n*factor, 360)
+	if n < 0 {
+		n += 360
+	}
+	return n, 1
+}
+
+func parseHSLFunction(body string) (RGBA, int) {
+	channels, alphaText, legacy, status := colourFunctionParts(body)
+	if status != 1 {
+		return RGBA{}, status
+	}
+	h, status := parseHue(channels[0])
+	if status != 1 {
+		return RGBA{}, status
+	}
+	if legacy && (!strings.HasSuffix(channels[1], "%") || !strings.HasSuffix(channels[2], "%")) {
+		return RGBA{}, 0
+	}
+	s, status := colourNumber(channels[1], .01, 1)
+	if status != 1 {
+		return RGBA{}, status
+	}
+	l, status := colourNumber(channels[2], .01, 1)
+	if status != 1 {
+		return RGBA{}, status
+	}
+	a, status := parseAlpha(alphaText)
+	if status != 1 {
+		return RGBA{}, status
+	}
+
+	chroma := (1 - math.Abs(2*l-1)) * s
+	x := chroma * (1 - math.Abs(math.Mod(h/60, 2)-1))
+	var r, g, b float64
+	switch int(h / 60) {
+	case 0:
+		r, g = chroma, x
+	case 1:
+		r, g = x, chroma
+	case 2:
+		g, b = chroma, x
+	case 3:
+		g, b = x, chroma
+	case 4:
+		r, b = x, chroma
+	default:
+		r, b = chroma, x
+	}
+	m := l - chroma/2
+	return RGBA{r + m, g + m, b + m, a}, 1
 }
 
 func colourString(c RGBA) string {

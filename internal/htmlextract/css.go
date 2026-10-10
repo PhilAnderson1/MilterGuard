@@ -1,8 +1,6 @@
 package htmlextract
 
 import (
-	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -42,12 +40,42 @@ var names = [properties]string{"display", "visibility", "content-visibility", "o
 type declaration struct {
 	prop        int
 	value       string
+	valueTokens []valueToken
+	valueStatus int
+	tokensReady bool
+	hasVars     bool
+	hasEscape   bool
+	keyword     string
 	important   bool
 	order       int
 	unsupported bool
 	custom      string
 	shorthand   bool
 }
+
+// prepareDeclaration performs the context-independent work for a declaration
+// once. Declarations are copied while cascading, so valueTokens must remain
+// immutable after this point.
+func prepareDeclaration(d declaration) declaration {
+	d.hasVars = hasVariables(d.value)
+	d.hasEscape = strings.Contains(d.value, "\\")
+	if d.custom != "" {
+		d.keyword = strings.ToLower(strings.TrimSpace(d.value))
+	}
+	if d.custom != "" || d.hasVars {
+		d.valueTokens, d.valueStatus = lexValue(d.value)
+		d.tokensReady = true
+	}
+	return d
+}
+
+func prepareDeclarations(ds []declaration) []declaration {
+	for i := range ds {
+		ds[i] = prepareDeclaration(ds[i])
+	}
+	return ds
+}
+
 type rule struct {
 	selectors         cascadia.SelectorGroup
 	fallbackScopes    []cascadia.SelectorGroup
@@ -57,41 +85,36 @@ type rule struct {
 	uncertainSelector bool
 }
 type sheet struct {
-	rules            []rule
-	selectors, order int
-	diagnostics      []string
-	seen             map[string]bool
-	limits           Limits
-	planningWork     int64
-	err              error
+	rules             []rule
+	selectors, order  int
+	limits            Limits
+	planningWork      int64
+	cascadeIncomplete bool
+	mediaCache        map[mediaCacheKey][]uint8
 }
 
-func (s *sheet) warn(reason string) {
-	if s.err != nil {
-		return
-	}
-	if len(reason) > 512 {
-		reason = reason[:512] + " [truncated]"
-	}
-	if s.seen == nil {
-		s.seen = make(map[string]bool)
-	}
-	if s.seen[reason] {
-		return
-	}
-	s.seen[reason] = true
-	if len(s.diagnostics) >= s.limits.Diagnostics {
-		s.err = fmt.Errorf("limit: diagnostics > %d", s.limits.Diagnostics)
-		return
-	}
-	s.diagnostics = append(s.diagnostics, reason)
+func (s *sheet) abandonCascade() {
+	s.cascadeIncomplete = true
+	s.rules = nil
+	s.selectors = 0
+	s.planningWork = 0
+	s.mediaCache = nil
 }
+
+func (s *sheet) invalidateMediaCache() {
+	s.mediaCache = nil
+}
+
 func tokenString(v []css.Token) string {
+	return strings.TrimSpace(rawTokenString(v))
+}
+
+func rawTokenString(v []css.Token) string {
 	var b strings.Builder
 	for _, t := range v {
 		b.Write(t.Data)
 	}
-	return strings.TrimSpace(b.String())
+	return b.String()
 }
 
 func cssUnescape(value string) string {
@@ -142,23 +165,77 @@ func cssUnescape(value string) string {
 	return out.String()
 }
 
-func unescapeCSSIdentifiers(value string) string {
-	if !strings.Contains(value, "\\") {
-		return value
-	}
+type parsedDeclarationValue struct {
+	text                  string
+	important             bool
+	unsafeIdentifier      bool
+	unsafeWithoutFunction bool
+}
+
+// parseDeclarationValue preserves CSS token boundaries while decoding the
+// identifier escapes that the supported property grammars need. In
+// particular, an escaped '!' remains part of an identifier and cannot become
+// an !important delimiter, and an escaped space cannot disappear through
+// string trimming.
+func parseDeclarationValue(value string) parsedDeclarationValue {
 	ts, status := lexValue(value)
 	if status != 1 {
-		return value
+		return parsedDeclarationValue{text: strings.TrimSpace(value)}
 	}
+	start, end := 0, len(ts)
+	for start < end && (ts[start].kind == css.WhitespaceToken || ts[start].kind == css.CommentToken) {
+		start++
+	}
+	for end > start && (ts[end-1].kind == css.WhitespaceToken || ts[end-1].kind == css.CommentToken) {
+		end--
+	}
+
+	important := false
+	last := end - 1
+	if last >= start && ts[last].kind == css.IdentToken && strings.EqualFold(cssUnescape(ts[last].raw), "important") {
+		bang := last - 1
+		for bang >= start && (ts[bang].kind == css.WhitespaceToken || ts[bang].kind == css.CommentToken) {
+			bang--
+		}
+		if bang >= start && ts[bang].kind == css.DelimToken && ts[bang].raw == "!" {
+			important = true
+			end = bang
+			for end > start && (ts[end-1].kind == css.WhitespaceToken || ts[end-1].kind == css.CommentToken) {
+				end--
+			}
+		}
+	}
+
+	unsafe := false
+	hasFunction := false
 	var out strings.Builder
-	for _, token := range ts {
-		raw := token.raw
-		if token.kind == css.IdentToken || token.kind == css.FunctionToken {
-			raw = cssUnescape(raw)
+	for i := start; i < end; i++ {
+		t := ts[i]
+		hasFunction = hasFunction || t.kind == css.FunctionToken
+		if t.kind == css.CommentToken {
+			// Keep tokens on either side of a comment from being accidentally
+			// joined into a different token.
+			out.WriteByte(' ')
+			continue
+		}
+		raw := t.raw
+		if (t.kind == css.IdentToken || t.kind == css.FunctionToken) && strings.Contains(raw, "\\") {
+			decoded := cssUnescape(raw)
+			decodedTokens, decodedStatus := lexValue(decoded)
+			if decodedStatus == 1 && len(decodedTokens) == 1 && decodedTokens[0].kind == t.kind {
+				raw = decoded
+			} else {
+				unsafe = true
+			}
 		}
 		out.WriteString(raw)
 	}
-	return out.String()
+	return parsedDeclarationValue{
+		text:                  out.String(),
+		important:             important,
+		unsafeIdentifier:      unsafe,
+		unsafeWithoutFunction: unsafe && !hasFunction,
+	}
 }
 
 func (s *sheet) declarations(prop, value string) []declaration {
@@ -166,46 +243,38 @@ func (s *sheet) declarations(prop, value string) []declaration {
 	if !strings.HasPrefix(prop, "--") {
 		prop = strings.ToLower(prop)
 	}
-	value = unescapeCSSIdentifiers(value)
-	value = strings.TrimSpace(value)
-	if strings.Contains(value, "/*") {
-		if ts, status := lexValue(value); status == 1 {
-			var b strings.Builder
-			for _, t := range ts {
-				if t.kind == css.CommentToken {
-					b.WriteByte(' ')
-				} else {
-					b.WriteString(t.raw)
-				}
-			}
-			value = strings.TrimSpace(b.String())
-		}
-	}
-	imp := false
-	// CSS comments/whitespace can occur between ! and important. The parser
-	// retains those tokens; canonicalize only this terminal priority marker.
-	if at := strings.LastIndex(value, "!"); at >= 0 && strings.EqualFold(strings.TrimSpace(value[at+1:]), "important") {
-		imp = true
-		value = strings.TrimSpace(value[:at])
-	}
+	parsed := parseDeclarationValue(value)
+	value = parsed.text
+	imp := parsed.important
 	s.order++
 	if strings.HasPrefix(prop, "--") {
-		return []declaration{{prop: -1, custom: prop, value: value, important: imp, order: s.order}}
+		return prepareDeclarations([]declaration{{prop: -1, custom: prop, value: value, important: imp, order: s.order}})
+	}
+	// None of the tracked property grammars accepts an arbitrary identifier.
+	// If decoding it would change its token type or boundaries, it cannot be a
+	// supported keyword and the browser will reject the declaration.
+	if parsed.unsafeWithoutFunction {
+		return nil
 	}
 	for p, n := range names {
 		if n == prop {
-			return []declaration{{prop: p, value: value, important: imp, order: s.order}}
+			return prepareDeclarations([]declaration{{prop: p, value: value, important: imp, order: s.order, unsupported: parsed.unsafeIdentifier}})
 		}
 	}
 	if prop == "background" {
+		if parsed.unsafeIdentifier {
+			return prepareDeclarations([]declaration{
+				{prop: background, value: value, important: imp, order: s.order, shorthand: true, unsupported: true},
+				{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true, unsupported: true},
+			})
+		}
 		if hasVariables(value) {
-			return []declaration{{prop: background, value: value, important: imp, order: s.order, shorthand: true}, {prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true}}
+			return prepareDeclarations([]declaration{{prop: background, value: value, important: imp, order: s.order, shorthand: true}, {prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true}})
 		}
 		return backgroundDeclarations(strings.ToLower(value), imp, s.order)
 	}
 	if prop == "mask" {
-		s.warn("unsupported shorthand: mask")
-		return []declaration{{prop: maskImage, value: value, important: imp, order: s.order, unsupported: true}}
+		return prepareDeclarations([]declaration{{prop: maskImage, value: value, important: imp, order: s.order, unsupported: true}})
 	}
 	var affected []int
 	switch prop {
@@ -217,15 +286,11 @@ func (s *sheet) declarations(prop, value string) []declaration {
 		}
 	}
 	if len(affected) > 0 {
-		s.warn("unsupported shorthand: " + prop)
 		out := make([]declaration, 0, len(affected))
 		for _, p := range affected {
 			out = append(out, declaration{prop: p, value: value, important: imp, order: s.order, unsupported: true})
 		}
-		return out
-	}
-	if prop == "content" || prop == "filter" || prop == "clip" || prop == "clip-path" || prop == "height" || prop == "max-height" || prop == "overflow" || prop == "position" || prop == "transform" {
-		s.warn("outside concealment coverage: " + prop)
+		return prepareDeclarations(out)
 	}
 	return nil
 }
@@ -234,24 +299,24 @@ func (s *sheet) declarations(prop, value string) []declaration {
 // conditions and selectors retain uncertainty only for declarations they can
 // affect; print blocks are skipped.
 func (s *sheet) parseCSS(text string, inline bool) []declaration {
+	if !inline {
+		s.invalidateMediaCache()
+	}
 	p := css.NewParser(parse.NewInputString(text), inline)
 	var conditions []mediaCondition
 	current := -1
 	var out []declaration
 	for {
-		if s.err != nil {
+		if s.cascadeIncomplete {
 			return out
 		}
 		g, _, data := p.Next()
-		vals := tokenString(p.Values())
+		values := p.Values()
+		vals := tokenString(values)
 		switch g {
 		case css.ErrorGrammar:
 			if p.HasParseError() {
-				s.warn("malformed CSS recovered")
 				continue
-			}
-			if p.Err() != nil && p.Err() != io.EOF {
-				s.warn("CSS read error: " + p.Err().Error())
 			}
 			return out
 		case css.BeginAtRuleGrammar:
@@ -261,13 +326,11 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 				cond = parseMedia(vals)
 			case "@font-face", "@keyframes", "@-webkit-keyframes":
 				cond = mediaCondition{{never: true}}
-				s.warn("inactive at-rule: " + string(data))
 			default:
 				cond = mediaCondition{{unknown: true}}
-				s.warn("unsupported conditional/at-rule: " + string(data))
 			}
 			if len(conditions) >= s.limits.Depth {
-				s.err = fmt.Errorf("limit: CSS conditional depth")
+				s.abandonCascade()
 				return out
 			}
 			conditions = append(conditions, cond)
@@ -277,9 +340,14 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			}
 			current = -1
 		case css.AtRuleGrammar:
-			s.warn("ignored at-rule: " + string(data))
 		case css.BeginRulesetGrammar:
 			current = -1
+			if inline {
+				// Rulesets are not valid members of a style attribute. In
+				// particular, do not let a ruleset nested in a malformed inline
+				// at-rule escape into the document stylesheet.
+				continue
+			}
 			selector := vals
 			var staticBranches []string
 			for _, branch := range splitSelectorList(selector) {
@@ -288,18 +356,16 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 				}
 			}
 			if len(staticBranches) == 0 {
-				s.warn("inactive interactive selector: " + selector)
 				continue
 			}
 			selector = strings.Join(staticBranches, ",")
 			if len(selector) > s.limits.SelectorBytes {
-				s.err = fmt.Errorf("limit: selector bytes")
+				s.abandonCascade()
 				return out
 			}
 			if !supportedSelector(selector) {
-				s.warn("unsupported selector: " + selector)
 				if len(s.rules) >= s.limits.Rules {
-					s.err = fmt.Errorf("limit: rules/selectors")
+					s.abandonCascade()
 					return out
 				}
 				// Preserve any provable target constraint from the rightmost
@@ -310,7 +376,7 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 				scope := uncertainSelectorScope(selector)
 				s.selectors += len(scope)
 				if s.selectors > s.limits.Selectors {
-					s.err = fmt.Errorf("limit: rules/selectors")
+					s.abandonCascade()
 					return out
 				}
 				s.rules = append(s.rules, rule{selectors: scope, conditions: append([]mediaCondition(nil), conditions...), uncertainSelector: true})
@@ -319,12 +385,11 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			}
 			group, err := cascadia.ParseGroup(selector)
 			if err != nil {
-				s.warn("invalid selector: " + selector)
 				continue
 			}
 			s.selectors += len(group)
 			if s.selectors > s.limits.Selectors || len(s.rules) >= s.limits.Rules {
-				s.err = fmt.Errorf("limit: rules/selectors")
+				s.abandonCascade()
 				return out
 			}
 			s.rules = append(s.rules, rule{selectors: group, conditions: append([]mediaCondition(nil), conditions...)})
@@ -332,25 +397,44 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 		case css.EndRulesetGrammar:
 			current = -1
 		case css.DeclarationGrammar, css.CustomPropertyGrammar:
+			// Unlike selectors and media queries, declaration values can end
+			// with an escaped whitespace character. Preserve the raw token data
+			// so it cannot be mistaken for insignificant surrounding space.
+			vals = rawTokenString(values)
+			// A style attribute is a declaration list, not a stylesheet. Some
+			// recoverable parsers nevertheless expose declarations nested in an
+			// invalid at-rule. Such declarations have no unconditional inline
+			// effect and must not override valid top-level declarations.
 			if inline {
-				out = append(out, s.declarations(string(data), vals)...)
+				if len(conditions) == 0 {
+					out = append(out, s.declarations(string(data), vals)...)
+				}
 			} else if current >= 0 {
 				s.rules[current].decls = append(s.rules[current].decls, s.declarations(string(data), vals)...)
 			}
 		case css.QualifiedRuleGrammar, css.TokenGrammar:
-			s.warn("malformed or unsupported CSS grammar")
 		}
+	}
+}
+
+// parseStylesheet parses a style element and applies the element's media
+// attribute to every rule it contributes. Conditions already attached by
+// nested at-rules are retained, making the conditions conjunctive.
+func (s *sheet) parseStylesheet(text, media string) {
+	firstRule := len(s.rules)
+	s.parseCSS(text, false)
+	if strings.TrimSpace(media) == "" {
+		return
+	}
+	condition := parseMedia(media)
+	for i := firstRule; i < len(s.rules); i++ {
+		s.rules[i].conditions = append([]mediaCondition{condition}, s.rules[i].conditions...)
 	}
 }
 
 func inactiveInteractiveSelector(selector string) bool {
 	lower := strings.ToLower(selector)
-	// Negated interaction states describe the initial state and cannot simply
-	// be discarded without compiling the negation.
-	if strings.Contains(lower, ":not(") {
-		return false
-	}
-	brackets := 0
+	brackets, parens := 0, 0
 	var quote byte
 	for i := 0; i < len(lower); i++ {
 		c := lower[i]
@@ -376,7 +460,18 @@ func inactiveInteractiveSelector(selector string) bool {
 			brackets--
 			continue
 		}
-		if brackets != 0 || c != ':' || i+1 < len(lower) && lower[i+1] == ':' {
+		if brackets == 0 && c == '(' {
+			parens++
+			continue
+		}
+		if brackets == 0 && c == ')' && parens > 0 {
+			parens--
+			continue
+		}
+		// An interaction state nested in a selector function may coexist with a
+		// statically matching arm, as in :is(.offer,:hover). Keep that branch so
+		// unsupported-selector handling can conservatively mark its scope unknown.
+		if brackets != 0 || parens != 0 || c != ':' || i+1 < len(lower) && lower[i+1] == ':' {
 			continue
 		}
 		for _, pseudo := range []string{":hover", ":focus-visible", ":focus-within", ":focus", ":active", ":visited"} {
@@ -603,15 +698,17 @@ func supportedSelector(s string) bool {
 // selectorCost bounds the branching scans in Cascadia for this limited grammar.
 // It is deliberately conservative: every sibling scan is charged the entire
 // document node count, and every descendant scan the maximum document depth.
+const siblingMatchWeight int64 = 10
+
 func selectorCost(sel string, depth, nodes int, limit int64) int64 {
 	cost := int64(len(sel) + 1)
 	brackets, parens := 0, 0
 	var quote byte
-	add := func(n int) {
-		if int64(n) > limit-cost {
+	add := func(n int, weight int64) {
+		if int64(n) > (limit-cost)/weight {
 			cost = limit + 1
 		} else {
-			cost += int64(n)
+			cost += int64(n) * weight
 		}
 	}
 	for i := 0; i < len(sel) && cost <= limit; i++ {
@@ -644,7 +741,10 @@ func selectorCost(sel string, depth, nodes int, limit int64) int64 {
 			continue
 		}
 		if c == '~' || c == '+' {
-			add(nodes + 1)
+			// Cascadia follows sibling pointers for these combinators. Weight
+			// that traversal to reflect its measured CPU cost relative to the
+			// cheap selector and rule-visit units used by the shared budget.
+			add(nodes+1, siblingMatchWeight)
 		}
 		if c == ' ' {
 			j := i
@@ -652,7 +752,7 @@ func selectorCost(sel string, depth, nodes int, limit int64) int64 {
 				j++
 			}
 			if i > 0 && j < len(sel) && !strings.ContainsRune(">+~", rune(sel[i-1])) && !strings.ContainsRune(">+~", rune(sel[j])) {
-				add(depth + 1)
+				add(depth+1, 1)
 			}
 			i = j - 1
 		}

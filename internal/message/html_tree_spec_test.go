@@ -40,6 +40,20 @@ func TestTreeExtractorMergesAdjacentEquivalentRuns(t *testing.T) {
 	}
 }
 
+func TestAnnotatedOutputAppendsEquivalentRunsWithoutFragmenting(t *testing.T) {
+	var output annotatedOutput
+	annotation := outputAnnotation{kind: "concealed", reason: "display:none"}
+	for range 4096 {
+		output.write(annotation, "x")
+	}
+	if len(output.chunks) != 1 || len(output.data) != 4096 {
+		t.Fatalf("buffer shape = %d chunks, %d bytes", len(output.chunks), len(output.data))
+	}
+	if got := output.String(); got != `<concealed reason="display:none">`+strings.Repeat("x", 4096)+`</concealed>` {
+		t.Fatalf("rendered append-only output = %q", got)
+	}
+}
+
 func TestTreeExtractorDoesNotAnnotateWhitespaceOrDecodedNBSP(t *testing.T) {
 	got := htmlToText("<div style=\"filter:blur(1px)\">\r\n&nbsp;\r\n<span>uncertain words</span>\r\n</div><div style=\"display:none\">&#847;&zwnj; &#847;&zwnj;</div>")
 	if !strings.Contains(got.Text, "\u00a0") {
@@ -227,12 +241,15 @@ func TestPromptUsesConciseConcealmentExplanation(t *testing.T) {
 	}
 }
 
-func TestVisibilityLimitFallbackRetainsCompleteTextWithoutIncompleteFlag(t *testing.T) {
-	got := htmlToText(`<style>` + strings.Repeat(`p{display:none}`, 10001) + `</style><p>retained evidence</p>`)
+func TestCSSLimitKeepsStructuredDOMExtraction(t *testing.T) {
+	got := htmlToText(`<style>` + strings.Repeat(`p{display:none}`, 10001) + `</style><p><a href="https://example.test/retained">retained evidence</a></p><!--comment-->`)
 	if got.ExtractionIncomplete {
 		t.Fatal("visibility-only limit reported text loss")
 	}
-	if !strings.Contains(got.Text, `<visibility-uncertain>retained evidence</visibility-uncertain>`) {
-		t.Fatalf("fallback = %q", got.Text)
+	if !strings.Contains(got.Text, `[retained evidence](https://example.test/retained)`) || !strings.Contains(got.Text, `<visibility-uncertain>`) {
+		t.Fatalf("structured uncertain extraction = %q", got.Text)
+	}
+	if got.HTMLComments.Characters != len("comment") {
+		t.Fatalf("comment statistics = %+v", got.HTMLComments)
 	}
 }

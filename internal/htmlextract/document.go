@@ -9,21 +9,63 @@ import (
 )
 
 type Limits struct {
-	InputBytes, Depth, Rules, Selectors, Diagnostics, SelectorBytes int
-	MatchWork                                                       int64
-	MediaCases                                                      int
-	ExpressionWork                                                  int64
+	InputBytes, Nodes, TextNodes, Depth, Rules, Selectors, SelectorBytes int
+	MatchWork                                                            int64
+	MediaCases                                                           int
+	ExpressionWork                                                       int64
 }
 
 // MaxViewingCases is the hard ceiling for conditional evaluations per document.
 const MaxViewingCases = 16
 
 func DefaultLimits() Limits {
-	return Limits{InputBytes: 8 << 20, Depth: 128, Rules: 10000, Selectors: 20000, Diagnostics: 256, SelectorBytes: 2048, MatchWork: 100000000, MediaCases: MaxViewingCases, ExpressionWork: 10000000}
+	return Limits{InputBytes: 8 << 20, Nodes: 100000, TextNodes: 50000, Depth: 128, Rules: 10000, Selectors: 20000, SelectorBytes: 2048, MatchWork: 100000000, MediaCases: MaxViewingCases, ExpressionWork: 10000000}
+}
+
+func (l Limits) validate() error {
+	for _, limit := range []struct {
+		name  string
+		value int
+	}{
+		{"InputBytes", l.InputBytes},
+		{"Nodes", l.Nodes},
+		{"TextNodes", l.TextNodes},
+		{"Depth", l.Depth},
+		{"SelectorBytes", l.SelectorBytes},
+		{"MediaCases", l.MediaCases},
+	} {
+		if limit.value <= 0 {
+			return fmt.Errorf("invalid limit: %s must be positive", limit.name)
+		}
+	}
+	for _, limit := range []struct {
+		name  string
+		value int
+	}{
+		{"Rules", l.Rules},
+		{"Selectors", l.Selectors},
+	} {
+		if limit.value < 0 {
+			return fmt.Errorf("invalid limit: %s must be non-negative", limit.name)
+		}
+	}
+	for _, limit := range []struct {
+		name  string
+		value int64
+	}{
+		{"MatchWork", l.MatchWork},
+		{"ExpressionWork", l.ExpressionWork},
+	} {
+		if limit.value <= 0 {
+			return fmt.Errorf("invalid limit: %s must be positive", limit.name)
+		}
+	}
+	return nil
 }
 
 type processor struct {
-	Limits Limits
+	Limits           Limits
+	retainInspection bool // tests only; production results retain compact decisions
 }
 
 func concealedVisibilityReason(value Value) string {
@@ -122,14 +164,19 @@ func labelBit(label string) uint8 {
 }
 
 type Text struct {
-	Text               string
 	Label              string
-	FontSize           Value
+	FontSize           string
 	EffectiveOpacity   float64
 	ConcealmentReasons []string
 	Node               *html.Node
-	style              Style
-	colour             colourInspection
+	inspection         *textInspection
+}
+
+// textInspection keeps detailed resolver evidence available to package tests
+// without copying it into every production Text result.
+type textInspection struct {
+	style  Style
+	colour colourInspection
 }
 type Element struct {
 	Node               *html.Node
@@ -184,34 +231,82 @@ func void(n string) bool {
 	return strings.Contains(" area base br col embed hr img input link meta param source track wbr ", " "+n+" ")
 }
 
+func foreignBreakout(n string) bool {
+	// HTML start tags that end ordinary SVG/MathML foreign-content parsing.
+	// Treat font conservatively as a breakout without inspecting its attributes.
+	return strings.Contains(" b big blockquote body br center code dd div dl dt em embed font h1 h2 h3 h4 h5 h6 head hr i img li listing menu meta nobr ol p pre ruby s small span strong strike sub sup table tt u ul var ", " "+n+" ")
+}
+
+type lexicalFrame struct {
+	name         string
+	foreign      bool
+	htmlChildren bool
+}
+
 // Preflight bounds nesting before the HTML5 tree builder (which itself can do
 // expensive recovery). This conservative lexical stack can reject malformed
 // optional-tag sequences that would produce a shallower tree; that is explicit.
 func preflight(b []byte, l Limits) error {
 	z := html.NewTokenizer(bytes.NewReader(b))
-	stack := make([]string, 0, l.Depth)
+	var stack []lexicalFrame
+	nodes, textNodes := 0, 0
 	for {
 		t := z.Next()
 		if t == html.ErrorToken {
 			return nil
 		}
-		if t != html.StartTagToken && t != html.EndTagToken {
+		switch t {
+		case html.StartTagToken, html.SelfClosingTagToken, html.TextToken, html.CommentToken, html.DoctypeToken:
+			nodes++
+			if nodes > l.Nodes {
+				return fmt.Errorf("limit: lexical nodes > %d", l.Nodes)
+			}
+		}
+		if t == html.TextToken {
+			textNodes++
+			if textNodes > l.TextNodes {
+				return fmt.Errorf("limit: lexical text nodes > %d", l.TextNodes)
+			}
+		}
+		if t != html.StartTagToken && t != html.SelfClosingTagToken && t != html.EndTagToken {
 			continue
 		}
 		raw, _ := z.TagName()
 		n := string(raw)
 		if t == html.EndTagToken {
 			for i := len(stack) - 1; i >= 0; i-- {
-				if stack[i] == n {
+				if stack[i].name == n {
 					stack = stack[:i]
 					break
 				}
 			}
-		} else if !void(n) {
-			stack = append(stack, n)
-			if len(stack) > l.Depth {
-				return fmt.Errorf("limit: lexical depth > %d", l.Depth)
+			continue
+		}
+
+		parentForeign := len(stack) > 0 && stack[len(stack)-1].foreign && !stack[len(stack)-1].htmlChildren
+		if parentForeign && foreignBreakout(n) {
+			// The HTML tree builder pops ordinary foreign elements and
+			// reprocesses this token in HTML mode.
+			for len(stack) > 0 && stack[len(stack)-1].foreign && !stack[len(stack)-1].htmlChildren {
+				stack = stack[:len(stack)-1]
 			}
+			parentForeign = false
+		}
+		foreign := parentForeign || n == "svg" || n == "math"
+		if t == html.SelfClosingTagToken && foreign {
+			// The self-closing flag is honored in foreign content.
+			continue
+		}
+		if !foreign && void(n) {
+			continue
+		}
+		stack = append(stack, lexicalFrame{
+			name:         n,
+			foreign:      foreign,
+			htmlChildren: foreign && (n == "foreignobject" || n == "desc" || n == "title"),
+		})
+		if len(stack) > l.Depth {
+			return fmt.Errorf("limit: lexical depth > %d", l.Depth)
 		}
 	}
 }
@@ -222,10 +317,14 @@ type parsedDocument struct {
 	inlineDecls map[*html.Node][]declaration
 	treeDepth   int
 	nodeCount   int
+	textCount   int
 }
 
 func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	var document parsedDocument
+	if err := p.Limits.validate(); err != nil {
+		return document, err
+	}
 	if len(input) > p.Limits.InputBytes {
 		return document, fmt.Errorf("limit: input bytes > %d", p.Limits.InputBytes)
 	}
@@ -258,6 +357,15 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			document.treeDepth = e.depth
 		}
 		document.nodeCount++
+		if document.nodeCount > p.Limits.Nodes {
+			return document, fmt.Errorf("limit: tree nodes > %d", p.Limits.Nodes)
+		}
+		if n.Type == html.TextNode {
+			document.textCount++
+			if document.textCount > p.Limits.TextNodes {
+				return document, fmt.Errorf("limit: tree text nodes > %d", p.Limits.TextNodes)
+			}
+		}
 		if n.Type == html.ElementNode {
 			if n.Data == "style" && (e.scope == "" || e.scope == "head") {
 				var css strings.Builder
@@ -266,22 +374,16 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 						css.WriteString(c.Data)
 					}
 				}
-				document.styles.parseCSS(css.String(), false)
+				document.styles.parseStylesheet(css.String(), attr(n, "media"))
 			}
 			if value := attr(n, "style"); value != "" {
 				document.inlineDecls[n] = document.styles.parseCSS(value, true)
-			}
-			if n.Data == "link" && strings.Contains(strings.ToLower(attr(n, "rel")), "stylesheet") {
-				document.styles.warn("external stylesheet not fetched")
 			}
 		}
 		scope := excluded(n, e.scope)
 		for c := n.LastChild; c != nil; c = c.PrevSibling {
 			todo = append(todo, entry{c, e.depth + 1, scope})
 		}
-	}
-	if document.styles.err != nil {
-		return document, document.styles.err
 	}
 	return document, nil
 }
@@ -308,15 +410,12 @@ func (p processor) process(input []byte) (Document, error) {
 		cap = MaxViewingCases
 	}
 	widths, fallback := s.viewingCases(cap)
-	if fallback {
-		s.warn("conditional case cap/planning budget: unresolved width conditions")
-	}
 	exprLimit := p.Limits.ExpressionWork
 	if exprLimit < 1 {
 		exprLimit = 10000000
 	}
 	budget := expressionBudget{remaining: exprLimit}
-	work := s.planningWork
+	matches := matchBudget{limit: p.Limits.MatchWork, used: s.planningWork}
 	var labels, elementLabels []uint8
 	var firstText []Text
 	var firstElements []Element
@@ -337,10 +436,10 @@ func (p processor) process(input []byte) (Document, error) {
 			vars               *variableScope
 			clipped, clipKnown bool
 		}
-		frames := make([]frame, 1, p.Limits.Depth+2)
+		frames := make([]frame, 1)
 		frames[0] = frame{n: root, style: initial(), alpha: 1, alphaKnown: true, displayKnown: true, contentKnown: true, clipKnown: true}
 		rootStyle := initial()
-		layers := make([]paintLayer, 0, p.Limits.Depth)
+		var layers []paintLayer
 		for len(frames) > 0 {
 			f := &frames[len(frames)-1]
 			n := f.n
@@ -350,7 +449,7 @@ func (p processor) process(input []byte) (Document, error) {
 				if n.Type == html.ElementNode {
 					parent := f.style
 					var err error
-					f.style, f.vars, err = s.elementStyle(n, parent, rootStyle, f.vars, inlineDecls[n], width, fallback, &work, &budget)
+					f.style, f.vars, err = s.elementStyle(n, parent, rootStyle, f.vars, inlineDecls[n], width, fallback, &matches, &budget)
 					if err != nil {
 						return in, err
 					}
@@ -379,19 +478,18 @@ func (p processor) process(input []byte) (Document, error) {
 						f.alpha *= a.Number
 						f.alphaKnown = f.alphaKnown && a.Known
 					}
-					decision := decideVisibility(f.style, f.none, f.displayKnown, f.alpha, f.alphaKnown, f.clipped, f.clipKnown, f.contentHidden, f.contentKnown, nil)
-					bit := labelBit(decision.label)
-					if caseIndex == 0 {
-						elementLabels = append(elementLabels, bit)
-					} else {
-						elementLabels[elementIndex] |= bit
-					}
-					if caseIndex == 0 {
-						in.Elements = append(in.Elements, Element{Node: n, Label: decision.label, ConcealmentReasons: decision.reasons, EffectiveOpacity: f.alpha})
-					}
-					elementIndex++
-					if strings.HasPrefix(excluded(n, ""), "outside-coverage:") {
-						s.warn("inert/client-dependent content: " + n.Data)
+					if n.Data == "img" || n.Data == "input" {
+						decision := decideVisibility(f.style, f.none, f.displayKnown, f.alpha, f.alphaKnown, f.clipped, f.clipKnown, f.contentHidden, f.contentKnown, nil)
+						bit := labelBit(decision.label)
+						if caseIndex == 0 {
+							elementLabels = append(elementLabels, bit)
+						} else {
+							elementLabels[elementIndex] |= bit
+						}
+						if caseIndex == 0 {
+							in.Elements = append(in.Elements, Element{Node: n, Label: decision.label, ConcealmentReasons: decision.reasons, EffectiveOpacity: f.alpha})
+						}
+						elementIndex++
 					}
 				}
 				f.scope = excluded(n, f.scope)
@@ -407,7 +505,11 @@ func (p processor) process(input []byte) (Document, error) {
 							labels[textIndex] |= bit
 						}
 						if caseIndex == 0 {
-							in.Text = append(in.Text, Text{Text: n.Data, Label: decision.label, FontSize: st[fontSize], EffectiveOpacity: f.alpha, ConcealmentReasons: decision.reasons, Node: n, style: st, colour: colour.inspection()})
+							text := Text{Label: decision.label, FontSize: st[fontSize].Text, EffectiveOpacity: f.alpha, ConcealmentReasons: decision.reasons, Node: n}
+							if p.retainInspection {
+								text.inspection = &textInspection{style: st, colour: colour.inspection()}
+							}
+							in.Text = append(in.Text, text)
 						}
 						textIndex++
 					}
@@ -444,11 +546,5 @@ func (p processor) process(input []byte) (Document, error) {
 		}
 	}
 	in.Elements = firstElements
-	if budget.exhausted {
-		s.warn("expression work budget exhausted; affected values unresolved")
-	}
-	if s.err != nil {
-		return in, s.err
-	}
 	return in, nil
 }

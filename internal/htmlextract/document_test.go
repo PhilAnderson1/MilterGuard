@@ -1,20 +1,25 @@
 package htmlextract
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
+
+	"golang.org/x/net/html"
 )
 
 func inspectHTML(t *testing.T, src string) Document {
 	t.Helper()
 	// Existing four-property policy tests supply an explicit canvas. New colour
 	// tests below deliberately do not inject a background.
-	p := processor{Limits: DefaultLimits()}
+	p := processor{Limits: DefaultLimits(), retainInspection: true}
 	src = `<style>html{background-color:white}</style>` + src
 	r, e := p.process([]byte(src))
 	if e != nil {
@@ -25,7 +30,7 @@ func inspectHTML(t *testing.T, src string) Document {
 func findText(t *testing.T, in Document, text string) Text {
 	t.Helper()
 	for _, v := range in.Text {
-		if v.Text == text {
+		if v.Node != nil && v.Node.Data == text {
 			return v
 		}
 	}
@@ -34,12 +39,139 @@ func findText(t *testing.T, in Document, text string) Text {
 }
 
 func textStyle(text Text, name string) Value {
+	if text.inspection == nil {
+		return Value{}
+	}
 	for property, propertyName := range names {
 		if propertyName == name {
-			return text.style[property]
+			return text.inspection.style[property]
 		}
 	}
 	return Value{}
+}
+
+func TestProductionTextResultIsCompact(t *testing.T) {
+	if size := unsafe.Sizeof(Text{}); size > 192 {
+		t.Fatalf("Text retains too much per-node state: %d bytes", size)
+	}
+}
+
+func TestAnalyzeValidatesLimitsWithoutPanicking(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(*Limits)
+	}{
+		{"input bytes", func(l *Limits) { l.InputBytes = 0 }},
+		{"nodes", func(l *Limits) { l.Nodes = 0 }},
+		{"text nodes", func(l *Limits) { l.TextNodes = 0 }},
+		{"depth", func(l *Limits) { l.Depth = -1 }},
+		{"rules", func(l *Limits) { l.Rules = -1 }},
+		{"selectors", func(l *Limits) { l.Selectors = -1 }},
+		{"selector bytes", func(l *Limits) { l.SelectorBytes = 0 }},
+		{"match work", func(l *Limits) { l.MatchWork = 0 }},
+		{"media cases", func(l *Limits) { l.MediaCases = 0 }},
+		{"expression work", func(l *Limits) { l.ExpressionWork = 0 }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			limits := DefaultLimits()
+			c.change(&limits)
+			if _, err := Analyze([]byte(`<p>T</p>`), limits); err == nil || !strings.Contains(err.Error(), "invalid limit") {
+				t.Fatalf("validation error = %v", err)
+			}
+		})
+	}
+}
+
+func TestAnalyzeDoesNotPreallocateCallerDepth(t *testing.T) {
+	limits := DefaultLimits()
+	limits.Depth = int(^uint(0) >> 1)
+	if _, err := Analyze([]byte(`<p>T</p>`), limits); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOnlyGeneratedContentElementsAreRetained(t *testing.T) {
+	document := inspectHTML(t, `<div><p>T</p><img src="x"><input type="button" value="Go"><span>U</span></div>`)
+	if len(document.Elements) != 2 || document.Elements[0].Node.Data != "img" || document.Elements[1].Node.Data != "input" {
+		t.Fatalf("retained elements = %+v", document.Elements)
+	}
+}
+
+func TestNodeLimitsBeforeAndAfterTreeConstruction(t *testing.T) {
+	t.Run("lexical nodes", func(t *testing.T) {
+		limits := DefaultLimits()
+		limits.Nodes = 3
+		err := preflight([]byte(`<b></b><i></i><u></u><s></s>`), limits)
+		if err == nil || !strings.Contains(err.Error(), "lexical nodes") {
+			t.Fatalf("node limit error = %v", err)
+		}
+	})
+	t.Run("lexical text nodes", func(t *testing.T) {
+		limits := DefaultLimits()
+		limits.TextNodes = 2
+		err := preflight([]byte(`first<b>second</b>third`), limits)
+		if err == nil || !strings.Contains(err.Error(), "lexical text nodes") {
+			t.Fatalf("text-node limit error = %v", err)
+		}
+	})
+	t.Run("parser-created nodes", func(t *testing.T) {
+		limits := DefaultLimits()
+		limits.Nodes = 2
+		_, err := (processor{Limits: limits}).parseDocument([]byte(`<p>x`))
+		if err == nil || !strings.Contains(err.Error(), "tree nodes") {
+			t.Fatalf("tree node limit error = %v", err)
+		}
+	})
+}
+
+func TestPreflightSelfClosingTagDepth(t *testing.T) {
+	limits := DefaultLimits()
+	limits.Depth = 2
+
+	t.Run("non-void HTML remains open", func(t *testing.T) {
+		err := preflight([]byte(`<div/><span/><p/>`), limits)
+		if err == nil || !strings.Contains(err.Error(), "lexical depth") {
+			t.Fatalf("depth limit error = %v", err)
+		}
+	})
+
+	t.Run("void HTML remains self-contained", func(t *testing.T) {
+		if err := preflight([]byte(`<br/><img/><input/><hr/>`), limits); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("foreign self-closing syntax is honored", func(t *testing.T) {
+		if err := preflight([]byte(`<svg><g><path/><circle/><rect/></g></svg><math><mrow><mi/><mn/></mrow></math>`), limits); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("HTML integration point resumes HTML rules", func(t *testing.T) {
+		err := preflight([]byte(`<svg><foreignObject><div/></foreignObject></svg>`), limits)
+		if err == nil || !strings.Contains(err.Error(), "lexical depth") {
+			t.Fatalf("depth limit error = %v", err)
+		}
+	})
+}
+
+func TestUnsupportedCSSVolumeDoesNotAbortAnalysis(t *testing.T) {
+	var css strings.Builder
+	for i := 0; i < 300; i++ {
+		css.WriteString("@unsupported-")
+		css.WriteString(strconv.Itoa(i))
+		css.WriteString("{x}")
+	}
+	css.WriteString("p{display:none}")
+
+	document, err := (processor{Limits: DefaultLimits()}).process([]byte("<style>" + css.String() + "</style><p>T</p>"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findText(t, document, "T").Label; got != "concealed" {
+		t.Fatalf("unsupported CSS volume changed concealment to %q", got)
+	}
 }
 func TestSelectors(t *testing.T) {
 	for _, sel := range []string{"*", "p", ".x", "#target", "[data-x]", "[data-x=a]", "div p", "div > p", "i + p", "i ~ p", "p:not(.other)", "#absent,p"} {
@@ -89,6 +221,97 @@ func TestInlineDeclarationsDecodeCSSIdentifierEscapes(t *testing.T) {
 		}
 	}
 }
+
+func TestCSSIdentifierEscapesDoNotChangeTokenMeaning(t *testing.T) {
+	cases := []struct {
+		name, style, want string
+	}{
+		{
+			"escaped bang is part of identifier",
+			`display:block;display:none\!important`,
+			"visible",
+		},
+		{
+			"escaped trailing space is part of identifier",
+			`visibility:visible;visibility:hidden\ `,
+			"visible",
+		},
+		{
+			"escaped digit remains an identifier",
+			`opacity:1;opacity:\30`,
+			"visible",
+		},
+		{
+			"comment may separate priority tokens",
+			`display:block;display:none!/**/important`,
+			"concealed",
+		},
+		{
+			"important identifier may contain an escape",
+			`display:block;display:none!\69mportant`,
+			"concealed",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := inspectHTML(t, `<p style="`+c.style+`">T</p>`)
+			if got := findText(t, in, "T").Label; got != c.want {
+				t.Fatalf("label = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestInlineAtRuleDeclarationsAreNotAppliedUnconditionally(t *testing.T) {
+	cases := []struct {
+		name, style, want string
+	}{
+		{
+			"media cannot reveal top-level hidden content",
+			`visibility:hidden;@media print{visibility:visible}`,
+			"concealed",
+		},
+		{
+			"media declaration is not unconditional",
+			`@media screen{display:none}`,
+			"visible",
+		},
+		{
+			"keyframes cannot reveal top-level hidden content",
+			`display:none;@keyframes k{from{display:block}}`,
+			"concealed",
+		},
+		{
+			"unknown at-rule declaration is not unconditional",
+			`@supports(display:grid){display:none}`,
+			"visible",
+		},
+		{
+			"at-rule swallowed into declaration remains uncertain",
+			`display:none @keyframes k{from{display:block}}`,
+			"unknown",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := inspectHTML(t, `<p style="`+c.style+`">T</p>`)
+			if got := findText(t, in, "T").Label; got != c.want {
+				t.Fatalf("label = %q, want %q", got, c.want)
+			}
+		})
+	}
+
+	t.Run("nested ruleset cannot escape into document stylesheet", func(t *testing.T) {
+		s := sheet{limits: DefaultLimits()}
+		if declarations := s.parseCSS(`@keyframes k{p{display:none}}`, true); len(declarations) != 0 {
+			t.Fatalf("inline declarations = %+v", declarations)
+		}
+		if len(s.rules) != 0 {
+			t.Fatalf("inline style created document rules: %+v", s.rules)
+		}
+	})
+}
+
 func TestInheritance(t *testing.T) {
 	cases := []struct{ name, src, want string }{
 		{"display ancestor", `<div style="display:none"><p style="display:block">T</p></div>`, "concealed"},
@@ -168,6 +391,28 @@ func TestConditionsAndRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestStyleElementMediaAttribute(t *testing.T) {
+	cases := []struct {
+		name, media, css, want string
+	}{
+		{"print", "print", `p{display:none}`, "visible"},
+		{"screen", "screen", `p{display:none}`, "concealed"},
+		{"width dependent", "(max-width:1px)", `p{display:none}`, "client-dependent"},
+		{"unknown", "(orientation:portrait)", `p{display:none}`, "unknown"},
+		{"empty", "", `p{display:none}`, "concealed"},
+		{"nested conditions", "screen", `@media print{p{display:none}}`, "visible"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := inspectHTML(t, `<style media="`+c.media+`">`+c.css+`</style><p>T</p>`)
+			if got := findText(t, in, "T").Label; got != c.want {
+				t.Fatalf("label = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestUnrelatedUnsupportedCSSDoesNotMakeDocumentUncertain(t *testing.T) {
 	for _, src := range []string{
 		`<link rel="stylesheet" href="https://example.test/email.css"><p>T</p>`,
@@ -197,6 +442,34 @@ func TestUnsupportedSelectorUncertaintyIsLimitedToRelevantDeclarations(t *testin
 	}
 }
 
+func TestNestedInteractionSelectorsRemainUncertain(t *testing.T) {
+	for _, test := range []struct {
+		name, selector, body, text string
+	}{
+		{"is", `div:is(.secret,:hover)`, `<div class="secret">is target</div>`, "is target"},
+		{"where", `div:where(.secret,:focus)`, `<div class="secret">where target</div>`, "where target"},
+		{"has", `div:has(.child,:active)`, `<div>has target<span class="child"></span></div>`, "has target"},
+		{"not", `div:not(:hover)`, `<div>not target</div>`, "not target"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, `<style>`+test.selector+`{visibility:hidden}</style>`+test.body)
+			if got := findText(t, document, test.text).Label; got != "unknown" {
+				t.Fatalf("nested interaction selector label = %q", got)
+			}
+		})
+	}
+}
+
+func TestTopLevelInteractionSelectorBranchRemainsInactive(t *testing.T) {
+	document := inspectHTML(t, `<style>p:hover,span.static{display:none}</style><p>interactive</p><span class="static">static</span>`)
+	if got := findText(t, document, "interactive").Label; got != "visible" {
+		t.Fatalf("top-level interaction label = %q", got)
+	}
+	if got := findText(t, document, "static").Label; got != "concealed" {
+		t.Fatalf("static selector label = %q", got)
+	}
+}
+
 func TestAttributeSelectorOperatorsAreEvaluated(t *testing.T) {
 	in := inspectHTML(t, `<style>[class~="mobile"]{display:none}[style*="margin: 16px"]{font-size:100%}[data-prefix^="yes"]{visibility:hidden}</style><p class="mobile">hidden</p><p style="margin: 16px 0">ordinary</p><p data-prefix="no">also ordinary</p>`)
 	if got := findText(t, in, "hidden").Label; got != "concealed" {
@@ -209,7 +482,7 @@ func TestAttributeSelectorOperatorsAreEvaluated(t *testing.T) {
 	}
 }
 
-func TestSelectorWorkLimitRetainsScopedText(t *testing.T) {
+func TestSelectorWorkLimitMakesUnprocessedTextUnknown(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MatchWork = 2
 	inspection, err := (processor{Limits: limits}).process([]byte(`<style>p{display:none}</style><p>T</p><div>U</div>`))
@@ -219,10 +492,69 @@ func TestSelectorWorkLimitRetainsScopedText(t *testing.T) {
 	if got := findText(t, inspection, "T").Label; got != "unknown" {
 		t.Fatalf("affected text label = %q", got)
 	}
-	if got := findText(t, inspection, "U").Label; got != "visible" {
-		t.Fatalf("unaffected text label = %q", got)
+	if got := findText(t, inspection, "U").Label; got != "unknown" {
+		t.Fatalf("text after budget exhaustion = %q", got)
 	}
 }
+
+func TestSelectorWorkBudgetStopsBeforePartialCascadeIsTrusted(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MatchWork = 5
+	s := sheet{limits: limits}
+	s.parseCSS(`p{display:none}p{display:block}`, false)
+	for ruleIndex := range s.rules {
+		rule := &s.rules[ruleIndex]
+		for _, selector := range rule.selectors {
+			rule.costs = append(rule.costs, selectorCost(selector.String(), 1, 1, limits.MatchWork))
+			rule.fallbackScopes = append(rule.fallbackScopes, uncertainSelectorScope(selector.String()))
+			rule.scopeCosts = append(rule.scopeCosts, int64(len(selector.String())+1))
+		}
+	}
+	matches := matchBudget{limit: limits.MatchWork}
+	expressions := expressionBudget{remaining: limits.ExpressionWork}
+	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matches.exhausted || matches.used > matches.limit {
+		t.Fatalf("match budget was not enforced: %+v", matches)
+	}
+	if style[display].Known {
+		t.Fatalf("partial cascade was trusted: %+v", style[display])
+	}
+}
+
+func TestSelectorWorkBudgetChargesInactiveRules(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MatchWork = 1
+	s := sheet{limits: limits}
+	s.parseCSS(`@media print{p{display:none}}@media print{div{display:none}}`, false)
+	matches := matchBudget{limit: limits.MatchWork}
+	expressions := expressionBudget{remaining: limits.ExpressionWork}
+	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matches.exhausted || style[display].Known {
+		t.Fatalf("inactive rule scan escaped budget: budget=%+v display=%+v", matches, style[display])
+	}
+}
+
+func TestSiblingSelectorWorkIsWeighted(t *testing.T) {
+	const nodes = 100
+	const limit = int64(1_000_000)
+	for _, selector := range []string{"q ~ p", "q + p"} {
+		base := int64(len(selector) + 1)
+		want := base + int64(nodes+1)*siblingMatchWeight
+		if got := selectorCost(selector, 1, nodes, limit); got != want {
+			t.Errorf("selectorCost(%q) = %d, want %d", selector, got, want)
+		}
+	}
+	if got, want := selectorCost("q p", 4, nodes, limit), int64(len("q p")+1+5); got != want {
+		t.Errorf("descendant selector cost = %d, want %d", got, want)
+	}
+}
+
 func TestTreeEvidence(t *testing.T) {
 	in := inspectHTML(t, `<p>&amp;lt;b&amp;gt;&#x200b;&lt;style&gt;hidden&lt;/style&gt;</p><script>script</script><style>p{color:red}</style><!--comment--><template>inert</template><iframe>fallback</iframe>`)
 	v := findText(t, in, "&lt;b&gt;\u200b<style>hidden</style>")
@@ -273,26 +605,26 @@ func TestLimitSubprocess(t *testing.T) {
 			src = `<style>` + strings.Repeat(`p{display:none}`, 10) + `</style><p>T</p>`
 		case "selectors":
 			l.Selectors = 3
-			src = `<style>p,i,b,u,div{display:none}</style>`
+			src = `<style>p,i,b,u,div{display:none}</style><p>T</p>`
 		case "work":
 			l.MatchWork = 2
 			src = `<style>*{display:none}</style><p>T</p>`
-		case "diagnostics":
-			l.Diagnostics = 1
-			src = `<p style="font-size:2ex;filter:blur(1px)">T</p>`
 		case "malformed":
 			src = `<style>` + strings.Repeat(`x{bad;;;;color:;}`, 1000) + `</style><p>T</p>`
 		case "transitions":
 			src = strings.Repeat(`<p style="visibility:hidden"><span style="visibility:visible">T</span></p>`, 1000)
 		}
-		_, e := (processor{Limits: l}).process([]byte(src))
-		expected := name != "malformed" && name != "transitions" && name != "work"
+		document, e := (processor{Limits: l}).process([]byte(src))
+		expected := name == "depth" || name == "attribute"
 		if expected != (e != nil) {
 			t.Fatal(name, e)
 		}
+		if (name == "rules" || name == "selectors") && findText(t, document, "T").Label != "unknown" {
+			t.Fatal(name, document)
+		}
 		return
 	}
-	for _, name := range []string{"depth", "attribute", "rules", "selectors", "work", "diagnostics", "malformed", "transitions"} {
+	for _, name := range []string{"depth", "attribute", "rules", "selectors", "work", "malformed", "transitions"} {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -316,6 +648,50 @@ func BenchmarkLargest(b *testing.B) {
 	}
 }
 
+func BenchmarkSiblingSelectorPhases(b *testing.B) {
+	limits := DefaultLimits()
+	body := strings.Repeat(`<p></p>`, limits.Nodes-10)
+	src := []byte(`<style>q ~ p{display:none}</style>` + body)
+	sparseBody := strings.Repeat(`<div></div>`, limits.Nodes-1010) + strings.Repeat(`<p></p>`, 1000)
+	sparse := []byte(`<style>q ~ p{display:none}</style>` + sparseBody)
+	b.Run("preflight", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if err := preflight(src, limits); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("tree", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := html.ParseWithOptions(bytes.NewReader(src), html.ParseOptionEnableScripting(false)); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("full-analysis", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := Analyze(src, limits); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("full-analysis-no-selector", func(b *testing.B) {
+		plain := []byte(body)
+		for i := 0; i < b.N; i++ {
+			if _, err := Analyze(plain, limits); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("sparse-sibling-worst-case", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := Analyze(sparse, limits); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 func TestReferenceRegressions(t *testing.T) {
 	for _, c := range []struct {
 		file string
@@ -337,8 +713,8 @@ func TestReferenceRegressions(t *testing.T) {
 			}
 			var text []string
 			for _, v := range r.Text {
-				if strings.TrimSpace(v.Text) != "" {
-					text = append(text, strings.TrimSpace(v.Text)+":"+v.Label)
+				if v.Node != nil && strings.TrimSpace(v.Node.Data) != "" {
+					text = append(text, strings.TrimSpace(v.Node.Data)+":"+v.Label)
 				}
 			}
 			if strings.Join(text, "|") != c.want {
@@ -366,15 +742,12 @@ func TestAdditionalBoundsAndUnsupportedWinners(t *testing.T) {
 			t.Fatal(property, in)
 		}
 	}
-	for _, c := range []struct {
-		src    string
-		limits Limits
-	}{
-		{"<style>" + strings.Repeat("@media screen{", 200) + strings.Repeat("}", 200) + "</style>", DefaultLimits()},
-	} {
-		_, e := (processor{Limits: c.limits}).process([]byte(c.src))
-		if e == nil || !strings.Contains(e.Error(), "limit:") {
-			t.Fatal(e)
-		}
+	src := "<style>" + strings.Repeat("@media screen{", 200) + "p{display:none}" + strings.Repeat("}", 200) + "</style><p>T</p>"
+	document, err := (processor{Limits: DefaultLimits()}).process([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findText(t, document, "T").Label; got != "unknown" {
+		t.Fatalf("CSS nesting limit label = %q", got)
 	}
 }
