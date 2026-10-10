@@ -98,14 +98,32 @@ func (m *Message) BuildAnalysis(context AnalysisContext, maxChars int, vision Vi
 		UsedVisibilityUncertainTag: finalAnnotations.UsedVisibilityUncertainTag, UsedHiddenContentStrippedTag: finalAnnotations.UsedHiddenContentStrippedTag}
 }
 
-// ProcessedBody returns the decoded and normalized body representation shared
-// by AI analysis and archived-message retrieval, bounded at UTF-8 rune
+// ProcessedBody returns the decoded, normalized, annotation-aware body
+// representation used for classification evidence, bounded at UTF-8 rune
 // boundaries.
 func (m *Message) ProcessedBody(maxChars int) string {
 	if maxChars < 1 {
 		return ""
 	}
 	body, _, _ := selectProcessedBody(m.processedContent(), maxChars)
+	return body
+}
+
+// VisibleBody returns the extractor's recipient-visible text estimate without
+// LLM-facing visibility annotations or concealed content. It is intended for
+// human-readable views; the original message remains the authoritative record.
+func (m *Message) VisibleBody(maxChars int) string {
+	if maxChars < 1 {
+		return ""
+	}
+	content := m.processedContent()
+	body := content.VisibleText
+	if utf8.RuneCountInString(body) > maxChars {
+		body = sampleBody(body, maxChars)
+	}
+	if content.ExtractionIncomplete {
+		body += "\n[HTML extraction incomplete; processing limits prevented extraction of the remainder]"
+	}
 	return body
 }
 
@@ -434,7 +452,7 @@ func boundedLinks(candidates []string) []string {
 	links := make([]string, 0, min(len(candidates), maxExtractedLinks))
 	chars := 0
 	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(stripInvisibleFormatting(candidate))
+		candidate = strings.TrimSpace(candidate)
 		parsed, err := url.Parse(candidate)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || seen[candidate] {
 			continue
@@ -456,7 +474,7 @@ func boundedLinks(candidates []string) []string {
 func boundedLinksMissingFromBody(candidates []string, body string) []string {
 	missing := make([]string, 0, len(candidates))
 	for _, link := range candidates {
-		link = strings.TrimSpace(stripInvisibleFormatting(link))
+		link = strings.TrimSpace(link)
 		if !strings.Contains(body, link) && !strings.Contains(body, markdownURL(link)) {
 			missing = append(missing, link)
 		}

@@ -85,6 +85,16 @@ func TestTreeExtractorViewportAndUncertainContentSurvivesBothModes(t *testing.T)
 	}
 }
 
+func TestTreeExtractorTreatsVisibilityCollapseAsConcealed(t *testing.T) {
+	got := htmlToText(`<div style="visibility:collapse">collapsed text</div>`)
+	if got.Text != `<concealed reason="visibility:collapse">collapsed text</concealed>` {
+		t.Fatalf("collapsed visibility = %q", got.Text)
+	}
+	if got.VisibleText != "" {
+		t.Fatalf("collapsed text was treated as visible: %q", got.VisibleText)
+	}
+}
+
 func TestTreeExtractorLimitsUncertaintyInDecorativeSpamTemplate(t *testing.T) {
 	raw, err := os.ReadFile("../../local-testing/test_emails/spam/Claim Your Free YETI PATRIOTIC Bundle.eml")
 	if err != nil {

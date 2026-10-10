@@ -32,6 +32,21 @@ type Processor struct {
 	Repair bool
 	Limits Limits
 }
+
+func concealedVisibilityReason(value Value) string {
+	if !value.Known {
+		return ""
+	}
+	switch value.Text {
+	case "hidden":
+		return "visibility-hidden"
+	case "collapse":
+		return "visibility-collapse"
+	default:
+		return ""
+	}
+}
+
 type Text struct {
 	CaseLabels          []string         `json:"case_labels,omitempty"`
 	Element             string           `json:"element"`
@@ -327,11 +342,13 @@ func (p Processor) Process(input []byte, mode string, inspect bool) (harness.Res
 				alpha              float64
 				alphaKnown         bool
 				displayKnown       bool
+				contentHidden      bool
+				contentKnown       bool
 				vars               *variableScope
 				clipped, clipKnown bool
 			}
 			frames := make([]frame, 1, p.Limits.Depth+2)
-			frames[0] = frame{n: root, style: initial(), alpha: 1, alphaKnown: true, displayKnown: true, clipKnown: true}
+			frames[0] = frame{n: root, style: initial(), alpha: 1, alphaKnown: true, displayKnown: true, contentKnown: true, clipKnown: true}
 			rootStyle := initial()
 			layers := make([]paintLayer, 0, p.Limits.Depth)
 			for len(frames) > 0 {
@@ -358,6 +375,11 @@ func (p Processor) Process(input []byte, mode string, inspect bool) (harness.Res
 						if f.style[display].Known && f.style[display].Text == "none" {
 							f.none = true
 						}
+						cv := f.style[contentVisibility]
+						if cv.Known && cv.Text == "hidden" {
+							f.contentHidden = true
+						}
+						f.contentKnown = f.contentKnown && cv.Known
 						a := f.style[opacity]
 						if a.Known && a.Number == 0 {
 							f.alpha = 0
@@ -372,7 +394,8 @@ func (p Processor) Process(input []byte, mode string, inspect bool) (harness.Res
 						if f.none {
 							reasonMask |= 1
 						}
-						if f.style[visibility].Known && f.style[visibility].Text == "hidden" {
+						visibilityReason := concealedVisibilityReason(f.style[visibility])
+						if visibilityReason != "" {
 							reasonMask |= 2
 						}
 						if f.alphaKnown && f.alpha <= .01+1e-14 {
@@ -381,9 +404,12 @@ func (p Processor) Process(input []byte, mode string, inspect bool) (harness.Res
 						if f.clipped {
 							reasonMask |= 8
 						}
+						if f.contentHidden {
+							reasonMask |= 16
+						}
 						if reasonMask != 0 {
 							label = "concealed"
-						} else if !f.displayKnown || !f.style[visibility].Known || !f.alphaKnown || !f.clipKnown {
+						} else if !f.displayKnown || !f.style[visibility].Known || !f.contentKnown || !f.alphaKnown || !f.clipKnown {
 							label = "unknown"
 						}
 						bit := uint8(1)
@@ -399,7 +425,7 @@ func (p Processor) Process(input []byte, mode string, inspect bool) (harness.Res
 						}
 						if inspect && caseIndex == 0 {
 							var reasons []string
-							for i, reason := range []string{"display-none", "visibility-hidden", "opacity", "empty-clip"} {
+							for i, reason := range []string{"display-none", visibilityReason, "opacity", "empty-clip", "content-visibility-hidden"} {
 								if reasonMask&(1<<i) != 0 {
 									reasons = append(reasons, reason)
 								}
@@ -430,7 +456,8 @@ func (p Processor) Process(input []byte, mode string, inspect bool) (harness.Res
 							if f.none {
 								reasonMask |= 1
 							}
-							if st[visibility].Known && st[visibility].Text == "hidden" {
+							visibilityReason := concealedVisibilityReason(st[visibility])
+							if visibilityReason != "" {
 								reasonMask |= 2
 							}
 							if f.alphaKnown && f.alpha <= .01+1e-14 {
@@ -457,9 +484,12 @@ func (p Processor) Process(input []byte, mode string, inspect bool) (harness.Res
 							if f.clipped {
 								reasonMask |= 32
 							}
+							if f.contentHidden {
+								reasonMask |= 64
+							}
 							if reasonMask != 0 {
 								label = "concealed"
-							} else if !f.displayKnown || !st[visibility].Known || !st[fontSize].Known || !f.alphaKnown || !colour.known || !f.clipKnown {
+							} else if !f.displayKnown || !st[visibility].Known || !st[fontSize].Known || !f.contentKnown || !f.alphaKnown || !colour.known || !f.clipKnown {
 								label = "unknown"
 							}
 							h.colour(colour)
@@ -485,7 +515,7 @@ func (p Processor) Process(input []byte, mode string, inspect bool) (harness.Res
 									m[name] = st[i]
 								}
 								var reasons []string
-								for i, name := range []string{"display-none", "visibility-hidden", "opacity", "font-size", "colour-distance", "empty-clip"} {
+								for i, name := range []string{"display-none", visibilityReason, "opacity", "font-size", "colour-distance", "empty-clip", "content-visibility-hidden"} {
 									if reasonMask&(1<<i) != 0 {
 										reasons = append(reasons, name)
 									}
@@ -510,7 +540,7 @@ func (p Processor) Process(input []byte, mode string, inspect bool) (harness.Res
 				}
 				c := f.next
 				f.next = c.NextSibling
-				frames = append(frames, frame{n: c, style: f.style, scope: f.scope, none: f.none, alpha: f.alpha, alphaKnown: f.alphaKnown, displayKnown: f.displayKnown, vars: f.vars, clipped: f.clipped, clipKnown: f.clipKnown})
+				frames = append(frames, frame{n: c, style: f.style, scope: f.scope, none: f.none, alpha: f.alpha, alphaKnown: f.alphaKnown, displayKnown: f.displayKnown, contentHidden: f.contentHidden, contentKnown: f.contentKnown, vars: f.vars, clipped: f.clipped, clipKnown: f.clipKnown})
 			}
 			if caseIndex == 0 {
 				firstText = in.Text

@@ -229,7 +229,7 @@ func formatRejectionDetail(entry stores.Rejection, body string) string {
 	if reason == "" {
 		reason = "Unavailable"
 	}
-	return fmt.Sprintf("Rejection ID: %d\nFrom: %s\nTo: %s\nSubject: %s\nDate: %s\nReason for rejection: %s\n\nProcessed email body text:\n%s\n", entry.ID, entry.Sender, strings.Join(entry.Recipients, ", "), subject, formatUTC(entry.RejectedAt), reason, body)
+	return fmt.Sprintf("Rejection ID: %d\nFrom: %s\nTo: %s\nSubject: %s\nDate: %s\nReason for rejection: %s\n\nVisible email body text:\n%s\n", entry.ID, entry.Sender, strings.Join(entry.Recipients, ", "), subject, formatUTC(entry.RejectedAt), reason, body)
 }
 
 func limitRows[T any](entries []T) ([]T, bool) {

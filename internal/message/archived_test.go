@@ -29,6 +29,21 @@ func TestParseArchivedUsesExistingHTMLProcessing(t *testing.T) {
 	}
 }
 
+func TestArchivedVisibleBodyExcludesConcealedContentAndAnnotations(t *testing.T) {
+	raw := []byte("Content-Type: text/html; charset=UTF-8\r\n\r\n" +
+		`<p>Visible notice</p><div style="display:none">Concealed padding</div>`)
+	msg, err := ParseArchived(raw, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := msg.VisibleBody(4096); body != "Visible notice" {
+		t.Fatalf("visible archived body = %q", body)
+	}
+	if body := msg.ProcessedBody(4096); !strings.Contains(body, `<concealed reason="display:none">Concealed padding</concealed>`) {
+		t.Fatalf("annotated archived body lost concealed evidence: %q", body)
+	}
+}
+
 func TestParseArchivedRejectsMalformedOuterMessageAndBoundsBody(t *testing.T) {
 	if _, err := ParseArchived([]byte("Bad Header\r\n\r\nbody"), 1024); err == nil {
 		t.Fatal("malformed RFC 5322 message was accepted")

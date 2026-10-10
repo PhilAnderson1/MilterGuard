@@ -106,7 +106,12 @@ func backgroundImageSyntax(value string) bool {
 // legacy spellings are unresolved, and cannot prove colour concealment.
 func legacyDeclarations(n *html.Node) []declaration {
 	var result []declaration
-	if hasAttr(n, "hidden") {
+	if hasAttr(n, "hidden") && strings.EqualFold(strings.TrimSpace(attr(n, "hidden")), "until-found") {
+		// Hidden-until-found retains a generated box but does not paint its
+		// contents. Model the browser's presentational content-visibility hint
+		// separately from display so display:block cannot reveal the text.
+		result = append(result, declaration{prop: contentVisibility, value: "hidden", order: -2})
+	} else if hasAttr(n, "hidden") {
 		// The hidden presentational default participates below author CSS, so an
 		// explicit author display declaration can restore the element.
 		result = append(result, declaration{prop: display, value: "none", order: -2})

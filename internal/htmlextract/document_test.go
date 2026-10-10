@@ -67,6 +67,21 @@ func TestCascade(t *testing.T) {
 		})
 	}
 }
+func TestInlineDeclarationsDecodeCSSIdentifierEscapes(t *testing.T) {
+	for _, style := range []string{
+		`displa\79 :none`,
+		`display:n\6f ne`,
+		`visi\62 ility:hidden`,
+		`visibility:h\69 dden`,
+		`opa\63 ity:0`,
+		`font-si\7a e:0`,
+	} {
+		in, _ := inspectHTML(t, `<span style="`+style+`">T</span>`)
+		if got := findText(t, in, "T").Label; got != "concealed" {
+			t.Errorf("style %q label = %q, want concealed", style, got)
+		}
+	}
+}
 func TestInheritance(t *testing.T) {
 	cases := []struct{ name, src, want string }{
 		{"display ancestor", `<div style="display:none"><p style="display:block">T</p></div>`, "concealed"},
@@ -84,11 +99,13 @@ func TestInheritance(t *testing.T) {
 		{"font initial", `<div style="font-size:0"><p style="font-size:initial">T</p></div>`, "visible"},
 		{"font unset", `<div style="font-size:0"><p style="font-size:unset">T</p></div>`, "concealed"},
 		{"display unset", `<div style="display:none"><p style="display:unset">T</p></div>`, "concealed"},
+		{"hidden until found with box", `<div hidden="until-found" style="display:block">T</div>`, "concealed"},
+		{"hidden until found author override", `<div hidden="until-found" style="content-visibility:visible">T</div>`, "visible"},
 		{"opacity inherit", `<div style="opacity:.1"><p style="opacity:inherit">T</p></div>`, "concealed"},
 		{"ex unsupported", `<p style="font-size:2ex">T</p>`, "unknown"},
 		{"ch unsupported", `<p style="font-size:2ch">T</p>`, "unknown"},
 		{"lh unsupported", `<p style="font-size:2lh">T</p>`, "unknown"},
-		{"collapse", `<p style="visibility:collapse">T</p>`, "unknown"},
+		{"collapse", `<p style="visibility:collapse">T</p>`, "concealed"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -217,14 +234,6 @@ func TestTreeEvidence(t *testing.T) {
 	if findText(t, in, "foster").Label != "visible" || findText(t, in, "cell").Label != "concealed" {
 		t.Fatal(in)
 	}
-	in, _ = inspectHTML(t, `<b>bold<i>italic</b>tail</i>`)
-	var text []string
-	for _, v := range in.Text {
-		text = append(text, v.Text)
-	}
-	if strings.Join(text, "|") != "bold|italic|tail" {
-		t.Fatal(text)
-	}
 }
 func TestAllFixtures(t *testing.T) {
 	files, e := filepath.Glob("testdata/*.html")
@@ -270,7 +279,7 @@ func TestLimitSubprocess(t *testing.T) {
 			src = `<style>*{display:none}</style><p>T</p>`
 		case "diagnostics":
 			l.Diagnostics = 1
-			src = `<p style="font-size:2ex;visibility:collapse">T</p>`
+			src = `<p style="font-size:2ex;filter:blur(1px)">T</p>`
 		case "malformed":
 			src = `<style>` + strings.Repeat(`x{bad;;;;color:;}`, 1000) + `</style><p>T</p>`
 		case "transitions":

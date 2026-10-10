@@ -1,6 +1,7 @@
 package admincmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io/fs"
@@ -222,6 +223,26 @@ func TestRejectionArchiveReadIsDeferred(t *testing.T) {
 	response := deferred()
 	if source.reads != 1 || !strings.Contains(response.Text, "Body text") || len(response.Attachments) != 1 || response.Attachments[0].SourcePath != "/archive/2026/09/20/7.eml" {
 		t.Fatalf("response=%#v reads=%d", response, source.reads)
+	}
+}
+
+func TestRejectionDetailDisplaysVisibleBodyAndAttachesOriginal(t *testing.T) {
+	entry := stores.Rejection{ID: 7, Sender: "sender@example.net", Recipients: []string{"user@example.com"}, RejectedAt: time.Now()}
+	repository := &rejectionRepositoryStub{entry: entry}
+	raw := []byte("From: sender@example.net\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n" +
+		`<p>Visible notice</p><div style="display:none">Concealed padding</div>`)
+	source := &messageSourceStub{contents: raw}
+	p := New(Dependencies{Rejections: repository, MessageSource: source, MaxMessageSize: 1 << 20})
+
+	response, err := p.ExecuteLine(context.Background(), "REJECTION 7", Actor{DefaultRecipient: "user@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.Text, "Visible notice") || strings.Contains(response.Text, "Concealed padding") || strings.Contains(response.Text, "<concealed") {
+		t.Fatalf("rejection detail body = %q", response.Text)
+	}
+	if len(response.Attachments) != 1 || !bytes.Equal(response.Attachments[0].Contents, raw) {
+		t.Fatalf("rejection detail attachments = %#v", response.Attachments)
 	}
 }
 

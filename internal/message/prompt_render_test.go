@@ -324,7 +324,7 @@ func TestPromptTruncates(t *testing.T) {
 	m := New(10000)
 	m.AddBody([]byte("abcdef"))
 	p := m.Prompt(3)
-	if !strings.Contains(p, "ab\n[... body omitted ...]\nf\n[body truncated; beginning and end retained]") {
+	if !strings.Contains(p, "abc\n[processed email body truncated; the remainder was omitted]") {
 		t.Fatalf("not truncated: %s", p)
 	}
 }
@@ -332,7 +332,7 @@ func TestPromptTruncates(t *testing.T) {
 func TestSampleBodyPreservesUTF8RuneBoundaries(t *testing.T) {
 	body := "零一二三四五六七八九"
 	got := sampleBody(body, 8)
-	want := "零一二三\n[... body section omitted ...]\n四五\n[... body section omitted ...]\n八九\n[body truncated; beginning, middle, and end retained]"
+	want := "零一二三四五六七\n[processed email body truncated; the remainder was omitted]"
 	if got != want {
 		t.Fatalf("sampleBody() = %q, want %q", got, want)
 	}
@@ -654,18 +654,6 @@ func TestAuthenticationResultsSemicolonInsideQuotedReasonDoesNotSplitClause(t *t
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("quote-aware authentication result missing %q:\n%s", want, prompt)
-		}
-	}
-}
-
-func TestLongBodySamplesBeginningMiddleAndEnd(t *testing.T) {
-	m := New(10000)
-	body := "BEGIN-EVIDENCE " + strings.Repeat("a", 400) + " MIDDLE-EVIDENCE " + strings.Repeat("b", 400) + " END-EVIDENCE"
-	m.AddBody([]byte(body))
-	prompt := m.Prompt(120)
-	for _, evidence := range []string{"BEGIN-EVIDENCE", "MIDDLE-EVIDENCE", "END-EVIDENCE"} {
-		if !strings.Contains(prompt, evidence) {
-			t.Errorf("sampled prompt omitted %s: %s", evidence, prompt)
 		}
 	}
 }

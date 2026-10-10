@@ -3,7 +3,9 @@ package htmlextract
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/andybalholm/cascadia"
 	"github.com/tdewolff/parse/v2"
@@ -13,6 +15,7 @@ import (
 const (
 	display = iota
 	visibility
+	contentVisibility
 	opacity
 	fontSize
 	color
@@ -34,7 +37,7 @@ const (
 	properties
 )
 
-var names = [properties]string{"display", "visibility", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path"}
+var names = [properties]string{"display", "visibility", "content-visibility", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path"}
 
 type declaration struct {
 	prop        int
@@ -90,10 +93,80 @@ func tokenString(v []css.Token) string {
 	}
 	return strings.TrimSpace(b.String())
 }
+
+func cssUnescape(value string) string {
+	if !strings.Contains(value, "\\") {
+		return value
+	}
+	var out strings.Builder
+	for i := 0; i < len(value); {
+		if value[i] != '\\' || i+1 == len(value) {
+			out.WriteByte(value[i])
+			i++
+			continue
+		}
+		i++
+		if value[i] == '\n' || value[i] == '\f' {
+			i++
+			continue
+		}
+		if value[i] == '\r' {
+			i++
+			if i < len(value) && value[i] == '\n' {
+				i++
+			}
+			continue
+		}
+		start := i
+		for i < len(value) && i-start < 6 && ((value[i] >= '0' && value[i] <= '9') || (value[i] >= 'a' && value[i] <= 'f') || (value[i] >= 'A' && value[i] <= 'F')) {
+			i++
+		}
+		if i > start {
+			codepoint, _ := strconv.ParseUint(value[start:i], 16, 32)
+			r := rune(codepoint)
+			if r == 0 || !utf8.ValidRune(r) {
+				r = utf8.RuneError
+			}
+			out.WriteRune(r)
+			if i < len(value) && (value[i] == ' ' || value[i] == '\t' || value[i] == '\n' || value[i] == '\r' || value[i] == '\f') {
+				if value[i] == '\r' && i+1 < len(value) && value[i+1] == '\n' {
+					i++
+				}
+				i++
+			}
+			continue
+		}
+		out.WriteByte(value[i])
+		i++
+	}
+	return out.String()
+}
+
+func unescapeCSSIdentifiers(value string) string {
+	if !strings.Contains(value, "\\") {
+		return value
+	}
+	ts, status := lexValue(value)
+	if status != 1 {
+		return value
+	}
+	var out strings.Builder
+	for _, token := range ts {
+		raw := token.raw
+		if token.kind == css.IdentToken || token.kind == css.FunctionToken {
+			raw = cssUnescape(raw)
+		}
+		out.WriteString(raw)
+	}
+	return out.String()
+}
+
 func (s *sheet) declarations(prop, value string) []declaration {
+	prop = cssUnescape(prop)
 	if !strings.HasPrefix(prop, "--") {
 		prop = strings.ToLower(prop)
 	}
+	value = unescapeCSSIdentifiers(value)
 	value = strings.TrimSpace(value)
 	if strings.Contains(value, "/*") {
 		if ts, status := lexValue(value); status == 1 {

@@ -19,6 +19,7 @@ func initial() Style {
 	var s Style
 	s[display] = Value{Text: "inline", Known: true}
 	s[visibility] = Value{Text: "visible", Known: true}
+	s[contentVisibility] = Value{Text: "visible", Known: true}
 	s[opacity] = Value{Text: "1", Number: 1, Known: true}
 	s[fontSize] = Value{Text: "16px", Number: 16, Known: true}
 	s[color] = Value{Text: "rgba(0,0,0,1)", Known: true, RGBA: RGBA{A: 1}}
@@ -84,11 +85,13 @@ func resolve(p int, s string, parent, root Style) (Value, int) {
 		}
 		return Value{}, 0
 	case visibility:
-		if s == "visible" || s == "hidden" {
+		if s == "visible" || s == "hidden" || s == "collapse" {
 			return Value{Text: s, Known: true}, 1
 		}
-		if s == "collapse" {
-			return Value{Text: s}, 2
+		return Value{}, 0
+	case contentVisibility:
+		if s == "visible" || s == "hidden" || s == "auto" {
+			return Value{Text: s, Known: true}, 1
 		}
 		return Value{}, 0
 	case opacity:
