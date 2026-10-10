@@ -57,7 +57,10 @@ type annotatedOutput struct {
 }
 
 func (o *annotatedOutput) WriteString(value string) { o.write(outputAnnotation{}, value) }
-func (o *annotatedOutput) WriteByte(value byte)     { o.write(outputAnnotation{}, string([]byte{value})) }
+func (o *annotatedOutput) WriteByte(value byte) error {
+	o.write(outputAnnotation{}, string([]byte{value}))
+	return nil
+}
 
 func (o *annotatedOutput) write(annotation outputAnnotation, value string) {
 	if value == "" {
