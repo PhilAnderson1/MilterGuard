@@ -6,6 +6,7 @@ licence texts are reproduced verbatim in `THIRD_PARTY_LICENSES`.
 
 | Software | Version | Licence and notice files |
 | --- | --- | --- |
+| github.com/andybalholm/cascadia | v1.3.3 | `github.com-andybalholm-cascadia.txt` |
 | github.com/beorn7/perks | v1.0.1 | `github.com-beorn7-perks.txt` |
 | github.com/cespare/xxhash/v2 | v2.2.0 | `github.com-cespare-xxhash-v2.txt` |
 | Go standard library | Go 1.25 or later | `go-standard-library.txt` |
@@ -23,6 +24,7 @@ licence texts are reproduced verbatim in `THIRD_PARTY_LICENSES`.
 | github.com/prometheus/common | v0.45.0 | `apache-2.0.txt`, `github.com-prometheus-common-notice.txt` |
 | github.com/prometheus/procfs | v0.12.0 | `apache-2.0.txt`, `github.com-prometheus-procfs-notice.txt` |
 | github.com/remyoudompheng/bigfft | v0.0.0-20230129092748-24d4a6f8daec | `github.com-remyoudompheng-bigfft.txt` |
+| github.com/tdewolff/parse/v2 | v2.8.5 | `github.com-tdewolff-parse-v2.txt` |
 | golang.org/x/net | v0.58.0 | `golang.org-x-net.txt` |
 | golang.org/x/sys | v0.47.0 | `golang.org-x-sys.txt` |
 | golang.org/x/text | v0.41.0 | `golang.org-x-text.txt` |
