@@ -14,7 +14,7 @@ var markdownURLReplacer = strings.NewReplacer(
 	"\\", "%5C", " ", "%20", "(", "%28", ")", "%29", "<", "%3C", ">", "%3E",
 )
 
-type lexicalLinkCollector struct {
+type linkCollector struct {
 	links []string
 	seen  map[string]struct{}
 	chars int
@@ -66,7 +66,7 @@ func markdownURL(value string) string { return markdownURLReplacer.Replace(value
 func extractBoundedHTMLFallback(source string) extractedContent {
 	z := xhtml.NewTokenizer(bytes.NewBufferString(source))
 	var text strings.Builder
-	var links lexicalLinkCollector
+	var links linkCollector
 	var images imageRefCollector
 	var base *url.URL
 	baseSeen, suppressed := false, 0
@@ -168,7 +168,7 @@ func fallbackDestination(raw string, base *url.URL) (string, bool) {
 	return u.String(), true
 }
 
-func (collector *lexicalLinkCollector) AddAllHTTP(values []string) {
+func (collector *linkCollector) AddAllHTTP(values []string) {
 	for _, value := range values {
 		collector.AddDestination(value)
 	}

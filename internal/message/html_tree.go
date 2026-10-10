@@ -35,7 +35,7 @@ type htmlExtraction struct {
 	elements    map[*xhtml.Node]htmlextract.Element
 	base        *url.URL
 	baseSeen    bool
-	links       lexicalLinkCollector
+	links       linkCollector
 	images      imageRefCollector
 	anchorDepth int
 }
@@ -780,7 +780,7 @@ func normalizeHTMLText(value string) string {
 	return strings.Trim(b.String(), " \t\r\n\f")
 }
 
-func (collector *lexicalLinkCollector) AddDestination(candidate string) {
+func (collector *linkCollector) AddDestination(candidate string) {
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
 		return

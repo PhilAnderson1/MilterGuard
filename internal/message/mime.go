@@ -213,7 +213,7 @@ func decodeCharset(label string, data []byte) string {
 
 // decodeHTMLCharset keeps a usable MIME declaration authoritative. Without
 // one, HTML's own BOM or early meta declaration can identify its encoding;
-// this does not parse the document or change the lexical HTML extractor.
+// this does not parse the document or change the HTML extractor.
 func decodeHTMLCharset(label string, data []byte) string {
 	if encoding, _ := charset.Lookup(strings.TrimSpace(label)); encoding != nil {
 		return strings.TrimPrefix(decodeCharset(label, data), "\ufeff")
