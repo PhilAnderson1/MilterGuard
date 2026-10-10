@@ -3,10 +3,12 @@ module github.com/PhilAnderson1/MilterGuard
 go 1.25.0
 
 require (
+	github.com/andybalholm/cascadia v1.3.3
 	github.com/mattn/go-isatty v0.0.24
 	github.com/mjl-/adns v0.0.0-20260809141028-22f885debe71
 	github.com/mjl-/mox v0.0.17
 	github.com/peterh/liner v1.2.2
+	github.com/tdewolff/parse/v2 v2.8.5
 	golang.org/x/net v0.58.0
 	golang.org/x/text v0.41.0
 	gopkg.in/yaml.v3 v3.0.1

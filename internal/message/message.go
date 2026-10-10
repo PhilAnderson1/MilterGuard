@@ -91,8 +91,16 @@ type Image struct {
 }
 
 type Analysis struct {
-	Prompt string
-	Images []Image
+	Prompt                                string
+	Images                                []Image
+	BodyTruncated                         bool
+	BodyExtractionIncomplete              bool
+	ConcealedContentRemoved               bool
+	HasConcealedContent                   bool
+	UsedConcealedTag                      bool
+	UsedVisibilityVariesByViewportSizeTag bool
+	UsedVisibilityUncertainTag            bool
+	UsedHiddenContentStrippedTag          bool
 }
 
 const (

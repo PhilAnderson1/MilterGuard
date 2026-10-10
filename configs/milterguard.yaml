@@ -121,6 +121,11 @@ ai:
   # integer. This is separate from milter.max_message_size, which is in bytes.
   max_body_chars: 50000
 
+  # Handling when extraction limits or final prefix truncation omit body text.
+  # scan submits the retained prefix with a limitation notice; reject records a
+  # rejection decision (enforced only while mode is enforce).
+  incomplete_body_action: scan
+
   # Image analysis detects scams concealed in images to evade text-based filtering.
   # Modes: off, fallback, or always. fallback analyses inline images only when
   # insufficient body text is available. Requires a vision-capable AI model.

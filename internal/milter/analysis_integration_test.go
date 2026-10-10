@@ -24,6 +24,28 @@ type failingAnalyzer struct{}
 
 type usageFailingAnalyzer struct{ usage ai.Usage }
 
+func TestIncompleteBodyRejectSkipsAIAndRespectsMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode     string
+		selected action
+	}{{"enforce", actionReject}, {"accept", actionAccept}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+			service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
+				Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 8,
+				IncompleteBodyAction: "reject", VisionMode: "off",
+			}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			msg := message.New(1024)
+			msg.AddHeader("Content-Type", "text/plain")
+			msg.AddBody([]byte(strings.Repeat("evidence ", 20)))
+			result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, tc.mode, .9, "accept", false)
+			if result.proposed != actionReject || result.selected != tc.selected || analyzer.calls.Load() != 0 {
+				t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
+			}
+		})
+	}
+}
+
 func (a *recordingAnalyzer) Analyze(_ context.Context, input ai.Input) (ai.Analysis, error) {
 	a.inputs <- input
 	return ai.Analysis{Decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}, nil

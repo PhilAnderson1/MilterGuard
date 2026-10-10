@@ -152,6 +152,9 @@ func validateAI(c AIConfig) error {
 	if c.Timeout.Value() <= 0 || c.MaxConcurrent < 1 || c.MaxBodyChars < 1 {
 		return fmt.Errorf("invalid ai timeout, max_concurrent, or max_body_chars")
 	}
+	if c.IncompleteBodyAction != "scan" && c.IncompleteBodyAction != "reject" {
+		return fmt.Errorf("ai incomplete_body_action must be scan or reject")
+	}
 	if c.Retries < 0 || c.Retries > 10 {
 		return fmt.Errorf("ai.retries must be between 0 and 10")
 	}

@@ -145,6 +145,7 @@ type AIConfig struct {
 	Retries                    int      `yaml:"retries"`
 	MaxConcurrent              int      `yaml:"max_concurrent"`
 	MaxBodyChars               int      `yaml:"max_body_chars"`
+	IncompleteBodyAction       string   `yaml:"incomplete_body_action"`
 	VisionMode                 string   `yaml:"vision_mode"`
 	VisionMinTextChars         int      `yaml:"vision_min_text_chars"`
 	MaxImages                  int      `yaml:"max_images"`
@@ -264,7 +265,7 @@ func defaults() Config {
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
 			Model: "qwen/qwen3.6-35b-a3b", DisableThinking: true,
 			PromptFile: "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
-			Retries: 2, MaxConcurrent: 8, MaxBodyChars: 50000,
+			Retries: 2, MaxConcurrent: 8, MaxBodyChars: 50000, IncompleteBodyAction: "scan",
 			VisionMode: "fallback", VisionMinTextChars: 500,
 			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000,
 			SiteURL: "https://github.com/PhilAnderson1/MilterGuard", AppName: "MilterGuard",

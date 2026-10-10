@@ -64,6 +64,14 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		MaxBytes:     s.ai.MaxImageBytes,
 		MaxPixels:    s.ai.MaxImagePixels,
 	})
+	if s.ai.IncompleteBodyAction == "reject" && (prepared.BodyTruncated || prepared.BodyExtractionIncomplete) {
+		proposed := actionReject
+		return evaluationResult{
+			proposed: proposed, selected: selectActionForMode(proposed, mode),
+			classification: ai.ClassificationUnwanted, score: 1,
+			reasons: []string{"message body extraction was incomplete"}, latency: time.Since(started),
+		}
+	}
 	input := ai.Input{Text: prepared.Prompt, Images: make([]ai.Image, 0, len(prepared.Images))}
 	for _, image := range prepared.Images {
 		input.Images = append(input.Images, ai.Image{MediaType: image.MediaType, Data: image.Data})

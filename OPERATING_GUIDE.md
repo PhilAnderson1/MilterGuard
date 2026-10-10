@@ -100,6 +100,18 @@ providers with a Zero Data Retention policy through its Privacy settings.
 
 ### Classification settings
 
+`ai.max_body_chars` bounds the processed email body supplied to the model. If a
+tagged HTML body is too large, MilterGuard first removes content it has
+confidently identified as concealed and leaves location markers. If the result
+is still too large, it retains one continuous prefix and reports the omitted
+remainder. Independently extracted links remain available within their limits.
+
+Set `ai.incomplete_body_action` to `scan` (the default) to classify the retained
+body with an explicit limitation notice. Set it to `reject` to record a
+rejection without asking the model when final truncation or an extraction
+processing limit loses body evidence. As with every rejection decision, accept
+mode records the decision but still accepts the message.
+
 Image analysis detects scams that conceal their message inside images. Set
 `vision_mode` to `off`, `fallback` to inspect images when insufficient text is
 available, or `always` to inspect them with every message. MilterGuard never

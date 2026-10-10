@@ -425,6 +425,24 @@ func validConfig() Config {
 	return cfg
 }
 
+func TestValidateIncompleteBodyAction(t *testing.T) {
+	if defaults().AI.IncompleteBodyAction != "scan" {
+		t.Fatal("incomplete body handling must default to scan")
+	}
+	for _, action := range []string{"scan", "reject"} {
+		cfg := validConfig()
+		cfg.AI.IncompleteBodyAction = action
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid action %q rejected: %v", action, err)
+		}
+	}
+	cfg := validConfig()
+	cfg.AI.IncompleteBodyAction = "accept"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "incomplete_body_action") {
+		t.Fatalf("invalid action error = %v", err)
+	}
+}
+
 func TestAuthenticatedMailScanningDefaultsDisabled(t *testing.T) {
 	if defaults().Filtering.ScanAuthenticated {
 		t.Fatal("authenticated mail scanning must match the disabled sample configuration")

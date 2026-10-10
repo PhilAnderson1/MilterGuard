@@ -15,14 +15,18 @@ import (
 )
 
 type extractedContent struct {
-	Text               string
-	VisibleText        string
-	Links              []string
-	ImageRefs          []string
-	Images             []extractedImage
-	HTML               bool
-	MIMEIncomplete     bool
-	TransferIncomplete bool
+	Text                 string
+	VisibleText          string
+	StrippedText         string
+	Links                []string
+	ImageRefs            []string
+	Images               []extractedImage
+	HTML                 bool
+	MIMEIncomplete       bool
+	TransferIncomplete   bool
+	ExtractionIncomplete bool
+	HasConcealedContent  bool
+	Annotations          annotationUsage
 }
 
 type extractedImage struct {
@@ -107,10 +111,18 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 		for _, part := range parts {
 			textParts = append(textParts, part.Text)
 			visibleTextParts = append(visibleTextParts, part.VisibleText)
+			stripped := part.StrippedText
+			if stripped == "" && !part.HasConcealedContent {
+				stripped = part.Text
+			}
+			combined.StrippedText = joinContent(combined.StrippedText, stripped)
 			combined.Links = append(combined.Links, part.Links...)
 			imageRefs.AddAll(part.ImageRefs)
 			combined.Images = append(combined.Images, part.Images...)
 			combined.HTML = combined.HTML || part.HTML
+			combined.HasConcealedContent = combined.HasConcealedContent || part.HasConcealedContent
+			combined.ExtractionIncomplete = combined.ExtractionIncomplete || part.ExtractionIncomplete
+			combined.Annotations = mergeAnnotationUsage(combined.Annotations, part.Annotations)
 		}
 		combined.ImageRefs = imageRefs.refs
 		combined.Text = strings.Join(textParts, "\n\n")
@@ -140,6 +152,25 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 	}
 	text := decodeCharset(params["charset"], decoded)
 	return extractedContent{Text: text, VisibleText: text, Links: findHTTPURLs(text), TransferIncomplete: transferIncomplete}
+}
+
+func joinContent(left, right string) string {
+	if left == "" {
+		return right
+	}
+	if right == "" {
+		return left
+	}
+	return left + "\n\n" + right
+}
+
+func mergeAnnotationUsage(a, b annotationUsage) annotationUsage {
+	return annotationUsage{
+		UsedConcealedTag:                      a.UsedConcealedTag || b.UsedConcealedTag,
+		UsedVisibilityVariesByViewportSizeTag: a.UsedVisibilityVariesByViewportSizeTag || b.UsedVisibilityVariesByViewportSizeTag,
+		UsedVisibilityUncertainTag:            a.UsedVisibilityUncertainTag || b.UsedVisibilityUncertainTag,
+		UsedHiddenContentStrippedTag:          a.UsedHiddenContentStrippedTag || b.UsedHiddenContentStrippedTag,
+	}
 }
 
 func extractAttachedMessage(data []byte, depth int) extractedContent {
@@ -185,7 +216,7 @@ func decodeCharset(label string, data []byte) string {
 // this does not parse the document or change the lexical HTML extractor.
 func decodeHTMLCharset(label string, data []byte) string {
 	if encoding, _ := charset.Lookup(strings.TrimSpace(label)); encoding != nil {
-		return decodeCharset(label, data)
+		return strings.TrimPrefix(decodeCharset(label, data), "\ufeff")
 	}
 	reader, err := charset.NewReader(bytes.NewReader(data), "text/html")
 	if err != nil {
@@ -195,7 +226,7 @@ func decodeHTMLCharset(label string, data []byte) string {
 	if err != nil {
 		return string(data)
 	}
-	return string(decoded)
+	return strings.TrimPrefix(string(decoded), "\ufeff")
 }
 
 func hasExtractedContent(content extractedContent) bool {
