@@ -1,9 +1,7 @@
 package htmlextract
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,19 +10,19 @@ import (
 	"time"
 )
 
-func inspectHTML(t *testing.T, src string) (Inspection, int) {
+func inspectHTML(t *testing.T, src string) Document {
 	t.Helper()
 	// Existing four-property policy tests supply an explicit canvas. New colour
 	// tests below deliberately do not inject a background.
-	p := Processor{Limits: DefaultLimits()}
+	p := processor{Limits: DefaultLimits()}
 	src = `<style>html{background-color:white}</style>` + src
-	r, e := p.Process([]byte(src), "styles", true)
+	r, e := p.process([]byte(src))
 	if e != nil {
 		t.Fatal(e)
 	}
-	return r.Inspection.(Inspection), r.Uncertainties
+	return r
 }
-func findText(t *testing.T, in Inspection, text string) Text {
+func findText(t *testing.T, in Document, text string) Text {
 	t.Helper()
 	for _, v := range in.Text {
 		if v.Text == text {
@@ -34,10 +32,19 @@ func findText(t *testing.T, in Inspection, text string) Text {
 	t.Fatalf("missing %q in %+v", text, in.Text)
 	return Text{}
 }
+
+func textStyle(text Text, name string) Value {
+	for property, propertyName := range names {
+		if propertyName == name {
+			return text.style[property]
+		}
+	}
+	return Value{}
+}
 func TestSelectors(t *testing.T) {
 	for _, sel := range []string{"*", "p", ".x", "#target", "[data-x]", "[data-x=a]", "div p", "div > p", "i + p", "i ~ p", "p:not(.other)", "#absent,p"} {
 		t.Run(sel, func(t *testing.T) {
-			in, _ := inspectHTML(t, `<div><i></i><p id="target" class="x" data-x="a">T</p></div><style>`+sel+`{display:none}</style>`)
+			in := inspectHTML(t, `<div><i></i><p id="target" class="x" data-x="a">T</p></div><style>`+sel+`{display:none}</style>`)
 			if findText(t, in, "T").Label != "concealed" {
 				t.Fatal(in)
 			}
@@ -60,7 +67,7 @@ func TestCascade(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			in, _ := inspectHTML(t, `<p id=t class=c style="`+c.inline+`">T</p><style>`+c.css+`</style>`)
+			in := inspectHTML(t, `<p id=t class=c style="`+c.inline+`">T</p><style>`+c.css+`</style>`)
 			if got := findText(t, in, "T").Label; got != c.want {
 				t.Fatalf("got %s want %s: %+v", got, c.want, in)
 			}
@@ -76,7 +83,7 @@ func TestInlineDeclarationsDecodeCSSIdentifierEscapes(t *testing.T) {
 		`opa\63 ity:0`,
 		`font-si\7a e:0`,
 	} {
-		in, _ := inspectHTML(t, `<span style="`+style+`">T</span>`)
+		in := inspectHTML(t, `<span style="`+style+`">T</span>`)
 		if got := findText(t, in, "T").Label; got != "concealed" {
 			t.Errorf("style %q label = %q, want concealed", style, got)
 		}
@@ -109,7 +116,7 @@ func TestInheritance(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			in, _ := inspectHTML(t, c.src)
+			in := inspectHTML(t, c.src)
 			v := findText(t, in, "T")
 			if v.Label != c.want {
 				t.Fatalf("got %+v want %s", v, c.want)
@@ -142,19 +149,19 @@ func TestNumbersAndColours(t *testing.T) {
 			t.Fatal(c, v, st)
 		}
 	}
-	in, _ := inspectHTML(t, `<div style="color:red;background-color:blue"><p style="background-color:currentColor">T</p><p>U</p></div>`)
+	in := inspectHTML(t, `<div style="color:red;background-color:blue"><p style="background-color:currentColor">T</p><p>U</p></div>`)
 	v := findText(t, in, "T")
-	if v.Style["color"].Text != "rgba(255,0,0,1)" || v.Style["background-color"].Text != v.Style["color"].Text {
+	if textStyle(v, "color").Text != "rgba(255,0,0,1)" || textStyle(v, "background-color").Text != textStyle(v, "color").Text {
 		t.Fatal(v)
 	}
-	if findText(t, in, "U").Style["background-color"].Text != "rgba(0,0,0,0)" {
+	if textStyle(findText(t, in, "U"), "background-color").Text != "rgba(0,0,0,0)" {
 		t.Fatal(in)
 	}
 }
 func TestConditionsAndRecovery(t *testing.T) {
 	for _, c := range []struct{ css, want string }{{"@media all{p{display:none}}", "concealed"}, {"@media screen{p{display:none}}", "concealed"}, {"@media print{p{display:none}}", "visible"}, {"@media screen and (min-width:1px){p{display:none}}", "client-dependent"}, {"@supports(display:grid){p{display:none}}", "unknown"}, {"p:hover{display:none}", "visible"}, {"p::before{display:none}", "unknown"}, {"p{broken;display:none}", "concealed"}, {"p{display:banana}p{display:none}", "concealed"}, {"@media print{@supports(display:grid){p{display:none}}}", "visible"}} {
 		t.Run(c.css, func(t *testing.T) {
-			in, _ := inspectHTML(t, `<p>T</p><style>`+c.css+`</style>`)
+			in := inspectHTML(t, `<p>T</p><style>`+c.css+`</style>`)
 			if got := findText(t, in, "T").Label; got != c.want {
 				t.Fatalf("%s want %s %+v", got, c.want, in)
 			}
@@ -167,14 +174,14 @@ func TestUnrelatedUnsupportedCSSDoesNotMakeDocumentUncertain(t *testing.T) {
 		`<style>a:hover{text-decoration:underline}</style><p>T</p>`,
 		`<style>[data-kind^="x"]{margin:1px}</style><p>T</p>`,
 	} {
-		in, _ := inspectHTML(t, src)
+		in := inspectHTML(t, src)
 		if got := findText(t, in, "T").Label; got != "visible" {
 			t.Errorf("%q label = %q", src, got)
 		}
 	}
 }
 func TestUnsupportedSelectorUncertaintyIsLimitedToRelevantDeclarations(t *testing.T) {
-	in, _ := inspectHTML(t, `<style>p::before{display:none}</style><p>T</p><div>U</div>`)
+	in := inspectHTML(t, `<style>p::before{display:none}</style><p>T</p><div>U</div>`)
 	if got := findText(t, in, "T").Label; got != "unknown" {
 		t.Fatalf("label = %q", got)
 	}
@@ -182,7 +189,7 @@ func TestUnsupportedSelectorUncertaintyIsLimitedToRelevantDeclarations(t *testin
 		t.Fatalf("unrelated label = %q", got)
 	}
 
-	in, _ = inspectHTML(t, `<style>div:has(.x) .offer{visibility:hidden}.other:has(.x){opacity:0}</style><div class="offer">offer</div><div class="other">other</div><div>ordinary</div>`)
+	in = inspectHTML(t, `<style>div:has(.x) .offer{visibility:hidden}.other:has(.x){opacity:0}</style><div class="offer">offer</div><div class="other">other</div><div>ordinary</div>`)
 	for text, want := range map[string]string{"offer": "unknown", "other": "unknown", "ordinary": "visible"} {
 		if got := findText(t, in, text).Label; got != want {
 			t.Errorf("%s label = %q, want %q", text, got, want)
@@ -191,7 +198,7 @@ func TestUnsupportedSelectorUncertaintyIsLimitedToRelevantDeclarations(t *testin
 }
 
 func TestAttributeSelectorOperatorsAreEvaluated(t *testing.T) {
-	in, _ := inspectHTML(t, `<style>[class~="mobile"]{display:none}[style*="margin: 16px"]{font-size:100%}[data-prefix^="yes"]{visibility:hidden}</style><p class="mobile">hidden</p><p style="margin: 16px 0">ordinary</p><p data-prefix="no">also ordinary</p>`)
+	in := inspectHTML(t, `<style>[class~="mobile"]{display:none}[style*="margin: 16px"]{font-size:100%}[data-prefix^="yes"]{visibility:hidden}</style><p class="mobile">hidden</p><p style="margin: 16px 0">ordinary</p><p data-prefix="no">also ordinary</p>`)
 	if got := findText(t, in, "hidden").Label; got != "concealed" {
 		t.Fatalf("attribute word selector label = %q", got)
 	}
@@ -205,11 +212,10 @@ func TestAttributeSelectorOperatorsAreEvaluated(t *testing.T) {
 func TestSelectorWorkLimitRetainsScopedText(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MatchWork = 2
-	result, err := (Processor{Limits: limits}).Process([]byte(`<style>p{display:none}</style><p>T</p><div>U</div>`), "styles", true)
+	inspection, err := (processor{Limits: limits}).process([]byte(`<style>p{display:none}</style><p>T</p><div>U</div>`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	inspection := result.Inspection.(Inspection)
 	if got := findText(t, inspection, "T").Label; got != "unknown" {
 		t.Fatalf("affected text label = %q", got)
 	}
@@ -218,7 +224,7 @@ func TestSelectorWorkLimitRetainsScopedText(t *testing.T) {
 	}
 }
 func TestTreeEvidence(t *testing.T) {
-	in, _ := inspectHTML(t, `<p>&amp;lt;b&amp;gt;&#x200b;&lt;style&gt;hidden&lt;/style&gt;</p><script>script</script><style>p{color:red}</style><!--comment--><template>inert</template><iframe>fallback</iframe>`)
+	in := inspectHTML(t, `<p>&amp;lt;b&amp;gt;&#x200b;&lt;style&gt;hidden&lt;/style&gt;</p><script>script</script><style>p{color:red}</style><!--comment--><template>inert</template><iframe>fallback</iframe>`)
 	v := findText(t, in, "&lt;b&gt;\u200b<style>hidden</style>")
 	if v.Label != "visible" {
 		t.Fatal(v)
@@ -226,11 +232,11 @@ func TestTreeEvidence(t *testing.T) {
 	if len(in.Text) != 1 {
 		t.Fatal(in)
 	}
-	in, _ = inspectHTML(t, `<div style="display:none"><table>foster<tr><td>cell</table></div><p>end`)
+	in = inspectHTML(t, `<div style="display:none"><table>foster<tr><td>cell</table></div><p>end`)
 	if findText(t, in, "foster").Label != "concealed" || findText(t, in, "cell").Label != "concealed" || findText(t, in, "end").Label != "visible" {
 		t.Fatal(in)
 	}
-	in, _ = inspectHTML(t, `<table style="display:none">foster<tr><td>cell</td></tr></table>`)
+	in = inspectHTML(t, `<table style="display:none">foster<tr><td>cell</td></tr></table>`)
 	if findText(t, in, "foster").Label != "visible" || findText(t, in, "cell").Label != "concealed" {
 		t.Fatal(in)
 	}
@@ -246,14 +252,8 @@ func TestAllFixtures(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			p := Processor{Limits: DefaultLimits()}
-			a, e := p.Process(b, "styles", false)
-			if e != nil {
+			if _, e := (processor{Limits: DefaultLimits()}).process(b); e != nil {
 				t.Fatal(e)
-			}
-			v, e := p.Process(b, "styles", true)
-			if e != nil || a.Checksum != v.Checksum {
-				t.Fatal(e, a, v)
 			}
 		})
 	}
@@ -285,7 +285,7 @@ func TestLimitSubprocess(t *testing.T) {
 		case "transitions":
 			src = strings.Repeat(`<p style="visibility:hidden"><span style="visibility:visible">T</span></p>`, 1000)
 		}
-		_, e := (Processor{Limits: l}).Process([]byte(src), "styles", false)
+		_, e := (processor{Limits: l}).process([]byte(src))
 		expected := name != "malformed" && name != "transitions" && name != "work"
 		if expected != (e != nil) {
 			t.Fatal(name, e)
@@ -305,19 +305,12 @@ func TestLimitSubprocess(t *testing.T) {
 		})
 	}
 }
-func TestInspectionJSON(t *testing.T) {
-	in, _ := inspectHTML(t, "<p>T</p>")
-	b, e := json.Marshal(in)
-	if e != nil || !bytes.Contains(b, []byte(`"body_text"`)) {
-		t.Fatal(e, string(b))
-	}
-}
 func BenchmarkLargest(b *testing.B) {
 	src := []byte(`<style>.quiet{opacity:.005}</style><p>` + strings.Repeat(`<span class="quiet">padding</span> visible `, 24000) + `</p>`)
-	p := Processor{Limits: DefaultLimits()}
+	p := processor{Limits: DefaultLimits()}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, e := p.Process(src, "styles", false); e != nil {
+		if _, e := p.process(src); e != nil {
 			b.Fatal(e)
 		}
 	}
@@ -338,12 +331,12 @@ func TestReferenceRegressions(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			r, e := (Processor{Limits: DefaultLimits()}).Process(b, "styles", true)
+			r, e := (processor{Limits: DefaultLimits()}).process(b)
 			if e != nil {
 				t.Fatal(e)
 			}
 			var text []string
-			for _, v := range r.Inspection.(Inspection).Text {
+			for _, v := range r.Text {
 				if strings.TrimSpace(v.Text) != "" {
 					text = append(text, strings.TrimSpace(v.Text)+":"+v.Label)
 				}
@@ -355,20 +348,20 @@ func TestReferenceRegressions(t *testing.T) {
 	}
 }
 func TestPropertyUncertainty(t *testing.T) {
-	in, _ := inspectHTML(t, `<div style="color:lab(10% 2 3);font-size:2ex;display:none"><p style="font-size:16px">T</p></div><p style="color:banana;font-size:banana;background-color:lab(10% 2 3)">U</p>`)
+	in := inspectHTML(t, `<div style="color:lab(10% 2 3);font-size:2ex;display:none"><p style="font-size:16px">T</p></div><p style="color:banana;font-size:banana;background-color:lab(10% 2 3)">U</p>`)
 	v := findText(t, in, "T")
-	if v.Label != "concealed" || v.Style["color"].Known || !v.Style["font-size"].Known {
+	if v.Label != "concealed" || textStyle(v, "color").Known || !textStyle(v, "font-size").Known {
 		t.Fatal(v)
 	}
 	v = findText(t, in, "U")
-	if !v.Style["color"].Known || !v.Style["font-size"].Known || v.Style["background-color"].Known {
+	if !textStyle(v, "color").Known || !textStyle(v, "font-size").Known || textStyle(v, "background-color").Known {
 		t.Fatal(v)
 	}
 }
 
 func TestAdditionalBoundsAndUnsupportedWinners(t *testing.T) {
 	for _, property := range []string{"opacity:0;opacity:sin(1)", "display:none;display:ruby", "display:none;display:run-in"} {
-		in, _ := inspectHTML(t, `<p style="`+property+`">T</p>`)
+		in := inspectHTML(t, `<p style="`+property+`">T</p>`)
 		if findText(t, in, "T").Label != "unknown" {
 			t.Fatal(property, in)
 		}
@@ -379,7 +372,7 @@ func TestAdditionalBoundsAndUnsupportedWinners(t *testing.T) {
 	}{
 		{"<style>" + strings.Repeat("@media screen{", 200) + strings.Repeat("}", 200) + "</style>", DefaultLimits()},
 	} {
-		_, e := (Processor{Limits: c.limits}).Process([]byte(c.src), "styles", false)
+		_, e := (processor{Limits: c.limits}).process([]byte(c.src))
 		if e == nil || !strings.Contains(e.Error(), "limit:") {
 			t.Fatal(e)
 		}

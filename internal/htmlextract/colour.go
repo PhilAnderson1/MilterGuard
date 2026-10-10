@@ -214,17 +214,17 @@ type colourResult struct {
 	known                  bool
 	uncertainty            string
 }
-type ColourInspection struct {
-	Foreground  *RGBA    `json:"effective_foreground"`
-	Background  *RGBA    `json:"effective_background"`
-	Distance    *float64 `json:"oklab_distance"`
-	Known       bool     `json:"known"`
-	Concealed   bool     `json:"concealed"`
-	Uncertainty string   `json:"uncertainty,omitempty"`
+type colourInspection struct {
+	Foreground  *RGBA
+	Background  *RGBA
+	Distance    *float64
+	Known       bool
+	Concealed   bool
+	Uncertainty string
 }
 
-func (c colourResult) inspection() ColourInspection {
-	out := ColourInspection{Known: c.known, Uncertainty: c.uncertainty}
+func (c colourResult) inspection() colourInspection {
+	out := colourInspection{Known: c.known, Uncertainty: c.uncertainty}
 	if c.known {
 		out.Foreground = &c.foreground
 		out.Background = &c.background
@@ -282,15 +282,4 @@ func evaluateColour(foreground Value, layers []paintLayer) colourResult {
 		return colourResult{uncertainty: "unsupported image or composition effect"}
 	}
 	return colourResult{foreground: ink, background: ground, distance: distance, known: true}
-}
-func (h *digest) colour(c colourResult) {
-	h.add(c.uncertainty)
-	if !c.known {
-		h.add("colour-unknown")
-		return
-	}
-	h.add("colour-known")
-	for _, v := range []float64{c.foreground.R, c.foreground.G, c.foreground.B, c.foreground.A, c.background.R, c.background.G, c.background.B, c.background.A, c.distance} {
-		h.number(v)
-	}
 }

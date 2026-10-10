@@ -30,7 +30,7 @@ type annotationUsage struct {
 var reservedAnnotation = regexp.MustCompile(`(?is)</?\s*(?:concealed|visibility-varies-by-viewport-size|visibility-uncertain|hidden-content-stripped)\b[^>]*>`)
 
 type htmlExtraction struct {
-	inspection  htmlextract.Inspection
+	inspection  htmlextract.Document
 	states      map[*xhtml.Node]htmlextract.Text
 	elements    map[*xhtml.Node]htmlextract.Element
 	base        *url.URL
@@ -553,9 +553,7 @@ func concealmentReason(state htmlextract.Text) (string, string) {
 		case "opacity":
 			return "opacity", strconv.FormatFloat(state.EffectiveOpacity, 'g', 6, 64)
 		case "font-size":
-			if value, ok := state.Style["font-size"]; ok {
-				return "font-size", value.Text
-			}
+			return "font-size", state.FontSize.Text
 		case "colour-distance":
 			return "color-match", ""
 		case "empty-clip":

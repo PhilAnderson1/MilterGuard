@@ -27,7 +27,7 @@ func TestConditionalCases(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			in, _ := inspectHTML(t, `<style>`+c.css+`</style><div><p>T</p></div>`)
+			in := inspectHTML(t, `<style>`+c.css+`</style><div><p>T</p></div>`)
 			if got := findText(t, in, "T"); got.Label != c.want {
 				t.Fatalf("%s: %+v", c.want, got)
 			}
@@ -35,17 +35,12 @@ func TestConditionalCases(t *testing.T) {
 	}
 	l := DefaultLimits()
 	l.MediaCases = 1
-	r, e := (Processor{Limits: l}).Process([]byte(`<style>@media(max-width:500px){p{display:none}}</style><p>T</p><b>U</b>`), "styles", true)
+	in, e := (processor{Limits: l}).process([]byte(`<style>@media(max-width:500px){p{display:none}}</style><p>T</p><b>U</b>`))
 	if e != nil {
 		t.Fatal(e)
 	}
-	in := r.Inspection.(Inspection)
-	if !r.ConditionalFallback || r.ViewingCases != 1 || findText(t, in, "T").Label != "unknown" || findText(t, in, "U").Label != "visible" {
-		t.Fatal(r, in)
-	}
-	r, e = (Processor{Limits: DefaultLimits()}).Process([]byte(`<p>T</p>`), "styles", true)
-	if e != nil || r.ViewingCases != 1 || r.ConditionalFallback {
-		t.Fatal(r, e)
+	if findText(t, in, "T").Label != "unknown" || findText(t, in, "U").Label != "visible" {
+		t.Fatal(in)
 	}
 }
 
@@ -59,17 +54,16 @@ func TestViewingCasesHardCap(t *testing.T) {
 		src.WriteString("</style><p>T</p><b>U</b>")
 		limits := DefaultLimits()
 		limits.MediaCases = 64 // Direct callers cannot raise the ceiling either.
-		r, err := (Processor{Limits: limits}).Process([]byte(src.String()), "styles", true)
+		in, err := (processor{Limits: limits}).process([]byte(src.String()))
 		if err != nil {
 			t.Fatal(err)
 		}
-		in := r.Inspection.(Inspection)
 		if breakpoints == 15 {
-			if r.ViewingCases != 16 || r.ConditionalFallback || findText(t, in, "T").Label != "client-dependent" {
-				t.Fatal(r, in)
+			if findText(t, in, "T").Label != "client-dependent" {
+				t.Fatal(in)
 			}
-		} else if r.ViewingCases != 1 || !r.ConditionalFallback || findText(t, in, "T").Label != "unknown" || findText(t, in, "U").Label != "visible" {
-			t.Fatal(r, in)
+		} else if findText(t, in, "T").Label != "unknown" || findText(t, in, "U").Label != "visible" {
+			t.Fatal(in)
 		}
 	}
 }
@@ -90,13 +84,13 @@ func TestEmptyClipping(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.style, func(t *testing.T) {
-			in, _ := inspectHTML(t, `<div style="`+c.style+`"><p style="clip-path:none">T</p></div>`)
+			in := inspectHTML(t, `<div style="`+c.style+`"><p style="clip-path:none">T</p></div>`)
 			if v := findText(t, in, "T"); v.Label != c.want {
 				t.Fatalf("want %s: %+v", c.want, v)
 			}
 		})
 	}
-	in, _ := inspectHTML(t, `<style>@media(max-width:500px){p{clip-path:circle(0px)}}</style><p>T</p>`)
+	in := inspectHTML(t, `<style>@media(max-width:500px){p{clip-path:circle(0px)}}</style><p>T</p>`)
 	if findText(t, in, "T").Label != "client-dependent" {
 		t.Fatal(in)
 	}
@@ -127,7 +121,7 @@ func TestVariables(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			in, _ := inspectHTML(t, c.src)
+			in := inspectHTML(t, c.src)
 			if v := findText(t, in, "T"); v.Label != c.want {
 				t.Fatalf("want %s: %+v", c.want, v)
 			}
@@ -159,8 +153,8 @@ func TestArithmetic(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.property, func(t *testing.T) {
-			in, _ := inspectHTML(t, `<p style="`+c.property+`">T</p>`)
-			v := findText(t, in, "T").Style[strings.Split(c.property, ":")[0]]
+			in := inspectHTML(t, `<p style="`+c.property+`">T</p>`)
+			v := textStyle(findText(t, in, "T"), strings.Split(c.property, ":")[0])
 			if v.Known != c.known {
 				t.Fatal(v)
 			}
@@ -170,12 +164,12 @@ func TestArithmetic(t *testing.T) {
 		})
 	}
 	for _, s := range []string{`calc(1px+ 2px)`, `calc(1px +2px)`, `calc(1px + 1)`, `calc(0)`, `calc(1px,2px)`} {
-		in, _ := inspectHTML(t, `<p style="font-size:10px;font-size:`+s+`">T</p>`)
-		if v := findText(t, in, "T").Style["font-size"]; v.Number != 10 || !v.Known {
+		in := inspectHTML(t, `<p style="font-size:10px;font-size:`+s+`">T</p>`)
+		if v := textStyle(findText(t, in, "T"), "font-size"); v.Number != 10 || !v.Known {
 			t.Fatal(s, v)
 		}
 	}
-	in, _ := inspectHTML(t, `<p style="--n:10px;font-size:calc(var(--n) - 10px)">T</p>`)
+	in := inspectHTML(t, `<p style="--n:10px;font-size:calc(var(--n) - 10px)">T</p>`)
 	if findText(t, in, "T").Label != "concealed" {
 		t.Fatal(in)
 	}
@@ -188,21 +182,16 @@ func TestExpressionLimitsAndDeterminism(t *testing.T) {
 		fmt.Fprintf(&b, "--v%d:var(--v%d) var(--v%d);", i, i-1, i-1)
 	}
 	b.WriteString(`display:var(--v29)">T</p>`)
-	var checksum string
 	for i := 0; i < 10; i++ {
-		r, e := (Processor{Limits: DefaultLimits()}).Process([]byte(b.String()), "styles", true)
+		in, e := (processor{Limits: DefaultLimits()}).process([]byte(b.String()))
 		if e != nil {
 			t.Fatal(e)
 		}
-		if findText(t, r.Inspection.(Inspection), "T").Label != "unknown" {
-			t.Fatal(r)
+		if findText(t, in, "T").Label != "unknown" {
+			t.Fatal(in)
 		}
-		if i > 0 && checksum != r.Checksum {
-			t.Fatal("nondeterministic")
-		}
-		checksum = r.Checksum
 	}
-	in, _ := inspectHTML(t, `<p style="opacity:`+strings.Repeat("calc(", 40)+"1"+strings.Repeat(")", 40)+`">T</p>`)
+	in := inspectHTML(t, `<p style="opacity:`+strings.Repeat("calc(", 40)+"1"+strings.Repeat(")", 40)+`">T</p>`)
 	if findText(t, in, "T").Label != "unknown" {
 		t.Fatal(in)
 	}
@@ -221,6 +210,6 @@ func FuzzBoundedStyles(f *testing.F) {
 		l := DefaultLimits()
 		l.ExpressionWork = 10000
 		l.Diagnostics = 32
-		_, _ = (Processor{Limits: l}).Process([]byte(src), "styles", true)
+		_, _ = (processor{Limits: l}).process([]byte(src))
 	})
 }
