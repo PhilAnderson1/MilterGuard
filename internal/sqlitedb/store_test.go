@@ -112,6 +112,45 @@ func TestOpenRejectsObsoleteSchema(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesPreviousSchemaAndPreservesActivity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "previous.db")
+	store, err := Open(context.Background(), path, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Exec(context.Background(), `INSERT INTO activity
+		(occurred_at_ms, event_type, outcome, analysis_failed, token_cost)
+		VALUES (1, 1, 1, 0, 0.25)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Exec(context.Background(), "PRAGMA user_version = 4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(context.Background(), path, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var version, count int
+	if err := store.QueryRow(context.Background(), "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.QueryRow(context.Background(), "SELECT count(*) FROM activity").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if version != CurrentSchemaVersion || count != 1 {
+		t.Fatalf("migrated version=%d activity rows=%d", version, count)
+	}
+	if _, err := store.Exec(context.Background(), `INSERT INTO activity
+		(occurred_at_ms, event_type, outcome) VALUES (2, 8, 2)`); err != nil {
+		t.Fatalf("new HTML DoS activity type rejected after migration: %v", err)
+	}
+}
+
 func TestOpenDisablesAutomaticWALCheckpointing(t *testing.T) {
 	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "checkpoint.db"), DefaultOptions())
 	if err != nil {

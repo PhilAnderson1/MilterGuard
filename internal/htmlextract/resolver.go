@@ -7,6 +7,10 @@ import (
 	"golang.org/x/net/html"
 )
 
+// Applying a declaration entails validity checks, cascade comparison and
+// candidate storage; weight it above a simple selector-index lookup.
+const declarationApplyWeight int64 = 16
+
 type mediaCacheKey struct {
 	width    float64
 	fallback bool
@@ -124,6 +128,12 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 		}
 		return unresolvedStyle(), parentVars, nil
 	}
+	// Once shared matching work is exhausted, every remaining element is
+	// unresolved. Avoid rebuilding and sorting its candidate-rule list merely
+	// to fail the first budget charge again.
+	if matches.exhausted {
+		return unresolvedStyle(), parentVars, nil
+	}
 	st := initial()
 	for i := range st {
 		if inherits(i) {
@@ -132,7 +142,13 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 	}
 	var wins [properties]candidate
 	var vars map[string]candidate
-	apply := func(ds []declaration, spec cascadia.Specificity, inl, uncertain bool) {
+	apply := func(ds []declaration, spec cascadia.Specificity, inl, uncertain bool) bool {
+		// Reserve the complete declaration-list cost before changing the
+		// cascade. A failed reservation must not leave a partially applied
+		// style that appears trustworthy.
+		if len(ds) > 0 && !matches.spend(int64(len(ds))*declarationApplyWeight) {
+			return false
+		}
 		for _, d := range ds {
 			if d.custom == "" && !d.unsupported {
 				if d.validityReady && d.validity == 0 {
@@ -158,10 +174,13 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 				wins[d.prop] = c
 			}
 		}
+		return true
 	}
-	apply(prepareDeclarations(legacyDeclarations(n)), cascadia.Specificity{}, false, false)
 	matchIncomplete := func() (Style, *variableScope, error) {
 		return unresolvedStyle(), parentVars, nil
+	}
+	if !apply(prepareDeclarations(legacyDeclarations(n)), cascadia.Specificity{}, false, false) {
+		return matchIncomplete()
 	}
 	mediaStates := s.mediaStates(width, fallback)
 	for _, ref := range s.candidates(n) {
@@ -200,13 +219,19 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 		}
 		if matched {
 			if plan.uncertain {
-				apply(r.decls, plan.specificity, false, true)
+				if !apply(r.decls, plan.specificity, false, true) {
+					return matchIncomplete()
+				}
 			} else {
-				apply(r.decls, plan.specificity, false, state == mediaUnknown)
+				if !apply(r.decls, plan.specificity, false, state == mediaUnknown) {
+					return matchIncomplete()
+				}
 			}
 		}
 	}
-	apply(inline, cascadia.Specificity{}, true, false)
+	if !apply(inline, cascadia.Specificity{}, true, false) {
+		return matchIncomplete()
+	}
 	var defs map[string]declaration
 	if len(vars) > 0 {
 		defs = map[string]declaration{}

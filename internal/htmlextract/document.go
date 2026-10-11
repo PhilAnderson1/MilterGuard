@@ -19,7 +19,7 @@ type Limits struct {
 const MaxViewingCases = 16
 
 func DefaultLimits() Limits {
-	return Limits{InputBytes: 8 << 20, Nodes: 100000, TextNodes: 50000, Depth: 128, Rules: 10000, Selectors: 20000, SelectorBytes: 2048, MatchWork: 100000000, MediaCases: MaxViewingCases, ExpressionWork: 10000000}
+	return Limits{InputBytes: 8 << 20, Nodes: 100000, TextNodes: 50000, Depth: 128, Rules: 10000, Selectors: 20000, SelectorBytes: 2048, MatchWork: 10000000, MediaCases: MaxViewingCases, ExpressionWork: 1000000}
 }
 
 func (l Limits) validate() error {
@@ -188,6 +188,23 @@ type Document struct {
 	Root     *html.Node
 	Text     []Text
 	Elements []Element
+	Usage    ResourceUsage
+}
+
+// ResourceUsage records deterministic input-derived work performed while
+// analysing one HTML document. It is informational; limits remain enforced by
+// Limits and an exhausted budget is never made trustworthy by this telemetry.
+type ResourceUsage struct {
+	InputBytes     int
+	Nodes          int
+	TextNodes      int
+	Depth          int
+	CSSDepth       int
+	Rules          int
+	Selectors      int
+	MediaCases     int
+	MatchWork      int64
+	ExpressionWork int64
 }
 
 // Analyze parses and resolves a document once and retains the tree alongside
@@ -247,25 +264,34 @@ type lexicalFrame struct {
 // expensive recovery). This conservative lexical stack can reject malformed
 // optional-tag sequences that would produce a shallower tree; that is explicit.
 func preflight(b []byte, l Limits) error {
+	_, err := measurePreflight(b, l)
+	return err
+}
+
+type lexicalUsage struct {
+	nodes, textNodes, depth int
+}
+
+func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
 	z := html.NewTokenizer(bytes.NewReader(b))
 	var stack []lexicalFrame
-	nodes, textNodes := 0, 0
+	var usage lexicalUsage
 	for {
 		t := z.Next()
 		if t == html.ErrorToken {
-			return nil
+			return usage, nil
 		}
 		switch t {
 		case html.StartTagToken, html.SelfClosingTagToken, html.TextToken, html.CommentToken, html.DoctypeToken:
-			nodes++
-			if nodes > l.Nodes {
-				return fmt.Errorf("limit: lexical nodes > %d", l.Nodes)
+			usage.nodes++
+			if usage.nodes > l.Nodes {
+				return usage, fmt.Errorf("limit: lexical nodes > %d", l.Nodes)
 			}
 		}
 		if t == html.TextToken {
-			textNodes++
-			if textNodes > l.TextNodes {
-				return fmt.Errorf("limit: lexical text nodes > %d", l.TextNodes)
+			usage.textNodes++
+			if usage.textNodes > l.TextNodes {
+				return usage, fmt.Errorf("limit: lexical text nodes > %d", l.TextNodes)
 			}
 		}
 		if t != html.StartTagToken && t != html.SelfClosingTagToken && t != html.EndTagToken {
@@ -305,8 +331,11 @@ func preflight(b []byte, l Limits) error {
 			foreign:      foreign,
 			htmlChildren: foreign && (n == "foreignobject" || n == "desc" || n == "title"),
 		})
+		if len(stack) > usage.depth {
+			usage.depth = len(stack)
+		}
 		if len(stack) > l.Depth {
-			return fmt.Errorf("limit: lexical depth > %d", l.Depth)
+			return usage, fmt.Errorf("limit: lexical depth > %d", l.Depth)
 		}
 	}
 }
@@ -318,6 +347,7 @@ type parsedDocument struct {
 	treeDepth   int
 	nodeCount   int
 	textCount   int
+	lexical     lexicalUsage
 }
 
 func (p processor) parseDocument(input []byte) (parsedDocument, error) {
@@ -328,9 +358,11 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	if len(input) > p.Limits.InputBytes {
 		return document, fmt.Errorf("limit: input bytes > %d", p.Limits.InputBytes)
 	}
-	if err := preflight(input, p.Limits); err != nil {
+	lexical, err := measurePreflight(input, p.Limits)
+	if err != nil {
 		return document, err
 	}
+	document.lexical = lexical
 	// Email extraction does not execute scripts; parse noscript fallback content
 	// in the corresponding HTML5 tree-construction mode.
 	root, err := html.ParseWithOptions(bytes.NewReader(input), html.ParseOptionEnableScripting(false))
@@ -396,13 +428,19 @@ func (p processor) process(input []byte) (Document, error) {
 	root := document.root
 	s := &document.styles
 	inlineDecls := document.inlineDecls
-	in := Document{Root: root}
+	in := Document{Root: root, Usage: ResourceUsage{
+		InputBytes: len(input), Nodes: max(document.nodeCount, document.lexical.nodes),
+		TextNodes: max(document.textCount, document.lexical.textNodes),
+		Depth:     max(document.treeDepth, document.lexical.depth), CSSDepth: s.conditionDepth,
+		Rules: len(s.rules), Selectors: s.selectors,
+	}}
 	s.buildSelectorIndex(document.treeDepth, document.nodeCount)
 	cap := p.Limits.MediaCases
 	if cap < 1 || cap > MaxViewingCases {
 		cap = MaxViewingCases
 	}
 	widths, fallback := s.viewingCases(cap)
+	in.Usage.MediaCases = len(widths)
 	s.cacheMatches = len(widths) > 1
 	exprLimit := p.Limits.ExpressionWork
 	if exprLimit < 1 {
@@ -540,5 +578,10 @@ func (p processor) process(input []byte) (Document, error) {
 		}
 	}
 	in.Elements = firstElements
+	in.Usage.MatchWork = matches.used
+	in.Usage.ExpressionWork = exprLimit - budget.remaining
+	if in.Usage.ExpressionWork > exprLimit {
+		in.Usage.ExpressionWork = exprLimit
+	}
 	return in, nil
 }

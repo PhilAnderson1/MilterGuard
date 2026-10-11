@@ -18,11 +18,13 @@ import (
 	lib "modernc.org/sqlite/lib"
 )
 
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 var (
 	//go:embed schema/schema.sql
 	currentSchema string
+	//go:embed schema/migrate_4_to_5.sql
+	migrateSchema4To5 string
 
 	ErrIncompatibleDatabase = errors.New("incompatible SQLite database format")
 )
@@ -149,6 +151,15 @@ func (s *Store) prepareSchema(ctx context.Context) error {
 			}
 			if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", CurrentSchemaVersion)); err != nil {
 				return fmt.Errorf("set SQLite schema version %d: %w", CurrentSchemaVersion, err)
+			}
+			return nil
+		}
+		if version == 4 {
+			if _, err := tx.ExecContext(ctx, migrateSchema4To5); err != nil {
+				return fmt.Errorf("migrate SQLite schema from version 4 to 5: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 5"); err != nil {
+				return fmt.Errorf("set SQLite schema version 5: %w", err)
 			}
 			return nil
 		}

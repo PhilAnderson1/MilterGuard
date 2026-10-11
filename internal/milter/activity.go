@@ -36,8 +36,12 @@ func (s *activityService) record(parent context.Context, event stores.ActivityEv
 }
 
 func (s *activityService) recordScan(ctx context.Context, result evaluationResult, responseErr error) {
+	eventType := stores.ActivityEventScan
+	if result.htmlCPUExceeded {
+		eventType = stores.ActivityEventHTMLDoS
+	}
 	s.record(ctx, stores.ActivityEvent{
-		EventType: stores.ActivityEventScan, Outcome: activityOutcome(result.selected, responseErr),
+		EventType: eventType, Outcome: activityOutcome(result.selected, responseErr),
 		AnalysisFailed: result.err != nil, TokenCost: result.tokenCost,
 	})
 }

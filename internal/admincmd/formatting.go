@@ -64,16 +64,18 @@ func formatActivity(pd period, before time.Time, retention time.Duration, summar
 	if activitySummaryEmpty(summary) {
 		body.WriteString("No activity was recorded for this period.\n\n")
 	}
-	totalRejected := summary.ScanRejections + summary.IPRejections + summary.AttachmentRejections + summary.ProtectedSenderDomainRejections + summary.SenderBlocklistRejections
-	totalAccepted := summary.ScanAccepted + summary.CorrespondentAccepts + summary.TrustedDomainAccepts
+	totalRejected := summary.ScanRejections + summary.IPRejections + summary.AttachmentRejections + summary.ProtectedSenderDomainRejections + summary.SenderBlocklistRejections + summary.HTMLDoSRejections
+	totalAccepted := summary.ScanAccepted + summary.CorrespondentAccepts + summary.TrustedDomainAccepts + summary.HTMLDoSAccepted
 	fmt.Fprintf(&body, "Total rejected: %d\n", totalRejected)
 	fmt.Fprintf(&body, "  AI classification: %d\n", summary.ScanRejections)
+	fmt.Fprintf(&body, "  HTML/CSS DoS protection: %d\n", summary.HTMLDoSRejections)
 	fmt.Fprintf(&body, "  IP reputation: %d\n", summary.IPRejections)
 	fmt.Fprintf(&body, "  Attachment policy: %d\n", summary.AttachmentRejections)
 	fmt.Fprintf(&body, "  Protected sender-domain policy: %d\n", summary.ProtectedSenderDomainRejections)
 	fmt.Fprintf(&body, "  Sender blocklist: %d\n\n", summary.SenderBlocklistRejections)
 	fmt.Fprintf(&body, "Total accepted: %d\n", totalAccepted)
 	fmt.Fprintf(&body, "  AI classification: %d\n", summary.ScanAccepted)
+	fmt.Fprintf(&body, "  HTML/CSS DoS protection (accept mode): %d\n", summary.HTMLDoSAccepted)
 	fmt.Fprintf(&body, "  Correspondent whitelist: %d\n", summary.CorrespondentAccepts)
 	fmt.Fprintf(&body, "  Trusted sender domain: %d\n\n", summary.TrustedDomainAccepts)
 	fmt.Fprintf(&body, "Recipient deliveries removed by sender blocklist: %d\n\n", summary.SenderBlocklistRecipientRemovals)
@@ -122,12 +124,12 @@ func activitySummaryEmpty(summary stores.ActivitySummary) bool {
 	return summary.ScanTotal == 0 && summary.IPRejections == 0 && summary.CorrespondentAccepts == 0 &&
 		summary.TrustedDomainAccepts == 0 && summary.AttachmentRejections == 0 &&
 		summary.ProtectedSenderDomainRejections == 0 && summary.SenderBlocklistRejections == 0 &&
-		summary.SenderBlocklistRecipientRemovals == 0
+		summary.SenderBlocklistRecipientRemovals == 0 && summary.HTMLDoSRejections == 0 && summary.HTMLDoSAccepted == 0
 }
 
 func activityHasRejections(summary stores.ActivitySummary) bool {
 	return summary.ScanRejections > 0 || summary.IPRejections > 0 || summary.AttachmentRejections > 0 ||
-		summary.ProtectedSenderDomainRejections > 0 || summary.SenderBlocklistRejections > 0
+		summary.ProtectedSenderDomainRejections > 0 || summary.SenderBlocklistRejections > 0 || summary.HTMLDoSRejections > 0
 }
 
 func formatAllowlist(entries []stores.Correspondent, includeRecipient, truncated bool) string {

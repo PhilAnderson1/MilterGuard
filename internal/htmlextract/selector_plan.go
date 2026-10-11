@@ -472,25 +472,27 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 		}
 	}
 	s.index = index
+	s.ancestorRefs = nil
 }
 
 func (s *sheet) candidates(n *html.Node) []selectorRef {
+	if s.index.count == 0 {
+		return nil
+	}
 	refs := s.candidateScratch[:0]
 	refs = append(refs, s.index.universal...)
 	refs = append(refs, s.index.tags[n.Data]...)
-	if id := attr(n, "id"); id != "" {
-		refs = append(refs, s.index.ids[id]...)
+	if len(s.index.ids) != 0 || len(s.index.classes) != 0 {
+		refs = appendAttributeSelectorRefs(refs, n, s.index.ids, s.index.classes)
 	}
-	refs = appendClassCandidates(refs, attr(n, "class"), s.index.classes)
 	for ancestor := n.Parent; ancestor != nil; ancestor = ancestor.Parent {
 		if ancestor.Type != html.ElementNode {
 			continue
 		}
 		refs = append(refs, s.index.ancestorTags[ancestor.Data]...)
-		if id := attr(ancestor, "id"); id != "" {
-			refs = append(refs, s.index.ancestorIDs[id]...)
+		if len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
+			refs = append(refs, s.cachedAncestorSelectorRefs(ancestor)...)
 		}
-		refs = appendClassCandidates(refs, attr(ancestor, "class"), s.index.ancestorClasses)
 	}
 	if len(refs) < 2 {
 		s.candidateScratch = refs
@@ -518,7 +520,43 @@ func (s *sheet) candidates(n *html.Node) []selectorRef {
 	return out
 }
 
-func appendClassCandidates(refs []selectorRef, classes string, index map[string][]selectorRef) []selectorRef {
+func (s *sheet) cachedAncestorSelectorRefs(n *html.Node) []selectorRef {
+	if refs, ok := s.ancestorRefs[n]; ok {
+		return refs
+	}
+	refs := appendAttributeSelectorRefs(nil, n, s.index.ancestorIDs, s.index.ancestorClasses)
+	if s.ancestorRefs == nil {
+		s.ancestorRefs = make(map[*html.Node][]selectorRef)
+	}
+	s.ancestorRefs[n] = refs
+	return refs
+}
+
+func appendAttributeSelectorRefs(refs []selectorRef, n *html.Node, idIndex, classIndex map[string][]selectorRef) []selectorRef {
+	var id, classes string
+	var idSeen, classesSeen bool
+	for _, a := range n.Attr {
+		switch a.Key {
+		case "id":
+			if !idSeen {
+				id, idSeen = a.Val, true
+			}
+		case "class":
+			if !classesSeen {
+				classes, classesSeen = a.Val, true
+			}
+		}
+		if idSeen && classesSeen {
+			break
+		}
+	}
+	if id != "" {
+		refs = append(refs, idIndex[id]...)
+	}
+	return appendClassSelectorRefs(refs, classes, classIndex)
+}
+
+func appendClassSelectorRefs(refs []selectorRef, classes string, index map[string][]selectorRef) []selectorRef {
 	for start := 0; start < len(classes); {
 		for start < len(classes) && isCSSSpace(classes[start]) {
 			start++

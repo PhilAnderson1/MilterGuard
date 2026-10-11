@@ -83,6 +83,8 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 		count(*) FILTER (WHERE event_type = :protected_sender_domain_rejection AND outcome = :rejected),
 		coalesce(sum(quantity) FILTER (WHERE event_type = :sender_blocklist AND outcome = :rejected), 0),
 		coalesce(sum(quantity) FILTER (WHERE event_type = :sender_blocklist AND outcome = :accepted), 0),
+		count(*) FILTER (WHERE event_type = :html_dos AND outcome = :rejected),
+		count(*) FILTER (WHERE event_type = :html_dos AND outcome = :accepted),
 		coalesce(sum(token_cost) FILTER (WHERE event_type = :scan), 0)
 		FROM activity WHERE occurred_at_ms >= :since AND occurred_at_ms < :before`,
 		sql.Named("scan", stores.ActivityEventScan),
@@ -94,13 +96,15 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 		sql.Named("attachment_rejection", stores.ActivityEventAttachmentRejection),
 		sql.Named("protected_sender_domain_rejection", stores.ActivityEventProtectedSenderDomainRejection),
 		sql.Named("sender_blocklist", stores.ActivityEventSenderBlocklist),
+		sql.Named("html_dos", stores.ActivityEventHTMLDoS),
 		sql.Named("since", unixMillis(since)),
 		sql.Named("before", unixMillis(before))).Scan(
 		&summary.ScanTotal, &summary.ScanRejections, &summary.ScanAccepted,
 		&summary.AIEvaluationsFailed, &summary.IPRejections, &summary.CorrespondentAccepts,
 		&summary.TrustedDomainAccepts, &summary.AttachmentRejections,
 		&summary.ProtectedSenderDomainRejections, &summary.SenderBlocklistRejections,
-		&summary.SenderBlocklistRecipientRemovals, &summary.TokenCost)
+		&summary.SenderBlocklistRecipientRemovals, &summary.HTMLDoSRejections,
+		&summary.HTMLDoSAccepted, &summary.TokenCost)
 	if err != nil {
 		return stores.ActivitySummary{}, fmt.Errorf("aggregate activity: %w", err)
 	}

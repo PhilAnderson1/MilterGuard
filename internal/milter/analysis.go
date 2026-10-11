@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
@@ -18,15 +19,18 @@ type Analyzer interface {
 }
 
 type evaluationResult struct {
-	proposed       action
-	selected       action
-	classification ai.Classification
-	score          float64
-	reasons        []string
-	visionImages   int
-	tokenCost      float64
-	err            error
-	latency        time.Duration
+	proposed        action
+	selected        action
+	classification  ai.Classification
+	score           float64
+	reasons         []string
+	visionImages    int
+	tokenCost       float64
+	htmlCPUTime     time.Duration
+	htmlCPUExceeded bool
+	rejectMessage   string
+	err             error
+	latency         time.Duration
 }
 
 func (s *analysisService) analysisTimeout() time.Duration {
@@ -57,19 +61,25 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		return s.analysisFailure(ctx.Err(), started, mode, aiErrorAction)
 	}
 
-	prepared := msg.BuildAnalysis(analysisContext, s.ai.MaxBodyChars, message.VisionOptions{
-		Mode:         s.ai.VisionMode,
-		MinTextChars: s.ai.VisionMinTextChars,
-		MaxImages:    s.ai.MaxImages,
-		MaxBytes:     s.ai.MaxImageBytes,
-		MaxPixels:    s.ai.MaxImagePixels,
-	})
+	prepared, htmlCPUTime, cpuMeasured := s.buildAnalysis(msg, analysisContext)
+	maximumHTMLCPU := time.Duration(s.ai.MaxHTMLParseCPUMilliseconds) * time.Millisecond
+	if prepared.HasHTML && cpuMeasured && htmlCPUTime > maximumHTMLCPU {
+		proposed := actionReject
+		return evaluationResult{
+			proposed: proposed, selected: selectActionForMode(proposed, mode),
+			classification: ai.ClassificationUnwanted, score: 1,
+			reasons:     []string{"HTML processing exceeded the configured CPU-time limit"},
+			htmlCPUTime: htmlCPUTime, htmlCPUExceeded: true, rejectMessage: s.ai.HTMLDoSRejectMessage,
+			latency: time.Since(started),
+		}
+	}
 	if s.ai.IncompleteBodyAction == "reject" && (prepared.BodyTruncated || prepared.BodyExtractionIncomplete) {
 		proposed := actionReject
 		return evaluationResult{
 			proposed: proposed, selected: selectActionForMode(proposed, mode),
 			classification: ai.ClassificationUnwanted, score: 1,
 			reasons: []string{"message body extraction was incomplete"}, latency: time.Since(started),
+			htmlCPUTime: htmlCPUTime,
 		}
 	}
 	input := ai.Input{Text: prepared.Prompt, Images: make([]ai.Image, 0, len(prepared.Images))}
@@ -83,6 +93,7 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		failure := s.analysisFailure(err, started, mode, aiErrorAction)
 		failure.visionImages = len(input.Images)
 		failure.tokenCost = tokenCost
+		failure.htmlCPUTime = htmlCPUTime
 		return failure
 	}
 
@@ -96,8 +107,35 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		reasons:        decision.Reasons,
 		visionImages:   len(input.Images),
 		tokenCost:      tokenCost,
+		htmlCPUTime:    htmlCPUTime,
 		latency:        time.Since(started),
 	}
+}
+
+func (s *analysisService) buildAnalysis(msg *message.Message, analysisContext message.AnalysisContext) (message.Analysis, time.Duration, bool) {
+	vision := message.VisionOptions{
+		Mode:         s.ai.VisionMode,
+		MinTextChars: s.ai.VisionMinTextChars,
+		MaxImages:    s.ai.MaxImages,
+		MaxBytes:     s.ai.MaxImageBytes,
+		MaxPixels:    s.ai.MaxImagePixels,
+	}
+	if s.ai.MaxHTMLParseCPUMilliseconds == 0 {
+		return msg.BuildAnalysis(analysisContext, s.ai.MaxBodyChars, vision), 0, false
+	}
+	clock := currentThreadCPUTime
+	if s.threadCPUTime != nil {
+		clock = s.threadCPUTime
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	started, startedOK := clock()
+	prepared := msg.BuildAnalysis(analysisContext, s.ai.MaxBodyChars, vision)
+	finished, finishedOK := clock()
+	if !startedOK || !finishedOK || finished < started {
+		return prepared, 0, false
+	}
+	return prepared, finished - started, true
 }
 
 func tokenCost(usage ai.Usage, cfg config.AIConfig) float64 {
@@ -147,6 +185,7 @@ func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, 
 			"actual_action", result.selected.String(), "error", result.err,
 			"latency_ms", result.latency.Milliseconds(), "response_sent", sent,
 			"vision_images", result.visionImages,
+			"html_processing_cpu_ms", result.htmlCPUTime.Milliseconds(),
 		}
 		if responseErr != nil {
 			attrs = append(attrs, "response_error", responseErr)
@@ -175,6 +214,8 @@ func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, 
 		"actual_action", result.selected.String(), "model", s.ai.Model,
 		"latency_ms", result.latency.Milliseconds(), "truncated", msg.Truncated,
 		"response_sent", sent, "vision_images", result.visionImages,
+		"html_processing_cpu_ms", result.htmlCPUTime.Milliseconds(),
+		"html_cpu_limit_exceeded", result.htmlCPUExceeded,
 	}
 	if includeSubject {
 		attrs = append(attrs, "subject", msg.DecodedHeader("Subject"))

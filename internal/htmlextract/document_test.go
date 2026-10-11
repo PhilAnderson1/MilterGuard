@@ -517,6 +517,32 @@ func TestSelectorWorkBudgetStopsBeforePartialCascadeIsTrusted(t *testing.T) {
 	}
 }
 
+func TestDeclarationApplicationWorkStopsBeforePartialCascadeIsTrusted(t *testing.T) {
+	limits := DefaultLimits()
+	s := sheet{limits: limits}
+	s.parseCSS(`*{color:red;color:green;color:blue}`, false)
+	s.buildSelectorIndex(1, 1)
+	plan := s.rules[0].plans[0]
+	declarations := int64(len(s.rules[0].decls))
+	if declarations < 2 {
+		t.Fatalf("test rule has only %d declarations", declarations)
+	}
+	// Leave enough work to match the selector but one unit less than is
+	// required to reserve the complete declaration list.
+	matches := matchBudget{limit: s.planningWork + 1 + plan.cost + declarations*declarationApplyWeight - 1, used: s.planningWork}
+	expressions := expressionBudget{remaining: limits.ExpressionWork}
+	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matches.exhausted {
+		t.Fatalf("declaration application did not exhaust budget: %+v", matches)
+	}
+	if style[color].Known {
+		t.Fatalf("partially applied cascade was trusted: %+v", style[color])
+	}
+}
+
 func TestSelectorIndexSkipsIrrelevantInactiveRules(t *testing.T) {
 	limits := DefaultLimits()
 	s := sheet{limits: limits}
@@ -542,6 +568,24 @@ func TestDeclarationsPrepareContextFreeValuesOnce(t *testing.T) {
 	contextual := s.declarations("font-size", "50%")
 	if len(contextual) != 1 || contextual[0].prepared != nil {
 		t.Fatalf("context-dependent declaration was prepared as static: %+v", contextual)
+	}
+}
+
+func TestAnalyzeReportsResourceUsage(t *testing.T) {
+	limits := DefaultLimits()
+	document, err := Analyze([]byte(`<style>@media screen{p,.x{font-size:calc(50% + 1px)}}</style><p class="x">T</p>`), limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := document.Usage
+	if usage.InputBytes == 0 || usage.Nodes == 0 || usage.TextNodes == 0 || usage.Depth == 0 {
+		t.Fatalf("missing HTML usage: %+v", usage)
+	}
+	if usage.CSSDepth != 1 || usage.Rules != 1 || usage.Selectors != 2 || usage.MediaCases == 0 {
+		t.Fatalf("missing CSS usage: %+v", usage)
+	}
+	if usage.MatchWork == 0 || usage.MatchWork > limits.MatchWork || usage.ExpressionWork > limits.ExpressionWork {
+		t.Fatalf("invalid work usage: %+v", usage)
 	}
 }
 
@@ -640,6 +684,37 @@ func TestSelectorIndexDoesNotReturnUnrelatedKeyedRules(t *testing.T) {
 	node := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: "other"}}}
 	if refs := s.candidates(node); len(refs) != 0 {
 		t.Fatalf("unrelated candidates = %+v", refs)
+	}
+}
+
+func TestSelectorIndexBypassesAttributeWorkWithoutSelectors(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.buildSelectorIndex(1, 1)
+	node := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: strings.Repeat("word ", 1_000)}}}
+	if refs := s.candidates(node); len(refs) != 0 {
+		t.Fatalf("candidates without selectors = %+v", refs)
+	}
+	if s.ancestorRefs != nil {
+		t.Fatal("selector-free document created an attribute cache")
+	}
+}
+
+func TestSelectorIndexCachesAncestorAttributes(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`.wanted *{display:none}`, false)
+	s.buildSelectorIndex(2, 3)
+	ancestor := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "wanted"}}}
+	first := &html.Node{Type: html.ElementNode, Data: "p", Parent: ancestor}
+	second := &html.Node{Type: html.ElementNode, Data: "p", Parent: ancestor}
+	if refs := s.candidates(first); len(refs) != 1 {
+		t.Fatalf("first descendant candidates = %+v", refs)
+	}
+	if got := len(s.ancestorRefs); got != 1 {
+		t.Fatalf("cached element count = %d, want 1", got)
+	}
+	ancestor.Attr[0].Val = "changed-after-preparation"
+	if refs := s.candidates(second); len(refs) != 1 {
+		t.Fatalf("cached ancestor candidates = %+v", refs)
 	}
 }
 

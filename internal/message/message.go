@@ -93,6 +93,7 @@ type Image struct {
 type Analysis struct {
 	Prompt                                string
 	Images                                []Image
+	HasHTML                               bool
 	BodyTruncated                         bool
 	BodyExtractionIncomplete              bool
 	ConcealedContentRemoved               bool

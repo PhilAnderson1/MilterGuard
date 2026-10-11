@@ -7,6 +7,7 @@ import (
 
 	"github.com/tdewolff/parse/v2"
 	"github.com/tdewolff/parse/v2/css"
+	"golang.org/x/net/html"
 )
 
 const (
@@ -138,6 +139,7 @@ type rule struct {
 	decls      []declaration
 	conditions []mediaCondition
 }
+
 type sheet struct {
 	rules               []rule
 	selectors, order    int
@@ -147,11 +149,13 @@ type sheet struct {
 	workIncomplete      bool
 	mediaCache          map[mediaCacheKey][]uint8
 	planCount           int
+	conditionDepth      int
 	index               selectorIndex
 	cacheMatches        bool
 	candidateScratch    []selectorRef
 	candidateMarks      []uint32
 	candidateGeneration uint32
+	ancestorRefs        map[*html.Node][]selectorRef
 }
 
 func (s *sheet) chargeDeclarationWork(value string) bool {
@@ -169,11 +173,13 @@ func (s *sheet) abandonCascade() {
 	s.rules = nil
 	s.selectors = 0
 	s.planCount = 0
+	s.conditionDepth = 0
 	s.index = selectorIndex{}
 	s.cacheMatches = false
 	s.candidateScratch = nil
 	s.candidateMarks = nil
 	s.candidateGeneration = 0
+	s.ancestorRefs = nil
 	s.planningWork = 0
 	s.mediaCache = nil
 }
@@ -457,6 +463,9 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 				return out
 			}
 			conditions = append(conditions, cond)
+			if len(conditions) > s.conditionDepth {
+				s.conditionDepth = len(conditions)
+			}
 		case css.EndAtRuleGrammar:
 			if len(conditions) > 0 {
 				conditions = conditions[:len(conditions)-1]

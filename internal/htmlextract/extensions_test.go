@@ -79,6 +79,7 @@ func TestMediaCasesShareSelectorWorkBudget(t *testing.T) {
 	for ruleIndex := range s.rules {
 		if s.rules[ruleIndex].mediaState(0, false) != mediaNo {
 			firstCaseWork += s.rules[ruleIndex].plans[0].cost
+			firstCaseWork += int64(len(s.rules[ruleIndex].decls)) * declarationApplyWeight
 		}
 	}
 

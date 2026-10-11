@@ -121,6 +121,16 @@ ai:
   # integer. This is separate from milter.max_message_size, which is in bytes.
   max_body_chars: 50000
 
+  # Maximum CPU time, in milliseconds, for converting an HTML message into the
+  # analysis prompt. Exceeding it rejects the message as unwanted without an AI
+  # request, so normal IP-reputation blocking and escalation apply. CPU time
+  # excludes time waiting to be scheduled. Set to 0 to disable this protection.
+  max_html_parse_cpu_ms: 250
+
+  # Text returned with SMTP status 550 5.7.1 when the HTML CPU limit is
+  # exceeded. Keep this on one line; NUL and newline characters are removed.
+  html_dos_reject_message: Message rejected due to suspected HTML/CSS denial-of-service attack
+
   # Handling when extraction limits or final prefix truncation omit body text.
   # scan submits the retained prefix with a limitation notice; reject records a
   # rejection decision (enforced only while mode is enforce).

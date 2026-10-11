@@ -443,6 +443,33 @@ func TestValidateIncompleteBodyAction(t *testing.T) {
 	}
 }
 
+func TestValidateMaximumHTMLParseCPU(t *testing.T) {
+	if got := defaults().AI.MaxHTMLParseCPUMilliseconds; got != 250 {
+		t.Fatalf("maximum HTML parse CPU default = %d, want 250", got)
+	}
+	for _, milliseconds := range []int{0, 1, 1000} {
+		cfg := validConfig()
+		cfg.AI.MaxHTMLParseCPUMilliseconds = milliseconds
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid max_html_parse_cpu_ms %d rejected: %v", milliseconds, err)
+		}
+	}
+	cfg := validConfig()
+	cfg.AI.MaxHTMLParseCPUMilliseconds = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_html_parse_cpu_ms") {
+		t.Fatalf("invalid max_html_parse_cpu_ms error = %v", err)
+	}
+	const wantRejectMessage = "Message rejected due to suspected HTML/CSS denial-of-service attack"
+	if got := defaults().AI.HTMLDoSRejectMessage; got != wantRejectMessage {
+		t.Fatalf("HTML DoS rejection message default = %q, want %q", got, wantRejectMessage)
+	}
+	cfg = validConfig()
+	cfg.AI.HTMLDoSRejectMessage = " "
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "html_dos_reject_message") {
+		t.Fatalf("blank html_dos_reject_message error = %v", err)
+	}
+}
+
 func TestAuthenticatedMailScanningDefaultsDisabled(t *testing.T) {
 	if defaults().Filtering.ScanAuthenticated {
 		t.Fatal("authenticated mail scanning must match the disabled sample configuration")

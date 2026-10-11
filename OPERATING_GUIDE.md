@@ -106,6 +106,16 @@ confidently identified as concealed and leaves location markers. If the result
 is still too large, it retains one continuous prefix and reports the omitted
 remainder. Independently extracted links remain available within their limits.
 
+`ai.max_html_parse_cpu_ms` limits the CPU time used to convert an HTML message
+into its complete analysis prompt. The default is 250 milliseconds; `0`
+disables this protection. CPU time excludes time spent descheduled, so unrelated
+server load does not by itself consume the allowance. Exceeding the limit skips
+the AI request and produces an unwanted-mail rejection decision. In enforce
+mode, that rejection adds the usual sending-IP reputation strike, including the
+configured short block and repeat-offender escalation. IP and reverse-DNS
+allowlists still apply. `ai.html_dos_reject_message` sets the dedicated SMTP
+rejection text returned for this decision.
+
 Set `ai.incomplete_body_action` to `scan` (the default) to classify the retained
 body with an explicit limitation notice. Set it to `reject` to record a
 rejection without asking the model when final truncation or an extraction
@@ -640,7 +650,8 @@ EXIT
 - `ACTIVITY` reports filtering activity, failed AI evaluations, estimated AI
   cost, and service uptime. Full sender-blocklist rejections are counted as
   rejected messages; selective matches are counted as removed recipient
-  deliveries. It is restricted to administrators.
+  deliveries. HTML/CSS CPU-limit decisions have their own protection category
+  and are not counted as AI scans. It is restricted to administrators.
 - `WHITELIST ADD`, `WHITELIST DELETE`, and `WHITELIST LIST` manage trusted
   correspondent addresses.
 - `BLOCKLIST ADD`, `BLOCKLIST DELETE`, and `BLOCKLIST LIST` manage manual
