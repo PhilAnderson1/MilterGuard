@@ -156,6 +156,7 @@ type sheet struct {
 	candidateMarks      []uint32
 	candidateGeneration uint32
 	ancestorRefs        map[*html.Node][]selectorRef
+	matchCacheEntries   int
 }
 
 func (s *sheet) chargeDeclarationWork(value string) bool {
@@ -180,6 +181,7 @@ func (s *sheet) abandonCascade() {
 	s.candidateMarks = nil
 	s.candidateGeneration = 0
 	s.ancestorRefs = nil
+	s.matchCacheEntries = 0
 	s.planningWork = 0
 	s.mediaCache = nil
 }
@@ -359,6 +361,10 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 	parsed := parseDeclarationTokens(tokens, status, fallback)
 	value := parsed.text
 	imp := parsed.important
+	custom := strings.HasPrefix(prop, "--")
+	if custom && (parsed.status == 0 || (parsed.status == 1 && !validVariableFunctions(parsed.tokens))) {
+		return nil
+	}
 	prepared := func(d declaration) declaration {
 		d.unsupported = d.unsupported || parsed.status == 2
 		d.valueTokens = parsed.tokens
@@ -367,7 +373,7 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 		return prepareDeclaration(d)
 	}
 	s.order++
-	if strings.HasPrefix(prop, "--") {
+	if custom {
 		return []declaration{prepared(declaration{prop: -1, custom: prop, value: value, important: imp, order: s.order})}
 	}
 	// None of the tracked property grammars accepts an arbitrary identifier.

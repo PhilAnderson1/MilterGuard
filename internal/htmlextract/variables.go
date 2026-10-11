@@ -120,7 +120,52 @@ func closing(ts []valueToken, start int) int {
 			}
 		}
 	}
-	return -1
+	// CSS automatically closes an open function at end of input.
+	return len(ts)
+}
+
+// validVariableFunctions validates the grammar of every var() reference in a
+// custom-property value. CSS requires a custom-property declaration containing
+// a malformed var() to be ignored rather than allowed to win the cascade.
+func validVariableFunctions(ts []valueToken) bool {
+	for i := 0; i < len(ts); i++ {
+		if ts[i].kind != css.FunctionToken || !strings.EqualFold(ts[i].raw, "var(") {
+			continue
+		}
+		end := closing(ts, i)
+		inner := ts[i+1 : end]
+		comma := -1
+		level := 0
+		for j, token := range inner {
+			switch token.kind {
+			case css.FunctionToken, css.LeftParenthesisToken:
+				level++
+			case css.RightParenthesisToken:
+				level--
+			case css.CommaToken:
+				if level == 0 && comma < 0 {
+					comma = j
+				}
+			}
+		}
+		name := inner
+		if comma >= 0 {
+			name = inner[:comma]
+			if !validVariableFunctions(inner[comma+1:]) {
+				return false
+			}
+		}
+		name = significant(name)
+		if len(name) != 1 || (name[0].kind != css.IdentToken && name[0].kind != css.CustomPropertyNameToken) {
+			return false
+		}
+		decoded := cssUnescape(name[0].raw)
+		if !strings.HasPrefix(decoded, "--") || decoded == "--" {
+			return false
+		}
+		i = end
+	}
+	return true
 }
 
 // Includes fallback dependencies even when the fallback would not be used.
@@ -290,9 +335,6 @@ func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget
 			out.WriteString(t.raw)
 		} else {
 			end := closing(ts, i)
-			if end < 0 {
-				return variableValue{status: 0}
-			}
 			inner := ts[i+1 : end]
 			comma := -1
 			level := 0

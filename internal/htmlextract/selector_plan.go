@@ -431,14 +431,24 @@ func selectorExecutionCost(c selectorComplexity, depth, nodes int, limit int64) 
 }
 
 func (s *sheet) buildSelectorIndex(depth, nodes int) {
+	// Rules without any declaration understood by the extractor cannot affect
+	// presentation. Removing them also prevents no-op selectors from consuming
+	// matching work or match-cache memory.
+	kept := s.rules[:0]
+	for _, rule := range s.rules {
+		if len(rule.decls) != 0 {
+			kept = append(kept, rule)
+		}
+	}
+	s.rules = kept
 	index := selectorIndex{
 		tags: map[string][]selectorRef{}, ids: map[string][]selectorRef{}, classes: map[string][]selectorRef{},
 		ancestorTags: map[string][]selectorRef{}, ancestorIDs: map[string][]selectorRef{}, ancestorClasses: map[string][]selectorRef{},
-		count: s.planCount,
 	}
 	for ruleIndex := range s.rules {
 		for branchIndex := range s.rules[ruleIndex].plans {
 			plan := &s.rules[ruleIndex].plans[branchIndex]
+			plan.matches = nil
 			if plan.uncertain {
 				plan.cost = int64(len(plan.scope.String()) + 1)
 			} else {
@@ -453,6 +463,7 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 				}
 			}
 			ref := selectorRef{rule: ruleIndex, branch: branchIndex, sequence: plan.sequence}
+			index.count = max(index.count, plan.sequence+1)
 			switch plan.key.kind {
 			case selectorTag:
 				index.tags[plan.key.value] = append(index.tags[plan.key.value], ref)
@@ -473,6 +484,7 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 	}
 	s.index = index
 	s.ancestorRefs = nil
+	s.matchCacheEntries = 0
 }
 
 func (s *sheet) candidates(n *html.Node) []selectorRef {

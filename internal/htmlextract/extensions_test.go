@@ -163,6 +163,30 @@ func TestVariables(t *testing.T) {
 	}
 }
 
+func TestMalformedCustomPropertyVariableDoesNotWinCascade(t *testing.T) {
+	for _, src := range []string{
+		`<p style="--x:hidden;--x:var(1);visibility:var(--x)">T</p>`,
+		`<p style="--x:hidden;--x:var(foo);visibility:var(--x)">T</p>`,
+		`<p style="--x:hidden;--x:var(--missing,var(1));visibility:var(--x)">T</p>`,
+	} {
+		in := inspectHTML(t, src)
+		if got := findText(t, in, "T").Label; got != "concealed" {
+			t.Errorf("malformed custom property label = %q for %s", got, src)
+		}
+	}
+
+	s := sheet{limits: DefaultLimits()}
+	if declarations := s.declarations("--x", "var(1)"); len(declarations) != 0 {
+		t.Fatalf("malformed custom property was retained: %+v", declarations)
+	}
+	if declarations := s.declarations("visibility", "var(1)"); len(declarations) != 1 {
+		t.Fatalf("ordinary property lost IACVT declaration: %+v", declarations)
+	}
+	if declarations := s.declarations("--x", "var(--missing"); len(declarations) != 1 {
+		t.Fatalf("implicitly closed var() was rejected: %+v", declarations)
+	}
+}
+
 func TestDeclarationValueTokensAreCached(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	ds := s.declarations("--payload", "var(--missing, none)")

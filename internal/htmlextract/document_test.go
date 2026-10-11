@@ -687,6 +687,68 @@ func TestSelectorIndexDoesNotReturnUnrelatedKeyedRules(t *testing.T) {
 	}
 }
 
+func TestSelectorIndexRemovesRulesWithoutRelevantDeclarations(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`*{}.unused{unknown-property:value}p{display:none}`, false)
+	if len(s.rules) != 3 {
+		t.Fatalf("parsed rules = %d, want 3", len(s.rules))
+	}
+	s.buildSelectorIndex(1, 1)
+	if len(s.rules) != 1 || len(s.rules[0].decls) != 1 {
+		t.Fatalf("indexed rules = %+v", s.rules)
+	}
+	node := &html.Node{Type: html.ElementNode, Data: "p"}
+	if refs := s.candidates(node); len(refs) != 1 {
+		t.Fatalf("relevant candidates = %+v", refs)
+	}
+}
+
+func TestMatchCacheStopsAtDocumentLimit(t *testing.T) {
+	s := sheet{limits: DefaultLimits(), cacheMatches: true, matchCacheEntries: maxMatchCacheEntries - 1}
+	s.parseCSS(`p{display:none}`, false)
+	s.buildSelectorIndex(1, 2)
+	// buildSelectorIndex resets cache accounting, so place it immediately below
+	// the ceiling before exercising two distinct entries.
+	s.matchCacheEntries = maxMatchCacheEntries - 1
+	plan := &s.rules[0].plans[0]
+	first := &html.Node{Type: html.ElementNode, Data: "p"}
+	second := &html.Node{Type: html.ElementNode, Data: "p"}
+	s.cacheMatch(plan, first, true)
+	s.cacheMatch(plan, second, true)
+	if s.matchCacheEntries != maxMatchCacheEntries {
+		t.Fatalf("cache entries = %d", s.matchCacheEntries)
+	}
+	if plan.matches[first] != 2 {
+		t.Fatal("entry below the ceiling was not cached")
+	}
+	if _, ok := plan.matches[second]; ok {
+		t.Fatal("entry beyond the ceiling was cached")
+	}
+}
+
+func TestMatchingContinuesAfterMatchCacheIsFull(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`p{display:none}`, false)
+	s.buildSelectorIndex(1, 1)
+	s.cacheMatches = true
+	s.matchCacheEntries = maxMatchCacheEntries
+	matches := matchBudget{limit: s.limits.MatchWork, used: s.planningWork}
+	expressions := expressionBudget{remaining: s.limits.ExpressionWork}
+	node := &html.Node{Type: html.ElementNode, Data: "p"}
+	for range 2 {
+		style, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !style[display].Known || style[display].Text != "none" {
+			t.Fatalf("uncached match display = %+v", style[display])
+		}
+	}
+	if s.rules[0].plans[0].matches != nil {
+		t.Fatal("full cache retained a new match")
+	}
+}
+
 func TestSelectorIndexBypassesAttributeWorkWithoutSelectors(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	s.buildSelectorIndex(1, 1)

@@ -169,6 +169,33 @@ func TestModernRGBAndHSLColours(t *testing.T) {
 		t.Fatal(v)
 	}
 }
+
+func TestNonFiniteHSLResultsRemainUncertain(t *testing.T) {
+	for _, value := range []string{
+		`hsl(1e306turn 0% 0%)`,
+		`hsl(1e307rad 0% 0%)`,
+		`hsla(-1e306turn,0%,0%,1)`,
+	} {
+		colour, status := readColour(value)
+		if status != 2 {
+			t.Errorf("readColour(%q) status = %d, want unresolved", value, status)
+		}
+		if !finite(colour.R) || !finite(colour.G) || !finite(colour.B) || !finite(colour.A) {
+			t.Errorf("readColour(%q) returned non-finite channels: %+v", value, colour)
+		}
+	}
+
+	for _, src := range []string{
+		`<body style="background-color:white"><span style="color:white"><span style="color:hsl(1e306turn,0%,0%)">T</span></span></body>`,
+		`<body style="background-color:white;color:white"><span style="background:hsl(1e307rad,0%,0%)">T</span></body>`,
+	} {
+		v := colourText(t, src)
+		if v.Label != "unknown" || v.inspection.colour.Known {
+			t.Errorf("non-finite HSL was trusted: %+v", v)
+		}
+	}
+}
+
 func TestBackgroundLayersAndResets(t *testing.T) {
 	cases := []struct {
 		name, src     string

@@ -11,6 +11,11 @@ import (
 // candidate storage; weight it above a simple selector-index lookup.
 const declarationApplyWeight int64 = 16
 
+// Go maps have substantial per-entry overhead. Bound cached selector results
+// independently of the CPU-work budget so one message has a predictable
+// memory ceiling. Matching continues normally after the cache is full.
+const maxMatchCacheEntries = 100_000
+
 type mediaCacheKey struct {
 	width    float64
 	fallback bool
@@ -52,6 +57,20 @@ func (b *matchBudget) spend(cost int64) bool {
 
 func unresolvedStyle() Style {
 	return Style{}
+}
+
+func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
+	if !s.cacheMatches || s.matchCacheEntries >= maxMatchCacheEntries {
+		return
+	}
+	if plan.matches == nil {
+		plan.matches = make(map[*html.Node]uint8)
+	}
+	plan.matches[n] = 1
+	if matched {
+		plan.matches[n] = 2
+	}
+	s.matchCacheEntries++
 }
 
 type candidate struct {
@@ -207,15 +226,7 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 			} else {
 				matched = plan.matcher.Match(n)
 			}
-			if s.cacheMatches {
-				if plan.matches == nil {
-					plan.matches = make(map[*html.Node]uint8)
-				}
-				plan.matches[n] = 1
-				if matched {
-					plan.matches[n] = 2
-				}
-			}
+			s.cacheMatch(plan, n, matched)
 		}
 		if matched {
 			if plan.uncertain {

@@ -264,9 +264,9 @@ func readColour(s string) (RGBA, int) {
 		body := s[open+1 : len(s)-1]
 		switch name {
 		case "rgb", "rgba":
-			return parseRGBFunction(body)
+			return finiteColourResult(parseRGBFunction(body))
 		case "hsl", "hsla":
-			return parseHSLFunction(body)
+			return finiteColourResult(parseHSLFunction(body))
 		default:
 			return RGBA{}, 2
 		}
@@ -282,6 +282,15 @@ func readColour(s string) (RGBA, int) {
 	}
 	return RGBA{c[0] / 255, c[1] / 255, c[2] / 255, c[3]}, 1
 }
+
+func finiteColourResult(c RGBA, status int) (RGBA, int) {
+	if status == 1 && (!finite(c.R) || !finite(c.G) || !finite(c.B) || !finite(c.A)) {
+		return RGBA{}, 2
+	}
+	return c, status
+}
+
+func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func colourFunctionParts(body string) (channels []string, alpha string, legacy bool, status int) {
 	if strings.Contains(body, "(") || containsFold(body, "from") {
@@ -399,6 +408,12 @@ func parseHue(component string) (float64, int) {
 		return 0, 0
 	}
 	n = math.Mod(n*factor, 360)
+	if !finite(n) {
+		// The source number may be finite while conversion to degrees
+		// overflows. Clients need not agree on such extreme values, so retain
+		// uncertainty rather than accepting a known colour containing NaN.
+		return 0, 2
+	}
 	if n < 0 {
 		n += 360
 	}
