@@ -31,6 +31,10 @@ func evalMath(prop int, src string, parent, root Style, budget *expressionBudget
 	if status != 1 {
 		return Value{Text: src}, status
 	}
+	return evalMathTokens(prop, src, ts, parent, root, budget)
+}
+
+func evalMathTokens(prop int, src string, ts []valueToken, parent, root Style, budget *expressionBudget) (Value, int) {
 	if !budget.charge(len(ts)) {
 		return Value{Text: src}, 2
 	}

@@ -151,12 +151,13 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 	}
 	seen := map[string]bool{}
 	var widths []float64
+	basePlanningWork := s.planningWork
 	var planningWork int64
 	for _, w := range candidates {
 		var key strings.Builder
 		for _, r := range s.rules {
 			planningWork += int64(1 + len(r.conditions)*32)
-			s.planningWork = planningWork
+			s.planningWork = basePlanningWork + planningWork
 			if planningWork > s.limits.MatchWork/4 {
 				return []float64{1024}, true
 			}

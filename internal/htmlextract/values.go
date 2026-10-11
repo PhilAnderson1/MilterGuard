@@ -284,7 +284,7 @@ func readColour(s string) (RGBA, int) {
 }
 
 func colourFunctionParts(body string) (channels []string, alpha string, legacy bool, status int) {
-	if strings.Contains(body, "(") || strings.Contains(strings.ToLower(body), "from") {
+	if strings.Contains(body, "(") || containsFold(body, "from") {
 		return nil, "", false, 2
 	}
 	if strings.Contains(body, ",") {

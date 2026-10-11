@@ -397,19 +397,13 @@ func (p processor) process(input []byte) (Document, error) {
 	s := &document.styles
 	inlineDecls := document.inlineDecls
 	in := Document{Root: root}
-	for i := range s.rules {
-		r := &s.rules[i]
-		for _, sel := range r.selectors {
-			r.costs = append(r.costs, selectorCost(sel.String(), document.treeDepth, document.nodeCount, p.Limits.MatchWork))
-			r.fallbackScopes = append(r.fallbackScopes, uncertainSelectorScope(sel.String()))
-			r.scopeCosts = append(r.scopeCosts, int64(len(sel.String())+1))
-		}
-	}
+	s.buildSelectorIndex(document.treeDepth, document.nodeCount)
 	cap := p.Limits.MediaCases
 	if cap < 1 || cap > MaxViewingCases {
 		cap = MaxViewingCases
 	}
 	widths, fallback := s.viewingCases(cap)
+	s.cacheMatches = len(widths) > 1
 	exprLimit := p.Limits.ExpressionWork
 	if exprLimit < 1 {
 		exprLimit = 10000000

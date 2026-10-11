@@ -74,19 +74,11 @@ func TestMediaCasesShareSelectorWorkBudget(t *testing.T) {
 	limits := DefaultLimits()
 	s := sheet{limits: limits}
 	s.parseCSS(`@media(max-width:500px){p{display:none}}@media(min-width:500px){p{display:block}}`, false)
-	var firstCaseWork int64
+	s.buildSelectorIndex(1, 1)
+	firstCaseWork := int64(2) // Both indexed candidates are visited.
 	for ruleIndex := range s.rules {
-		rule := &s.rules[ruleIndex]
-		for _, selector := range rule.selectors {
-			cost := selectorCost(selector.String(), 1, 1, limits.MatchWork)
-			rule.costs = append(rule.costs, cost)
-			rule.fallbackScopes = append(rule.fallbackScopes, uncertainSelectorScope(selector.String()))
-			scopeCost := int64(len(selector.String()) + 1)
-			rule.scopeCosts = append(rule.scopeCosts, scopeCost)
-		}
-		firstCaseWork++ // rule visit, including media-inactive rules
-		if rule.mediaState(0, false) != mediaNo {
-			firstCaseWork += rule.scopeCosts[0] + rule.costs[0]
+		if s.rules[ruleIndex].mediaState(0, false) != mediaNo {
+			firstCaseWork += s.rules[ruleIndex].plans[0].cost
 		}
 	}
 

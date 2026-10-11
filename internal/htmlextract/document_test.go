@@ -502,14 +502,7 @@ func TestSelectorWorkBudgetStopsBeforePartialCascadeIsTrusted(t *testing.T) {
 	limits.MatchWork = 5
 	s := sheet{limits: limits}
 	s.parseCSS(`p{display:none}p{display:block}`, false)
-	for ruleIndex := range s.rules {
-		rule := &s.rules[ruleIndex]
-		for _, selector := range rule.selectors {
-			rule.costs = append(rule.costs, selectorCost(selector.String(), 1, 1, limits.MatchWork))
-			rule.fallbackScopes = append(rule.fallbackScopes, uncertainSelectorScope(selector.String()))
-			rule.scopeCosts = append(rule.scopeCosts, int64(len(selector.String())+1))
-		}
-	}
+	s.buildSelectorIndex(1, 1)
 	matches := matchBudget{limit: limits.MatchWork}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
 	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
@@ -524,19 +517,59 @@ func TestSelectorWorkBudgetStopsBeforePartialCascadeIsTrusted(t *testing.T) {
 	}
 }
 
-func TestSelectorWorkBudgetChargesInactiveRules(t *testing.T) {
+func TestSelectorIndexSkipsIrrelevantInactiveRules(t *testing.T) {
 	limits := DefaultLimits()
-	limits.MatchWork = 1
 	s := sheet{limits: limits}
 	s.parseCSS(`@media print{p{display:none}}@media print{div{display:none}}`, false)
-	matches := matchBudget{limit: limits.MatchWork}
+	s.buildSelectorIndex(1, 1)
+	matches := matchBudget{limit: 1}
+	expressions := expressionBudget{remaining: limits.ExpressionWork}
+	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matches.exhausted || !style[display].Known {
+		t.Fatalf("irrelevant indexed rule consumed work: budget=%+v display=%+v", matches, style[display])
+	}
+}
+
+func TestDeclarationsPrepareContextFreeValuesOnce(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	static := s.declarations("color", "rgb(1 2 3)")
+	if len(static) != 1 || static[0].prepared == nil || static[0].prepared.status != 1 || !static[0].prepared.value.Known {
+		t.Fatalf("static declaration was not prepared: %+v", static)
+	}
+	contextual := s.declarations("font-size", "50%")
+	if len(contextual) != 1 || contextual[0].prepared != nil {
+		t.Fatalf("context-dependent declaration was prepared as static: %+v", contextual)
+	}
+}
+
+func TestOversizedDeclarationValueIsPreparedAsUnresolved(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	value := "rgb(" + strings.Repeat("0", maxResolvedValueBytes) + ")"
+	ds := s.declarations("color", value)
+	if len(ds) != 1 || ds[0].prepared == nil || ds[0].prepared.status != 2 {
+		t.Fatalf("oversized declaration was not bounded: %+v", ds)
+	}
+}
+
+func TestDeclarationValuesShareWorkBudget(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MatchWork = 4
+	s := sheet{limits: limits}
+	s.parseCSS(`p{display:none}`, false)
+	if !s.workIncomplete {
+		t.Fatal("declaration value did not exhaust the shared work budget")
+	}
+	matches := matchBudget{limit: limits.MatchWork, used: s.planningWork}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
 	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !matches.exhausted || style[display].Known {
-		t.Fatalf("inactive rule scan escaped budget: budget=%+v display=%+v", matches, style[display])
+		t.Fatalf("exhausted declaration work was trusted: budget=%+v display=%+v", matches, style[display])
 	}
 }
 
@@ -544,14 +577,69 @@ func TestSiblingSelectorWorkIsWeighted(t *testing.T) {
 	const nodes = 100
 	const limit = int64(1_000_000)
 	for _, selector := range []string{"q ~ p", "q + p"} {
-		base := int64(len(selector) + 1)
-		want := base + int64(nodes+1)*siblingMatchWeight
-		if got := selectorCost(selector, 1, nodes, limit); got != want {
-			t.Errorf("selectorCost(%q) = %d, want %d", selector, got, want)
+		sequence := 0
+		plan := planSelectorList(selector, &sequence)[0]
+		want := int64(5) + int64(nodes+1)*siblingMatchWeight
+		if got := selectorExecutionCost(plan.complexity, 1, nodes, limit); got != want {
+			t.Errorf("selectorExecutionCost(%q) = %d, want %d", selector, got, want)
 		}
 	}
-	if got, want := selectorCost("q p", 4, nodes, limit), int64(len("q p")+1+5); got != want {
+	sequence := 0
+	plan := planSelectorList("q p", &sequence)[0]
+	if got, want := selectorExecutionCost(plan.complexity, 4, nodes, limit), int64(10); got != want {
 		t.Errorf("descendant selector cost = %d, want %d", got, want)
+	}
+	sequence = 0
+	plan = planSelectorList("a ~ b ~ p", &sequence)[0]
+	if bound, additive := plannedSelectorCost(plan.complexity, 1, nodes, limit), selectorExecutionCost(plan.complexity, 1, nodes, limit); bound <= additive {
+		t.Fatalf("nested sibling bound %d did not exceed additive cost %d", bound, additive)
+	}
+}
+
+func TestOverComplexSelectorBecomesUncertainBeforeMatching(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MatchWork = 1_000
+	s := sheet{limits: limits}
+	s.parseCSS(`a ~ b ~ p{display:none}`, false)
+	s.buildSelectorIndex(1, 100)
+	if len(s.rules) != 1 || len(s.rules[0].plans) != 1 {
+		t.Fatalf("unexpected plans: %+v", s.rules)
+	}
+	plan := s.rules[0].plans[0]
+	if plan.bound <= limits.MatchWork {
+		t.Fatalf("single-call bound %d did not exceed limit %d", plan.bound, limits.MatchWork)
+	}
+	if !plan.uncertain || plan.matcher != nil || plan.scope == nil {
+		t.Fatalf("over-complex selector was not converted to uncertainty: %+v", plan)
+	}
+}
+
+func TestSelectorIndexIncludesEveryPotentialCandidate(t *testing.T) {
+	limits := DefaultLimits()
+	s := sheet{limits: limits}
+	s.parseCSS(`p{display:none}.target{opacity:0}#chosen{visibility:hidden}.ancestor *{font-size:0}[data-x]{color:red}`, false)
+	s.buildSelectorIndex(4, 20)
+	ancestor := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "ancestor"}}}
+	node := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "id", Val: "chosen"}, {Key: "class", Val: "target"}, {Key: "data-x", Val: "1"}}, Parent: ancestor}
+	refs := s.candidates(node)
+	got := make(map[string]bool)
+	for _, ref := range refs {
+		got[s.rules[ref.rule].plans[ref.branch].source] = true
+	}
+	for _, selector := range []string{"p", ".target", "#chosen", ".ancestor *", "[data-x]"} {
+		if !got[selector] {
+			t.Errorf("index omitted %q; candidates=%v", selector, got)
+		}
+	}
+}
+
+func TestSelectorIndexDoesNotReturnUnrelatedKeyedRules(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`.wanted{display:none}#chosen{opacity:0}section{visibility:hidden}`, false)
+	s.buildSelectorIndex(1, 4)
+	node := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: "other"}}}
+	if refs := s.candidates(node); len(refs) != 0 {
+		t.Fatalf("unrelated candidates = %+v", refs)
 	}
 }
 

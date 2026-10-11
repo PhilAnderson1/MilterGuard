@@ -75,12 +75,18 @@ func resolvedDeclaration(d declaration, parent, root Style, vars *variableScope,
 	if d.unsupported {
 		return Value{Text: d.value}, 2
 	}
+	if d.prepared != nil {
+		return d.prepared.value, d.prepared.status
+	}
 	hadVar := d.hasVars
 	v := substitute(d, vars, budget)
 	if v.status == 0 {
 		return resolve(d.prop, "unset", parent, root)
 	}
 	if v.status == 2 {
+		return Value{Text: d.value}, 2
+	}
+	if len(v.text) > maxResolvedValueBytes {
 		return Value{Text: d.value}, 2
 	}
 	value := strings.ToLower(strings.TrimSpace(v.text))
@@ -98,7 +104,11 @@ func resolvedDeclaration(d declaration, parent, root Style, vars *variableScope,
 	var out Value
 	var status int
 	if (d.prop == fontSize || d.prop == opacity) && isMath(value) {
-		out, status = evalMath(d.prop, value, parent, root, budget)
+		if !hadVar && d.tokensReady && d.valueStatus == 1 {
+			out, status = evalMathTokens(d.prop, value, d.valueTokens, parent, root, budget)
+		} else {
+			out, status = evalMath(d.prop, value, parent, root, budget)
+		}
 	} else {
 		out, status = resolve(d.prop, value, parent, root)
 	}
@@ -108,7 +118,10 @@ func resolvedDeclaration(d declaration, parent, root Style, vars *variableScope,
 	return out, status
 }
 func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *variableScope, inline []declaration, width float64, fallback bool, matches *matchBudget, budget *expressionBudget) (Style, *variableScope, error) {
-	if s.cascadeIncomplete {
+	if s.cascadeIncomplete || s.workIncomplete {
+		if s.workIncomplete {
+			matches.exhausted = true
+		}
 		return unresolvedStyle(), parentVars, nil
 	}
 	st := initial()
@@ -121,10 +134,15 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 	var vars map[string]candidate
 	apply := func(ds []declaration, spec cascadia.Specificity, inl, uncertain bool) {
 		for _, d := range ds {
-			if d.custom == "" && !d.unsupported && !d.hasVars && !d.shorthand {
-				_, status := resolvedDeclaration(d, parent, root, parentVars, budget)
-				if status == 0 {
+			if d.custom == "" && !d.unsupported {
+				if d.validityReady && d.validity == 0 {
 					continue
+				}
+				if !d.validityReady && !d.hasVars && !d.shorthand {
+					_, status := resolvedDeclaration(d, parent, root, parentVars, budget)
+					if status == 0 {
+						continue
+					}
 				}
 			}
 			d.unsupported = d.unsupported || uncertain
@@ -141,55 +159,50 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 			}
 		}
 	}
-	apply(legacyDeclarations(n), cascadia.Specificity{}, false, false)
+	apply(prepareDeclarations(legacyDeclarations(n)), cascadia.Specificity{}, false, false)
 	matchIncomplete := func() (Style, *variableScope, error) {
 		return unresolvedStyle(), parentVars, nil
 	}
 	mediaStates := s.mediaStates(width, fallback)
-	for ruleNumber := range s.rules {
-		r := s.rules[ruleNumber]
-		// Charge the rule visit before inspecting its media state. Otherwise an
-		// attacker can retain an element-by-rule scan using only inactive rules.
+	for _, ref := range s.candidates(n) {
+		r := &s.rules[ref.rule]
+		plan := &r.plans[ref.branch]
 		if !matches.spend(1) {
 			return matchIncomplete()
 		}
-		state := int(mediaStates[ruleNumber])
+		state := int(mediaStates[ref.rule])
 		if state == mediaNo {
 			continue
 		}
-		if r.uncertainSelector {
-			// The complete selector may or may not match. Its retained selector
-			// group is a conservative target scope, so declarations need not
-			// contaminate elements that the original selector could never match.
-			for i, sel := range r.selectors {
-				if !matches.spend(r.costs[i]) {
-					return matchIncomplete()
-				}
-				if sel.Match(n) {
-					// Maximal specificity prevents a lower-specificity rule from
-					// creating false confidence. Inline precedence is unchanged.
-					apply(r.decls, cascadia.Specificity{1<<30 - 1, 1<<30 - 1, 1<<30 - 1}, false, true)
-					break
-				}
-			}
-			continue
+		matched, cached := false, false
+		if s.cacheMatches {
+			state := plan.matches[n]
+			matched, cached = state == 2, state != 0
 		}
-		for i, sel := range r.selectors {
-			// The recovered rightmost compound is a necessary (but not
-			// sufficient) condition for the complete selector. Most elements
-			// fail it immediately in Cascadia too; charge only that cheap test
-			// and avoid assigning full ancestor/sibling-search cost to it.
-			if !matches.spend(r.scopeCosts[i]) {
+		if !cached {
+			if !matches.spend(plan.cost) {
 				return matchIncomplete()
 			}
-			if !r.fallbackScopes[i].Match(n) {
-				continue
+			if plan.uncertain {
+				matched = plan.scope.Match(n)
+			} else {
+				matched = plan.matcher.Match(n)
 			}
-			if !matches.spend(r.costs[i]) {
-				return matchIncomplete()
+			if s.cacheMatches {
+				if plan.matches == nil {
+					plan.matches = make(map[*html.Node]uint8)
+				}
+				plan.matches[n] = 1
+				if matched {
+					plan.matches[n] = 2
+				}
 			}
-			if sel.Match(n) {
-				apply(r.decls, sel.Specificity(), false, state == mediaUnknown)
+		}
+		if matched {
+			if plan.uncertain {
+				apply(r.decls, plan.specificity, false, true)
+			} else {
+				apply(r.decls, plan.specificity, false, state == mediaUnknown)
 			}
 		}
 	}

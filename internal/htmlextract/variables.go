@@ -59,7 +59,37 @@ func lexValue(s string) ([]valueToken, int) {
 	return ts, 1
 }
 func hasVariables(s string) bool {
-	return strings.Contains(strings.ToLower(s), "var(") || strings.Contains(s, "\\")
+	return containsFold(s, "var(") || strings.Contains(s, "\\")
+}
+
+func tokensHaveVariables(tokens []valueToken) bool {
+	for _, token := range tokens {
+		if token.kind == css.FunctionToken && strings.EqualFold(token.raw, "var(") {
+			return true
+		}
+	}
+	return false
+}
+
+func tokensHaveEscape(tokens []valueToken) bool {
+	for _, token := range tokens {
+		if strings.Contains(token.raw, "\\") {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFold(s, substr string) bool {
+	if substr == "" {
+		return true
+	}
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if strings.EqualFold(s[i:i+len(substr)], substr) {
+			return true
+		}
+	}
+	return false
 }
 func tokenText(ts []valueToken) string {
 	var b strings.Builder
