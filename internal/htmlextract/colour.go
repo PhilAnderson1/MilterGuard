@@ -238,7 +238,18 @@ func (c colourResult) inspection() colourInspection {
 // with no glyph. Paint groups are folded from inside to outside. An opaque white default
 // canvas is supplied after known layers; unresolved layers remain unknown. No sibling/layout/image
 // sampling, antialiasing, blending or filter model is implied.
-func evaluateColour(foreground Value, layers []paintLayer) colourResult {
+func evaluateColour(foreground Value, layers []paintLayer, work *matchBudget) colourResult {
+	// Account for the fixed conversion/distance work and, when the foreground
+	// is usable, every ancestor layer the evaluator may inspect. Reserve the
+	// complete cost before starting so exhaustion cannot leave a partially
+	// composited colour looking trustworthy.
+	cost := int64(1)
+	if foreground.Known {
+		cost += int64(len(layers))
+	}
+	if work != nil && !work.spend(cost) {
+		return colourResult{uncertainty: "style-analysis work limit"}
+	}
 	if !foreground.Known {
 		return colourResult{uncertainty: "unresolved foreground"}
 	}

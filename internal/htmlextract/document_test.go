@@ -64,6 +64,7 @@ func TestAnalyzeValidatesLimitsWithoutPanicking(t *testing.T) {
 		{"input bytes", func(l *Limits) { l.InputBytes = 0 }},
 		{"nodes", func(l *Limits) { l.Nodes = 0 }},
 		{"text nodes", func(l *Limits) { l.TextNodes = 0 }},
+		{"attributes", func(l *Limits) { l.Attributes = 0 }},
 		{"depth", func(l *Limits) { l.Depth = -1 }},
 		{"rules", func(l *Limits) { l.Rules = -1 }},
 		{"selectors", func(l *Limits) { l.Selectors = -1 }},
@@ -115,6 +116,14 @@ func TestNodeLimitsBeforeAndAfterTreeConstruction(t *testing.T) {
 			t.Fatalf("text-node limit error = %v", err)
 		}
 	})
+	t.Run("lexical attributes", func(t *testing.T) {
+		limits := DefaultLimits()
+		limits.Attributes = 2
+		err := preflight([]byte(`<p a="1" b="2" c="3">x</p>`), limits)
+		if err == nil || !strings.Contains(err.Error(), "lexical attributes") {
+			t.Fatalf("attribute limit error = %v", err)
+		}
+	})
 	t.Run("parser-created nodes", func(t *testing.T) {
 		limits := DefaultLimits()
 		limits.Nodes = 2
@@ -154,6 +163,23 @@ func TestPreflightSelfClosingTagDepth(t *testing.T) {
 			t.Fatalf("depth limit error = %v", err)
 		}
 	})
+}
+
+func TestPreflightEndTagIndexTracksEveryStackPop(t *testing.T) {
+	limits := DefaultLimits()
+	limits.Depth = 4
+
+	// The first div end tag pops both span and div. Neither later closing tag
+	// may be treated as open, and the SVG breakout must remove both foreign
+	// frames from the same index before ordinary HTML parsing resumes.
+	src := []byte(`<div><span></div></span></div><svg><g><p></g></svg></g>`)
+	usage, err := measurePreflight(src, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.depth != 2 {
+		t.Fatalf("lexical depth = %d, want 2", usage.depth)
+	}
 }
 
 func TestUnsupportedCSSVolumeDoesNotAbortAnalysis(t *testing.T) {
@@ -348,6 +374,16 @@ func TestInheritance(t *testing.T) {
 	}
 }
 func TestNumbersAndColours(t *testing.T) {
+	for _, value := range []string{"0", "+0", "-0", ".5", "+.5", "-.5", "1.25", "1e2", "1E-2", "+1e+2"} {
+		if _, ok := number(value); !ok {
+			t.Errorf("valid CSS number %q was rejected", value)
+		}
+	}
+	for _, value := range []string{"", "+", ".", "1.", "0x0p0", "0x1_0p0", "1_0", "1e", "1e+", "NaN", "Inf"} {
+		if _, ok := number(value); ok {
+			t.Errorf("invalid CSS number %q was accepted", value)
+		}
+	}
 	for _, c := range []struct {
 		v    string
 		want float64
@@ -379,6 +415,32 @@ func TestNumbersAndColours(t *testing.T) {
 	}
 	if textStyle(findText(t, in, "U"), "background-color").Text != "rgba(0,0,0,0)" {
 		t.Fatal(in)
+	}
+}
+
+func TestGoOnlyNumbersDoNotConcealText(t *testing.T) {
+	for _, property := range []string{
+		`font-size:16px;font-size:0x0p0`,
+		`font-size:16px;font-size:0x0p0px`,
+		`font-size:16px;font-size:0_0px`,
+		`font-size:16px;font-size:calc(0x0p0px)`,
+		`opacity:1;opacity:0x0p0`,
+	} {
+		t.Run(property, func(t *testing.T) {
+			document := inspectHTML(t, `<p style="`+property+`">T</p>`)
+			if got := findText(t, document, "T").Label; got != "visible" {
+				t.Fatalf("label = %q, want visible", got)
+			}
+		})
+	}
+
+	for _, property := range []string{`font-size:+0`, `opacity:+0`} {
+		t.Run(property, func(t *testing.T) {
+			document := inspectHTML(t, `<p style="`+property+`">T</p>`)
+			if got := findText(t, document, "T").Label; got != "concealed" {
+				t.Fatalf("label = %q, want concealed", got)
+			}
+		})
 	}
 }
 func TestConditionsAndRecovery(t *testing.T) {
@@ -497,6 +559,43 @@ func TestSelectorWorkLimitMakesUnprocessedTextUnknown(t *testing.T) {
 	}
 }
 
+func TestElementTraversalConsumesSharedWorkBudget(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	matches := matchBudget{limit: elementTraversalWork}
+	expressions := expressionBudget{remaining: s.limits.ExpressionWork}
+	node := &html.Node{Type: html.ElementNode, Data: "p"}
+	first, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first[display].Known || matches.exhausted {
+		t.Fatalf("first traversal = %+v, budget=%+v", first[display], matches)
+	}
+	second, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second[display].Known || !matches.exhausted {
+		t.Fatalf("second traversal = %+v, budget=%+v", second[display], matches)
+	}
+}
+
+func TestColourLayerTraversalConsumesSharedWorkBudget(t *testing.T) {
+	layers := make([]paintLayer, 128)
+	for i := range layers {
+		layers[i] = layer(initial())
+	}
+	cost := int64(1 + len(layers))
+	enough := matchBudget{limit: cost}
+	if result := evaluateColour(initial()[color], layers, &enough); !result.known || enough.used != cost || enough.exhausted {
+		t.Fatalf("bounded colour result = %+v, budget=%+v", result, enough)
+	}
+	short := matchBudget{limit: cost - 1}
+	if result := evaluateColour(initial()[color], layers, &short); result.known || !short.exhausted {
+		t.Fatalf("over-budget colour result = %+v, budget=%+v", result, short)
+	}
+}
+
 func TestSelectorWorkBudgetStopsBeforePartialCascadeIsTrusted(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MatchWork = 5
@@ -505,7 +604,7 @@ func TestSelectorWorkBudgetStopsBeforePartialCascadeIsTrusted(t *testing.T) {
 	s.buildSelectorIndex(1, 1)
 	matches := matchBudget{limit: limits.MatchWork}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
+	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +630,7 @@ func TestDeclarationApplicationWorkStopsBeforePartialCascadeIsTrusted(t *testing
 	// required to reserve the complete declaration list.
 	matches := matchBudget{limit: s.planningWork + 1 + plan.cost + declarations*declarationApplyWeight - 1, used: s.planningWork}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
+	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,9 +647,13 @@ func TestSelectorIndexSkipsIrrelevantInactiveRules(t *testing.T) {
 	s := sheet{limits: limits}
 	s.parseCSS(`@media print{p{display:none}}@media print{div{display:none}}`, false)
 	s.buildSelectorIndex(1, 1)
-	matches := matchBudget{limit: 1}
+	work := elementTraversalWork + 1 // Traversal and the indexed p candidate.
+	for _, rule := range s.rules {
+		work += rule.mediaStateWork(false)
+	}
+	matches := matchBudget{limit: work}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
+	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +681,7 @@ func TestAnalyzeReportsResourceUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	usage := document.Usage
-	if usage.InputBytes == 0 || usage.Nodes == 0 || usage.TextNodes == 0 || usage.Depth == 0 {
+	if usage.InputBytes == 0 || usage.Nodes == 0 || usage.TextNodes == 0 || usage.Attributes != 1 || usage.Depth == 0 {
 		t.Fatalf("missing HTML usage: %+v", usage)
 	}
 	if usage.CSSDepth != 1 || usage.Rules != 1 || usage.Selectors != 2 || usage.MediaCases == 0 {
@@ -591,10 +694,25 @@ func TestAnalyzeReportsResourceUsage(t *testing.T) {
 
 func TestOversizedDeclarationValueIsPreparedAsUnresolved(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
-	value := "rgb(" + strings.Repeat("0", maxResolvedValueBytes) + ")"
+	value := "rgb(" + strings.Repeat("0", maxValueBytes) + ")"
 	ds := s.declarations("color", value)
 	if len(ds) != 1 || ds[0].prepared == nil || ds[0].prepared.status != 2 {
 		t.Fatalf("oversized declaration was not bounded: %+v", ds)
+	}
+}
+
+func TestLongValidMathValueCanStillProveConcealment(t *testing.T) {
+	value := "calc(" + strings.Repeat("0px + ", 900) + "1px)"
+	if len(value) <= 4096 || len(value) > maxValueBytes {
+		t.Fatalf("invalid test value length %d", len(value))
+	}
+	document := inspectHTML(t, `<p style="font-size:`+value+`">T</p>`)
+	text := findText(t, document, "T")
+	if text.Label != "concealed" {
+		t.Fatalf("label = %q, want concealed", text.Label)
+	}
+	if size := textStyle(text, "font-size"); !size.Known || size.Number != 1 {
+		t.Fatalf("font size = %+v, want known 1px", size)
 	}
 }
 
@@ -608,7 +726,7 @@ func TestDeclarationValuesShareWorkBudget(t *testing.T) {
 	}
 	matches := matchBudget{limit: limits.MatchWork, used: s.planningWork}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
+	style, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,19 +742,72 @@ func TestSiblingSelectorWorkIsWeighted(t *testing.T) {
 		sequence := 0
 		plan := planSelectorList(selector, &sequence)[0]
 		want := int64(5) + int64(nodes+1)*siblingMatchWeight
-		if got := selectorExecutionCost(plan.complexity, 1, nodes, limit); got != want {
+		if got := selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, 1, nodes, limit); got != want {
 			t.Errorf("selectorExecutionCost(%q) = %d, want %d", selector, got, want)
 		}
 	}
 	sequence := 0
 	plan := planSelectorList("q p", &sequence)[0]
-	if got, want := selectorExecutionCost(plan.complexity, 4, nodes, limit), int64(10); got != want {
+	if got, want := selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, 4, nodes, limit), int64(10); got != want {
 		t.Errorf("descendant selector cost = %d, want %d", got, want)
 	}
 	sequence = 0
 	plan = planSelectorList("a ~ b ~ p", &sequence)[0]
-	if bound, additive := plannedSelectorCost(plan.complexity, 1, nodes, limit), selectorExecutionCost(plan.complexity, 1, nodes, limit); bound <= additive {
+	if bound, additive := plannedSelectorCost(plan.complexity, selectorAttributeProfile{}, 1, nodes, limit), selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, 1, nodes, limit); bound <= additive {
 		t.Fatalf("nested sibling bound %d did not exceed additive cost %d", bound, additive)
+	}
+}
+
+func TestAttributeAwareSelectorBoundRejectsExpensiveBacktracking(t *testing.T) {
+	limits := DefaultLimits()
+	s := sheet{limits: limits}
+	s.parseCSS(`.a1 .a2 .a3 p{display:none}`, false)
+	s.buildSelectorIndex(104, 108)
+	plan := &s.rules[0].plans[0]
+	profile := selectorAttributeProfile{classes: 3125, attributes: 3125}
+	context := selectorMatchContext{current: profile, path: profile, document: profile, depth: 104, nodes: 108}
+	if cost := selectorMatchCost(plan, context, limits.MatchWork); cost <= limits.MatchWork {
+		t.Fatalf("attribute-heavy selector match cost = %d, want over %d", cost, limits.MatchWork)
+	}
+}
+
+func TestAttributeAwareSelectorChargesConservativeBound(t *testing.T) {
+	limits := DefaultLimits()
+	s := sheet{limits: limits}
+	s.parseCSS(`.ancestor p{display:none}`, false)
+	s.buildSelectorIndex(10, 20)
+	plan := &s.rules[0].plans[0]
+	profile := selectorAttributeProfile{classes: 100, ids: 2, attributes: 200}
+	context := selectorMatchContext{current: selectorAttributeProfile{}, path: profile, document: profile, depth: 10, nodes: 20}
+	cost := selectorMatchCost(plan, context, limits.MatchWork)
+	withAttributes := plannedSelectorCost(plan.execution, profile, context.depth, context.nodes, limits.MatchWork)
+	withoutAttributes := plannedSelectorCost(plan.execution, selectorAttributeProfile{}, context.depth, context.nodes, limits.MatchWork)
+	want := plan.cost + withAttributes - withoutAttributes
+	if plan.uncertain || cost != want || cost <= plan.cost {
+		t.Fatalf("attribute selector cost = %d, want conservative %d above static %d: %+v", cost, want, plan.cost, plan)
+	}
+}
+
+func TestAttributeHeavyBacktrackingStopsBeforeCascadia(t *testing.T) {
+	const depth = 100
+	class := "a3 a2 " + strings.Repeat("x", 20000-len("a3 a2 "))
+	var source strings.Builder
+	source.WriteString(`<style>.a1 .a2 .a3 p{display:none}</style>`)
+	for range depth {
+		source.WriteString(`<div class="`)
+		source.WriteString(class)
+		source.WriteString(`">`)
+	}
+	source.WriteString(`<p>T</p>`)
+	document, err := Analyze([]byte(source.String()), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findText(t, document, "T").Label; got != "unknown" {
+		t.Fatalf("attribute-heavy selector result = %q, want unknown", got)
+	}
+	if document.Usage.MatchWork > int64(document.Usage.Nodes)+10 {
+		t.Fatalf("expensive selector reached matching: usage=%+v", document.Usage)
 	}
 }
 
@@ -674,6 +845,46 @@ func TestSelectorIndexIncludesEveryPotentialCandidate(t *testing.T) {
 		if !got[selector] {
 			t.Errorf("index omitted %q; candidates=%v", selector, got)
 		}
+	}
+}
+
+func TestNamespaceSelectorsRetainEveryPotentialCandidate(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`s|text{display:none}*|text{display:none}|text{display:none}s|*{visibility:hidden}s|linearGradient{opacity:0}[s|href]{display:none}`, false)
+	s.buildSelectorIndex(2, 4)
+	node := &html.Node{Type: html.ElementNode, Data: "text", Namespace: "svg"}
+	refs := s.candidates(node)
+	got := make(map[string]bool)
+	for _, ref := range refs {
+		got[s.rules[ref.rule].plans[ref.branch].source] = true
+	}
+	for _, selector := range []string{"s|text", "*|text", "|text", "s|*", "s|linearGradient", "[s|href]"} {
+		if !got[selector] {
+			t.Errorf("index omitted %q; candidates=%v", selector, got)
+		}
+	}
+	if plan := s.rules[0].plans[0]; plan.scopePrefix != "text" || plan.key != (selectorKey{kind: selectorTag, value: "text"}) || !plan.uncertain {
+		t.Fatalf("qualified selector plan = %+v", plan)
+	}
+	if plan := s.rules[4].plans[0]; plan.scopePrefix != "" || plan.key.kind != selectorUniversal || !plan.uncertain {
+		t.Fatalf("case-sensitive qualified selector plan = %+v", plan)
+	}
+}
+
+func TestNamespaceVisibilityIsConservative(t *testing.T) {
+	for _, test := range []struct {
+		name, css string
+	}{
+		{"qualified", `@namespace s url(http://www.w3.org/2000/svg);s|text{display:none}`},
+		{"wildcard prefix", `*|text{display:none}`},
+		{"default", `@namespace url(http://www.w3.org/2000/svg);text{display:none}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, `<style>`+test.css+`</style><svg><text>T</text></svg>`)
+			if got := findText(t, document, "T").Label; got != "unknown" {
+				t.Fatalf("label = %q, want unknown", got)
+			}
+		})
 	}
 }
 
@@ -736,7 +947,7 @@ func TestMatchingContinuesAfterMatchCacheIsFull(t *testing.T) {
 	expressions := expressionBudget{remaining: s.limits.ExpressionWork}
 	node := &html.Node{Type: html.ElementNode, Data: "p"}
 	for range 2 {
-		style, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1024, false, &matches, &expressions)
+		style, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -756,27 +967,31 @@ func TestSelectorIndexBypassesAttributeWorkWithoutSelectors(t *testing.T) {
 	if refs := s.candidates(node); len(refs) != 0 {
 		t.Fatalf("candidates without selectors = %+v", refs)
 	}
-	if s.ancestorRefs != nil {
-		t.Fatal("selector-free document created an attribute cache")
-	}
 }
 
-func TestSelectorIndexCachesAncestorAttributes(t *testing.T) {
+func TestSelectorIndexDeduplicatesRepeatedAncestorBuckets(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`.wanted *{display:none}`, false)
-	s.buildSelectorIndex(2, 3)
-	ancestor := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "wanted"}}}
-	first := &html.Node{Type: html.ElementNode, Data: "p", Parent: ancestor}
-	second := &html.Node{Type: html.ElementNode, Data: "p", Parent: ancestor}
-	if refs := s.candidates(first); len(refs) != 1 {
-		t.Fatalf("first descendant candidates = %+v", refs)
+	s.parseCSS(strings.Repeat(`.wanted *{display:none}`, 1_000), false)
+	s.buildSelectorIndex(128, 129)
+	parent := &html.Node{Type: html.ElementNode, Data: "div"}
+	for range 128 {
+		parent = &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "wanted"}}, Parent: parent}
 	}
-	if got := len(s.ancestorRefs); got != 1 {
-		t.Fatalf("cached element count = %d, want 1", got)
+	node := &html.Node{Type: html.ElementNode, Data: "p", Parent: parent}
+	matches := matchBudget{limit: s.limits.MatchWork}
+	refs, complete := s.collectCandidates(node, &matches)
+	if !complete || len(refs) != 1_000 {
+		t.Fatalf("repeated ancestor candidates = %+v, complete=%t", refs, complete)
 	}
-	ancestor.Attr[0].Val = "changed-after-preparation"
-	if refs := s.candidates(second); len(refs) != 1 {
-		t.Fatalf("cached ancestor candidates = %+v", refs)
+	if len(s.candidateScratch) > s.index.count {
+		t.Fatalf("candidate scratch length = %d, selector count = %d", len(s.candidateScratch), s.index.count)
+	}
+	if matches.used != 1_256 {
+		t.Fatalf("candidate work = %d, want 256 attribute scans plus 1,000 bucket entries", matches.used)
+	}
+	limited := matchBudget{limit: 100}
+	if _, complete := s.collectCandidates(node, &limited); complete || !limited.exhausted {
+		t.Fatalf("limited candidate collection completed: %+v", limited)
 	}
 }
 

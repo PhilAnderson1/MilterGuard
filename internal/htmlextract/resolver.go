@@ -11,6 +11,10 @@ import (
 // candidate storage; weight it above a simple selector-index lookup.
 const declarationApplyWeight int64 = 16
 
+// Every element/viewing-case traversal copies and resolves a fixed-size Style,
+// even when no stylesheet selector is relevant.
+const elementTraversalWork int64 = 1
+
 // Go maps have substantial per-entry overhead. Bound cached selector results
 // independently of the CPU-work budget so one message has a predictable
 // memory ceiling. Matching continues normally after the cache is full.
@@ -21,20 +25,27 @@ type mediaCacheKey struct {
 	fallback bool
 }
 
-func (s *sheet) mediaStates(width float64, fallback bool) []uint8 {
+func (s *sheet) mediaStates(width float64, fallback bool, work *matchBudget) ([]uint8, bool) {
 	key := mediaCacheKey{width: width, fallback: fallback}
 	if states := s.mediaCache[key]; states != nil {
-		return states
+		return states, true
 	}
 	if s.mediaCache == nil {
 		s.mediaCache = make(map[mediaCacheKey][]uint8)
+	}
+	var cost int64
+	for i := range s.rules {
+		cost += s.rules[i].mediaStateWork(fallback)
+	}
+	if cost > 0 && work != nil && !work.spend(cost) {
+		return nil, false
 	}
 	states := make([]uint8, len(s.rules))
 	for i := range s.rules {
 		states[i] = uint8(s.rules[i].mediaState(width, fallback))
 	}
 	s.mediaCache[key] = states
-	return states
+	return states, true
 }
 
 type matchBudget struct {
@@ -109,7 +120,7 @@ func resolvedDeclaration(d declaration, parent, root Style, vars *variableScope,
 	if v.status == 2 {
 		return Value{Text: d.value}, 2
 	}
-	if len(v.text) > maxResolvedValueBytes {
+	if len(v.text) > maxValueBytes {
 		return Value{Text: d.value}, 2
 	}
 	value := strings.ToLower(strings.TrimSpace(v.text))
@@ -140,17 +151,19 @@ func resolvedDeclaration(d declaration, parent, root Style, vars *variableScope,
 	}
 	return out, status
 }
-func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *variableScope, inline []declaration, width float64, fallback bool, matches *matchBudget, budget *expressionBudget) (Style, *variableScope, error) {
+func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *variableScope, inline []declaration, width float64, fallback bool, selectorContext selectorMatchContext, matches *matchBudget, budget *expressionBudget) (Style, *variableScope, error) {
 	if s.cascadeIncomplete || s.workIncomplete {
 		if s.workIncomplete {
 			matches.exhausted = true
 		}
 		return unresolvedStyle(), parentVars, nil
 	}
-	// Once shared matching work is exhausted, every remaining element is
-	// unresolved. Avoid rebuilding and sorting its candidate-rule list merely
-	// to fail the first budget charge again.
+	// Once shared style-analysis work is exhausted, every remaining element is
+	// unresolved. Avoid any further style copies or candidate construction.
 	if matches.exhausted {
+		return unresolvedStyle(), parentVars, nil
+	}
+	if !matches.spend(elementTraversalWork) {
 		return unresolvedStyle(), parentVars, nil
 	}
 	st := initial()
@@ -201,13 +214,17 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 	if !apply(prepareDeclarations(legacyDeclarations(n)), cascadia.Specificity{}, false, false) {
 		return matchIncomplete()
 	}
-	mediaStates := s.mediaStates(width, fallback)
-	for _, ref := range s.candidates(n) {
+	mediaStates, complete := s.mediaStates(width, fallback, matches)
+	if !complete {
+		return matchIncomplete()
+	}
+	refs, complete := s.collectCandidates(n, matches)
+	if !complete {
+		return matchIncomplete()
+	}
+	for _, ref := range refs {
 		r := &s.rules[ref.rule]
 		plan := &r.plans[ref.branch]
-		if !matches.spend(1) {
-			return matchIncomplete()
-		}
 		state := int(mediaStates[ref.rule])
 		if state == mediaNo {
 			continue
@@ -218,7 +235,7 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 			matched, cached = state == 2, state != 0
 		}
 		if !cached {
-			if !matches.spend(plan.cost) {
+			if !matches.spend(selectorMatchCost(plan, selectorContext, matches.limit)) {
 				return matchIncomplete()
 			}
 			if plan.uncertain {

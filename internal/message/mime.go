@@ -26,6 +26,7 @@ type extractedContent struct {
 	MIMEIncomplete       bool
 	TransferIncomplete   bool
 	ExtractionIncomplete bool
+	HTMLFallbackUsed     bool
 	HasConcealedContent  bool
 	HTMLComments         htmlCommentStats
 }
@@ -123,6 +124,7 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 			combined.HTML = combined.HTML || part.HTML
 			combined.HasConcealedContent = combined.HasConcealedContent || part.HasConcealedContent
 			combined.ExtractionIncomplete = combined.ExtractionIncomplete || part.ExtractionIncomplete
+			combined.HTMLFallbackUsed = combined.HTMLFallbackUsed || part.HTMLFallbackUsed
 			combined.HTMLComments.add(part.HTMLComments)
 		}
 		combined.ImageRefs = imageRefs.refs

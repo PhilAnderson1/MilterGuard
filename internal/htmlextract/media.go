@@ -114,12 +114,61 @@ func (r rule) mediaState(width float64, fallback bool) int {
 	return result
 }
 
+// mediaStateWork is a conservative structural cost for one mediaState call.
+// It reflects the rule, condition, alternative and bound loops rather than a
+// fixed multiplier that can underestimate a dense comma-separated query.
+func calculatedMediaStateWork(r rule, fallback bool) int64 {
+	work := int64(1)
+	for _, condition := range r.conditions {
+		work++
+		for _, alternative := range condition {
+			work += 1 + int64(len(alternative.bounds))
+		}
+		if fallback {
+			work += int64(len(condition))
+		}
+	}
+	return work
+}
+
+func (r *rule) prepareMediaWork() {
+	r.mediaWork = calculatedMediaStateWork(*r, false)
+	r.fallbackMediaWork = calculatedMediaStateWork(*r, true)
+}
+
+func (r rule) mediaStateWork(fallback bool) int64 {
+	if fallback {
+		if r.fallbackMediaWork != 0 {
+			return r.fallbackMediaWork
+		}
+	} else if r.mediaWork != 0 {
+		return r.mediaWork
+	}
+	// Tests and other internal callers may construct a rule literal directly.
+	return calculatedMediaStateWork(r, fallback)
+}
+
 // Width-independent property values make activation vectors sufficient. Exact
 // endpoints are separate from open intervals, so a one-point rule is covered.
 func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 	var bounds []float64
 	unique := map[float64]bool{}
+	basePlanningWork := s.planningWork
+	var planningWork int64
+	charge := func(cost int64) bool {
+		limit := s.limits.MatchWork / 4
+		if cost < 0 || planningWork > limit || cost > limit-planningWork {
+			return false
+		}
+		planningWork += cost
+		s.planningWork = basePlanningWork + planningWork
+		return true
+	}
 	for _, r := range s.rules {
+		// Gathering breakpoints traverses the same condition structure once.
+		if !charge(r.mediaStateWork(false)) {
+			return []float64{1024}, true
+		}
 		for _, c := range r.conditions {
 			for _, a := range c {
 				for _, b := range a.bounds {
@@ -134,36 +183,43 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 			}
 		}
 	}
+	var candidates []float64
 	if len(bounds) == 0 {
-		return []float64{1024}, false
-	}
-	sort.Float64s(bounds)
-	candidates := []float64{0}
-	prev := 0.0
-	for _, b := range bounds {
-		if b > prev {
-			candidates = append(candidates, prev+(b-prev)/2, b)
-			prev = b
+		states := make([]uint8, 0, len(s.rules))
+		for _, r := range s.rules {
+			if !charge(r.mediaStateWork(false)) {
+				return []float64{1024}, true
+			}
+			states = append(states, uint8(r.mediaState(1024, false)))
 		}
-	}
-	if after := math.Nextafter(prev, math.Inf(1)); !math.IsInf(after, 0) {
-		candidates = append(candidates, after)
+		s.mediaCache = map[mediaCacheKey][]uint8{{width: 1024}: states}
+		return []float64{1024}, false
+	} else {
+		sort.Float64s(bounds)
+		candidates = []float64{0}
+		prev := 0.0
+		for _, b := range bounds {
+			if b > prev {
+				candidates = append(candidates, prev+(b-prev)/2, b)
+				prev = b
+			}
+		}
+		if after := math.Nextafter(prev, math.Inf(1)); !math.IsInf(after, 0) {
+			candidates = append(candidates, after)
+		}
 	}
 	seen := map[string]bool{}
 	var widths []float64
-	basePlanningWork := s.planningWork
-	var planningWork int64
+	s.mediaCache = make(map[mediaCacheKey][]uint8)
 	for _, w := range candidates {
-		var key strings.Builder
+		states := make([]uint8, 0, len(s.rules))
 		for _, r := range s.rules {
-			planningWork += int64(1 + len(r.conditions)*32)
-			s.planningWork = basePlanningWork + planningWork
-			if planningWork > s.limits.MatchWork/4 {
+			if !charge(r.mediaStateWork(false)) {
 				return []float64{1024}, true
 			}
-			key.WriteByte(byte(r.mediaState(w, false)))
+			states = append(states, uint8(r.mediaState(w, false)))
 		}
-		k := key.String()
+		k := string(states)
 		if seen[k] {
 			continue
 		}
@@ -172,6 +228,7 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 		if len(widths) > cap {
 			return []float64{1024}, true
 		}
+		s.mediaCache[mediaCacheKey{width: w}] = states
 	}
 	return widths, false
 }

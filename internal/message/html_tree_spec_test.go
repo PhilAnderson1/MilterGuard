@@ -241,6 +241,45 @@ func TestPromptUsesConciseConcealmentExplanation(t *testing.T) {
 	}
 }
 
+func TestHTMLAnalysisFallbackUsesDocumentLevelNotice(t *testing.T) {
+	source := strings.Repeat("<div>", 129) + "fallback evidence"
+	got := htmlToText(source)
+	if !got.HTMLFallbackUsed || got.ExtractionIncomplete {
+		t.Fatalf("fallback state = %+v", got)
+	}
+	if got.VisibleText != "" {
+		t.Fatalf("fallback text was treated as confidently visible: %q", got.VisibleText)
+	}
+	if strings.Contains(got.Text, "<visibility-uncertain>") || !strings.Contains(got.Text, "fallback evidence") {
+		t.Fatalf("fallback text = %q", got.Text)
+	}
+
+	m := New(1 << 20)
+	m.AddHeader("Content-Type", "text/html")
+	m.AddBody([]byte(source))
+	prompt := m.BuildAnalysis(AnalysisContext{}, 1000, VisionOptions{Mode: "off"}).Prompt
+	want := "HTML/CSS visibility analysis unavailable; email text may include content concealed from the recipient."
+	if !strings.Contains(prompt, "ANALYSIS LIMITATIONS:\n- "+want) {
+		t.Fatalf("prompt missing fallback notice %q: %s", want, prompt)
+	}
+	if strings.Contains(prompt, "<visibility-uncertain>") || !strings.Contains(prompt, "fallback evidence") {
+		t.Fatalf("prompt fallback body = %s", prompt)
+	}
+}
+
+func TestBoundedHTMLFallbackStreamsAttributesAndKeepsFirstDestination(t *testing.T) {
+	got := extractBoundedHTMLFallback(`<base ignored="x" href="https://example.test/root/"><a class="offer" href="first" href="second">Review</a><img alt="notice" src="cid:image-id">`)
+	if len(got.Links) != 1 || got.Links[0] != "https://example.test/root/first" {
+		t.Fatalf("fallback links = %#v", got.Links)
+	}
+	if len(got.ImageRefs) != 1 || got.ImageRefs[0] != "image-id" {
+		t.Fatalf("fallback image references = %#v", got.ImageRefs)
+	}
+	if got.Text != "Review" || got.VisibleText != "" || !got.HTMLFallbackUsed {
+		t.Fatalf("fallback content = %+v", got)
+	}
+}
+
 func TestCSSLimitKeepsStructuredDOMExtraction(t *testing.T) {
 	got := htmlToText(`<style>` + strings.Repeat(`p{display:none}`, 10001) + `</style><p><a href="https://example.test/retained">retained evidence</a></p><!--comment-->`)
 	if got.ExtractionIncomplete {

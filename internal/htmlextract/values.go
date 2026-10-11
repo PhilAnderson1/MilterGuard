@@ -43,10 +43,58 @@ func makeInitialStyle() Style {
 
 func initial() Style      { return initialStyle }
 func inherits(p int) bool { return p == visibility || p == fontSize || p == color }
+
+// number parses the decimal syntax accepted by CSS <number>. strconv.ParseFloat
+// alone is too permissive here: it also accepts Go spellings such as hexadecimal
+// floats and underscore separators that a browser does not treat as CSS numbers.
 func number(s string) (float64, bool) {
+	if !validCSSNumber(s) {
+		return 0, false
+	}
 	v, e := strconv.ParseFloat(s, 64)
 	return v, e == nil && !math.IsNaN(v) && !math.IsInf(v, 0)
 }
+
+func validCSSNumber(s string) bool {
+	i := 0
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	integerStart := i
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	hasInteger := i > integerStart
+	if i < len(s) && s[i] == '.' {
+		i++
+		fractionStart := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		// A decimal point is part of a CSS number only when followed by a
+		// digit. This deliberately rejects Go's accepted "1." spelling.
+		if i == fractionStart {
+			return false
+		}
+	} else if !hasInteger {
+		return false
+	}
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		exponentStart := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i == exponentStart {
+			return false
+		}
+	}
+	return i == len(s)
+}
+
 func clamp(v, hi float64) float64 { return math.Min(hi, math.Max(0, v)) }
 
 // status: 0 known-invalid; 1 resolved; 2 potentially valid but unsupported.

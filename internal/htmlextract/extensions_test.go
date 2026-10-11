@@ -70,13 +70,48 @@ func TestViewingCasesHardCap(t *testing.T) {
 	}
 }
 
+func TestMediaStateWorkAndPlanningCache(t *testing.T) {
+	dense := rule{conditions: []mediaCondition{{
+		{bounds: []widthBound{{}, {}, {}}},
+		{bounds: []widthBound{{}, {}}},
+	}}}
+	if got := dense.mediaStateWork(false); got != 9 {
+		t.Fatalf("media state work = %d, want 9", got)
+	}
+	if got := dense.mediaStateWork(true); got != 11 {
+		t.Fatalf("fallback media state work = %d, want 11", got)
+	}
+
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`@media(max-width:500px){p{display:none}}`, false)
+	widths, fallback := s.viewingCases(MaxViewingCases)
+	if fallback || len(widths) == 0 {
+		t.Fatalf("viewing cases = %v, fallback=%t", widths, fallback)
+	}
+	cacheHit := matchBudget{limit: 0}
+	if _, complete := s.mediaStates(widths[0], false, &cacheHit); !complete || cacheHit.used != 0 || cacheHit.exhausted {
+		t.Fatalf("planned media state was not cached: %+v", cacheHit)
+	}
+
+	cost := s.rules[0].mediaStateWork(true)
+	short := matchBudget{limit: cost - 1}
+	if _, complete := s.mediaStates(1024, true, &short); complete || !short.exhausted {
+		t.Fatalf("fallback media state exceeded its budget: %+v", short)
+	}
+	enough := matchBudget{limit: cost}
+	if _, complete := s.mediaStates(1024, true, &enough); !complete || enough.used != cost || enough.exhausted {
+		t.Fatalf("fallback media state was not charged exactly: %+v", enough)
+	}
+}
+
 func TestMediaCasesShareSelectorWorkBudget(t *testing.T) {
 	limits := DefaultLimits()
 	s := sheet{limits: limits}
 	s.parseCSS(`@media(max-width:500px){p{display:none}}@media(min-width:500px){p{display:block}}`, false)
 	s.buildSelectorIndex(1, 1)
-	firstCaseWork := int64(2) // Both indexed candidates are visited.
+	firstCaseWork := elementTraversalWork + 2 // Element traversal plus both indexed candidates.
 	for ruleIndex := range s.rules {
+		firstCaseWork += s.rules[ruleIndex].mediaStateWork(false)
 		if s.rules[ruleIndex].mediaState(0, false) != mediaNo {
 			firstCaseWork += s.rules[ruleIndex].plans[0].cost
 			firstCaseWork += int64(len(s.rules[ruleIndex].decls)) * declarationApplyWeight
@@ -86,14 +121,14 @@ func TestMediaCasesShareSelectorWorkBudget(t *testing.T) {
 	matches := matchBudget{limit: firstCaseWork}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
 	node := &xhtml.Node{Type: xhtml.ElementNode, Data: "p"}
-	first, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 0, false, &matches, &expressions)
+	first, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 0, false, selectorMatchContext{}, &matches, &expressions)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !first[display].Known || first[display].Text != "none" {
 		t.Fatalf("first media case = %+v", first[display])
 	}
-	second, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1000, false, &matches, &expressions)
+	second, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1000, false, selectorMatchContext{}, &matches, &expressions)
 	if err != nil {
 		t.Fatal(err)
 	}

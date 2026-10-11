@@ -7,7 +7,6 @@ import (
 
 	"github.com/tdewolff/parse/v2"
 	"github.com/tdewolff/parse/v2/css"
-	"golang.org/x/net/html"
 )
 
 const (
@@ -61,8 +60,6 @@ type preparedDeclaration struct {
 	status int
 }
 
-const maxResolvedValueBytes = 4096
-
 // contextualDeclaration reports whether computing the value requires an
 // element's inherited/root style. Variables and shorthands are handled by the
 // caller because their substituted value may change this answer.
@@ -106,7 +103,7 @@ func prepareDeclaration(d declaration) declaration {
 	}
 	if d.custom == "" && !d.hasVars && !d.shorthand && !contextualDeclaration(d) {
 		prepared := preparedDeclaration{}
-		if d.unsupported || len(d.value) > maxResolvedValueBytes {
+		if d.unsupported || len(d.value) > maxValueBytes {
 			prepared.value = Value{Text: d.value}
 			prepared.status = 2
 		} else {
@@ -135,9 +132,10 @@ func prepareDeclarations(ds []declaration) []declaration {
 }
 
 type rule struct {
-	plans      []selectorPlan
-	decls      []declaration
-	conditions []mediaCondition
+	plans                        []selectorPlan
+	decls                        []declaration
+	conditions                   []mediaCondition
+	mediaWork, fallbackMediaWork int64
 }
 
 type sheet struct {
@@ -155,7 +153,6 @@ type sheet struct {
 	candidateScratch    []selectorRef
 	candidateMarks      []uint32
 	candidateGeneration uint32
-	ancestorRefs        map[*html.Node][]selectorRef
 	matchCacheEntries   int
 }
 
@@ -180,7 +177,6 @@ func (s *sheet) abandonCascade() {
 	s.candidateScratch = nil
 	s.candidateMarks = nil
 	s.candidateGeneration = 0
-	s.ancestorRefs = nil
 	s.matchCacheEntries = 0
 	s.planningWork = 0
 	s.mediaCache = nil
@@ -200,6 +196,20 @@ func rawTokenString(v []css.Token) string {
 		b.Write(t.Data)
 	}
 	return b.String()
+}
+
+// defaultNamespaceRule reports whether an @namespace statement establishes a
+// default namespace. A leading identifier instead declares a named prefix.
+// Invalid or unfamiliar non-empty forms are treated conservatively as default
+// declarations because namespace semantics cannot be delegated to Cascadia.
+func defaultNamespaceRule(values []css.Token) bool {
+	for _, token := range values {
+		if token.TokenType == css.WhitespaceToken || token.TokenType == css.CommentToken {
+			continue
+		}
+		return token.TokenType != css.IdentToken
+	}
+	return false
 }
 
 func cssUnescape(value string) string {
@@ -388,7 +398,7 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 		}
 	}
 	if prop == "background" {
-		if len(value) > maxResolvedValueBytes {
+		if len(value) > maxValueBytes {
 			return prepareDeclarations([]declaration{
 				{prop: background, value: value, important: imp, order: s.order, unsupported: true},
 				{prop: backgroundImage, value: value, important: imp, order: s.order, unsupported: true},
@@ -439,6 +449,7 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 	}
 	p := css.NewParser(parse.NewInputString(text), inline)
 	var conditions []mediaCondition
+	defaultNamespace := false
 	current := -1
 	var out []declaration
 	for {
@@ -478,6 +489,9 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			}
 			current = -1
 		case css.AtRuleGrammar:
+			if !inline && len(conditions) == 0 && strings.EqualFold(string(data), "@namespace") && defaultNamespaceRule(values) {
+				defaultNamespace = true
+			}
 		case css.BeginRulesetGrammar:
 			current = -1
 			if inline {
@@ -495,12 +509,24 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			if len(plans) == 0 {
 				continue
 			}
+			if defaultNamespace {
+				for i := range plans {
+					// A default namespace can alter even otherwise supported type
+					// selectors. Cascadia cannot express that constraint, so do not
+					// let its HTML-oriented scope or index omit a possible match.
+					plans[i].scopePrefix = ""
+					plans[i].key = selectorKey{}
+					plans[i].makeUncertain()
+				}
+			}
 			s.selectors += len(plans)
 			if s.selectors > s.limits.Selectors || len(s.rules) >= s.limits.Rules {
 				s.abandonCascade()
 				return out
 			}
-			s.rules = append(s.rules, rule{plans: plans, conditions: append([]mediaCondition(nil), conditions...)})
+			r := rule{plans: plans, conditions: append([]mediaCondition(nil), conditions...)}
+			r.prepareMediaWork()
+			s.rules = append(s.rules, r)
 			current = len(s.rules) - 1
 		case css.EndRulesetGrammar:
 			current = -1
@@ -547,5 +573,6 @@ func (s *sheet) parseStylesheet(text, media string) {
 	condition := parseMedia(media)
 	for i := firstRule; i < len(s.rules); i++ {
 		s.rules[i].conditions = append([]mediaCondition{condition}, s.rules[i].conditions...)
+		s.rules[i].prepareMediaWork()
 	}
 }

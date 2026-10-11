@@ -83,8 +83,8 @@ func extractBoundedHTMLFallback(source string) extractedContent {
 		}
 		switch token {
 		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
-			t := z.Token()
-			name := strings.ToLower(t.Data)
+			rawName, moreAttributes := z.TagName()
+			name := strings.ToLower(string(rawName))
 			if omittedHTMLElement(name) {
 				suppressed++
 				continue
@@ -92,16 +92,25 @@ func extractBoundedHTMLFallback(source string) extractedContent {
 			if suppressed > 0 {
 				continue
 			}
-			attr := func(key string) (string, bool) {
-				for _, a := range t.Attr {
-					if strings.EqualFold(a.Key, key) {
-						return a.Val, true
-					}
+			var attributeName []byte
+			switch name {
+			case "base", "a":
+				attributeName = []byte("href")
+			case "img":
+				attributeName = []byte("src")
+			}
+			var raw string
+			present := false
+			for moreAttributes {
+				key, value, more := z.TagAttr()
+				moreAttributes = more
+				if !present && attributeName != nil && bytes.EqualFold(key, attributeName) {
+					raw = string(value)
+					present = true
 				}
-				return "", false
 			}
 			if name == "base" && !baseSeen {
-				if raw, ok := attr("href"); ok {
+				if present {
 					baseSeen = true
 					if u, err := url.Parse(strings.TrimSpace(raw)); err == nil && u.IsAbs() && (u.Scheme == "http" || u.Scheme == "https") {
 						base = u
@@ -109,14 +118,14 @@ func extractBoundedHTMLFallback(source string) extractedContent {
 				}
 			}
 			if name == "a" {
-				if raw, ok := attr("href"); ok {
+				if present {
 					if destination, valid := fallbackDestination(raw, base); valid {
 						links.AddDestination(destination)
 					}
 				}
 			}
 			if name == "img" {
-				if raw, ok := attr("src"); ok {
+				if present {
 					if strings.HasPrefix(strings.ToLower(raw), "cid:") {
 						images.Add(raw[4:])
 					} else if destination, valid := fallbackDestination(raw, base); valid {
@@ -141,12 +150,8 @@ func extractBoundedHTMLFallback(source string) extractedContent {
 		complete = false
 	}
 	value := normalizeHTMLText(sanitizeSenderText(text.String()))
-	tagged := value
-	if value != "" {
-		tagged = "<visibility-uncertain>" + value + "</visibility-uncertain>"
-	}
 	links.AddAllHTTP(findHTTPURLs(value))
-	return extractedContent{Text: tagged, VisibleText: value,
+	return extractedContent{Text: value, HTMLFallbackUsed: true,
 		Links: links.links, ImageRefs: images.refs, ExtractionIncomplete: !complete}
 }
 

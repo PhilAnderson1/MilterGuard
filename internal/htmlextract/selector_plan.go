@@ -1,7 +1,6 @@
 package htmlextract
 
 import (
-	"sort"
 	"strings"
 
 	"github.com/andybalholm/cascadia"
@@ -28,8 +27,123 @@ type selectorKey struct {
 }
 
 type selectorComplexity struct {
-	compounds   []int64
+	compounds   []compoundComplexity
 	combinators []byte
+}
+
+type compoundComplexity struct {
+	base, classes, ids, attributes int64
+}
+
+type selectorAttributeProfile struct {
+	classes, ids, attributes int64
+}
+
+const selectorBytesPerWorkUnit = 16
+const selectorAttributesPerWorkUnit = 16
+
+func selectorByteWork(bytes int) int64 {
+	return int64(bytes / selectorBytesPerWorkUnit)
+}
+
+func selectorAttributeCountWork(attributes int) int64 {
+	return int64(attributes / selectorAttributesPerWorkUnit)
+}
+
+func (p *selectorAttributeProfile) observe(n *html.Node) {
+	if n.Type != html.ElementNode {
+		return
+	}
+	classWork := selectorAttributeCountWork(len(n.Attr))
+	idWork := classWork
+	attributeWork := classWork
+	for _, attribute := range n.Attr {
+		attributeWork += selectorByteWork(len(attribute.Key) + len(attribute.Val) + 1)
+		switch attribute.Key {
+		case "class":
+			classWork += selectorByteWork(len(attribute.Val))
+		case "id":
+			idWork += selectorByteWork(len(attribute.Val))
+		}
+	}
+	p.classes = max(p.classes, classWork)
+	p.ids = max(p.ids, idWork)
+	p.attributes = max(p.attributes, attributeWork)
+}
+
+func selectorCompoundComplexity(part string) compoundComplexity {
+	complexity := compoundComplexity{base: int64(len(part) + 1)}
+	brackets := 0
+	var quote byte
+	for i := 0; i < len(part); i++ {
+		c := part[i]
+		if c == '\\' {
+			i++
+			continue
+		}
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+			continue
+		}
+		switch c {
+		case '[':
+			if brackets == 0 {
+				complexity.attributes++
+			}
+			brackets++
+		case ']':
+			if brackets > 0 {
+				brackets--
+			}
+		case '.':
+			if brackets == 0 {
+				complexity.classes++
+			}
+		case '#':
+			if brackets == 0 {
+				complexity.ids++
+			}
+		}
+	}
+	return complexity
+}
+
+func (c selectorComplexity) attributeSensitive() bool {
+	for _, compound := range c.compounds {
+		if compound.classes != 0 || compound.ids != 0 || compound.attributes != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func selectorCompoundCost(compound compoundComplexity, profile selectorAttributeProfile, limit int64) int64 {
+	cap := limit + 1
+	cost := compound.base
+	for _, term := range []struct{ count, weight int64 }{
+		{compound.classes, profile.classes},
+		{compound.ids, profile.ids},
+		{compound.attributes, profile.attributes},
+	} {
+		if term.count <= 0 || term.weight <= 0 {
+			continue
+		}
+		if term.count > cap/term.weight {
+			return cap
+		}
+		value := term.count * term.weight
+		if cost >= cap || value >= cap || cost > cap-value {
+			return cap
+		}
+		cost += value
+	}
+	return cost
 }
 
 type selectorPlan struct {
@@ -38,6 +152,7 @@ type selectorPlan struct {
 	scope       cascadia.Sel
 	specificity cascadia.Specificity
 	complexity  selectorComplexity
+	execution   selectorComplexity
 	key         selectorKey
 	scopePrefix string
 	cost        int64
@@ -45,6 +160,19 @@ type selectorPlan struct {
 	sequence    int
 	uncertain   bool
 	matches     map[*html.Node]uint8
+}
+
+func (p *selectorPlan) makeUncertain() {
+	p.uncertain = true
+	p.scope = compileConservativeScope(p.scopePrefix)
+	p.matcher = nil
+	p.specificity = cascadia.Specificity{1<<30 - 1, 1<<30 - 1, 1<<30 - 1}
+	p.execution = scopeSelectorComplexity(p.scopePrefix)
+}
+
+type selectorMatchContext struct {
+	current, path, document selectorAttributeProfile
+	depth, nodes            int
 }
 
 type selectorRef struct {
@@ -129,7 +257,7 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 	finishCompound := func(end int) {
 		part := strings.TrimSpace(branch[compoundStart:end])
 		if part != "" {
-			complexity.compounds = append(complexity.compounds, int64(len(part)+1))
+			complexity.compounds = append(complexity.compounds, selectorCompoundComplexity(part))
 			compoundPrefixes = append(compoundPrefixes, positiveCompoundPrefix(part))
 		}
 	}
@@ -269,7 +397,7 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 			}
 		}
 	}
-	plan := selectorPlan{source: branch, sequence: sequence, complexity: complexity, key: key, scopePrefix: prefix}
+	plan := selectorPlan{source: branch, sequence: sequence, complexity: complexity, execution: complexity, key: key, scopePrefix: prefix}
 	if supported {
 		group, err := cascadia.ParseGroup(branch)
 		if err == nil && len(group) == 1 {
@@ -278,10 +406,12 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 			return plan, true
 		}
 	}
-	plan.uncertain = true
-	plan.scope = compileConservativeScope(prefix)
-	plan.specificity = cascadia.Specificity{1<<30 - 1, 1<<30 - 1, 1<<30 - 1}
+	plan.makeUncertain()
 	return plan, true
+}
+
+func scopeSelectorComplexity(prefix string) selectorComplexity {
+	return selectorComplexity{compounds: []compoundComplexity{selectorCompoundComplexity(prefix)}}
 }
 
 func ancestorSelectorKey(key selectorKey) selectorKey {
@@ -308,8 +438,34 @@ func positiveCompoundPrefix(compound string) string {
 			i++
 			continue
 		}
-		if compound[i] == ':' || compound[i] == '[' || compound[i] == '|' {
+		if compound[i] == ':' || compound[i] == '[' {
 			return strings.TrimSpace(compound[:i])
+		}
+		if compound[i] == '|' {
+			// Cascadia does not implement CSS namespaces. A namespace prefix is
+			// not an element name: s|text can only match an element whose local
+			// name is text, never an HTML <s>. Retaining that local name gives
+			// the uncertain plan a useful but still conservative candidate set.
+			// Wildcards, escapes and the || column combinator cannot be narrowed
+			// safely here and therefore use universal scope.
+			start := i + 1
+			if start >= len(compound) || compound[start] == '|' || compound[start] == '*' || compound[start] == '\\' {
+				return ""
+			}
+			end := start
+			for end < len(compound) && isSelectorNameByte(compound[end]) {
+				end++
+			}
+			if end == start {
+				return ""
+			}
+			// Foreign element names are case-sensitive. The existing HTML tag
+			// index and Cascadia's type selector both fold names to lower case,
+			// so retain a local-name constraint only when folding is a no-op.
+			if local := compound[start:end]; local != strings.ToLower(local) {
+				return ""
+			}
+			return strings.ToLower(compound[start:end])
 		}
 	}
 	return strings.TrimSpace(compound)
@@ -372,7 +528,7 @@ func selectorIndexKey(prefix string) selectorKey {
 	return selectorKey{}
 }
 
-func plannedSelectorCost(c selectorComplexity, depth, nodes int, limit int64) int64 {
+func plannedSelectorCost(c selectorComplexity, profile selectorAttributeProfile, depth, nodes int, limit int64) int64 {
 	if len(c.compounds) == 0 || len(c.compounds) != len(c.combinators)+1 {
 		return limit + 1
 	}
@@ -392,7 +548,7 @@ func plannedSelectorCost(c selectorComplexity, depth, nodes int, limit int64) in
 		}
 		return a * b
 	}
-	cost := c.compounds[0]
+	cost := selectorCompoundCost(c.compounds[0], profile, limit)
 	for i, combinator := range c.combinators {
 		factor := int64(1)
 		switch combinator {
@@ -401,18 +557,19 @@ func plannedSelectorCost(c selectorComplexity, depth, nodes int, limit int64) in
 		case '+', '~':
 			factor = mul(int64(nodes+1), siblingMatchWeight)
 		}
-		cost = add(c.compounds[i+1], mul(cost, factor))
+		cost = add(selectorCompoundCost(c.compounds[i+1], profile, limit), mul(cost, factor))
 	}
 	return cost
 }
 
-func selectorExecutionCost(c selectorComplexity, depth, nodes int, limit int64) int64 {
+func selectorExecutionCost(c selectorComplexity, profile selectorAttributeProfile, depth, nodes int, limit int64) int64 {
 	cost := int64(1)
 	for _, compound := range c.compounds {
-		if compound > limit-cost {
+		compoundCost := selectorCompoundCost(compound, profile, limit)
+		if compoundCost > limit-cost {
 			return limit + 1
 		}
-		cost += compound
+		cost += compoundCost
 	}
 	for _, combinator := range c.combinators {
 		var extra int64
@@ -428,6 +585,32 @@ func selectorExecutionCost(c selectorComplexity, depth, nodes int, limit int64) 
 		cost += extra
 	}
 	return cost
+}
+
+func selectorMatchCost(plan *selectorPlan, context selectorMatchContext, limit int64) int64 {
+	if !plan.execution.attributeSensitive() {
+		return plan.cost
+	}
+	profile := context.current
+	if len(plan.execution.combinators) > 0 {
+		profile = context.path
+		for _, combinator := range plan.execution.combinators {
+			if combinator == '+' || combinator == '~' {
+				profile = context.document
+				break
+			}
+		}
+	}
+	bound := plannedSelectorCost(plan.execution, profile, context.depth, context.nodes, limit)
+	if bound > limit {
+		return bound
+	}
+	structural := plannedSelectorCost(plan.execution, selectorAttributeProfile{}, context.depth, context.nodes, limit)
+	extra := bound - structural
+	if extra < 0 || plan.cost > limit-extra {
+		return limit + 1
+	}
+	return plan.cost + extra
 }
 
 func (s *sheet) buildSelectorIndex(depth, nodes int) {
@@ -450,16 +633,13 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 			plan := &s.rules[ruleIndex].plans[branchIndex]
 			plan.matches = nil
 			if plan.uncertain {
-				plan.cost = int64(len(plan.scope.String()) + 1)
+				plan.cost = selectorExecutionCost(plan.execution, selectorAttributeProfile{}, 0, 1, s.limits.MatchWork)
 			} else {
-				plan.bound = plannedSelectorCost(plan.complexity, depth, nodes, s.limits.MatchWork)
-				plan.cost = selectorExecutionCost(plan.complexity, depth, nodes, s.limits.MatchWork)
+				plan.bound = plannedSelectorCost(plan.complexity, selectorAttributeProfile{}, depth, nodes, s.limits.MatchWork)
+				plan.cost = selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, depth, nodes, s.limits.MatchWork)
 				if plan.bound > s.limits.MatchWork {
-					plan.uncertain = true
-					plan.scope = compileConservativeScope(plan.scopePrefix)
-					plan.matcher = nil
-					plan.specificity = cascadia.Specificity{1<<30 - 1, 1<<30 - 1, 1<<30 - 1}
-					plan.cost = int64(len(plan.scope.String()) + 1)
+					plan.makeUncertain()
+					plan.cost = selectorExecutionCost(plan.execution, selectorAttributeProfile{}, 0, 1, s.limits.MatchWork)
 				}
 			}
 			ref := selectorRef{rule: ruleIndex, branch: branchIndex, sequence: plan.sequence}
@@ -483,34 +663,22 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 		}
 	}
 	s.index = index
-	s.ancestorRefs = nil
 	s.matchCacheEntries = 0
 }
 
 func (s *sheet) candidates(n *html.Node) []selectorRef {
+	refs, _ := s.collectCandidates(n, nil)
+	return refs
+}
+
+// collectCandidates builds the union of relevant selector-index buckets. A
+// selector plan belongs to exactly one bucket, so the first reference also
+// serves as that bucket's stable identity. Marking before append prevents a
+// repeated ancestor key from expanding the same bucket at every tree level.
+func (s *sheet) collectCandidates(n *html.Node, budget *matchBudget) ([]selectorRef, bool) {
 	if s.index.count == 0 {
-		return nil
+		return nil, true
 	}
-	refs := s.candidateScratch[:0]
-	refs = append(refs, s.index.universal...)
-	refs = append(refs, s.index.tags[n.Data]...)
-	if len(s.index.ids) != 0 || len(s.index.classes) != 0 {
-		refs = appendAttributeSelectorRefs(refs, n, s.index.ids, s.index.classes)
-	}
-	for ancestor := n.Parent; ancestor != nil; ancestor = ancestor.Parent {
-		if ancestor.Type != html.ElementNode {
-			continue
-		}
-		refs = append(refs, s.index.ancestorTags[ancestor.Data]...)
-		if len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
-			refs = append(refs, s.cachedAncestorSelectorRefs(ancestor)...)
-		}
-	}
-	if len(refs) < 2 {
-		s.candidateScratch = refs
-		return refs
-	}
-	sort.Slice(refs, func(i, j int) bool { return refs[i].sequence < refs[j].sequence })
 	if len(s.candidateMarks) < s.index.count {
 		s.candidateMarks = make([]uint32, s.index.count)
 	}
@@ -520,69 +688,100 @@ func (s *sheet) candidates(n *html.Node) []selectorRef {
 		s.candidateGeneration = 1
 	}
 	generation := s.candidateGeneration
-	out := refs[:0]
-	for _, ref := range refs {
-		if s.candidateMarks[ref.sequence] == generation {
+	refs := s.candidateScratch[:0]
+	appendBucket := func(bucket []selectorRef) bool {
+		if len(bucket) == 0 || s.candidateMarks[bucket[0].sequence] == generation {
+			return true
+		}
+		if budget != nil && !budget.spend(int64(len(bucket))) {
+			return false
+		}
+		for _, ref := range bucket {
+			if s.candidateMarks[ref.sequence] == generation {
+				continue
+			}
+			s.candidateMarks[ref.sequence] = generation
+			refs = append(refs, ref)
+		}
+		return true
+	}
+	appendAttributes := func(node *html.Node, idIndex, classIndex map[string][]selectorRef) bool {
+		if len(idIndex) == 0 && len(classIndex) == 0 {
+			return true
+		}
+		if budget != nil && len(node.Attr) != 0 && !budget.spend(int64(len(node.Attr))) {
+			return false
+		}
+		var id, classes string
+		var idSeen, classesSeen bool
+		for _, attribute := range node.Attr {
+			switch attribute.Key {
+			case "id":
+				if !idSeen {
+					id, idSeen = attribute.Val, true
+				}
+			case "class":
+				if !classesSeen {
+					classes, classesSeen = attribute.Val, true
+				}
+			}
+			if idSeen && classesSeen {
+				break
+			}
+		}
+		if id != "" && !appendBucket(idIndex[id]) {
+			return false
+		}
+		if classes != "" {
+			if budget != nil && !budget.spend(1+selectorByteWork(len(classes))) {
+				return false
+			}
+			for start := 0; start < len(classes); {
+				for start < len(classes) && isCSSSpace(classes[start]) {
+					start++
+				}
+				end := start
+				for end < len(classes) && !isCSSSpace(classes[end]) {
+					end++
+				}
+				if end > start && !appendBucket(classIndex[classes[start:end]]) {
+					return false
+				}
+				start = end
+			}
+		}
+		return true
+	}
+	if !appendBucket(s.index.universal) || !appendBucket(s.index.tags[n.Data]) {
+		s.candidateScratch = refs
+		return nil, false
+	}
+	if len(s.index.ids) != 0 || len(s.index.classes) != 0 {
+		if !appendAttributes(n, s.index.ids, s.index.classes) {
+			s.candidateScratch = refs
+			return nil, false
+		}
+	}
+	for ancestor := n.Parent; ancestor != nil; ancestor = ancestor.Parent {
+		if ancestor.Type != html.ElementNode {
 			continue
 		}
-		s.candidateMarks[ref.sequence] = generation
-		out = append(out, ref)
-	}
-	s.candidateScratch = out
-	return out
-}
-
-func (s *sheet) cachedAncestorSelectorRefs(n *html.Node) []selectorRef {
-	if refs, ok := s.ancestorRefs[n]; ok {
-		return refs
-	}
-	refs := appendAttributeSelectorRefs(nil, n, s.index.ancestorIDs, s.index.ancestorClasses)
-	if s.ancestorRefs == nil {
-		s.ancestorRefs = make(map[*html.Node][]selectorRef)
-	}
-	s.ancestorRefs[n] = refs
-	return refs
-}
-
-func appendAttributeSelectorRefs(refs []selectorRef, n *html.Node, idIndex, classIndex map[string][]selectorRef) []selectorRef {
-	var id, classes string
-	var idSeen, classesSeen bool
-	for _, a := range n.Attr {
-		switch a.Key {
-		case "id":
-			if !idSeen {
-				id, idSeen = a.Val, true
-			}
-		case "class":
-			if !classesSeen {
-				classes, classesSeen = a.Val, true
+		if !appendBucket(s.index.ancestorTags[ancestor.Data]) {
+			s.candidateScratch = refs
+			return nil, false
+		}
+		if len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
+			if !appendAttributes(ancestor, s.index.ancestorIDs, s.index.ancestorClasses) {
+				s.candidateScratch = refs
+				return nil, false
 			}
 		}
-		if idSeen && classesSeen {
-			break
-		}
 	}
-	if id != "" {
-		refs = append(refs, idIndex[id]...)
-	}
-	return appendClassSelectorRefs(refs, classes, classIndex)
-}
-
-func appendClassSelectorRefs(refs []selectorRef, classes string, index map[string][]selectorRef) []selectorRef {
-	for start := 0; start < len(classes); {
-		for start < len(classes) && isCSSSpace(classes[start]) {
-			start++
-		}
-		end := start
-		for end < len(classes) && !isCSSSpace(classes[end]) {
-			end++
-		}
-		if end > start {
-			refs = append(refs, index[classes[start:end]]...)
-		}
-		start = end
-	}
-	return refs
+	// No sort is required: candidate.beats compares declaration importance,
+	// inline origin, specificity and source order explicitly. Keeping discovery
+	// order avoids an O(n log n) phase without changing cascade results.
+	s.candidateScratch = refs
+	return refs, true
 }
 
 func isCSSSpace(c byte) bool {

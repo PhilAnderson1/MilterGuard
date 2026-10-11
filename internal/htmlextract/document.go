@@ -9,17 +9,24 @@ import (
 )
 
 type Limits struct {
-	InputBytes, Nodes, TextNodes, Depth, Rules, Selectors, SelectorBytes int
-	MatchWork                                                            int64
-	MediaCases                                                           int
-	ExpressionWork                                                       int64
+	InputBytes     int
+	Nodes          int
+	TextNodes      int
+	Attributes     int
+	Depth          int
+	Rules          int
+	Selectors      int
+	SelectorBytes  int
+	MatchWork      int64
+	MediaCases     int
+	ExpressionWork int64
 }
 
 // MaxViewingCases is the hard ceiling for conditional evaluations per document.
 const MaxViewingCases = 16
 
 func DefaultLimits() Limits {
-	return Limits{InputBytes: 8 << 20, Nodes: 100000, TextNodes: 50000, Depth: 128, Rules: 10000, Selectors: 20000, SelectorBytes: 2048, MatchWork: 10000000, MediaCases: MaxViewingCases, ExpressionWork: 1000000}
+	return Limits{InputBytes: 8 << 20, Nodes: 100000, TextNodes: 50000, Attributes: 50000, Depth: 128, Rules: 10000, Selectors: 20000, SelectorBytes: 2048, MatchWork: 10000000, MediaCases: MaxViewingCases, ExpressionWork: 1000000}
 }
 
 func (l Limits) validate() error {
@@ -30,6 +37,7 @@ func (l Limits) validate() error {
 		{"InputBytes", l.InputBytes},
 		{"Nodes", l.Nodes},
 		{"TextNodes", l.TextNodes},
+		{"Attributes", l.Attributes},
 		{"Depth", l.Depth},
 		{"SelectorBytes", l.SelectorBytes},
 		{"MediaCases", l.MediaCases},
@@ -198,6 +206,7 @@ type ResourceUsage struct {
 	InputBytes     int
 	Nodes          int
 	TextNodes      int
+	Attributes     int
 	Depth          int
 	CSSDepth       int
 	Rules          int
@@ -260,21 +269,35 @@ type lexicalFrame struct {
 	htmlChildren bool
 }
 
-// Preflight bounds nesting before the HTML5 tree builder (which itself can do
-// expensive recovery). This conservative lexical stack can reject malformed
-// optional-tag sequences that would produce a shallower tree; that is explicit.
+// Preflight bounds explicit lexical nesting before the HTML5 tree builder
+// (which itself can do expensive recovery). The builder can insert implied
+// ancestors, so parseDocument separately enforces the limit on final tree
+// depth. This conservative lexical stack can also reject malformed optional-tag
+// sequences that would produce a shallower tree; that is explicit.
 func preflight(b []byte, l Limits) error {
 	_, err := measurePreflight(b, l)
 	return err
 }
 
 type lexicalUsage struct {
-	nodes, textNodes, depth int
+	nodes, textNodes, attributes, depth int
 }
 
 func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
 	z := html.NewTokenizer(bytes.NewReader(b))
 	var stack []lexicalFrame
+	open := make(map[string]int)
+	popTo := func(keep int) {
+		for i := len(stack) - 1; i >= keep; i-- {
+			name := stack[i].name
+			if open[name] == 1 {
+				delete(open, name)
+			} else {
+				open[name]--
+			}
+		}
+		stack = stack[:keep]
+	}
 	var usage lexicalUsage
 	for {
 		t := z.Next()
@@ -297,12 +320,27 @@ func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
 		if t != html.StartTagToken && t != html.SelfClosingTagToken && t != html.EndTagToken {
 			continue
 		}
-		raw, _ := z.TagName()
+		raw, more := z.TagName()
 		n := string(raw)
+		if t == html.StartTagToken || t == html.SelfClosingTagToken {
+			for more {
+				_, _, more = z.TagAttr()
+				usage.attributes++
+				if usage.attributes > l.Attributes {
+					return usage, fmt.Errorf("limit: lexical attributes > %d", l.Attributes)
+				}
+			}
+		}
 		if t == html.EndTagToken {
+			// Unmatched end tags are common in malformed input and cannot
+			// affect this stack. Avoid searching the full bounded depth for
+			// every such token in an adversarial end-tag flood.
+			if open[n] == 0 {
+				continue
+			}
 			for i := len(stack) - 1; i >= 0; i-- {
 				if stack[i].name == n {
-					stack = stack[:i]
+					popTo(i)
 					break
 				}
 			}
@@ -313,9 +351,11 @@ func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
 		if parentForeign && foreignBreakout(n) {
 			// The HTML tree builder pops ordinary foreign elements and
 			// reprocesses this token in HTML mode.
-			for len(stack) > 0 && stack[len(stack)-1].foreign && !stack[len(stack)-1].htmlChildren {
-				stack = stack[:len(stack)-1]
+			keep := len(stack)
+			for keep > 0 && stack[keep-1].foreign && !stack[keep-1].htmlChildren {
+				keep--
 			}
+			popTo(keep)
 			parentForeign = false
 		}
 		foreign := parentForeign || n == "svg" || n == "math"
@@ -331,6 +371,7 @@ func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
 			foreign:      foreign,
 			htmlChildren: foreign && (n == "foreignobject" || n == "desc" || n == "title"),
 		})
+		open[n]++
 		if len(stack) > usage.depth {
 			usage.depth = len(stack)
 		}
@@ -341,13 +382,15 @@ func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
 }
 
 type parsedDocument struct {
-	root        *html.Node
-	styles      sheet
-	inlineDecls map[*html.Node][]declaration
-	treeDepth   int
-	nodeCount   int
-	textCount   int
-	lexical     lexicalUsage
+	root           *html.Node
+	styles         sheet
+	inlineDecls    map[*html.Node][]declaration
+	treeDepth      int
+	nodeCount      int
+	textCount      int
+	attributeCount int
+	attributeWork  selectorAttributeProfile
+	lexical        lexicalUsage
 }
 
 func (p processor) parseDocument(input []byte) (parsedDocument, error) {
@@ -399,6 +442,11 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			}
 		}
 		if n.Type == html.ElementNode {
+			document.attributeCount += len(n.Attr)
+			if document.attributeCount > p.Limits.Attributes {
+				return document, fmt.Errorf("limit: tree attributes > %d", p.Limits.Attributes)
+			}
+			document.attributeWork.observe(n)
 			if n.Data == "style" && (e.scope == "" || e.scope == "head") {
 				var css strings.Builder
 				for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -430,8 +478,9 @@ func (p processor) process(input []byte) (Document, error) {
 	inlineDecls := document.inlineDecls
 	in := Document{Root: root, Usage: ResourceUsage{
 		InputBytes: len(input), Nodes: max(document.nodeCount, document.lexical.nodes),
-		TextNodes: max(document.textCount, document.lexical.textNodes),
-		Depth:     max(document.treeDepth, document.lexical.depth), CSSDepth: s.conditionDepth,
+		TextNodes:  max(document.textCount, document.lexical.textNodes),
+		Attributes: max(document.attributeCount, document.lexical.attributes),
+		Depth:      max(document.treeDepth, document.lexical.depth), CSSDepth: s.conditionDepth,
 		Rules: len(s.rules), Selectors: s.selectors,
 	}}
 	s.buildSelectorIndex(document.treeDepth, document.nodeCount)
@@ -467,6 +516,7 @@ func (p processor) process(input []byte) (Document, error) {
 			contentKnown       bool
 			vars               *variableScope
 			clipped, clipKnown bool
+			selectorPath       selectorAttributeProfile
 		}
 		frames := make([]frame, 1)
 		frames[0] = frame{n: root, style: initial(), alpha: 1, alphaKnown: true, displayKnown: true, contentKnown: true, clipKnown: true}
@@ -480,8 +530,17 @@ func (p processor) process(input []byte) (Document, error) {
 				f.next = n.FirstChild
 				if n.Type == html.ElementNode {
 					parent := f.style
+					var selectorCurrent selectorAttributeProfile
+					selectorCurrent.observe(n)
+					f.selectorPath.classes = max(f.selectorPath.classes, selectorCurrent.classes)
+					f.selectorPath.ids = max(f.selectorPath.ids, selectorCurrent.ids)
+					f.selectorPath.attributes = max(f.selectorPath.attributes, selectorCurrent.attributes)
+					selectorContext := selectorMatchContext{
+						current: selectorCurrent, path: f.selectorPath, document: document.attributeWork,
+						depth: len(frames) - 1, nodes: document.nodeCount,
+					}
 					var err error
-					f.style, f.vars, err = s.elementStyle(n, parent, rootStyle, f.vars, inlineDecls[n], width, fallback, &matches, &budget)
+					f.style, f.vars, err = s.elementStyle(n, parent, rootStyle, f.vars, inlineDecls[n], width, fallback, selectorContext, &matches, &budget)
 					if err != nil {
 						return in, err
 					}
@@ -528,7 +587,7 @@ func (p processor) process(input []byte) (Document, error) {
 				if n.Type == html.TextNode {
 					if f.scope == "" {
 						st := f.style
-						colour := evaluateColour(st[color], layers)
+						colour := evaluateColour(st[color], layers, &matches)
 						decision := decideVisibility(st, f.none, f.displayKnown, f.alpha, f.alphaKnown, f.clipped, f.clipKnown, f.contentHidden, f.contentKnown, &colour)
 						bit := labelBit(decision.label)
 						if caseIndex == 0 {
@@ -556,7 +615,7 @@ func (p processor) process(input []byte) (Document, error) {
 			}
 			c := f.next
 			f.next = c.NextSibling
-			frames = append(frames, frame{n: c, style: f.style, scope: f.scope, none: f.none, alpha: f.alpha, alphaKnown: f.alphaKnown, displayKnown: f.displayKnown, contentHidden: f.contentHidden, contentKnown: f.contentKnown, vars: f.vars, clipped: f.clipped, clipKnown: f.clipKnown})
+			frames = append(frames, frame{n: c, style: f.style, scope: f.scope, none: f.none, alpha: f.alpha, alphaKnown: f.alphaKnown, displayKnown: f.displayKnown, contentHidden: f.contentHidden, contentKnown: f.contentKnown, vars: f.vars, clipped: f.clipped, clipKnown: f.clipKnown, selectorPath: f.selectorPath})
 		}
 		if caseIndex == 0 {
 			firstText = in.Text
