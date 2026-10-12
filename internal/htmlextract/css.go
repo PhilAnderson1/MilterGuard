@@ -7,6 +7,7 @@ import (
 
 	"github.com/tdewolff/parse/v2"
 	"github.com/tdewolff/parse/v2/css"
+	"golang.org/x/net/html"
 )
 
 const (
@@ -63,26 +64,28 @@ const (
 var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "overflow", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
 
 type declaration struct {
-	prop          int
-	value         string
-	prepared      *preparedDeclaration
-	validity      int
-	validityReady bool
-	valueTokens   []valueToken
-	valueStatus   int
-	tokensReady   bool
-	hasVars       bool
-	keyword       string
-	important     bool
-	order         int
-	unsupported   bool
-	custom        string
-	shorthand     bool
+	prop                 int
+	value                string
+	prepared             *preparedDeclaration
+	validity             valueStatus
+	validityReady        bool
+	valueTokens          []valueToken
+	valueStatus          valueStatus
+	tokensReady          bool
+	hasVars              bool
+	keyword              string
+	important            bool
+	order                int
+	unsupported          bool
+	custom               string
+	shorthand            bool
+	variableDependencies []string
+	dependenciesReady    bool
 }
 
 type preparedDeclaration struct {
 	value  Value
-	status int
+	status valueStatus
 }
 
 // contextualDeclaration reports whether computing the value requires an
@@ -112,6 +115,9 @@ func contextualDeclaration(d declaration) bool {
 // once. Declarations are copied while cascading, so valueTokens must remain
 // immutable after this point.
 func prepareDeclaration(d declaration) declaration {
+	if d.prepared != nil {
+		return d
+	}
 	if d.tokensReady {
 		d.hasVars = tokensHaveVariables(d.valueTokens)
 	} else {
@@ -124,23 +130,31 @@ func prepareDeclaration(d declaration) declaration {
 		d.valueTokens, d.valueStatus = lexValue(d.value)
 		d.tokensReady = true
 	}
+	if d.custom != "" && d.tokensReady && d.valueStatus == valueResolved {
+		d.variableDependencies = variableRefs(d.valueTokens)
+		d.dependenciesReady = true
+	}
 	if d.custom == "" && !d.hasVars && !d.shorthand && !contextualDeclaration(d) {
 		prepared := preparedDeclaration{}
 		if d.unsupported || len(d.value) > maxValueBytes {
 			prepared.value = Value{Text: d.value}
-			prepared.status = 2
+			prepared.status = valueUnsupported
 		} else {
-			prepared.value, prepared.status = resolve(d.prop, d.value, initialStyle, initialStyle)
+			prepared.value, prepared.status = resolve(d.prop, d.value, &initialStyle, &initialStyle)
 		}
 		d.prepared = &prepared
 		d.validity, d.validityReady = prepared.status, true
+		// The prepared value is the complete runtime representation. Keeping the
+		// parser token stream as well only retains duplicate strings and slices.
+		d.valueTokens = nil
+		d.tokensReady = false
 	} else if d.custom == "" && !d.hasVars && !d.shorthand && !d.unsupported {
 		value := strings.ToLower(strings.TrimSpace(d.value))
-		if (d.prop == fontSize || d.prop == opacity) && isMath(value) && d.tokensReady && d.valueStatus == 1 {
+		if (d.prop == fontSize || d.prop == opacity) && isMath(value) && d.tokensReady && d.valueStatus == valueResolved {
 			budget := expressionBudget{remaining: int64(maxValueTokens * 4)}
-			_, d.validity = evalMathTokens(d.prop, value, d.valueTokens, initialStyle, initialStyle, &budget)
+			_, d.validity = evalMathTokens(d.prop, value, d.valueTokens, &initialStyle, &initialStyle, &budget)
 		} else {
-			_, d.validity = resolve(d.prop, value, initialStyle, initialStyle)
+			_, d.validity = resolve(d.prop, value, &initialStyle, &initialStyle)
 		}
 		d.validityReady = true
 	}
@@ -161,25 +175,33 @@ type rule struct {
 	mediaWork, fallbackMediaWork int64
 }
 
+// sheetRuntime contains evaluation caches and reusable scratch storage. Rules,
+// declarations and selector plans remain immutable once indexing completes.
+type sheetRuntime struct {
+	mediaCache          map[mediaCacheKey][]uint8
+	cacheMatches        bool
+	matchCaches         []map[*html.Node]uint8
+	candidateScratch    []selectorRef
+	candidateMarks      []uint32
+	candidateGeneration uint32
+	matchCacheEntries   int
+}
+
 type sheet struct {
 	rules                []rule
+	rulesSeen            int
 	selectors, order     int
 	limits               Limits
 	planningWork         int64
 	cascadeIncomplete    bool
 	workIncomplete       bool
-	mediaCache           map[mediaCacheKey][]uint8
 	planCount            int
 	conditionDepth       int
 	index                selectorIndex
-	cacheMatches         bool
-	candidateScratch     []selectorRef
-	candidateMarks       []uint32
-	candidateGeneration  uint32
-	matchCacheEntries    int
 	cssBytes             int
 	importDepth          int
 	unresolvedStylesheet bool
+	runtime              sheetRuntime
 }
 
 // admitCSS applies allocation-light source bounds before tdewolff's parser is
@@ -200,7 +222,19 @@ func (s *sheet) admitCSS(text string, inline bool) bool {
 }
 
 func (s *sheet) chargePlanningWork(value string) bool {
-	cost := int64(len(value) + 1)
+	return s.chargePlanningBytes(len(value))
+}
+
+func (s *sheet) chargePlanningTokens(tokens []css.Token) bool {
+	bytes := 0
+	for _, token := range tokens {
+		bytes += len(token.Data)
+	}
+	return s.chargePlanningBytes(bytes)
+}
+
+func (s *sheet) chargePlanningBytes(bytes int) bool {
+	cost := int64(bytes) + 1
 	if cost < 1 || s.planningWork > s.limits.MatchWork || cost > s.limits.MatchWork-s.planningWork {
 		s.workIncomplete = true
 		return false
@@ -212,21 +246,13 @@ func (s *sheet) chargePlanningWork(value string) bool {
 func (s *sheet) abandonCascade() {
 	s.cascadeIncomplete = true
 	s.rules = nil
-	s.selectors = 0
 	s.planCount = 0
-	s.conditionDepth = 0
 	s.index = selectorIndex{}
-	s.cacheMatches = false
-	s.candidateScratch = nil
-	s.candidateMarks = nil
-	s.candidateGeneration = 0
-	s.matchCacheEntries = 0
-	s.planningWork = 0
-	s.mediaCache = nil
+	s.runtime = sheetRuntime{}
 }
 
 func (s *sheet) invalidateMediaCache() {
-	s.mediaCache = nil
+	s.runtime.mediaCache = nil
 }
 
 func tokenString(v []css.Token) string {
@@ -306,7 +332,7 @@ func cssUnescape(value string) string {
 type parsedDeclarationValue struct {
 	text                  string
 	tokens                []valueToken
-	status                int
+	status                valueStatus
 	important             bool
 	unsafeIdentifier      bool
 	unsafeWithoutFunction bool
@@ -317,8 +343,8 @@ type parsedDeclarationValue struct {
 // particular, an escaped '!' remains part of an identifier and cannot become
 // an !important delimiter, and an escaped space cannot disappear through
 // string trimming.
-func parseDeclarationTokens(ts []valueToken, status int, fallback string) parsedDeclarationValue {
-	if status != 1 {
+func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string) parsedDeclarationValue {
+	if status != valueResolved {
 		return parsedDeclarationValue{text: strings.TrimSpace(fallback), tokens: ts, status: status}
 	}
 	start, end := 0, len(ts)
@@ -388,7 +414,7 @@ func (s *sheet) declarations(prop, value string) []declaration {
 	return s.declarationsFromTokens(prop, tokens, status, value)
 }
 
-func ownedValueTokens(values []css.Token) ([]valueToken, int) {
+func ownedValueTokens(values []css.Token) ([]valueToken, valueStatus) {
 	if len(values) > maxValueTokens {
 		return nil, 2
 	}
@@ -407,7 +433,7 @@ func ownedValueTokens(values []css.Token) ([]valueToken, int) {
 	return tokens, 1
 }
 
-func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status int, fallback string) []declaration {
+func normalizeDeclarationProperty(prop string) string {
 	prop = cssUnescape(prop)
 	if !strings.HasPrefix(prop, "--") {
 		prop = strings.ToLower(prop)
@@ -418,26 +444,53 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 	// stripping could give unrelated vendor extensions incorrect semantics.
 	switch prop {
 	case "-webkit-mask":
-		prop = "mask"
+		return "mask"
 	case "-webkit-mask-image":
-		prop = "mask-image"
+		return "mask-image"
 	case "-webkit-transform", "-ms-transform":
-		prop = "transform"
+		return "transform"
 	case "-webkit-text-stroke-width":
 		// Stroke colour cannot affect rendering while the width is zero. A
 		// non-zero or unresolved width makes the existing stroke-effect slot
 		// uncertain, including when a separate stroke colour is also present.
-		prop = "-webkit-text-stroke"
+		return "-webkit-text-stroke"
+	default:
+		return prop
 	}
+}
+
+func relevantDeclarationProperty(prop string) bool {
+	return relevantNormalizedDeclarationProperty(normalizeDeclarationProperty(prop))
+}
+
+func relevantNormalizedDeclarationProperty(prop string) bool {
+	if strings.HasPrefix(prop, "--") {
+		return true
+	}
+	for _, name := range names {
+		if name == prop {
+			return true
+		}
+	}
+	switch prop {
+	case "margin", "background", "mask", "font", "all":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status valueStatus, fallback string) []declaration {
+	prop = normalizeDeclarationProperty(prop)
 	parsed := parseDeclarationTokens(tokens, status, fallback)
 	value := parsed.text
 	imp := parsed.important
 	custom := strings.HasPrefix(prop, "--")
-	if custom && (parsed.status == 0 || (parsed.status == 1 && !validVariableFunctions(parsed.tokens))) {
+	if custom && (parsed.status == valueInvalid || (parsed.status == valueResolved && !validVariableFunctions(parsed.tokens))) {
 		return nil
 	}
 	prepared := func(d declaration) declaration {
-		d.unsupported = d.unsupported || parsed.status == 2
+		d.unsupported = d.unsupported || parsed.status == valueUnsupported
 		d.valueTokens = parsed.tokens
 		d.valueStatus = parsed.status
 		d.tokensReady = true
@@ -458,7 +511,7 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 			componentTokens, componentStatus := lexValue(values[i])
 			d := declaration{
 				prop: property, value: values[i], important: imp, order: s.order,
-				unsupported: uncertain || parsed.status == 2 || parsed.unsafeIdentifier,
+				unsupported: uncertain || parsed.status == valueUnsupported || parsed.unsafeIdentifier,
 				valueTokens: componentTokens, valueStatus: componentStatus, tokensReady: true,
 			}
 			out = append(out, prepareDeclaration(d))
@@ -548,7 +601,7 @@ func marginShorthandValues(value string) ([4]string, bool, bool) {
 	}
 	for i, component := range out {
 		property := [...]int{marginTop, marginRight, marginBottom, marginLeft}[i]
-		if _, status := resolveLayoutProperty(property, component); status == 0 {
+		if _, status := resolveLayoutProperty(property, component); status == valueInvalid {
 			return [4]string{}, false, false
 		}
 	}
@@ -654,6 +707,7 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 				}
 			}
 			s.selectors += len(plans)
+			s.rulesSeen++
 			if s.selectors > s.limits.Selectors || len(s.rules) >= s.limits.Rules {
 				s.abandonCascade()
 				return out
@@ -668,27 +722,33 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			// Unlike selectors and media queries, declaration values can end
 			// with an escaped whitespace character. Preserve the raw token data
 			// so it cannot be mistaken for insignificant surrounding space.
-			vals := rawTokenString(values)
-			if !s.chargePlanningWork(vals) {
+			if !s.chargePlanningTokens(values) {
 				return out
 			}
-			valueTokens, valueStatus := ownedValueTokens(values)
+			prop := normalizeDeclarationProperty(string(data))
+			applicable := (inline && len(conditions) == 0) || (!inline && current >= 0)
+			if !applicable || !relevantNormalizedDeclarationProperty(prop) {
+				continue
+			}
+			vals := rawTokenString(values)
+			var valueTokens []valueToken
+			var valueStatus valueStatus
 			// tdewolff deliberately exposes a custom-property value as one
 			// opaque CustomPropertyValue token. Lex that payload once here so
 			// var() dependencies and !important retain their CSS token boundaries.
 			if g == css.CustomPropertyGrammar {
 				valueTokens, valueStatus = lexValue(vals)
+			} else {
+				valueTokens, valueStatus = ownedValueTokens(values)
 			}
 			// A style attribute is a declaration list, not a stylesheet. Some
 			// recoverable parsers nevertheless expose declarations nested in an
 			// invalid at-rule. Such declarations have no unconditional inline
 			// effect and must not override valid top-level declarations.
 			if inline {
-				if len(conditions) == 0 {
-					out = append(out, s.declarationsFromTokens(string(data), valueTokens, valueStatus, vals)...)
-				}
+				out = append(out, s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)...)
 			} else if current >= 0 {
-				s.rules[current].decls = append(s.rules[current].decls, s.declarationsFromTokens(string(data), valueTokens, valueStatus, vals)...)
+				s.rules[current].decls = append(s.rules[current].decls, s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)...)
 			}
 		case css.QualifiedRuleGrammar, css.TokenGrammar:
 		}
@@ -701,6 +761,10 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 func (s *sheet) parseStylesheet(text, media string) {
 	firstRule := len(s.rules)
 	s.parseCSS(text, false)
+	s.attachMediaCondition(firstRule, media)
+}
+
+func (s *sheet) attachMediaCondition(firstRule int, media string) {
 	if strings.TrimSpace(media) == "" {
 		return
 	}

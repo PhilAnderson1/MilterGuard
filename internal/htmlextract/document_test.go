@@ -15,6 +15,15 @@ import (
 	"golang.org/x/net/html"
 )
 
+func initialPtr() *Style {
+	style := initial()
+	return &style
+}
+
+func mediaAt(width float64) *mediaEvaluation {
+	return &mediaEvaluation{width: width}
+}
+
 func inspectHTML(t *testing.T, src string) Document {
 	t.Helper()
 	// Existing four-property policy tests supply an explicit canvas. New colour
@@ -59,6 +68,47 @@ func textStyle(text Text, name string) Value {
 func TestProductionTextResultIsCompact(t *testing.T) {
 	if size := unsafe.Sizeof(Text{}); size > 192 {
 		t.Fatalf("Text retains too much per-node state: %d bytes", size)
+	}
+}
+
+func TestConcealmentReasonMaskMaterializesInStableOrder(t *testing.T) {
+	mask := reasonDisplayNone | reasonVisibilityHidden | reasonVisibilityCollapse | reasonOpacity | reasonFontSize | reasonColour | reasonEmptyClip | reasonContentVisibility
+	got := strings.Join(concealmentReasonStrings(mask), ",")
+	want := "display-none,visibility-hidden,visibility-collapse,opacity,font-size,colour-distance,empty-clip,content-visibility-hidden"
+	if got != want {
+		t.Fatalf("concealment reasons = %q, want %q", got, want)
+	}
+}
+
+func TestConcealmentReasonsAreRetainedInPublicResult(t *testing.T) {
+	document, err := Analyze([]byte(`<p style="display:none">T</p>`), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := findText(t, document, "T")
+	if text.Label != "concealed" || strings.Join(text.ConcealmentReasons, ",") != "display-none" {
+		t.Fatalf("concealed text result = %+v", text)
+	}
+}
+
+func TestAggregatedLabelRetainsFirstViewingCaseEvidence(t *testing.T) {
+	document, err := Analyze([]byte(`<style>p{display:none}@media(min-width:500px){p{display:block;opacity:0}}</style><p>T</p>`), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := findText(t, document, "T")
+	if text.Label != "concealed" {
+		t.Fatalf("aggregated label = %q", text.Label)
+	}
+	if strings.Join(text.ConcealmentReasons, ",") != "display-none" || text.EffectiveOpacity != 1 {
+		t.Fatalf("first viewing-case evidence = %+v", text)
+	}
+}
+
+func TestCascadeWinnerIsCompact(t *testing.T) {
+	winnerSize := unsafe.Sizeof(candidate{})
+	if winnerSize > 64 || winnerSize >= unsafe.Sizeof(declaration{}) {
+		t.Fatalf("cascade winner is %d bytes; declaration is %d bytes", winnerSize, unsafe.Sizeof(declaration{}))
 	}
 }
 
@@ -212,6 +262,42 @@ func TestOnlyGeneratedContentElementsAreRetained(t *testing.T) {
 	}
 }
 
+func TestDocumentCollectionCountsExtractableResults(t *testing.T) {
+	source := []byte(`<body><p>A<style>p{color:red}</style>C<script>D</script></p><img><input><iframe>E</iframe></body>`)
+	parsed, err := (processor{Limits: DefaultLimits()}).parseDocument(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.extractableTextCount != 2 || parsed.extractableElementCount != 2 {
+		t.Fatalf("extractable counts = text %d, elements %d", parsed.extractableTextCount, parsed.extractableElementCount)
+	}
+	document, err := Analyze(source, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Text) != parsed.extractableTextCount || len(document.Elements) != parsed.extractableElementCount {
+		t.Fatalf("result counts = text %d, elements %d", len(document.Text), len(document.Elements))
+	}
+}
+
+func TestDocumentCollectionPreparesElementMetadataOnce(t *testing.T) {
+	source := []byte(`<p class="` + strings.Repeat("x", 32) + `" style="opacity:.5" hidden>T</p>`)
+	parsed, err := (processor{Limits: DefaultLimits()}).parseDocument(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for node, prepared := range parsed.elements {
+		if node.Data != "p" {
+			continue
+		}
+		if len(prepared.inline) != 1 || len(prepared.legacy) != 1 || prepared.selector.empty() {
+			t.Fatalf("prepared element metadata = %+v", prepared)
+		}
+		return
+	}
+	t.Fatal("missing prepared paragraph metadata")
+}
+
 func TestNodeLimitsBeforeAndAfterTreeConstruction(t *testing.T) {
 	t.Run("lexical nodes", func(t *testing.T) {
 		limits := DefaultLimits()
@@ -356,22 +442,17 @@ func TestAllShorthandIsStoredOnceAndChargedForEveryProperty(t *testing.T) {
 	wantWork := elementTraversalWork + int64(declarationProperties)*declarationApplyWeight
 	matches := matchBudget{limit: wantWork}
 	expressions := expressionBudget{remaining: s.limits.ExpressionWork}
-	style, _, _, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, inline, 1024, false, selectorMatchContext{}, &matches, &expressions)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, inline, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
 	if matches.exhausted || matches.used != wantWork {
 		t.Fatalf("all shorthand work = %+v, want %d", matches, wantWork)
 	}
-	if style[display].Known {
-		t.Fatalf("all shorthand display = %+v, want unresolved", style[display])
+	if result.style[display].Known {
+		t.Fatalf("all shorthand display = %+v, want unresolved", result.style[display])
 	}
 
 	matches = matchBudget{limit: wantWork - 1}
 	expressions = expressionBudget{remaining: s.limits.ExpressionWork}
-	if _, _, _, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, inline, 1024, false, selectorMatchContext{}, &matches, &expressions); err != nil {
-		t.Fatal(err)
-	}
+	s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, inline, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
 	if !matches.exhausted {
 		t.Fatal("all shorthand partially applied after its complete work reservation failed")
 	}
@@ -548,7 +629,7 @@ func TestNumbersAndColours(t *testing.T) {
 		v    string
 		want float64
 	}{{"0", 0}, {"2px", 2}, {"1.5pt", 2}, {".125em", 2}, {"12.5%", 2}, {".125rem", 2}} {
-		v, st := resolve(fontSize, c.v, initial(), initial())
+		v, st := resolve(fontSize, c.v, initialPtr(), initialPtr())
 		if st != 1 || v.Number != c.want {
 			t.Fatal(c, v, st)
 		}
@@ -557,7 +638,7 @@ func TestNumbersAndColours(t *testing.T) {
 		v    string
 		want float64
 	}{{"-2", 0}, {"200%", 1}, {".25", .25}} {
-		v, st := resolve(opacity, c.v, initial(), initial())
+		v, st := resolve(opacity, c.v, initialPtr(), initialPtr())
 		if st != 1 || v.Number != c.want {
 			t.Fatal(c, v, st)
 		}
@@ -583,12 +664,12 @@ func TestUnknownRelativeFontSizePreservesSpecifiedText(t *testing.T) {
 	parent[fontSize] = Value{Text: "1vw"}
 	root[fontSize] = Value{Text: "1vw"}
 	for _, specified := range []string{"1em", "50%", "smaller", "larger"} {
-		value, status := resolve(fontSize, specified, parent, root)
+		value, status := resolve(fontSize, specified, &parent, &root)
 		if status != 1 || value.Known || value.Text != specified {
 			t.Errorf("resolve(font-size, %q) = %+v, status %d", specified, value, status)
 		}
 	}
-	value, status := resolve(fontSize, "1rem", initial(), root)
+	value, status := resolve(fontSize, "1rem", initialPtr(), &root)
 	if status != 1 || value.Known || value.Text != "1rem" {
 		t.Fatalf("resolve(font-size, 1rem) = %+v, status %d", value, status)
 	}
@@ -631,7 +712,7 @@ func TestConditionsAndRecovery(t *testing.T) {
 }
 
 func TestViewingCaseLabelMergeRejectsShapeMismatch(t *testing.T) {
-	labels := []uint8{labelBit("visible")}
+	labels := []visibilityLabel{labelBit("visible")}
 	if !mergeViewingCaseLabel(labels, 0, labelBit("unknown")) {
 		t.Fatal("valid viewing-case label was rejected")
 	}
@@ -787,26 +868,20 @@ func TestElementTraversalConsumesSharedWorkBudget(t *testing.T) {
 	matches := matchBudget{limit: elementTraversalWork}
 	expressions := expressionBudget{remaining: s.limits.ExpressionWork}
 	node := &html.Node{Type: html.ElementNode, Data: "p"}
-	first, _, _, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
-	if err != nil {
-		t.Fatal(err)
+	first := s.elementStyle(node, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
+	if !first.style[display].Known || matches.exhausted {
+		t.Fatalf("first traversal = %+v, budget=%+v", first.style[display], matches)
 	}
-	if !first[display].Known || matches.exhausted {
-		t.Fatalf("first traversal = %+v, budget=%+v", first[display], matches)
-	}
-	second, _, _, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second[display].Known || !matches.exhausted {
-		t.Fatalf("second traversal = %+v, budget=%+v", second[display], matches)
+	second := s.elementStyle(node, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
+	if second.style[display].Known || !matches.exhausted {
+		t.Fatalf("second traversal = %+v, budget=%+v", second.style[display], matches)
 	}
 }
 
 func TestColourLayerTraversalConsumesSharedWorkBudget(t *testing.T) {
 	layers := make([]paintLayer, 128)
 	for i := range layers {
-		layers[i] = layer(initial())
+		layers[i] = layer(initialPtr())
 	}
 	cost := int64(1 + len(layers))
 	enough := matchBudget{limit: cost}
@@ -827,15 +902,12 @@ func TestSelectorWorkBudgetStopsBeforePartialCascadeIsTrusted(t *testing.T) {
 	s.buildSelectorIndex(1, 1)
 	matches := matchBudget{limit: limits.MatchWork}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	style, _, _, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
 	if !matches.exhausted || matches.used > matches.limit {
 		t.Fatalf("match budget was not enforced: %+v", matches)
 	}
-	if style[display].Known {
-		t.Fatalf("partial cascade was trusted: %+v", style[display])
+	if result.style[display].Known {
+		t.Fatalf("partial cascade was trusted: %+v", result.style[display])
 	}
 }
 
@@ -853,15 +925,12 @@ func TestDeclarationApplicationWorkStopsBeforePartialCascadeIsTrusted(t *testing
 	// required to reserve the complete declaration list.
 	matches := matchBudget{limit: s.planningWork + 1 + plan.cost + declarations*declarationApplyWeight - 1, used: s.planningWork}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	style, _, _, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
 	if !matches.exhausted {
 		t.Fatalf("declaration application did not exhaust budget: %+v", matches)
 	}
-	if style[color].Known {
-		t.Fatalf("partially applied cascade was trusted: %+v", style[color])
+	if result.style[color].Known {
+		t.Fatalf("partially applied cascade was trusted: %+v", result.style[color])
 	}
 }
 
@@ -876,12 +945,9 @@ func TestSelectorIndexSkipsIrrelevantInactiveRules(t *testing.T) {
 	}
 	matches := matchBudget{limit: work}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	style, _, _, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if matches.exhausted || !style[display].Known {
-		t.Fatalf("irrelevant indexed rule consumed work: budget=%+v display=%+v", matches, style[display])
+	result := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
+	if matches.exhausted || !result.style[display].Known {
+		t.Fatalf("irrelevant indexed rule consumed work: budget=%+v display=%+v", matches, result.style[display])
 	}
 }
 
@@ -894,6 +960,43 @@ func TestDeclarationsPrepareContextFreeValuesOnce(t *testing.T) {
 	contextual := s.declarations("font-size", "50%")
 	if len(contextual) != 1 || contextual[0].prepared != nil {
 		t.Fatalf("context-dependent declaration was prepared as static: %+v", contextual)
+	}
+}
+
+func TestPreparedDeclarationReleasesUnneededTokens(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	static := s.declarations("display", "none")
+	if len(static) != 1 || static[0].prepared == nil {
+		t.Fatalf("static declaration was not prepared: %+v", static)
+	}
+	if static[0].tokensReady || static[0].valueTokens != nil {
+		t.Fatalf("static declaration retained tokens: %+v", static[0])
+	}
+
+	contextual := s.declarations("font-size", "calc(1em + 2px)")
+	if len(contextual) != 1 || contextual[0].prepared != nil || !contextual[0].tokensReady || len(contextual[0].valueTokens) == 0 {
+		t.Fatalf("contextual declaration did not retain tokens: %+v", contextual)
+	}
+	custom := s.declarations("--size", "calc(1em + 2px)")
+	if len(custom) != 1 || !custom[0].tokensReady || len(custom[0].valueTokens) == 0 {
+		t.Fatalf("custom declaration did not retain tokens: %+v", custom)
+	}
+}
+
+func TestRelevantDeclarationPropertyClassification(t *testing.T) {
+	relevant := []string{
+		"display", "DISPLAY", `d\69splay`, "margin", "background", "font", "all",
+		"-webkit-mask", "-webkit-transform", "-ms-transform", "-webkit-text-stroke-width", "--custom",
+	}
+	for _, property := range relevant {
+		if !relevantDeclarationProperty(property) {
+			t.Errorf("relevantDeclarationProperty(%q) = false", property)
+		}
+	}
+	for _, property := range []string{"border", "padding", "animation", "-vendor-display", ""} {
+		if relevantDeclarationProperty(property) {
+			t.Errorf("relevantDeclarationProperty(%q) = true", property)
+		}
 	}
 }
 
@@ -912,6 +1015,43 @@ func TestAnalyzeReportsResourceUsage(t *testing.T) {
 	}
 	if usage.MatchWork == 0 || usage.MatchWork > limits.MatchWork || usage.ExpressionWork > limits.ExpressionWork {
 		t.Fatalf("invalid work usage: %+v", usage)
+	}
+}
+
+func TestCSSLimitAbandonmentPreservesResourceUsage(t *testing.T) {
+	limits := DefaultLimits()
+	limits.Rules = 1
+	document, err := Analyze([]byte(`<style>p{display:none}b{display:none}</style><p>T</p>`), limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if label := findText(t, document, "T").Label; label != "unknown" {
+		t.Fatalf("label = %q, want unknown", label)
+	}
+	usage := document.Usage
+	if !usage.CSSLimitExceeded {
+		t.Fatalf("CSS limit was not reported: %+v", usage)
+	}
+	if usage.Rules != 2 || usage.Selectors != 2 {
+		t.Fatalf("discarded CSS work was not retained: %+v", usage)
+	}
+	if usage.MatchWork <= 1 {
+		t.Fatalf("planning work was reset on abandonment: %+v", usage)
+	}
+}
+
+func TestCSSAbandonmentReleasesPreparedElementMetadata(t *testing.T) {
+	limits := DefaultLimits()
+	limits.Rules = 1
+	document, err := (processor{Limits: limits}).parseDocument([]byte(`<p class="before" style="display:none">A</p><style>b{display:none}i{display:none}</style><b class="after">B</b>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !document.styles.cascadeIncomplete {
+		t.Fatal("CSS limit was not exhausted")
+	}
+	if document.elements != nil {
+		t.Fatalf("unusable element metadata was retained for %d elements", len(document.elements))
 	}
 }
 
@@ -949,12 +1089,9 @@ func TestDeclarationValuesShareWorkBudget(t *testing.T) {
 	}
 	matches := matchBudget{limit: limits.MatchWork, used: s.planningWork}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	style, _, _, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !matches.exhausted || style[display].Known {
-		t.Fatalf("exhausted declaration work was trusted: budget=%+v display=%+v", matches, style[display])
+	result := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
+	if !matches.exhausted || result.style[display].Known {
+		t.Fatalf("exhausted declaration work was trusted: budget=%+v display=%+v", matches, result.style[display])
 	}
 }
 
@@ -1108,6 +1245,24 @@ func TestSelectorIndexIncludesEveryPotentialCandidate(t *testing.T) {
 	}
 }
 
+func TestDirectSelectorIndexHasNoAncestorSearch(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`p{display:none}`, false)
+	s.buildSelectorIndex(128, 129)
+	if len(s.index.ancestorTags) != 0 || len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
+		t.Fatalf("direct selector populated ancestor index: %+v", s.index)
+	}
+	parent := &html.Node{Type: html.ElementNode, Data: "div"}
+	for range 128 {
+		parent = &html.Node{Type: html.ElementNode, Data: "div", Parent: parent}
+	}
+	node := &html.Node{Type: html.ElementNode, Data: "p", Parent: parent}
+	refs := s.candidates(node)
+	if len(refs) != 1 || s.rules[refs[0].rule].plans[refs[0].branch].source != "p" {
+		t.Fatalf("direct selector candidates = %+v", refs)
+	}
+}
+
 func TestNamespaceSelectorsRetainEveryPotentialCandidate(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	s.parseCSS(`s|text{display:none}*|text{display:none}|text{display:none}s|*{visibility:hidden}s|linearGradient{opacity:0}[s|href]{display:none}`, false)
@@ -1175,24 +1330,26 @@ func TestSelectorIndexRemovesRulesWithoutRelevantDeclarations(t *testing.T) {
 }
 
 func TestMatchCacheStopsAtDocumentLimit(t *testing.T) {
-	s := sheet{limits: DefaultLimits(), cacheMatches: true, matchCacheEntries: maxMatchCacheEntries - 1}
+	s := sheet{limits: DefaultLimits(), runtime: sheetRuntime{cacheMatches: true, matchCacheEntries: maxMatchCacheEntries - 1}}
 	s.parseCSS(`p{display:none}`, false)
 	s.buildSelectorIndex(1, 2)
 	// buildSelectorIndex resets cache accounting, so place it immediately below
 	// the ceiling before exercising two distinct entries.
-	s.matchCacheEntries = maxMatchCacheEntries - 1
+	s.runtime.cacheMatches = true
+	s.runtime.matchCacheEntries = maxMatchCacheEntries - 1
 	plan := &s.rules[0].plans[0]
 	first := &html.Node{Type: html.ElementNode, Data: "p"}
 	second := &html.Node{Type: html.ElementNode, Data: "p"}
 	s.cacheMatch(plan, first, true)
 	s.cacheMatch(plan, second, true)
-	if s.matchCacheEntries != maxMatchCacheEntries {
-		t.Fatalf("cache entries = %d", s.matchCacheEntries)
+	if s.runtime.matchCacheEntries != maxMatchCacheEntries {
+		t.Fatalf("cache entries = %d", s.runtime.matchCacheEntries)
 	}
-	if plan.matches[first] != 2 {
+	cache := s.runtime.matchCaches[plan.sequence]
+	if cache[first] != 2 {
 		t.Fatal("entry below the ceiling was not cached")
 	}
-	if _, ok := plan.matches[second]; ok {
+	if _, ok := cache[second]; ok {
 		t.Fatal("entry beyond the ceiling was cached")
 	}
 }
@@ -1201,21 +1358,18 @@ func TestMatchingContinuesAfterMatchCacheIsFull(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	s.parseCSS(`p{display:none}`, false)
 	s.buildSelectorIndex(1, 1)
-	s.cacheMatches = true
-	s.matchCacheEntries = maxMatchCacheEntries
+	s.runtime.cacheMatches = true
+	s.runtime.matchCacheEntries = maxMatchCacheEntries
 	matches := matchBudget{limit: s.limits.MatchWork, used: s.planningWork}
 	expressions := expressionBudget{remaining: s.limits.ExpressionWork}
 	node := &html.Node{Type: html.ElementNode, Data: "p"}
 	for range 2 {
-		style, _, _, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1024, false, selectorMatchContext{}, &matches, &expressions)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !style[display].Known || style[display].Text != "none" {
-			t.Fatalf("uncached match display = %+v", style[display])
+		result := s.elementStyle(node, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
+		if !result.style[display].Known || result.style[display].Text != "none" {
+			t.Fatalf("uncached match display = %+v", result.style[display])
 		}
 	}
-	if s.rules[0].plans[0].matches != nil {
+	if s.runtime.matchCaches != nil {
 		t.Fatal("full cache retained a new match")
 	}
 }
@@ -1243,8 +1397,8 @@ func TestSelectorIndexDeduplicatesRepeatedAncestorBuckets(t *testing.T) {
 	if !complete || len(refs) != 1_000 {
 		t.Fatalf("repeated ancestor candidates = %+v, complete=%t", refs, complete)
 	}
-	if len(s.candidateScratch) > s.index.count {
-		t.Fatalf("candidate scratch length = %d, selector count = %d", len(s.candidateScratch), s.index.count)
+	if len(s.runtime.candidateScratch) > s.index.count {
+		t.Fatalf("candidate scratch length = %d, selector count = %d", len(s.runtime.candidateScratch), s.index.count)
 	}
 	if matches.used != 1_256 {
 		t.Fatalf("candidate work = %d, want 256 attribute scans plus 1,000 bucket entries", matches.used)

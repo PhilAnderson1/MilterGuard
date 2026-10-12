@@ -38,8 +38,8 @@ var reservedAnnotation = regexp.MustCompile(`(?is)</?\s*(?:concealed|visibility-
 
 type htmlExtraction struct {
 	inspection  htmlextract.Document
-	states      map[*xhtml.Node]htmlextract.Text
-	elements    map[*xhtml.Node]htmlextract.Element
+	states      map[*xhtml.Node]*htmlextract.Text
+	elements    map[*xhtml.Node]*htmlextract.Element
 	base        *url.URL
 	baseSeen    bool
 	links       linkCollector
@@ -228,11 +228,13 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		return extractBoundedHTMLFallback(source)
 	}
 	budget.consumeHTML(inspection.Usage)
-	e := htmlExtraction{inspection: inspection, states: make(map[*xhtml.Node]htmlextract.Text, len(inspection.Text)), elements: make(map[*xhtml.Node]htmlextract.Element, len(inspection.Elements))}
-	for _, state := range inspection.Text {
+	e := htmlExtraction{inspection: inspection, states: make(map[*xhtml.Node]*htmlextract.Text, len(inspection.Text)), elements: make(map[*xhtml.Node]*htmlextract.Element, len(inspection.Elements))}
+	for i := range inspection.Text {
+		state := &inspection.Text[i]
 		e.states[state.Node] = state
 	}
-	for _, state := range inspection.Elements {
+	for i := range inspection.Elements {
+		state := &inspection.Elements[i]
 		e.elements[state.Node] = state
 	}
 	e.findBase(inspection.Root)
@@ -459,6 +461,11 @@ func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode
 		return
 	}
 	state := e.elements[n]
+	if state == nil {
+		out.WriteString(content)
+		visible.WriteString(content)
+		return
+	}
 	switch state.Label {
 	case "concealed":
 		if mode == StripHidden {
@@ -627,8 +634,8 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 	if text == "" {
 		return
 	}
-	state, found := e.states[n]
-	if !found {
+	state := e.states[n]
+	if state == nil {
 		return // source in head/style/script/title/template or another inert scope
 	}
 	outText := text
@@ -755,7 +762,7 @@ func annotationWhitespaceOnlyBytes(value []byte) bool {
 	return true
 }
 
-func concealmentReason(state htmlextract.Text) (string, string) {
+func concealmentReason(state *htmlextract.Text) (string, string) {
 	for _, reason := range state.ConcealmentReasons {
 		switch reason {
 		case "display-none":
@@ -807,6 +814,10 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 		return
 	}
 	state := e.elements[n]
+	if state == nil {
+		out.WriteString(rendered)
+		return
+	}
 	switch state.Label {
 	case "concealed":
 		if mode == StripHidden {
@@ -840,7 +851,7 @@ func explicitTrackingPixel(n *xhtml.Node) bool {
 	return unit("width") && unit("height")
 }
 
-func elementConcealmentReason(state htmlextract.Element) (string, string) {
+func elementConcealmentReason(state *htmlextract.Element) (string, string) {
 	for _, reason := range state.ConcealmentReasons {
 		switch reason {
 		case "display-none":

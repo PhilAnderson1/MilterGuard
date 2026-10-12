@@ -310,7 +310,7 @@ func TestHTMLBodyBackgroundIsPropagatedToCanvas(t *testing.T) {
 func TestBackgroundFallbackColour(t *testing.T) {
 	tests := []struct {
 		value, colour string
-		status        int
+		status        valueStatus
 		valid         bool
 	}{
 		{`url(x) red`, "red", 1, true},

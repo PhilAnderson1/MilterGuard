@@ -82,23 +82,34 @@ type processor struct {
 	retainInspection bool // tests only; production results retain compact decisions
 }
 
-func concealedVisibilityReason(value Value) string {
+type visibilityLabel uint8
+
+const (
+	labelVisible visibilityLabel = 1 << iota
+	labelConcealed
+	labelUnknown
+)
+
+type concealmentReason uint8
+
+func concealedVisibilityReason(value Value) concealmentReason {
 	if !value.Known {
-		return ""
+		return 0
 	}
 	switch value.Text {
 	case "hidden":
-		return "visibility-hidden"
+		return reasonVisibilityHidden
 	case "collapse":
-		return "visibility-collapse"
+		return reasonVisibilityCollapse
 	default:
-		return ""
+		return 0
 	}
 }
 
 const (
-	reasonDisplayNone uint8 = 1 << iota
-	reasonVisibility
+	reasonDisplayNone concealmentReason = 1 << iota
+	reasonVisibilityHidden
+	reasonVisibilityCollapse
 	reasonOpacity
 	reasonFontSize
 	reasonColour
@@ -107,30 +118,44 @@ const (
 )
 
 type visibilityDecision struct {
-	label   string
-	reasons []string
+	label   visibilityLabel
+	reasons concealmentReason
 }
 
-func decideVisibility(style Style, none bool, displayKnown bool, alpha float64, alphaKnown bool, clipped, clipKnown, contentHidden, contentKnown, msoHidden, msoKnown, layoutUncertain bool, colour *colourResult) visibilityDecision {
-	var mask uint8
+type presentationState struct {
+	none, displayKnown          bool
+	alpha                       float64
+	alphaKnown                  bool
+	clipped, clipKnown          bool
+	contentHidden, contentKnown bool
+	msoHidden, msoKnown         bool
+	layoutUncertain             bool
+}
+
+func initialPresentationState() presentationState {
+	return presentationState{alpha: 1, alphaKnown: true, displayKnown: true, contentKnown: true, msoKnown: true, clipKnown: true}
+}
+
+func decideVisibility(style *Style, state presentationState, colour *colourResult) visibilityDecision {
+	var mask concealmentReason
 	visibilityReason := concealedVisibilityReason(style[visibility])
-	if none {
+	if state.none {
 		mask |= reasonDisplayNone
 	}
-	if visibilityReason != "" {
-		mask |= reasonVisibility
+	if visibilityReason != 0 {
+		mask |= visibilityReason
 	}
-	if alphaKnown && alpha <= .01+1e-14 {
+	if state.alphaKnown && state.alpha <= .01+1e-14 {
 		mask |= reasonOpacity
 	}
-	if clipped {
+	if state.clipped {
 		mask |= reasonEmptyClip
 	}
-	if contentHidden {
+	if state.contentHidden {
 		mask |= reasonContentVisibility
 	}
 
-	known := displayKnown && style[visibility].Known && alphaKnown && clipKnown && contentKnown && msoKnown && !layoutUncertain
+	known := state.displayKnown && style[visibility].Known && state.alphaKnown && state.clipKnown && state.contentKnown && state.msoKnown && !state.layoutUncertain
 	if colour != nil {
 		if style[fontSize].Known && style[fontSize].Number <= 2 {
 			mask |= reasonFontSize
@@ -141,23 +166,30 @@ func decideVisibility(style Style, none bool, displayKnown bool, alpha float64, 
 		known = known && style[fontSize].Known && colour.known
 	}
 
-	decision := visibilityDecision{label: "visible"}
+	decision := visibilityDecision{label: labelVisible, reasons: mask}
 	if mask != 0 {
-		decision.label = "concealed"
+		decision.label = labelConcealed
 	} else if !known {
-		decision.label = "unknown"
-	} else if msoHidden {
+		decision.label = labelUnknown
+	} else if state.msoHidden {
 		// mso-hide is honored only by Word-based Outlook clients. This is
 		// client-dependent, but not viewport-dependent, so use the generic
 		// uncertainty annotation rather than the viewport-specific one.
-		decision.label = "unknown"
+		decision.label = labelUnknown
 	}
+	return decision
+}
+
+func concealmentReasonStrings(mask concealmentReason) []string {
+	var reasons [8]string
+	count := 0
 	for _, reason := range []struct {
-		bit  uint8
+		bit  concealmentReason
 		name string
 	}{
 		{reasonDisplayNone, "display-none"},
-		{reasonVisibility, visibilityReason},
+		{reasonVisibilityHidden, "visibility-hidden"},
+		{reasonVisibilityCollapse, "visibility-collapse"},
 		{reasonOpacity, "opacity"},
 		{reasonFontSize, "font-size"},
 		{reasonColour, "colour-distance"},
@@ -165,23 +197,28 @@ func decideVisibility(style Style, none bool, displayKnown bool, alpha float64, 
 		{reasonContentVisibility, "content-visibility-hidden"},
 	} {
 		if mask&reason.bit != 0 {
-			decision.reasons = append(decision.reasons, reason.name)
+			reasons[count] = reason.name
+			count++
 		}
 	}
-	return decision
+	return append([]string(nil), reasons[:count]...)
 }
 
-func labelBit(label string) uint8 {
+func labelBit(label string) visibilityLabel {
 	switch label {
 	case "concealed":
-		return 2
+		return labelConcealed
 	case "unknown":
-		return 4
+		return labelUnknown
 	default:
-		return 1
+		return labelVisible
 	}
 }
 
+// Text describes one extractable text node. Label is aggregated across every
+// evaluated viewing case. FontSize, EffectiveOpacity and ConcealmentReasons
+// describe the first evaluated case and provide representative rendering
+// evidence rather than a second cross-case aggregate.
 type Text struct {
 	Label              string
 	FontSize           string
@@ -197,6 +234,9 @@ type textInspection struct {
 	style  Style
 	colour colourInspection
 }
+
+// Element describes an image-like element. Label is aggregated across viewing
+// cases; EffectiveOpacity and ConcealmentReasons come from the first case.
 type Element struct {
 	Node               *html.Node
 	Label              string
@@ -204,10 +244,13 @@ type Element struct {
 	EffectiveOpacity   float64
 }
 type Document struct {
-	Root                 *html.Node
-	Text                 []Text
-	Elements             []Element
-	Usage                ResourceUsage
+	Root     *html.Node
+	Text     []Text
+	Elements []Element
+	Usage    ResourceUsage
+	// UnresolvedStylesheet reports that an applicable external or unsupported
+	// stylesheet could not be evaluated. It does not force every node label to
+	// unknown; consumers must account for the missing global CSS separately.
 	UnresolvedStylesheet bool
 }
 
@@ -226,6 +269,7 @@ type ResourceUsage struct {
 	MediaCases              int
 	MatchWork               int64
 	ExpressionWork          int64
+	CSSLimitExceeded        bool
 	MatchWorkExhausted      bool
 	ExpressionWorkExhausted bool
 }
@@ -406,15 +450,26 @@ func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
 }
 
 type parsedDocument struct {
-	root           *html.Node
-	styles         sheet
-	inlineDecls    map[*html.Node][]declaration
-	treeDepth      int
-	nodeCount      int
-	textCount      int
-	attributeCount int
-	attributeWork  selectorAttributeProfile
-	lexical        lexicalUsage
+	root                    *html.Node
+	styles                  sheet
+	elements                map[*html.Node]elementPreparation
+	treeDepth               int
+	nodeCount               int
+	textCount               int
+	attributeCount          int
+	extractableTextCount    int
+	extractableElementCount int
+	attributeWork           selectorAttributeProfile
+	lexical                 lexicalUsage
+}
+
+type elementPreparation struct {
+	inline, legacy []declaration
+	selector       selectorAttributeProfile
+}
+
+func (p selectorAttributeProfile) empty() bool {
+	return p.classes == 0 && p.ids == 0 && p.attributes == 0
 }
 
 func (p processor) parseDocument(input []byte) (parsedDocument, error) {
@@ -438,16 +493,29 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	}
 	document.root = root
 	document.styles = sheet{limits: p.Limits}
-	document.inlineDecls = make(map[*html.Node][]declaration)
+	document.elements = make(map[*html.Node]elementPreparation)
 	type entry struct {
-		n     *html.Node
-		depth int
-		scope string
+		n, next *html.Node
+		depth   int
+		scope   string
+		entered bool
 	}
-	todo := []entry{{root, 0, ""}}
-	for len(todo) > 0 {
-		e := todo[len(todo)-1]
-		todo = todo[:len(todo)-1]
+	stack := make([]entry, 1, max(1, document.lexical.depth+1))
+	stack[0] = entry{n: root}
+	for len(stack) > 0 {
+		e := &stack[len(stack)-1]
+		if e.entered {
+			if e.next == nil {
+				stack = stack[:len(stack)-1]
+				continue
+			}
+			child := e.next
+			e.next = child.NextSibling
+			stack = append(stack, entry{n: child, depth: e.depth + 1, scope: e.scope})
+			continue
+		}
+		e.entered = true
+		e.next = e.n.FirstChild
 		n := e.n
 		if e.depth > p.Limits.Depth {
 			return document, fmt.Errorf("limit: tree depth > %d", p.Limits.Depth)
@@ -470,7 +538,11 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			if document.attributeCount > p.Limits.Attributes {
 				return document, fmt.Errorf("limit: tree attributes > %d", p.Limits.Attributes)
 			}
-			document.attributeWork.observe(n)
+			var prepared elementPreparation
+			prepared.selector.observe(n)
+			document.attributeWork.classes = max(document.attributeWork.classes, prepared.selector.classes)
+			document.attributeWork.ids = max(document.attributeWork.ids, prepared.selector.ids)
+			document.attributeWork.attributes = max(document.attributeWork.attributes, prepared.selector.attributes)
 			if href, media, applies := stylesheetLink(n); applies && (e.scope == "" || e.scope == "head") {
 				document.styles.loadStylesheetReference(href, media)
 			}
@@ -487,13 +559,28 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 				}
 			}
 			if value := attr(n, "style"); value != "" {
-				document.inlineDecls[n] = document.styles.parseCSS(value, true)
+				prepared.inline = document.styles.parseCSS(value, true)
+			}
+			if !document.styles.cascadeIncomplete && !document.styles.workIncomplete {
+				prepared.legacy = prepareDeclarations(legacyDeclarations(n))
+			}
+			if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || !prepared.selector.empty() {
+				document.elements[n] = prepared
+			}
+			if n.Data == "img" || n.Data == "input" {
+				document.extractableElementCount++
 			}
 		}
-		scope := excluded(n, e.scope)
-		for c := n.LastChild; c != nil; c = c.PrevSibling {
-			todo = append(todo, entry{c, e.depth + 1, scope})
+		e.scope = excluded(n, e.scope)
+		if n.Type == html.TextNode && e.scope == "" {
+			document.extractableTextCount++
 		}
+	}
+	if document.styles.cascadeIncomplete || document.styles.workIncomplete {
+		// No prepared per-element CSS can be used once global style analysis is
+		// incomplete. Release declarations and selector profiles collected before
+		// the failure rather than retaining them through result traversal.
+		document.elements = nil
 	}
 	return document, nil
 }
@@ -515,6 +602,150 @@ func boundedStyleText(style *html.Node, maximum int) (string, bool) {
 	return css.String(), true
 }
 
+type viewingCaseResults struct {
+	text           []Text
+	elements       []Element
+	textLabels     []visibilityLabel
+	elementLabels  []visibilityLabel
+	textReasons    []concealmentReason
+	elementReasons []concealmentReason
+}
+
+type viewingCaseFrame struct {
+	n, next *html.Node
+	entered bool
+	style   Style
+	scope   string
+	presentationState
+	vars         *variableScope
+	selectorPath selectorAttributeProfile
+}
+
+type viewingCaseRunner struct {
+	document         *parsedDocument
+	styles           *sheet
+	retainInspection bool
+	matches          *matchBudget
+	expressions      *expressionBudget
+	results          *viewingCaseResults
+	frames           []viewingCaseFrame
+	layers           []paintLayer
+}
+
+func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
+	textIndex, elementIndex := 0, 0
+	media := mediaEvaluation{width: width, fallback: fallback}
+	r.frames = r.frames[:0]
+	r.frames = append(r.frames, viewingCaseFrame{n: r.document.root, style: initial(), presentationState: initialPresentationState()})
+	rootStyle := initial()
+	r.layers = r.layers[:0]
+	for len(r.frames) > 0 {
+		f := &r.frames[len(r.frames)-1]
+		n := f.n
+		if !f.entered {
+			f.entered = true
+			f.next = n.FirstChild
+			if n.Type == html.ElementNode {
+				prepared := r.document.elements[n]
+				selectorCurrent := prepared.selector
+				f.selectorPath.classes = max(f.selectorPath.classes, selectorCurrent.classes)
+				f.selectorPath.ids = max(f.selectorPath.ids, selectorCurrent.ids)
+				f.selectorPath.attributes = max(f.selectorPath.attributes, selectorCurrent.attributes)
+				selectorContext := selectorMatchContext{
+					current: selectorCurrent, path: f.selectorPath, document: r.document.attributeWork,
+					depth: len(r.frames) - 1, nodes: r.document.nodeCount,
+				}
+				resolved := r.styles.elementStyle(n, &f.style, &rootStyle, f.vars, prepared.legacy, prepared.inline, &media, selectorContext, r.matches, r.expressions)
+				f.style = resolved.style
+				f.vars = resolved.variables
+				empty, known, inlineClipPathUncertain := emptyClip(&f.style, n, resolved.displayDeclared)
+				f.clipped = f.clipped || empty
+				f.clipKnown = f.clipKnown && known
+				paintStyle := f.style
+				if inlineClipPathUncertain {
+					paintStyle[clipPath] = initialStyle[clipPath]
+				}
+				r.layers = append(r.layers, layer(&paintStyle))
+				if n.Namespace == "" && n.Data == "body" && n.Parent != nil && n.Parent.Namespace == "" && n.Parent.Data == "html" {
+					propagateHTMLBodyBackground(r.layers)
+				}
+				if n.Data == "html" {
+					rootStyle = f.style
+				}
+				f.displayKnown = f.displayKnown && f.style[display].Known
+				if f.style[display].Known && f.style[display].Text == "none" {
+					f.none = true
+				}
+				cv := f.style[contentVisibility]
+				if cv.Known && cv.Text == "hidden" {
+					f.contentHidden = true
+				}
+				f.contentKnown = f.contentKnown && cv.Known
+				mh := f.style[msoHide]
+				if mh.Known && mh.Text == "all" {
+					f.msoHidden = true
+				}
+				f.msoKnown = f.msoKnown && mh.Known
+				f.layoutUncertain = f.layoutUncertain || resolved.layoutUncertain
+				a := f.style[opacity]
+				if a.Known && a.Number == 0 {
+					f.alpha = 0
+					f.alphaKnown = true
+				} else if !(f.alphaKnown && f.alpha == 0) {
+					f.alpha *= a.Number
+					f.alphaKnown = f.alphaKnown && a.Known
+				}
+				if n.Data == "img" || n.Data == "input" {
+					decision := decideVisibility(&f.style, f.presentationState, nil)
+					if first {
+						r.results.elementLabels = append(r.results.elementLabels, decision.label)
+						r.results.elementReasons = append(r.results.elementReasons, decision.reasons)
+						r.results.elements = append(r.results.elements, Element{Node: n, EffectiveOpacity: f.alpha})
+					} else if !mergeViewingCaseLabel(r.results.elementLabels, elementIndex, decision.label) {
+						return fmt.Errorf("internal: viewing-case element count exceeded first case")
+					}
+					elementIndex++
+				}
+			}
+			f.scope = excluded(n, f.scope)
+			if n.Type == html.TextNode && f.scope == "" {
+				st := f.style
+				colour := evaluateColour(st[color], r.layers, r.matches)
+				decision := decideVisibility(&st, f.presentationState, &colour)
+				if first {
+					r.results.textLabels = append(r.results.textLabels, decision.label)
+					r.results.textReasons = append(r.results.textReasons, decision.reasons)
+					text := Text{FontSize: st[fontSize].Text, EffectiveOpacity: f.alpha, Node: n}
+					if r.retainInspection {
+						text.inspection = &textInspection{style: st, colour: colour.inspection()}
+					}
+					r.results.text = append(r.results.text, text)
+				} else if !mergeViewingCaseLabel(r.results.textLabels, textIndex, decision.label) {
+					return fmt.Errorf("internal: viewing-case text count exceeded first case")
+				}
+				textIndex++
+			}
+		}
+		if f.next == nil {
+			if f.n.Type == html.ElementNode {
+				r.layers = r.layers[:len(r.layers)-1]
+			}
+			r.frames = r.frames[:len(r.frames)-1]
+			continue
+		}
+		child := f.next
+		f.next = child.NextSibling
+		r.frames = append(r.frames, viewingCaseFrame{
+			n: child, style: f.style, scope: f.scope, presentationState: f.presentationState,
+			vars: f.vars, selectorPath: f.selectorPath,
+		})
+	}
+	if !first && (textIndex != len(r.results.textLabels) || elementIndex != len(r.results.elementLabels)) {
+		return fmt.Errorf("internal: viewing-case traversal shape changed: text %d/%d, elements %d/%d", textIndex, len(r.results.textLabels), elementIndex, len(r.results.elementLabels))
+	}
+	return nil
+}
+
 func (p processor) process(input []byte) (Document, error) {
 	document, err := p.parseDocument(input)
 	if err != nil {
@@ -522,14 +753,19 @@ func (p processor) process(input []byte) (Document, error) {
 	}
 	root := document.root
 	s := &document.styles
-	inlineDecls := document.inlineDecls
-	in := Document{Root: root, Usage: ResourceUsage{
-		InputBytes: len(input), Nodes: max(document.nodeCount, document.lexical.nodes),
-		TextNodes:  max(document.textCount, document.lexical.textNodes),
-		Attributes: max(document.attributeCount, document.lexical.attributes),
-		Depth:      max(document.treeDepth, document.lexical.depth), CSSDepth: s.conditionDepth,
-		Rules: len(s.rules), Selectors: s.selectors,
-	}, UnresolvedStylesheet: s.unresolvedStylesheet}
+	in := Document{
+		Root:     root,
+		Text:     make([]Text, 0, document.extractableTextCount),
+		Elements: make([]Element, 0, document.extractableElementCount),
+		Usage: ResourceUsage{
+			InputBytes: len(input), Nodes: max(document.nodeCount, document.lexical.nodes),
+			TextNodes:  max(document.textCount, document.lexical.textNodes),
+			Attributes: max(document.attributeCount, document.lexical.attributes),
+			Depth:      max(document.treeDepth, document.lexical.depth), CSSDepth: s.conditionDepth,
+			Rules: s.rulesSeen, Selectors: s.selectors, CSSLimitExceeded: s.cascadeIncomplete,
+		},
+		UnresolvedStylesheet: s.unresolvedStylesheet,
+	}
 	s.buildSelectorIndex(document.treeDepth, document.nodeCount)
 	cap := p.Limits.MediaCases
 	if cap < 1 || cap > MaxViewingCases {
@@ -537,185 +773,59 @@ func (p processor) process(input []byte) (Document, error) {
 	}
 	widths, fallback := s.viewingCases(cap)
 	in.Usage.MediaCases = len(widths)
-	s.cacheMatches = len(widths) > 1
+	s.runtime.cacheMatches = len(widths) > 1
 	exprLimit := p.Limits.ExpressionWork
 	if exprLimit < 1 {
 		exprLimit = 10000000
 	}
 	budget := expressionBudget{remaining: exprLimit}
 	matches := matchBudget{limit: p.Limits.MatchWork, used: s.planningWork}
-	var labels, elementLabels []uint8
-	var firstText []Text
-	var firstElements []Element
+	results := viewingCaseResults{
+		text:           in.Text,
+		elements:       in.Elements,
+		textLabels:     make([]visibilityLabel, 0, document.extractableTextCount),
+		elementLabels:  make([]visibilityLabel, 0, document.extractableElementCount),
+		textReasons:    make([]concealmentReason, 0, document.extractableTextCount),
+		elementReasons: make([]concealmentReason, 0, document.extractableElementCount),
+	}
+	runner := viewingCaseRunner{
+		document: &document, styles: s, retainInspection: p.retainInspection,
+		matches: &matches, expressions: &budget, results: &results,
+		frames: make([]viewingCaseFrame, 0, document.treeDepth+1),
+		layers: make([]paintLayer, 0, document.treeDepth),
+	}
 	for caseIndex, width := range widths {
-		textIndex := 0
-		elementIndex := 0
-		type frame struct {
-			n, next            *html.Node
-			entered            bool
-			style              Style
-			scope              string
-			none               bool
-			alpha              float64
-			alphaKnown         bool
-			displayKnown       bool
-			contentHidden      bool
-			contentKnown       bool
-			msoHidden          bool
-			msoKnown           bool
-			layoutUncertain    bool
-			vars               *variableScope
-			clipped, clipKnown bool
-			selectorPath       selectorAttributeProfile
-		}
-		frames := make([]frame, 1)
-		frames[0] = frame{n: root, style: initial(), alpha: 1, alphaKnown: true, displayKnown: true, contentKnown: true, msoKnown: true, clipKnown: true}
-		rootStyle := initial()
-		var layers []paintLayer
-		for len(frames) > 0 {
-			f := &frames[len(frames)-1]
-			n := f.n
-			if !f.entered {
-				f.entered = true
-				f.next = n.FirstChild
-				if n.Type == html.ElementNode {
-					parent := f.style
-					var selectorCurrent selectorAttributeProfile
-					selectorCurrent.observe(n)
-					f.selectorPath.classes = max(f.selectorPath.classes, selectorCurrent.classes)
-					f.selectorPath.ids = max(f.selectorPath.ids, selectorCurrent.ids)
-					f.selectorPath.attributes = max(f.selectorPath.attributes, selectorCurrent.attributes)
-					selectorContext := selectorMatchContext{
-						current: selectorCurrent, path: f.selectorPath, document: document.attributeWork,
-						depth: len(frames) - 1, nodes: document.nodeCount,
-					}
-					var err error
-					var elementLayoutUncertain bool
-					var displayDeclared bool
-					f.style, f.vars, elementLayoutUncertain, displayDeclared, err = s.elementStyle(n, parent, rootStyle, f.vars, inlineDecls[n], width, fallback, selectorContext, &matches, &budget)
-					if err != nil {
-						return in, err
-					}
-					empty, known, inlineClipPathUncertain := emptyClip(f.style, n, displayDeclared)
-					f.clipped = f.clipped || empty
-					f.clipKnown = f.clipKnown && known
-					paintStyle := f.style
-					if inlineClipPathUncertain {
-						paintStyle[clipPath] = initialStyle[clipPath]
-					}
-					layers = append(layers, layer(paintStyle))
-					if n.Namespace == "" && n.Data == "body" && n.Parent != nil && n.Parent.Namespace == "" && n.Parent.Data == "html" {
-						propagateHTMLBodyBackground(layers)
-					}
-					if n.Data == "html" {
-						rootStyle = f.style
-					}
-					f.displayKnown = f.displayKnown && f.style[display].Known
-					if f.style[display].Known && f.style[display].Text == "none" {
-						f.none = true
-					}
-					cv := f.style[contentVisibility]
-					if cv.Known && cv.Text == "hidden" {
-						f.contentHidden = true
-					}
-					f.contentKnown = f.contentKnown && cv.Known
-					mh := f.style[msoHide]
-					if mh.Known && mh.Text == "all" {
-						f.msoHidden = true
-					}
-					f.msoKnown = f.msoKnown && mh.Known
-					f.layoutUncertain = f.layoutUncertain || elementLayoutUncertain
-					a := f.style[opacity]
-					if a.Known && a.Number == 0 {
-						f.alpha = 0
-						f.alphaKnown = true
-					} else if f.alphaKnown && f.alpha == 0 {
-					} else {
-						f.alpha *= a.Number
-						f.alphaKnown = f.alphaKnown && a.Known
-					}
-					if n.Data == "img" || n.Data == "input" {
-						decision := decideVisibility(f.style, f.none, f.displayKnown, f.alpha, f.alphaKnown, f.clipped, f.clipKnown, f.contentHidden, f.contentKnown, f.msoHidden, f.msoKnown, f.layoutUncertain, nil)
-						bit := labelBit(decision.label)
-						if caseIndex == 0 {
-							elementLabels = append(elementLabels, bit)
-						} else if !mergeViewingCaseLabel(elementLabels, elementIndex, bit) {
-							return in, fmt.Errorf("internal: viewing-case element count exceeded first case")
-						}
-						if caseIndex == 0 {
-							in.Elements = append(in.Elements, Element{Node: n, Label: decision.label, ConcealmentReasons: decision.reasons, EffectiveOpacity: f.alpha})
-						}
-						elementIndex++
-					}
-				}
-				f.scope = excluded(n, f.scope)
-				if n.Type == html.TextNode {
-					if f.scope == "" {
-						st := f.style
-						colour := evaluateColour(st[color], layers, &matches)
-						decision := decideVisibility(st, f.none, f.displayKnown, f.alpha, f.alphaKnown, f.clipped, f.clipKnown, f.contentHidden, f.contentKnown, f.msoHidden, f.msoKnown, f.layoutUncertain, &colour)
-						bit := labelBit(decision.label)
-						if caseIndex == 0 {
-							labels = append(labels, bit)
-						} else if !mergeViewingCaseLabel(labels, textIndex, bit) {
-							return in, fmt.Errorf("internal: viewing-case text count exceeded first case")
-						}
-						if caseIndex == 0 {
-							text := Text{Label: decision.label, FontSize: st[fontSize].Text, EffectiveOpacity: f.alpha, ConcealmentReasons: decision.reasons, Node: n}
-							if p.retainInspection {
-								text.inspection = &textInspection{style: st, colour: colour.inspection()}
-							}
-							in.Text = append(in.Text, text)
-						}
-						textIndex++
-					}
-				}
-			}
-			if f.next == nil {
-				if f.n.Type == html.ElementNode {
-					layers = layers[:len(layers)-1]
-				}
-				frames = frames[:len(frames)-1]
-				continue
-			}
-			c := f.next
-			f.next = c.NextSibling
-			frames = append(frames, frame{n: c, style: f.style, scope: f.scope, none: f.none, alpha: f.alpha, alphaKnown: f.alphaKnown, displayKnown: f.displayKnown, contentHidden: f.contentHidden, contentKnown: f.contentKnown, msoHidden: f.msoHidden, msoKnown: f.msoKnown, layoutUncertain: f.layoutUncertain, vars: f.vars, clipped: f.clipped, clipKnown: f.clipKnown, selectorPath: f.selectorPath})
-		}
-		if caseIndex == 0 {
-			firstText = in.Text
-			firstElements = in.Elements
-		} else if textIndex != len(labels) || elementIndex != len(elementLabels) {
-			return in, fmt.Errorf("internal: viewing-case traversal shape changed: text %d/%d, elements %d/%d", textIndex, len(labels), elementIndex, len(elementLabels))
+		if err := runner.run(width, fallback, caseIndex == 0); err != nil {
+			return in, err
 		}
 		if matches.exhausted && caseIndex+1 < len(widths) {
 			// All later cases would receive unresolved styles. Mark their
 			// contribution directly instead of repeatedly traversing the DOM.
-			unknown := labelBit("unknown")
-			for i := range labels {
-				labels[i] |= unknown
+			unknown := labelUnknown
+			for i := range results.textLabels {
+				results.textLabels[i] |= unknown
 			}
-			for i := range elementLabels {
-				elementLabels[i] |= unknown
+			for i := range results.elementLabels {
+				results.elementLabels[i] |= unknown
 			}
 			break
 		}
 	}
-	for i, bits := range labels {
+	for i, bits := range results.textLabels {
 		label := aggregateLabel(bits)
-		firstText[i].Label = label
-		if label != "concealed" {
-			firstText[i].ConcealmentReasons = nil
+		results.text[i].Label = label
+		if label == "concealed" {
+			results.text[i].ConcealmentReasons = concealmentReasonStrings(results.textReasons[i])
 		}
 	}
-	in.Text = firstText
-	for i, bits := range elementLabels {
-		firstElements[i].Label = aggregateLabel(bits)
-		if firstElements[i].Label != "concealed" {
-			firstElements[i].ConcealmentReasons = nil
+	in.Text = results.text
+	for i, bits := range results.elementLabels {
+		results.elements[i].Label = aggregateLabel(bits)
+		if results.elements[i].Label == "concealed" {
+			results.elements[i].ConcealmentReasons = concealmentReasonStrings(results.elementReasons[i])
 		}
 	}
-	in.Elements = firstElements
+	in.Elements = results.elements
 	in.Usage.MatchWork = matches.used
 	in.Usage.MatchWorkExhausted = matches.exhausted || s.workIncomplete
 	in.Usage.ExpressionWork = exprLimit - budget.remaining
@@ -726,7 +836,7 @@ func (p processor) process(input []byte) (Document, error) {
 	return in, nil
 }
 
-func mergeViewingCaseLabel(labels []uint8, index int, bit uint8) bool {
+func mergeViewingCaseLabel(labels []visibilityLabel, index int, bit visibilityLabel) bool {
 	if index < 0 || index >= len(labels) {
 		return false
 	}

@@ -98,8 +98,15 @@ func validCSSNumber(s string) bool {
 
 func clamp(v, hi float64) float64 { return math.Min(hi, math.Max(0, v)) }
 
-// status: 0 known-invalid; 1 resolved; 2 potentially valid but unsupported.
-func resolve(p int, s string, parent, root Style) (Value, int) {
+type valueStatus uint8
+
+const (
+	valueInvalid valueStatus = iota
+	valueResolved
+	valueUnsupported
+)
+
+func resolve(p int, s string, parent, root *Style) (Value, valueStatus) {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if p >= properties {
 		return resolveLayoutProperty(p, s)
@@ -280,7 +287,7 @@ func resolve(p int, s string, parent, root Style) (Value, int) {
 			return Value{Text: s, Known: true}, 1
 		}
 		c, status := readColour(s)
-		if status != 1 {
+		if status != valueResolved {
 			return Value{Text: s}, status
 		}
 		return Value{Text: colourString(c), RGBA: c, Known: true}, status
@@ -288,7 +295,7 @@ func resolve(p int, s string, parent, root Style) (Value, int) {
 	return Value{Text: s}, 2
 }
 
-func resolveLayoutProperty(property int, value string) (Value, int) {
+func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 	if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
 		return Value{}, 0
 	}
@@ -346,7 +353,7 @@ func resolveLayoutProperty(property int, value string) (Value, int) {
 	return resolveLayoutLength(property, value)
 }
 
-func resolveLayoutLength(property int, value string) (Value, int) {
+func resolveLayoutLength(property int, value string) (Value, valueStatus) {
 	if (property == width || property == height || property == left || property == top || property == right || property == bottom ||
 		property == marginTop || property == marginRight || property == marginBottom || property == marginLeft) && value == "auto" {
 		return Value{Text: value, Known: true}, 1
@@ -408,7 +415,7 @@ func layoutPropertyAllowsNegative(property int) bool {
 
 var named = map[string]string{"black": "#000000", "silver": "#c0c0c0", "gray": "#808080", "grey": "#808080", "white": "#ffffff", "maroon": "#800000", "red": "#ff0000", "purple": "#800080", "fuchsia": "#ff00ff", "magenta": "#ff00ff", "green": "#008000", "lime": "#00ff00", "olive": "#808000", "yellow": "#ffff00", "navy": "#000080", "blue": "#0000ff", "teal": "#008080", "aqua": "#00ffff", "cyan": "#00ffff", "orange": "#ffa500", "rebeccapurple": "#663399"}
 
-func readColour(s string) (RGBA, int) {
+func readColour(s string) (RGBA, valueStatus) {
 	if s == "transparent" {
 		return RGBA{}, 1
 	}
@@ -464,8 +471,8 @@ func readColour(s string) (RGBA, int) {
 	return RGBA{c[0] / 255, c[1] / 255, c[2] / 255, c[3]}, 1
 }
 
-func finiteColourResult(c RGBA, status int) (RGBA, int) {
-	if status == 1 && (!finite(c.R) || !finite(c.G) || !finite(c.B) || !finite(c.A)) {
+func finiteColourResult(c RGBA, status valueStatus) (RGBA, valueStatus) {
+	if status == valueResolved && (!finite(c.R) || !finite(c.G) || !finite(c.B) || !finite(c.A)) {
 		return RGBA{}, 2
 	}
 	return c, status
@@ -473,7 +480,7 @@ func finiteColourResult(c RGBA, status int) (RGBA, int) {
 
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
-func colourFunctionParts(body string) (channels []string, alpha string, legacy bool, status int) {
+func colourFunctionParts(body string) (channels []string, alpha string, legacy bool, status valueStatus) {
 	if strings.Contains(body, "(") || containsFold(body, "from") {
 		return nil, "", false, 2
 	}
@@ -514,7 +521,7 @@ func colourFunctionParts(body string) (channels []string, alpha string, legacy b
 	return channels, alpha, false, 1
 }
 
-func colourNumber(component string, numberScale, hi float64) (float64, int) {
+func colourNumber(component string, numberScale, hi float64) (float64, valueStatus) {
 	if component == "none" || strings.Contains(component, "(") {
 		return 0, 2
 	}
@@ -544,16 +551,16 @@ func colourComponentNumber(component string) (float64, bool) {
 	return value, !math.IsNaN(value)
 }
 
-func parseAlpha(component string) (float64, int) {
+func parseAlpha(component string) (float64, valueStatus) {
 	if component == "" {
 		return 1, 1
 	}
 	return colourNumber(component, 1, 1)
 }
 
-func parseRGBFunction(body string) (RGBA, int) {
+func parseRGBFunction(body string) (RGBA, valueStatus) {
 	channels, alphaText, legacy, status := colourFunctionParts(body)
-	if status != 1 {
+	if status != valueResolved {
 		return RGBA{}, status
 	}
 	if legacy {
@@ -567,18 +574,18 @@ func parseRGBFunction(body string) (RGBA, int) {
 	var c [3]float64
 	for i, channel := range channels {
 		c[i], status = colourNumber(channel, 1, 255)
-		if status != 1 {
+		if status != valueResolved {
 			return RGBA{}, status
 		}
 	}
 	a, status := parseAlpha(alphaText)
-	if status != 1 {
+	if status != valueResolved {
 		return RGBA{}, status
 	}
 	return RGBA{c[0] / 255, c[1] / 255, c[2] / 255, a}, 1
 }
 
-func parseHue(component string) (float64, int) {
+func parseHue(component string) (float64, valueStatus) {
 	if component == "none" || strings.Contains(component, "(") {
 		return 0, 2
 	}
@@ -613,28 +620,28 @@ func parseHue(component string) (float64, int) {
 	return n, 1
 }
 
-func parseHSLFunction(body string) (RGBA, int) {
+func parseHSLFunction(body string) (RGBA, valueStatus) {
 	channels, alphaText, legacy, status := colourFunctionParts(body)
-	if status != 1 {
+	if status != valueResolved {
 		return RGBA{}, status
 	}
 	h, status := parseHue(channels[0])
-	if status != 1 {
+	if status != valueResolved {
 		return RGBA{}, status
 	}
 	if legacy && (!strings.HasSuffix(channels[1], "%") || !strings.HasSuffix(channels[2], "%")) {
 		return RGBA{}, 0
 	}
 	s, status := colourNumber(channels[1], .01, 1)
-	if status != 1 {
+	if status != valueResolved {
 		return RGBA{}, status
 	}
 	l, status := colourNumber(channels[2], .01, 1)
-	if status != 1 {
+	if status != valueResolved {
 		return RGBA{}, status
 	}
 	a, status := parseAlpha(alphaText)
-	if status != 1 {
+	if status != valueResolved {
 		return RGBA{}, status
 	}
 
@@ -662,9 +669,9 @@ func parseHSLFunction(body string) (RGBA, int) {
 func colourString(c RGBA) string {
 	return fmt.Sprintf("rgba(%g,%g,%g,%g)", c.R*255, c.G*255, c.B*255, c.A)
 }
-func parseColor(s string) (string, int) {
+func parseColor(s string) (string, valueStatus) {
 	c, status := readColour(s)
-	if status != 1 {
+	if status != valueResolved {
 		return s, status
 	}
 	return colourString(c), 1

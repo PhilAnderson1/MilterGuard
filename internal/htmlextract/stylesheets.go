@@ -82,14 +82,7 @@ func (s *sheet) parseImportedStylesheet(text, media string) {
 	firstRule := len(s.rules)
 	s.parseCSS(text, false)
 	s.importDepth--
-	if strings.TrimSpace(media) == "" {
-		return
-	}
-	condition := parseMedia(media)
-	for i := firstRule; i < len(s.rules); i++ {
-		s.rules[i].conditions = append([]mediaCondition{condition}, s.rules[i].conditions...)
-		s.rules[i].prepareMediaWork()
-	}
+	s.attachMediaCondition(firstRule, media)
 }
 
 func (s *sheet) parseImport(values []css.Token) {

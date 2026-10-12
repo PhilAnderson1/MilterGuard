@@ -124,19 +124,13 @@ func TestMediaCasesShareSelectorWorkBudget(t *testing.T) {
 	matches := matchBudget{limit: firstCaseWork}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
 	node := &xhtml.Node{Type: xhtml.ElementNode, Data: "p"}
-	first, _, _, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 0, false, selectorMatchContext{}, &matches, &expressions)
-	if err != nil {
-		t.Fatal(err)
+	first := s.elementStyle(node, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(0), selectorMatchContext{}, &matches, &expressions)
+	if !first.style[display].Known || first.style[display].Text != "none" {
+		t.Fatalf("first media case = %+v", first.style[display])
 	}
-	if !first[display].Known || first[display].Text != "none" {
-		t.Fatalf("first media case = %+v", first[display])
-	}
-	second, _, _, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1000, false, selectorMatchContext{}, &matches, &expressions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !matches.exhausted || second[display].Known {
-		t.Fatalf("media cases did not share budget: budget=%+v display=%+v", matches, second[display])
+	second := s.elementStyle(node, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1000), selectorMatchContext{}, &matches, &expressions)
+	if !matches.exhausted || second.style[display].Known {
+		t.Fatalf("media cases did not share budget: budget=%+v display=%+v", matches, second.style[display])
 	}
 }
 
@@ -286,6 +280,30 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 	in = inspectHTML(t, `<p style="--zero:0;overflow:hidden;width:var(--zero)">T</p>`)
 	if got := findText(t, in, "T").Label; got != "unknown" {
 		t.Fatalf("variable layout label = %q, want unknown", got)
+	}
+}
+
+func TestLayoutDimensionsDoNotConsumeExpressionWorkWithoutClipping(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	declarations := s.declarations("width", "var(--width)")
+	if len(declarations) != 1 {
+		t.Fatalf("width declarations = %d, want 1", len(declarations))
+	}
+	var wins [layoutProperties]layoutCandidate
+	wins[width-properties] = layoutCandidate{d: &declarations[0], property: width, set: true}
+	budget := expressionBudget{remaining: 1}
+	context := evaluationContext{
+		parent: initialPtr(),
+		root:   initialPtr(),
+		vars:   &variableScope{values: map[string]variableValue{"--width": {text: "0", status: 1}}},
+		budget: &budget,
+	}
+	style := initial()
+	if layoutVisibilityUncertain(&wins, &style, context) {
+		t.Fatal("unclipped width made layout uncertain")
+	}
+	if budget.remaining != 1 || budget.exhausted {
+		t.Fatalf("irrelevant width consumed expression work: %+v", budget)
 	}
 }
 
@@ -439,6 +457,9 @@ func TestDeclarationValueTokensAreCached(t *testing.T) {
 	if len(ds) != 1 || !ds[0].tokensReady || ds[0].valueStatus != 1 || len(ds[0].valueTokens) == 0 {
 		t.Fatalf("declaration was not prepared: %+v", ds)
 	}
+	if !ds[0].dependenciesReady || len(ds[0].variableDependencies) != 1 || ds[0].variableDependencies[0] != "--missing" {
+		t.Fatalf("variable dependencies were not prepared: %+v", ds[0].variableDependencies)
+	}
 
 	// Cascading copies declarations. Resolution must use the immutable token
 	// stream prepared by the parser rather than lexing the value again for each
@@ -446,7 +467,7 @@ func TestDeclarationValueTokensAreCached(t *testing.T) {
 	d := ds[0]
 	d.value = strings.Repeat("x", maxValueBytes+1)
 	budget := expressionBudget{remaining: 100}
-	scope := buildVariables(nil, map[string]declaration{"--payload": d}, &budget)
+	scope := buildVariables(nil, map[string]variableDefinition{"--payload": {declaration: &d}}, &budget)
 	if got := scope.get("--payload"); got.status != 1 || got.text != "none" {
 		t.Fatalf("cached value was not used: %+v", got)
 	}
@@ -473,7 +494,7 @@ func TestExpressionBudgetStopsCachedVariableTraversal(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	d := s.declarations("--payload", "var(--a) var(--b) var(--c)")[0]
 	budget := expressionBudget{remaining: 1}
-	scope := buildVariables(nil, map[string]declaration{"--payload": d}, &budget)
+	scope := buildVariables(nil, map[string]variableDefinition{"--payload": {declaration: &d}}, &budget)
 	if !budget.exhausted {
 		t.Fatal("expression budget was not exhausted")
 	}

@@ -9,12 +9,12 @@ import (
 
 // Empty basic shapes do not require box dimensions. Nonempty shapes are not
 // evidence of visibility: their relationship to text needs layout.
-func resolveClip(p int, s string) (Value, int) {
+func resolveClip(p int, s string) (Value, valueStatus) {
 	if p == clipPath && s == "none" || p == clip && s == "auto" {
 		return Value{Text: s, Known: true}, 1
 	}
 	ts, status := lexValue(s)
-	if status != 1 {
+	if status != valueResolved {
 		return Value{Text: s}, status
 	}
 	ts = significant(ts)
@@ -67,7 +67,7 @@ func resolveClip(p int, s string) (Value, int) {
 	}
 	return Value{Text: s}, 2
 }
-func emptyClip(st Style, n *html.Node, displayDeclared bool) (empty, known, inlineClipPathUncertain bool) {
+func emptyClip(st *Style, n *html.Node, displayDeclared bool) (empty, known, inlineClipPathUncertain bool) {
 	if n.Namespace != "" || !st[display].Known || st[display].Text == "contents" {
 		return false, false, false
 	}
@@ -97,7 +97,7 @@ func emptyClip(st Style, n *html.Node, displayDeclared bool) (empty, known, inli
 // behavior cannot safely be assumed. CSS's initial display value is inline,
 // but the user-agent stylesheet gives many HTML elements a non-inline display,
 // so an undeclared value must also consider the element's normal box type.
-func nonReplacedInlineBox(n *html.Node, st Style, displayDeclared bool) bool {
+func nonReplacedInlineBox(n *html.Node, st *Style, displayDeclared bool) bool {
 	if st[display].Text != "inline" || st[position].Text == "absolute" || st[position].Text == "fixed" || replacedHTMLElement(n.Data) {
 		return false
 	}

@@ -12,9 +12,10 @@ type quantity struct {
 	length bool
 }
 type mathParser struct {
-	ts                      []valueToken
-	at, depth, prop, status int
-	parent, root            Style
+	ts              []valueToken
+	at, depth, prop int
+	status          valueStatus
+	parent, root    *Style
 }
 
 func isMath(s string) bool {
@@ -26,15 +27,15 @@ func isMath(s string) bool {
 	}
 	return false
 }
-func evalMath(prop int, src string, parent, root Style, budget *expressionBudget) (Value, int) {
+func evalMath(prop int, src string, parent, root *Style, budget *expressionBudget) (Value, valueStatus) {
 	ts, status := lexValue(src)
-	if status != 1 {
+	if status != valueResolved {
 		return Value{Text: src}, status
 	}
 	return evalMathTokens(prop, src, ts, parent, root, budget)
 }
 
-func evalMathTokens(prop int, src string, ts []valueToken, parent, root Style, budget *expressionBudget) (Value, int) {
+func evalMathTokens(prop int, src string, ts []valueToken, parent, root *Style, budget *expressionBudget) (Value, valueStatus) {
 	if !budget.charge(len(ts)) {
 		return Value{Text: src}, 2
 	}
@@ -46,12 +47,12 @@ func evalMathTokens(prop int, src string, ts []valueToken, parent, root Style, b
 			}
 		}
 	}
-	p := mathParser{ts: significant(ts), status: 1, prop: prop, parent: parent, root: root}
+	p := mathParser{ts: significant(ts), status: valueResolved, prop: prop, parent: parent, root: root}
 	q := p.expr(0)
-	if p.at != len(p.ts) && p.status == 1 {
-		p.status = 0
+	if p.at != len(p.ts) && p.status == valueResolved {
+		p.status = valueInvalid
 	}
-	if p.status != 1 {
+	if p.status != valueResolved {
 		return Value{Text: src}, p.status
 	}
 	if prop == fontSize && !q.length || prop == opacity && q.length {
@@ -72,7 +73,7 @@ func evalMathTokens(prop int, src string, ts []valueToken, parent, root Style, b
 }
 func (p *mathParser) expr(min int) quantity {
 	left := p.atom()
-	for p.status == 1 && p.at < len(p.ts) {
+	for p.status == valueResolved && p.at < len(p.ts) {
 		t := p.ts[p.at]
 		priority := 0
 		if t.kind == css.DelimToken {
@@ -91,7 +92,7 @@ func (p *mathParser) expr(min int) quantity {
 		switch t.raw {
 		case "+", "-":
 			if left.length != right.length {
-				p.status = 0
+				p.status = valueInvalid
 				break
 			}
 			if t.raw == "+" {
@@ -101,34 +102,34 @@ func (p *mathParser) expr(min int) quantity {
 			}
 		case "*":
 			if left.length && right.length {
-				p.status = 2
+				p.status = valueUnsupported
 				break
 			}
 			left = quantity{left.n * right.n, left.length || right.length}
 		case "/":
 			if right.n == 0 {
-				p.status = 2
+				p.status = valueUnsupported
 				break
 			}
 			if right.length {
-				p.status = 2
+				p.status = valueUnsupported
 				break
 			}
 			left.n /= right.n
 		}
 		if math.IsNaN(left.n) || math.IsInf(left.n, 0) {
-			p.status = 2
+			p.status = valueUnsupported
 		}
 	}
 	return left
 }
 func (p *mathParser) atom() quantity {
 	if p.at >= len(p.ts) {
-		p.status = 0
+		p.status = valueInvalid
 		return quantity{}
 	}
 	if p.depth >= maxExpressionDepth {
-		p.status = 2
+		p.status = valueUnsupported
 		return quantity{}
 	}
 	t := p.ts[p.at]
@@ -139,19 +140,19 @@ func (p *mathParser) atom() quantity {
 			name = "calc("
 		}
 		if name != "calc(" && name != "min(" && name != "max(" && name != "clamp(" {
-			p.status = 2
+			p.status = valueUnsupported
 			return quantity{}
 		}
 		p.depth++
 		var args []quantity
 		for {
 			args = append(args, p.expr(0))
-			if p.status != 1 {
+			if p.status != valueResolved {
 				p.depth--
 				return quantity{}
 			}
 			if p.at >= len(p.ts) {
-				p.status = 0
+				p.status = valueInvalid
 				break
 			}
 			end := p.ts[p.at]
@@ -160,7 +161,7 @@ func (p *mathParser) atom() quantity {
 				break
 			}
 			if end.kind != css.CommaToken {
-				p.status = 0
+				p.status = valueInvalid
 				break
 			}
 		}
@@ -171,17 +172,17 @@ func (p *mathParser) atom() quantity {
 		q := args[0]
 		for _, a := range args {
 			if q.length != a.length {
-				p.status = 0
+				p.status = valueInvalid
 			}
 		}
 		switch name {
 		case "calc(":
 			if len(args) != 1 {
-				p.status = 0
+				p.status = valueInvalid
 			}
 		case "clamp(":
 			if len(args) != 3 {
-				p.status = 0
+				p.status = valueInvalid
 			} else {
 				q.n = math.Max(args[0].n, math.Min(args[1].n, args[2].n))
 			}
@@ -199,26 +200,26 @@ func (p *mathParser) atom() quantity {
 	if t.kind == css.NumberToken {
 		v, ok := number(t.raw)
 		if !ok {
-			p.status = 2
+			p.status = valueUnsupported
 		}
 		return quantity{n: v}
 	}
 	if t.kind == css.PercentageToken {
 		v, ok := number(strings.TrimSuffix(t.raw, "%"))
 		if !ok {
-			p.status = 2
+			p.status = valueUnsupported
 		}
 		if p.prop == opacity {
 			return quantity{n: v / 100}
 		}
 		if !p.parent[fontSize].Known {
-			p.status = 2
+			p.status = valueUnsupported
 		}
 		return quantity{v * p.parent[fontSize].Number / 100, true}
 	}
 	if t.kind == css.DimensionToken {
 		if p.prop == opacity {
-			p.status = 0
+			p.status = valueInvalid
 			return quantity{}
 		}
 		s := strings.ToLower(t.raw)
@@ -226,7 +227,7 @@ func (p *mathParser) atom() quantity {
 			if strings.HasSuffix(s, unit) {
 				v, ok := number(strings.TrimSuffix(s, unit))
 				if !ok {
-					p.status = 0
+					p.status = valueInvalid
 				}
 				factor := 1.0
 				switch unit {
@@ -235,24 +236,24 @@ func (p *mathParser) atom() quantity {
 				case "em":
 					factor = p.parent[fontSize].Number
 					if !p.parent[fontSize].Known {
-						p.status = 2
+						p.status = valueUnsupported
 					}
 				case "rem":
 					factor = p.root[fontSize].Number
 					if !p.root[fontSize].Known {
-						p.status = 2
+						p.status = valueUnsupported
 					}
 				}
 				return quantity{v * factor, true}
 			}
 		}
-		p.status = 2
+		p.status = valueUnsupported
 		return quantity{}
 	}
 	if t.kind == css.IdentToken {
-		p.status = 2
+		p.status = valueUnsupported
 	} else {
-		p.status = 0
+		p.status = valueInvalid
 	}
 	return quantity{}
 }

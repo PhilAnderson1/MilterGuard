@@ -29,11 +29,11 @@ type mediaCacheKey struct {
 
 func (s *sheet) mediaStates(width float64, fallback bool, work *matchBudget) ([]uint8, bool) {
 	key := mediaCacheKey{width: width, fallback: fallback}
-	if states := s.mediaCache[key]; states != nil {
+	if states := s.runtime.mediaCache[key]; states != nil {
 		return states, true
 	}
-	if s.mediaCache == nil {
-		s.mediaCache = make(map[mediaCacheKey][]uint8)
+	if s.runtime.mediaCache == nil {
+		s.runtime.mediaCache = make(map[mediaCacheKey][]uint8)
 	}
 	var cost int64
 	for i := range s.rules {
@@ -46,7 +46,7 @@ func (s *sheet) mediaStates(width float64, fallback bool, work *matchBudget) ([]
 	for i := range s.rules {
 		states[i] = uint8(s.rules[i].mediaState(width, fallback))
 	}
-	s.mediaCache[key] = states
+	s.runtime.mediaCache[key] = states
 	return states, true
 }
 
@@ -73,31 +73,33 @@ func unresolvedStyle() Style {
 }
 
 func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
-	if !s.cacheMatches || s.matchCacheEntries >= maxMatchCacheEntries {
+	if !s.runtime.cacheMatches || s.runtime.matchCacheEntries >= maxMatchCacheEntries {
 		return
 	}
-	if plan.matches == nil {
-		plan.matches = make(map[*html.Node]uint8)
+	if s.runtime.matchCaches == nil {
+		s.runtime.matchCaches = make([]map[*html.Node]uint8, s.index.count)
 	}
-	plan.matches[n] = 1
+	cache := s.runtime.matchCaches[plan.sequence]
+	if cache == nil {
+		cache = make(map[*html.Node]uint8)
+		s.runtime.matchCaches[plan.sequence] = cache
+	}
+	cache[n] = 1
 	if matched {
-		plan.matches[n] = 2
+		cache[n] = 2
 	}
-	s.matchCacheEntries++
+	s.runtime.matchCacheEntries++
 }
 
 type candidate struct {
-	d           declaration
-	set, inline bool
-	spec        cascadia.Specificity
-}
-
-type layoutCandidate struct {
-	d               declaration
+	d               *declaration
+	property        int
 	set, inline     bool
 	uncertainOrigin bool
 	spec            cascadia.Specificity
 }
+
+type layoutCandidate = candidate
 
 func (c candidate) beats(old candidate) bool {
 	if !old.set {
@@ -115,34 +117,48 @@ func (c candidate) beats(old candidate) bool {
 	return c.d.order >= old.d.order
 }
 
-func (c layoutCandidate) beats(old layoutCandidate) bool {
-	if !old.set {
-		return true
-	}
-	if c.d.important != old.d.important {
-		return c.d.important
-	}
-	if c.inline != old.inline {
-		return c.inline
-	}
-	if c.spec != old.spec {
-		return old.spec.Less(c.spec)
-	}
-	return c.d.order >= old.d.order
+type evaluationContext struct {
+	parent, root *Style
+	vars         *variableScope
+	budget       *expressionBudget
 }
-func resolvedDeclaration(d declaration, parent, root Style, vars *variableScope, budget *expressionBudget) (Value, int) {
-	if d.unsupported {
+
+type mediaEvaluation struct {
+	width    float64
+	fallback bool
+	ready    bool
+	complete bool
+	states   []uint8
+}
+
+type elementStyleResult struct {
+	style           Style
+	variables       *variableScope
+	layoutUncertain bool
+	displayDeclared bool
+}
+
+func (m *mediaEvaluation) evaluate(s *sheet, work *matchBudget) ([]uint8, bool) {
+	if !m.ready {
+		m.states, m.complete = s.mediaStates(m.width, m.fallback, work)
+		m.ready = true
+	}
+	return m.states, m.complete
+}
+
+func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, context evaluationContext, resolveUnsupported bool) (Value, valueStatus) {
+	if (d.unsupported || uncertainOrigin) && !resolveUnsupported {
 		return Value{Text: d.value}, 2
 	}
 	if d.prepared != nil {
 		return d.prepared.value, d.prepared.status
 	}
 	hadVar := d.hasVars
-	v := substitute(d, vars, budget)
-	if v.status == 0 {
-		return resolve(d.prop, "unset", parent, root)
+	v := substitute(d, context.vars, context.budget)
+	if v.status == valueInvalid {
+		return resolve(property, "unset", context.parent, context.root)
 	}
-	if v.status == 2 {
+	if v.status == valueUnsupported {
 		return Value{Text: d.value}, 2
 	}
 	if len(v.text) > maxValueBytes {
@@ -152,7 +168,7 @@ func resolvedDeclaration(d declaration, parent, root Style, vars *variableScope,
 	if d.shorthand {
 		ds := backgroundDeclarations(value, d.important, d.order)
 		for _, x := range ds {
-			if x.prop == d.prop {
+			if x.prop == property {
 				value = x.value
 				if x.unsupported {
 					return Value{Text: value}, 2
@@ -161,35 +177,35 @@ func resolvedDeclaration(d declaration, parent, root Style, vars *variableScope,
 		}
 	}
 	var out Value
-	var status int
-	if (d.prop == fontSize || d.prop == opacity) && isMath(value) {
-		if !hadVar && d.tokensReady && d.valueStatus == 1 {
-			out, status = evalMathTokens(d.prop, value, d.valueTokens, parent, root, budget)
+	var status valueStatus
+	if (property == fontSize || property == opacity) && isMath(value) {
+		if !hadVar && d.tokensReady && d.valueStatus == valueResolved {
+			out, status = evalMathTokens(property, value, d.valueTokens, context.parent, context.root, context.budget)
 		} else {
-			out, status = evalMath(d.prop, value, parent, root, budget)
+			out, status = evalMath(property, value, context.parent, context.root, context.budget)
 		}
 	} else {
-		out, status = resolve(d.prop, value, parent, root)
+		out, status = resolve(property, value, context.parent, context.root)
 	}
-	if status == 0 && hadVar {
-		return resolve(d.prop, "unset", parent, root)
+	if status == valueInvalid && hadVar {
+		return resolve(property, "unset", context.parent, context.root)
 	}
 	return out, status
 }
-func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *variableScope, inline []declaration, width float64, fallback bool, selectorContext selectorMatchContext, matches *matchBudget, budget *expressionBudget) (Style, *variableScope, bool, bool, error) {
+func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *variableScope, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, matches *matchBudget, budget *expressionBudget) elementStyleResult {
 	if s.cascadeIncomplete || s.workIncomplete {
 		if s.workIncomplete {
 			matches.exhausted = true
 		}
-		return unresolvedStyle(), parentVars, false, false, nil
+		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
 	// Once shared style-analysis work is exhausted, every remaining element is
 	// unresolved. Avoid any further style copies or candidate construction.
 	if matches.exhausted {
-		return unresolvedStyle(), parentVars, false, false, nil
+		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
 	if !matches.spend(elementTraversalWork) {
-		return unresolvedStyle(), parentVars, false, false, nil
+		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
 	st := initial()
 	for i := range st {
@@ -200,6 +216,10 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 	var wins [properties]candidate
 	var layoutWins [layoutProperties]layoutCandidate
 	var vars map[string]candidate
+	context := evaluationContext{parent: parent, root: root, vars: parentVars, budget: budget}
+	// Parsed declaration slices are immutable and stable for the duration of
+	// evaluation. Winners retain references plus per-use property/uncertainty
+	// metadata instead of copying and modifying complete declarations.
 	apply := func(ds []declaration, spec cascadia.Specificity, inl, uncertain bool) bool {
 		// Reserve the complete declaration-list cost before changing the
 		// cascade. A failed reservation must not leave a partially applied
@@ -213,38 +233,34 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 		if applications > 0 && !matches.spend(int64(applications)*declarationApplyWeight) {
 			return false
 		}
-		applyProperty := func(d declaration, property int) {
-			d.prop = property
+		applyProperty := func(d *declaration, property int) {
+			c := candidate{d: d, property: property, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
 			if property >= properties {
-				c := layoutCandidate{d: d, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
 				index := property - properties
 				if c.beats(layoutWins[index]) {
 					layoutWins[index] = c
 				}
 				return
 			}
-			d.unsupported = d.unsupported || uncertain
-			c := candidate{d: d, set: true, inline: inl, spec: spec}
 			if c.beats(wins[property]) {
 				wins[property] = c
 			}
 		}
 		for declarationIndex := range ds {
-			d := ds[declarationIndex]
+			d := &ds[declarationIndex]
 			if d.custom == "" && !d.unsupported {
 				if d.validityReady && d.validity == 0 {
 					continue
 				}
 				if !d.validityReady && !d.hasVars && !d.shorthand {
-					_, status := resolvedDeclaration(d, parent, root, parentVars, budget)
-					if status == 0 {
+					_, status := resolvedDeclaration(d, d.prop, false, context, false)
+					if status == valueInvalid {
 						continue
 					}
 				}
 			}
 			if d.custom != "" {
-				d.unsupported = d.unsupported || uncertain
-				c := candidate{d: d, set: true, inline: inl, spec: spec}
+				c := candidate{d: d, property: d.prop, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
 				if vars == nil {
 					vars = map[string]candidate{}
 				}
@@ -261,13 +277,13 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 		}
 		return true
 	}
-	matchIncomplete := func() (Style, *variableScope, bool, bool, error) {
-		return unresolvedStyle(), parentVars, false, false, nil
+	matchIncomplete := func() elementStyleResult {
+		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
-	if !apply(prepareDeclarations(legacyDeclarations(n)), cascadia.Specificity{}, false, false) {
+	if !apply(legacy, cascadia.Specificity{}, false, false) {
 		return matchIncomplete()
 	}
-	mediaStates, complete := s.mediaStates(width, fallback, matches)
+	mediaStates, complete := media.evaluate(s, matches)
 	if !complete {
 		return matchIncomplete()
 	}
@@ -283,8 +299,8 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 			continue
 		}
 		matched, cached := false, false
-		if s.cacheMatches {
-			state := plan.matches[n]
+		if s.runtime.cacheMatches && plan.sequence < len(s.runtime.matchCaches) {
+			state := s.runtime.matchCaches[plan.sequence][n]
 			matched, cached = state == 2, state != 0
 		}
 		if !cached {
@@ -313,19 +329,20 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 	if !apply(inline, cascadia.Specificity{}, true, false) {
 		return matchIncomplete()
 	}
-	var defs map[string]declaration
+	var defs map[string]variableDefinition
 	if len(vars) > 0 {
-		defs = map[string]declaration{}
+		defs = map[string]variableDefinition{}
 		for n, c := range vars {
-			defs[n] = c.d
+			defs[n] = variableDefinition{declaration: c.d, uncertainOrigin: c.uncertainOrigin}
 		}
 	}
 	scope := buildVariables(parentVars, defs, budget)
+	context.vars = scope
 	for i := 0; i < properties; i++ {
 		c := wins[i]
 		if c.set {
-			v, status := resolvedDeclaration(c.d, parent, root, scope, budget)
-			if status == 2 {
+			v, status := resolvedDeclaration(c.d, c.property, c.uncertainOrigin, context, false)
+			if status == valueUnsupported {
 				v.Known = false
 			}
 			st[i] = v
@@ -334,6 +351,9 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 	if st[background].Text == "currentcolor" {
 		st[background] = st[color]
 	}
-	layoutUncertain := layoutVisibilityUncertain(&layoutWins, st, parent, root, scope, budget)
-	return st, scope, layoutUncertain, wins[display].set, nil
+	layoutUncertain := layoutVisibilityUncertain(&layoutWins, &st, context)
+	return elementStyleResult{
+		style: st, variables: scope, layoutUncertain: layoutUncertain,
+		displayDeclared: wins[display].set,
+	}
 }

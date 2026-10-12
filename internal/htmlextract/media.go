@@ -194,7 +194,7 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 			}
 			states = append(states, uint8(r.mediaState(1024, false)))
 		}
-		s.mediaCache = map[mediaCacheKey][]uint8{{width: 1024}: states}
+		s.runtime.mediaCache = map[mediaCacheKey][]uint8{{width: 1024}: states}
 		return []float64{1024}, false
 	} else {
 		sort.Float64s(bounds)
@@ -212,7 +212,7 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 	}
 	seen := map[string]bool{}
 	var widths []float64
-	s.mediaCache = make(map[mediaCacheKey][]uint8)
+	s.runtime.mediaCache = make(map[mediaCacheKey][]uint8)
 	for _, w := range candidates {
 		states := make([]uint8, 0, len(s.rules))
 		for _, r := range s.rules {
@@ -230,19 +230,19 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 		if len(widths) > cap {
 			return []float64{1024}, true
 		}
-		s.mediaCache[mediaCacheKey{width: w}] = states
+		s.runtime.mediaCache[mediaCacheKey{width: w}] = states
 	}
 	return widths, false
 }
 
-func aggregateLabel(bits uint8) string {
-	if bits&4 != 0 {
+func aggregateLabel(bits visibilityLabel) string {
+	if bits&labelUnknown != 0 {
 		return "unknown"
 	}
-	if bits&3 == 3 {
+	if bits&(labelVisible|labelConcealed) == labelVisible|labelConcealed {
 		return "client-dependent"
 	}
-	if bits&2 != 0 {
+	if bits&labelConcealed != 0 {
 		return "concealed"
 	}
 	return "visible"

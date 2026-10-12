@@ -27,10 +27,10 @@ func backgroundDeclarations(value string, important bool, order int) []declarati
 	return backgroundDeclarationsTokens(value, tokens, status, important, order)
 }
 
-func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus int, important bool, order int) []declaration {
+func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus valueStatus, important bool, order int) []declaration {
 	colourValue, image := "transparent", "none"
 	unsupported := false
-	imageColourStatus := 1
+	imageColourStatus := valueResolved
 	switch value {
 	case "inherit", "initial", "unset", "revert", "revert-layer":
 		colourValue = value
@@ -70,7 +70,7 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 			colourValue = token
 			_, status := readColour(token)
 			if token == "currentcolor" {
-				status = 1
+				status = valueResolved
 			}
 			if backgroundImageSyntax(token) {
 				// Images paint over the final layer's explicit colour. Preserve
@@ -85,10 +85,10 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 				image = token
 				unsupported = true
 			}
-			if status == 0 && !strings.ContainsAny(token, " /,") && !strings.Contains(token, "(") {
+			if status == valueInvalid && !strings.ContainsAny(token, " /,") && !strings.Contains(token, "(") {
 				return nil
 			}
-			unsupported = unsupported || status != 1
+			unsupported = unsupported || status != valueResolved
 		}
 		if !haveColour && !haveNone {
 			return nil
@@ -109,15 +109,15 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 // backgroundFallbackColour returns the colour from the final comma-separated
 // background layer. Colour functions nested inside gradients are deliberately
 // ignored. CSS permits a background colour only in the final layer.
-func backgroundFallbackColour(value string) (string, int, bool) {
+func backgroundFallbackColour(value string) (string, valueStatus, bool) {
 	tokens, status := lexValue(value)
-	if status != 1 {
+	if status != valueResolved {
 		return value, 2, true
 	}
 	return backgroundFallbackColourTokens(tokens)
 }
 
-func backgroundFallbackColourTokens(tokens []valueToken) (string, int, bool) {
+func backgroundFallbackColourTokens(tokens []valueToken) (string, valueStatus, bool) {
 	finalStart := 0
 	depth := 0
 	for i, token := range tokens {
@@ -150,9 +150,9 @@ func backgroundFallbackColourTokens(tokens []valueToken) (string, int, bool) {
 	return colour, colourStatus, true
 }
 
-func backgroundLayerColour(tokens []valueToken) (string, int, int) {
+func backgroundLayerColour(tokens []valueToken) (string, valueStatus, int) {
 	var colour string
-	colourStatus, count := 0, 0
+	colourStatus, count := valueInvalid, 0
 	for i := 0; i < len(tokens); i++ {
 		token := tokens[i]
 		candidate := ""
@@ -221,12 +221,12 @@ func legacyDeclarations(n *html.Node) []declaration {
 			return
 		}
 		if len(value) == 6 && !strings.HasPrefix(value, "#") {
-			if _, status := readColour("#" + value); status == 1 {
+			if _, status := readColour("#" + value); status == valueResolved {
 				value = "#" + value
 			}
 		}
 		_, status := readColour(value)
-		result = append(result, declaration{prop: prop, value: value, order: -1, unsupported: status != 1})
+		result = append(result, declaration{prop: prop, value: value, order: -1, unsupported: status != valueResolved})
 	}
 	if n.Namespace != "" {
 		return nil
@@ -310,7 +310,7 @@ func propagateHTMLBodyBackground(layers []paintLayer) {
 	body.imageKnown = true
 }
 
-func layer(s Style) paintLayer {
+func layer(s *Style) paintLayer {
 	known := s[display].Known && s[display].Text != "contents" && (s[clip].Text == "auto" || s[position].Text == "static") && s[clipPath].Text == "none"
 	// Positioning does not alter the base glyph/background pixels used by this
 	// contrast test. Text shadows can only add painted pixels, so they matter

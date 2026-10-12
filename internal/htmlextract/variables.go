@@ -34,7 +34,7 @@ func (b *expressionBudget) charge(n int) bool {
 	}
 	return true
 }
-func lexValue(s string) ([]valueToken, int) {
+func lexValue(s string) ([]valueToken, valueStatus) {
 	if len(s) > maxValueBytes {
 		return nil, 2
 	}
@@ -211,12 +211,17 @@ func variableRefs(ts []valueToken) []string {
 
 type variableValue struct {
 	text   string
-	status int
+	status valueStatus
 }
 type variableScope struct {
 	parent     *variableScope
 	values     map[string]variableValue
-	unresolved map[string]declaration
+	unresolved map[string]variableDefinition
+}
+
+type variableDefinition struct {
+	declaration     *declaration
+	uncertainOrigin bool
 }
 
 func (s *variableScope) get(name string) variableValue {
@@ -225,19 +230,19 @@ func (s *variableScope) get(name string) variableValue {
 			return v
 		}
 		if _, ok := s.unresolved[name]; ok {
-			return variableValue{status: 2}
+			return variableValue{status: valueUnsupported}
 		}
 	}
-	return variableValue{status: 0}
+	return variableValue{status: valueInvalid}
 }
 
-func unresolvedVariableScope(parent *variableScope, defs map[string]declaration) *variableScope {
+func unresolvedVariableScope(parent *variableScope, defs map[string]variableDefinition) *variableScope {
 	return &variableScope{parent: parent, unresolved: defs}
 }
 
 // A scope stores only this element's computed overrides. Parent references have
 // already been substituted, so a child's --b cannot change inherited --a:var(--b).
-func buildVariables(parent *variableScope, defs map[string]declaration, budget *expressionBudget) *variableScope {
+func buildVariables(parent *variableScope, defs map[string]variableDefinition, budget *expressionBudget) *variableScope {
 	if len(defs) == 0 {
 		return parent
 	}
@@ -255,9 +260,10 @@ func buildVariables(parent *variableScope, defs map[string]declaration, budget *
 	states := map[string]uint8{}
 	var path []string
 	for _, name := range ordered {
-		d := defs[name]
-		if !d.tokensReady || d.valueStatus != 1 || d.unsupported {
-			s.values[name] = variableValue{status: 2}
+		definition := defs[name]
+		d := definition.declaration
+		if !d.tokensReady || d.valueStatus != 1 || d.unsupported || definition.uncertainOrigin {
+			s.values[name] = variableValue{status: valueUnsupported}
 		} else {
 			tokens[name] = d.valueTokens
 		}
@@ -279,12 +285,17 @@ func buildVariables(parent *variableScope, defs map[string]declaration, budget *
 			return
 		}
 		if depth > maxExpressionDepth || !budget.charge(1+len(tokens[n])) {
-			s.values[n] = variableValue{status: 2}
+			s.values[n] = variableValue{status: valueUnsupported}
 			return
 		}
 		states[n] = 1
 		path = append(path, n)
-		for _, ref := range variableRefs(tokens[n]) {
+		definition := defs[n]
+		dependencies := definition.declaration.variableDependencies
+		if !definition.declaration.dependenciesReady {
+			dependencies = variableRefs(tokens[n])
+		}
+		for _, ref := range dependencies {
 			if _, local := tokens[ref]; local {
 				visit(ref, depth+1)
 			}
@@ -299,28 +310,29 @@ func buildVariables(parent *variableScope, defs map[string]declaration, budget *
 		}
 	}
 	for n := range cyclic {
-		s.values[n] = variableValue{status: 0}
+		s.values[n] = variableValue{status: valueInvalid}
 	}
 	var resolveName func(string, int) variableValue
 	resolveName = func(n string, depth int) variableValue {
 		if v, ok := s.values[n]; ok {
 			return v
 		}
-		d, local := defs[n]
+		definition, local := defs[n]
 		if !local {
 			return parent.get(n)
 		}
+		d := definition.declaration
 		if depth > maxExpressionDepth {
-			return variableValue{status: 2}
+			return variableValue{status: valueUnsupported}
 		}
 		var v variableValue
 		switch d.keyword {
 		case "inherit", "unset":
 			v = parent.get(n)
 		case "initial":
-			v = variableValue{status: 0}
+			v = variableValue{status: valueInvalid}
 		case "revert", "revert-layer":
-			v = variableValue{status: 2}
+			v = variableValue{status: valueUnsupported}
 		default:
 			v = substituteTokens(tokens[n], func(ref string) variableValue { return resolveName(ref, depth+1) }, budget, depth)
 		}
@@ -335,7 +347,7 @@ func buildVariables(parent *variableScope, defs map[string]declaration, budget *
 	}
 	return s
 }
-func substitute(d declaration, vars *variableScope, budget *expressionBudget) variableValue {
+func substitute(d *declaration, vars *variableScope, budget *expressionBudget) variableValue {
 	if !d.hasVars {
 		return variableValue{d.value, 1}
 	}
@@ -346,7 +358,7 @@ func substitute(d declaration, vars *variableScope, budget *expressionBudget) va
 }
 func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget *expressionBudget, depth int) variableValue {
 	if depth > maxExpressionDepth || !budget.charge(len(ts)) {
-		return variableValue{status: 2}
+		return variableValue{status: valueUnsupported}
 	}
 	var out strings.Builder
 	for i := 0; i < len(ts); i++ {
@@ -376,21 +388,21 @@ func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget
 			}
 			nameTokens = significant(nameTokens)
 			if len(nameTokens) != 1 || (nameTokens[0].kind != css.IdentToken && nameTokens[0].kind != css.CustomPropertyNameToken) {
-				return variableValue{status: 0}
+				return variableValue{status: valueInvalid}
 			}
 			name := cssUnescape(nameTokens[0].raw)
 			if !strings.HasPrefix(name, "--") || name == "--" {
-				return variableValue{status: 0}
+				return variableValue{status: valueInvalid}
 			}
 			v := lookup(name)
-			if v.status == 0 && comma >= 0 {
+			if v.status == valueInvalid && comma >= 0 {
 				v = substituteTokens(inner[comma+1:], lookup, budget, depth+1)
 			}
-			if v.status != 1 {
+			if v.status != valueResolved {
 				return v
 			}
 			if !budget.charge(len(v.text)) {
-				return variableValue{status: 2}
+				return variableValue{status: valueUnsupported}
 			}
 			// Whitespace prevents token concatenation such as var(--n)px.
 			out.WriteByte(' ')
@@ -399,7 +411,7 @@ func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget
 			i = end
 		}
 		if out.Len() > maxValueBytes {
-			return variableValue{status: 2}
+			return variableValue{status: valueUnsupported}
 		}
 	}
 	return variableValue{strings.TrimSpace(out.String()), 1}

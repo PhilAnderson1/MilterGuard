@@ -159,7 +159,6 @@ type selectorPlan struct {
 	bound       int64
 	sequence    int
 	uncertain   bool
-	matches     map[*html.Node]uint8
 }
 
 func (p *selectorPlan) makeUncertain() {
@@ -634,12 +633,14 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 	// Rules without any declaration understood by the extractor cannot affect
 	// presentation. Removing them also prevents no-op selectors from consuming
 	// matching work or match-cache memory.
-	kept := s.rules[:0]
-	for _, rule := range s.rules {
+	original := s.rules
+	kept := original[:0]
+	for _, rule := range original {
 		if len(rule.decls) != 0 {
 			kept = append(kept, rule)
 		}
 	}
+	clear(original[len(kept):])
 	s.rules = kept
 	index := selectorIndex{
 		tags: map[string][]selectorRef{}, ids: map[string][]selectorRef{}, classes: map[string][]selectorRef{},
@@ -648,7 +649,6 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 	for ruleIndex := range s.rules {
 		for branchIndex := range s.rules[ruleIndex].plans {
 			plan := &s.rules[ruleIndex].plans[branchIndex]
-			plan.matches = nil
 			if plan.uncertain {
 				plan.cost = selectorExecutionCost(plan.execution, selectorAttributeProfile{}, 0, 1, s.limits.MatchWork)
 			} else {
@@ -680,7 +680,8 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 		}
 	}
 	s.index = index
-	s.matchCacheEntries = 0
+	s.runtime.matchCaches = nil
+	s.runtime.matchCacheEntries = 0
 }
 
 func (s *sheet) candidates(n *html.Node) []selectorRef {
@@ -696,28 +697,28 @@ func (s *sheet) collectCandidates(n *html.Node, budget *matchBudget) ([]selector
 	if s.index.count == 0 {
 		return nil, true
 	}
-	if len(s.candidateMarks) < s.index.count {
-		s.candidateMarks = make([]uint32, s.index.count)
+	if len(s.runtime.candidateMarks) < s.index.count {
+		s.runtime.candidateMarks = make([]uint32, s.index.count)
 	}
-	s.candidateGeneration++
-	if s.candidateGeneration == 0 {
-		clear(s.candidateMarks)
-		s.candidateGeneration = 1
+	s.runtime.candidateGeneration++
+	if s.runtime.candidateGeneration == 0 {
+		clear(s.runtime.candidateMarks)
+		s.runtime.candidateGeneration = 1
 	}
-	generation := s.candidateGeneration
-	refs := s.candidateScratch[:0]
+	generation := s.runtime.candidateGeneration
+	refs := s.runtime.candidateScratch[:0]
 	appendBucket := func(bucket []selectorRef) bool {
-		if len(bucket) == 0 || s.candidateMarks[bucket[0].sequence] == generation {
+		if len(bucket) == 0 || s.runtime.candidateMarks[bucket[0].sequence] == generation {
 			return true
 		}
 		if budget != nil && !budget.spend(int64(len(bucket))) {
 			return false
 		}
 		for _, ref := range bucket {
-			if s.candidateMarks[ref.sequence] == generation {
+			if s.runtime.candidateMarks[ref.sequence] == generation {
 				continue
 			}
-			s.candidateMarks[ref.sequence] = generation
+			s.runtime.candidateMarks[ref.sequence] = generation
 			refs = append(refs, ref)
 		}
 		return true
@@ -770,34 +771,36 @@ func (s *sheet) collectCandidates(n *html.Node, budget *matchBudget) ([]selector
 		return true
 	}
 	if !appendBucket(s.index.universal) || !appendBucket(s.index.tags[n.Data]) {
-		s.candidateScratch = refs
+		s.runtime.candidateScratch = refs
 		return nil, false
 	}
 	if len(s.index.ids) != 0 || len(s.index.classes) != 0 {
 		if !appendAttributes(n, s.index.ids, s.index.classes) {
-			s.candidateScratch = refs
+			s.runtime.candidateScratch = refs
 			return nil, false
 		}
 	}
-	for ancestor := n.Parent; ancestor != nil; ancestor = ancestor.Parent {
-		if ancestor.Type != html.ElementNode {
-			continue
-		}
-		if !appendBucket(s.index.ancestorTags[ancestor.Data]) {
-			s.candidateScratch = refs
-			return nil, false
-		}
-		if len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
-			if !appendAttributes(ancestor, s.index.ancestorIDs, s.index.ancestorClasses) {
-				s.candidateScratch = refs
+	if len(s.index.ancestorTags) != 0 || len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
+		for ancestor := n.Parent; ancestor != nil; ancestor = ancestor.Parent {
+			if ancestor.Type != html.ElementNode {
+				continue
+			}
+			if !appendBucket(s.index.ancestorTags[ancestor.Data]) {
+				s.runtime.candidateScratch = refs
 				return nil, false
+			}
+			if len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
+				if !appendAttributes(ancestor, s.index.ancestorIDs, s.index.ancestorClasses) {
+					s.runtime.candidateScratch = refs
+					return nil, false
+				}
 			}
 		}
 	}
 	// No sort is required: candidate.beats compares declaration importance,
 	// inline origin, specificity and source order explicitly. Keeping discovery
 	// order avoids an O(n log n) phase without changing cascade results.
-	s.candidateScratch = refs
+	s.runtime.candidateScratch = refs
 	return refs, true
 }
 
