@@ -12,23 +12,82 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 	"golang.org/x/net/html/charset"
 )
 
+const (
+	maxMIMEParts = 256
+	maxHTMLParts = 32
+)
+
+type extractionBudget struct {
+	parts                   int
+	htmlParts               int
+	htmlBytesRemaining      int
+	matchWorkRemaining      int64
+	expressionWorkRemaining int64
+}
+
+func newExtractionBudget() *extractionBudget {
+	limits := htmlextract.DefaultLimits()
+	return &extractionBudget{
+		htmlBytesRemaining:      limits.InputBytes,
+		matchWorkRemaining:      limits.MatchWork,
+		expressionWorkRemaining: limits.ExpressionWork,
+	}
+}
+
+func (b *extractionBudget) takePart() bool {
+	if b.parts >= maxMIMEParts {
+		return false
+	}
+	b.parts++
+	return true
+}
+
+func (b *extractionBudget) htmlLimits(bytes int) (htmlextract.Limits, bool) {
+	b.htmlParts++
+	if b.htmlParts > maxHTMLParts || bytes > b.htmlBytesRemaining || b.matchWorkRemaining <= 0 || b.expressionWorkRemaining <= 0 {
+		b.htmlBytesRemaining = 0
+		return htmlextract.Limits{}, false
+	}
+	b.htmlBytesRemaining -= bytes
+	limits := htmlextract.DefaultLimits()
+	limits.MatchWork = b.matchWorkRemaining
+	limits.ExpressionWork = b.expressionWorkRemaining
+	return limits, true
+}
+
+func (b *extractionBudget) consumeHTML(usage htmlextract.ResourceUsage) {
+	if usage.MatchWorkExhausted || usage.MatchWork >= b.matchWorkRemaining {
+		b.matchWorkRemaining = 0
+	} else {
+		b.matchWorkRemaining -= usage.MatchWork
+	}
+	if usage.ExpressionWorkExhausted || usage.ExpressionWork >= b.expressionWorkRemaining {
+		b.expressionWorkRemaining = 0
+	} else {
+		b.expressionWorkRemaining -= usage.ExpressionWork
+	}
+}
+
 type extractedContent struct {
-	Text                 string
-	VisibleText          string
-	StrippedText         string
-	Links                []string
-	ImageRefs            []string
-	Images               []extractedImage
-	HTML                 bool
-	MIMEIncomplete       bool
-	TransferIncomplete   bool
-	ExtractionIncomplete bool
-	HTMLFallbackUsed     bool
-	HasConcealedContent  bool
-	HTMLComments         htmlCommentStats
+	Text                  string
+	VisibleText           string
+	ConfidentVisibleChars int
+	StrippedText          string
+	Links                 []string
+	ImageRefs             []string
+	Images                []extractedImage
+	HTML                  bool
+	MIMEIncomplete        bool
+	TransferIncomplete    bool
+	ExtractionIncomplete  bool
+	HTMLFallbackUsed      bool
+	CSSIncomplete         bool
+	HasConcealedContent   bool
+	HTMLComments          htmlCommentStats
 }
 
 type extractedImage struct {
@@ -37,6 +96,10 @@ type extractedImage struct {
 }
 
 func extractMIME(contentType, encoding, contentID string, data []byte, depth int) extractedContent {
+	return extractMIMEWithBudget(contentType, encoding, contentID, data, depth, newExtractionBudget())
+}
+
+func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte, depth int, budget *extractionBudget) extractedContent {
 	if depth > 8 {
 		return extractedContent{Text: "[MIME nesting limit reached]", MIMEIncomplete: true}
 	}
@@ -64,6 +127,10 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 				mimeIncomplete = true
 				break
 			}
+			if !budget.takePart() {
+				mimeIncomplete = true
+				break
+			}
 			// The complete message body has already been bounded by Message.maxBytes.
 			// Do not impose a smaller per-part limit here: doing so would silently
 			// discard evidence from otherwise retained messages.
@@ -73,7 +140,7 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 			if mediaType == "multipart/digest" && strings.TrimSpace(partContentType) == "" {
 				partContentType = "message/rfc822"
 			}
-			content := extractMIME(partContentType, part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-ID"), body, depth+1)
+			content := extractMIMEWithBudget(partContentType, part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-ID"), body, depth+1, budget)
 			mimeIncomplete = mimeIncomplete || content.MIMEIncomplete
 			nestedTransferIncomplete = nestedTransferIncomplete || content.TransferIncomplete
 			if !hasExtractedContent(content) {
@@ -122,9 +189,11 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 			imageRefs.AddAll(part.ImageRefs)
 			combined.Images = append(combined.Images, part.Images...)
 			combined.HTML = combined.HTML || part.HTML
+			combined.ConfidentVisibleChars += part.ConfidentVisibleChars
 			combined.HasConcealedContent = combined.HasConcealedContent || part.HasConcealedContent
 			combined.ExtractionIncomplete = combined.ExtractionIncomplete || part.ExtractionIncomplete
 			combined.HTMLFallbackUsed = combined.HTMLFallbackUsed || part.HTMLFallbackUsed
+			combined.CSSIncomplete = combined.CSSIncomplete || part.CSSIncomplete
 			combined.HTMLComments.add(part.HTMLComments)
 		}
 		combined.ImageRefs = imageRefs.refs
@@ -135,7 +204,7 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 		return combined
 	}
 	if mediaType == "message/rfc822" {
-		content := extractAttachedMessage(decoded, depth)
+		content := extractAttachedMessage(decoded, depth, budget)
 		content.TransferIncomplete = content.TransferIncomplete || transferIncomplete
 		return content
 	}
@@ -148,13 +217,17 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 	}
 	if mediaType == "text/html" {
 		text := decodeHTMLCharset(params["charset"], decoded)
-		content := htmlToText(text)
+		content := htmlToTextWithBudget(text, budget)
 		content.HTML = true
 		content.TransferIncomplete = transferIncomplete
 		return content
 	}
 	text := decodeCharset(params["charset"], decoded)
-	return extractedContent{Text: text, VisibleText: text, Links: findHTTPURLs(text), TransferIncomplete: transferIncomplete}
+	return extractedContent{
+		Text: text, VisibleText: text,
+		ConfidentVisibleChars: confidentTextCharacters(text),
+		Links:                 findHTTPURLs(text), TransferIncomplete: transferIncomplete,
+	}
 }
 
 func joinContent(left, right string) string {
@@ -167,7 +240,7 @@ func joinContent(left, right string) string {
 	return left + "\n\n" + right
 }
 
-func extractAttachedMessage(data []byte, depth int) extractedContent {
+func extractAttachedMessage(data []byte, depth int, budget *extractionBudget) extractedContent {
 	attached, err := mail.ReadMessage(bytes.NewReader(data))
 	if err != nil {
 		return extractedContent{Text: "[attached message could not be parsed]"}
@@ -176,12 +249,13 @@ func extractAttachedMessage(data []byte, depth int) extractedContent {
 	if err != nil {
 		return extractedContent{Text: "[attached message body could not be read]"}
 	}
-	return extractMIME(
+	return extractMIMEWithBudget(
 		attached.Header.Get("Content-Type"),
 		attached.Header.Get("Content-Transfer-Encoding"),
 		attached.Header.Get("Content-ID"),
 		body,
 		depth+1,
+		budget,
 	)
 }
 

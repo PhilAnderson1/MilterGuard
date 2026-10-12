@@ -30,6 +30,17 @@ func TestTreeExtractorConcealmentThresholdsAndReasons(t *testing.T) {
 	}
 }
 
+func TestTreeExtractorAnnotatesLayoutHidingRisk(t *testing.T) {
+	got := htmlToText(`<div style="overflow:hidden;width:0"><span>zero box</span></div><p style="position:absolute;left:-9999px">off screen</p>`)
+	want := "<visibility-uncertain>zero box\n\noff screen</visibility-uncertain>"
+	if got.Text != want {
+		t.Fatalf("layout uncertainty = %q, want %q", got.Text, want)
+	}
+	if got.StrippedText != "" || got.HasConcealedContent {
+		t.Fatalf("layout uncertainty was treated as concealment: %+v", got)
+	}
+}
+
 func TestTreeExtractorMergesAdjacentEquivalentRuns(t *testing.T) {
 	got := htmlToText(`<span style="display:none">a</span><i style="display:none">b</i>`)
 	if got.Text != `<concealed reason="display:none">ab</concealed>` {
@@ -172,6 +183,36 @@ func TestTreeExtractorRetainsFallbackPresentationsWithoutPresentationCode(t *tes
 	}
 }
 
+func TestTreeExtractorAnnotatesMSOHiddenContent(t *testing.T) {
+	got := htmlToText(`<p>Visible</p><p style="mso-hide:all">Outlook-hidden</p>`)
+	if !strings.Contains(got.Text, `<visibility-uncertain>Outlook-hidden</visibility-uncertain>`) {
+		t.Fatalf("mso-hide annotation = %q", got.Text)
+	}
+	if !strings.Contains(got.VisibleText, "Outlook-hidden") {
+		t.Fatalf("content visible in non-Word clients was omitted from visible text: %q", got.VisibleText)
+	}
+}
+
+func TestTreeExtractorBoundsConditionalCommentFragments(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "bytes", content: strings.Repeat("x", maxConditionalFragmentBytes+1)},
+		{name: "nodes", content: strings.Repeat("<br>", maxConditionalFragmentNodes+1)},
+		{name: "depth", content: strings.Repeat("<div>", maxConditionalFragmentDepth+2) + "deep" + strings.Repeat("</div>", maxConditionalFragmentDepth+2)},
+		{name: "output", content: `<a href="https://example.test/">` + strings.Repeat("[", 50<<10) + `</a>`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := htmlToText(`Before<!--[if mso]>` + test.content + `<![endif]-->After`)
+			if got.Text != "BeforeAfter" || got.VisibleText != "BeforeAfter" || len(got.Links) != 0 {
+				t.Fatalf("bounded conditional fragment leaked partial evidence: text=%q visible=%q links=%v", got.Text, got.VisibleText, got.Links)
+			}
+		})
+	}
+}
+
 func TestTreeExtractorSummarizesOrdinaryHTMLComments(t *testing.T) {
 	got := htmlToText(`vi<!-- harmless project meeting -->agra<!-- ordinary note --><!--[if mso]><p>Outlook</p><![endif]-->`)
 	if got.Text != "viagra<visibility-uncertain>Outlook</visibility-uncertain>" {
@@ -287,6 +328,9 @@ func TestCSSLimitKeepsStructuredDOMExtraction(t *testing.T) {
 	}
 	if !strings.Contains(got.Text, `[retained evidence](https://example.test/retained)`) || !strings.Contains(got.Text, `<visibility-uncertain>`) {
 		t.Fatalf("structured uncertain extraction = %q", got.Text)
+	}
+	if got.VisibleText == "" || got.ConfidentVisibleChars != 0 {
+		t.Fatalf("uncertain text confidence = visible %q, confident chars %d", got.VisibleText, got.ConfidentVisibleChars)
 	}
 	if got.HTMLComments.Characters != len("comment") {
 		t.Fatalf("comment statistics = %+v", got.HTMLComments)

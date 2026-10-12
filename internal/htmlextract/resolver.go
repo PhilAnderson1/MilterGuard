@@ -12,8 +12,10 @@ import (
 const declarationApplyWeight int64 = 16
 
 // Every element/viewing-case traversal copies and resolves a fixed-size Style,
-// even when no stylesheet selector is relevant.
-const elementTraversalWork int64 = 1
+// candidate arrays and frame state even when no stylesheet selector is
+// relevant. Benchmarks put that fixed work at roughly 100 simple selector
+// operations; use a power-of-two conservative weight.
+const elementTraversalWork int64 = 128
 
 // Go maps have substantial per-entry overhead. Bound cached selector results
 // independently of the CPU-work budget so one message has a predictable
@@ -90,7 +92,29 @@ type candidate struct {
 	spec        cascadia.Specificity
 }
 
+type layoutCandidate struct {
+	d           *declaration
+	set, inline bool
+	spec        cascadia.Specificity
+}
+
 func (c candidate) beats(old candidate) bool {
+	if !old.set {
+		return true
+	}
+	if c.d.important != old.d.important {
+		return c.d.important
+	}
+	if c.inline != old.inline {
+		return c.inline
+	}
+	if c.spec != old.spec {
+		return old.spec.Less(c.spec)
+	}
+	return c.d.order >= old.d.order
+}
+
+func (c layoutCandidate) beats(old layoutCandidate) bool {
 	if !old.set {
 		return true
 	}
@@ -151,20 +175,20 @@ func resolvedDeclaration(d declaration, parent, root Style, vars *variableScope,
 	}
 	return out, status
 }
-func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *variableScope, inline []declaration, width float64, fallback bool, selectorContext selectorMatchContext, matches *matchBudget, budget *expressionBudget) (Style, *variableScope, error) {
+func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *variableScope, inline []declaration, width float64, fallback bool, selectorContext selectorMatchContext, matches *matchBudget, budget *expressionBudget) (Style, *variableScope, bool, bool, error) {
 	if s.cascadeIncomplete || s.workIncomplete {
 		if s.workIncomplete {
 			matches.exhausted = true
 		}
-		return unresolvedStyle(), parentVars, nil
+		return unresolvedStyle(), parentVars, false, false, nil
 	}
 	// Once shared style-analysis work is exhausted, every remaining element is
 	// unresolved. Avoid any further style copies or candidate construction.
 	if matches.exhausted {
-		return unresolvedStyle(), parentVars, nil
+		return unresolvedStyle(), parentVars, false, false, nil
 	}
 	if !matches.spend(elementTraversalWork) {
-		return unresolvedStyle(), parentVars, nil
+		return unresolvedStyle(), parentVars, false, false, nil
 	}
 	st := initial()
 	for i := range st {
@@ -173,6 +197,7 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 		}
 	}
 	var wins [properties]candidate
+	var layoutWins [layoutProperties]layoutCandidate
 	var vars map[string]candidate
 	apply := func(ds []declaration, spec cascadia.Specificity, inl, uncertain bool) bool {
 		// Reserve the complete declaration-list cost before changing the
@@ -181,7 +206,8 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 		if len(ds) > 0 && !matches.spend(int64(len(ds))*declarationApplyWeight) {
 			return false
 		}
-		for _, d := range ds {
+		for declarationIndex := range ds {
+			d := ds[declarationIndex]
 			if d.custom == "" && !d.unsupported {
 				if d.validityReady && d.validity == 0 {
 					continue
@@ -193,23 +219,33 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 					}
 				}
 			}
-			d.unsupported = d.unsupported || uncertain
-			c := candidate{d: d, set: true, inline: inl, spec: spec}
 			if d.custom != "" {
+				d.unsupported = d.unsupported || uncertain
+				c := candidate{d: d, set: true, inline: inl, spec: spec}
 				if vars == nil {
 					vars = map[string]candidate{}
 				}
 				if c.beats(vars[d.custom]) {
 					vars[d.custom] = c
 				}
-			} else if c.beats(wins[d.prop]) {
-				wins[d.prop] = c
+			} else if d.prop >= properties {
+				c := layoutCandidate{d: &ds[declarationIndex], set: true, inline: inl, spec: spec}
+				index := d.prop - properties
+				if c.beats(layoutWins[index]) {
+					layoutWins[index] = c
+				}
+			} else {
+				d.unsupported = d.unsupported || uncertain
+				c := candidate{d: d, set: true, inline: inl, spec: spec}
+				if c.beats(wins[d.prop]) {
+					wins[d.prop] = c
+				}
 			}
 		}
 		return true
 	}
-	matchIncomplete := func() (Style, *variableScope, error) {
-		return unresolvedStyle(), parentVars, nil
+	matchIncomplete := func() (Style, *variableScope, bool, bool, error) {
+		return unresolvedStyle(), parentVars, false, false, nil
 	}
 	if !apply(prepareDeclarations(legacyDeclarations(n)), cascadia.Specificity{}, false, false) {
 		return matchIncomplete()
@@ -268,7 +304,8 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 		}
 	}
 	scope := buildVariables(parentVars, defs, budget)
-	for i, c := range wins {
+	for i := 0; i < properties; i++ {
+		c := wins[i]
 		if c.set {
 			v, status := resolvedDeclaration(c.d, parent, root, scope, budget)
 			if status == 2 {
@@ -280,5 +317,6 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 	if st[background].Text == "currentcolor" {
 		st[background] = st[color]
 	}
-	return st, scope, nil
+	layoutUncertain := layoutVisibilityUncertain(&layoutWins, st, parent, root, scope, budget)
+	return st, scope, layoutUncertain, wins[display].set, nil
 }

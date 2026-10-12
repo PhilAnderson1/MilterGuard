@@ -134,6 +134,8 @@ func TestModernRGBAndHSLColours(t *testing.T) {
 		{`hsla(120,100%,25%,.5)`, RGBA{0, .5, 0, .5}},
 		{`hsl(.5turn 100 50)`, RGBA{0, 1, 1, 1}},
 		{`hsl(-120deg 100% 50%)`, RGBA{0, 0, 1, 1}},
+		{`rgba(1e400,-1e400,1e-4000,1e400)`, RGBA{1, 0, 0, 1}},
+		{`hsl(0 1e400% 1e400% / -1e400)`, RGBA{1, 1, 1, 0}},
 	}
 	for _, c := range cases {
 		t.Run(c.value, func(t *testing.T) {
@@ -165,6 +167,10 @@ func TestModernRGBAndHSLColours(t *testing.T) {
 	}
 
 	v := colourText(t, `<p style="background:rgb(255 255 255);color:hsl(0 0% 100%)">T</p>`)
+	if !v.inspection.colour.Known || v.Label != "concealed" {
+		t.Fatal(v)
+	}
+	v = colourText(t, `<p style="background:white;color:rgba(255,255,255,1e400)">T</p>`)
 	if !v.inspection.colour.Known || v.Label != "concealed" {
 		t.Fatal(v)
 	}
@@ -210,7 +216,14 @@ func TestBackgroundLayersAndResets(t *testing.T) {
 		{"reset colour to transparent", `<div style="background:white"><p style="background:red;background:none;color:white">T</p></div>`, true, true},
 		{"reset image", `<p style="background-image:url(https://invalid.example/x);background:white;color:white">T</p>`, true, true},
 		{"reset by unset", `<div style="background:white"><p style="background:red;background-image:url(x);background:unset;color:white">T</p></div>`, true, true},
+		{"stray close invalid", `<p style="background:black;background:) white;color:black">T</p>`, true, true},
 		{"colour alone keeps image", `<p style="background:url(x) white;background-color:white;color:white">T</p>`, false, false},
+		{"image then fallback colour", `<p style="background:url(x) red;color:red">T</p>`, false, false},
+		{"fallback colour then image", `<p style="background:red url(x);color:red">T</p>`, false, false},
+		{"multilayer final fallback colour", `<p style="background:url(x),red;color:red">T</p>`, false, false},
+		{"gradient with fallback colour", `<p style="background:linear-gradient(blue,green) red;color:red">T</p>`, false, false},
+		{"contrasting image fallback", `<p style="background:url(x) red;color:black">T</p>`, true, false},
+		{"invalid colour in non-final layer", `<p style="background:white;background:red,url(x);color:white">T</p>`, true, true},
 		{"image after shorthand", `<p style="background:white;background-image:url(x);color:white">T</p>`, false, false},
 		{"gradient", `<p style="background:linear-gradient(white,white);color:white">T</p>`, false, false},
 		{"unknown shorthand winner", `<p style="background:white;background:var(--bg);color:white">T</p>`, true, true},
@@ -241,6 +254,61 @@ func TestBackgroundLayersAndResets(t *testing.T) {
 		t.Fatal("background was incorrectly inherited/composited into property", v)
 	}
 }
+
+func TestBackgroundShorthandRejectsUnmatchedClosingParenthesis(t *testing.T) {
+	if declarations := backgroundDeclarations(`) none`, false, 0); len(declarations) != 0 {
+		t.Fatalf("unmatched closing parenthesis produced declarations: %+v", declarations)
+	}
+}
+
+func TestHTMLBodyBackgroundIsPropagatedToCanvas(t *testing.T) {
+	// A propagated body background is painted as the root background. Body
+	// opacity therefore affects its text but not the canvas background itself.
+	v := colourText(t, `<html><body style="background:black;opacity:.5;color:white"><p>T</p></body></html>`)
+	expectRGBA(t, v.inspection.colour.Background, RGBA{0, 0, 0, 1})
+	expectRGBA(t, v.inspection.colour.Foreground, RGBA{.5, .5, .5, 1})
+	if !v.inspection.colour.Known || v.inspection.colour.Concealed || v.Label != "visible" {
+		t.Fatalf("propagated body background produced %+v", v)
+	}
+
+	// Once the root supplies a background, the body background remains on the
+	// body and is grouped with its opacity, as for an ordinary element.
+	v = colourText(t, `<html style="background:blue"><body style="background:black;opacity:.5;color:white"><p>T</p></body></html>`)
+	expectRGBA(t, v.inspection.colour.Background, RGBA{0, 0, .5, 1})
+	expectRGBA(t, v.inspection.colour.Foreground, RGBA{.5, .5, 1, 1})
+
+	// Propagated values are treated as root values, so root opacity applies to
+	// the canvas background while body opacity does not.
+	v = colourText(t, `<html style="opacity:.5"><body style="background:black;color:white"><p>T</p></body></html>`)
+	expectRGBA(t, v.inspection.colour.Background, RGBA{.5, .5, .5, 1})
+	expectRGBA(t, v.inspection.colour.Foreground, RGBA{1, 1, 1, 1})
+}
+
+func TestBackgroundFallbackColour(t *testing.T) {
+	tests := []struct {
+		value, colour string
+		status        int
+		valid         bool
+	}{
+		{`url(x) red`, "red", 1, true},
+		{`red url(x)`, "red", 1, true},
+		{`linear-gradient(red,blue) #fff`, "#fff", 1, true},
+		{`url(x),rgb(1 2 3)`, "rgb(1 2 3)", 1, true},
+		{`url(x) center/cover no-repeat`, "transparent", 1, true},
+		{`url(x) aliceblue`, "aliceblue", 2, true},
+		{`red,url(x)`, "", 0, false},
+		{`url(x) red blue`, "", 0, false},
+	}
+	for _, test := range tests {
+		t.Run(test.value, func(t *testing.T) {
+			colour, status, valid := backgroundFallbackColour(test.value)
+			if colour != test.colour || status != test.status || valid != test.valid {
+				t.Fatalf("backgroundFallbackColour() = %q, %d, %t; want %q, %d, %t", colour, status, valid, test.colour, test.status, test.valid)
+			}
+		})
+	}
+}
+
 func TestGroupOpacity(t *testing.T) {
 	v := colourText(t, `<div style="background:white"><p style="background:white;color:black;opacity:.5">T</p></div>`)
 	expectRGBA(t, v.inspection.colour.Foreground, RGBA{.5, .5, .5, 1})

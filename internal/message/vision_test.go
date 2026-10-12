@@ -234,6 +234,29 @@ func TestVisionFallbackSkipsImageWhenTextIsMeaningful(t *testing.T) {
 	}
 }
 
+func TestVisionFallbackUsesOnlyConfidentVisibleCharacterCount(t *testing.T) {
+	decoded, err := base64.StdEncoding.DecodeString(onePixelPNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := extractedContent{
+		VisibleText: strings.Repeat("apparently visible text ", 20),
+		ImageRefs:   []string{"notice"},
+		Images:      []extractedImage{{ContentID: "notice", Data: decoded}},
+	}
+	options := VisionOptions{
+		Mode: "fallback", MinTextChars: 20, MaxImages: 1,
+		MaxBytes: 1 << 20, MaxPixels: 100,
+	}
+	if images := selectVisionImages(content, options); len(images) != 1 {
+		t.Fatalf("uncertain visible-text estimate suppressed image analysis: selected %d images", len(images))
+	}
+	content.ConfidentVisibleChars = 200
+	if images := selectVisionImages(content, options); len(images) != 0 {
+		t.Fatalf("confident visible text did not suppress fallback image analysis: selected %d images", len(images))
+	}
+}
+
 func TestVisionImageLimitsAreEnforced(t *testing.T) {
 	m := imageOnlyMessage("cid:scam-image", "<scam-image>")
 	decoded, err := base64.StdEncoding.DecodeString(onePixelPNG)

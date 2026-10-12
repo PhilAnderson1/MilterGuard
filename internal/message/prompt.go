@@ -55,7 +55,7 @@ func (m *Message) BuildAnalysis(context AnalysisContext, maxChars int, vision Vi
 		}
 	}
 	content := m.processedContent()
-	if m.BodyTruncated || content.MIMEIncomplete || content.TransferIncomplete || content.HTMLFallbackUsed {
+	if m.BodyTruncated || content.MIMEIncomplete || content.TransferIncomplete || content.HTMLFallbackUsed || content.CSSIncomplete {
 		b.WriteString("\nANALYSIS LIMITATIONS:\n")
 		if m.BodyTruncated {
 			b.WriteString("- Message body exceeded the retained-byte limit; only its initial portion was available.\n")
@@ -68,6 +68,9 @@ func (m *Message) BuildAnalysis(context AnalysisContext, maxChars int, vision Vi
 		}
 		if content.HTMLFallbackUsed {
 			b.WriteString("- HTML/CSS visibility analysis unavailable; email text may include content concealed from the recipient.\n")
+		}
+		if content.CSSIncomplete {
+			b.WriteString("- Linked or imported CSS was not evaluated; email text may include content concealed from the recipient.\n")
 		}
 	}
 	body, bodyTruncated, concealedRemoved := selectProcessedBody(content, maxChars)

@@ -22,6 +22,7 @@ func makeInitialStyle() Style {
 	s[display] = Value{Text: "inline", Known: true}
 	s[visibility] = Value{Text: "visible", Known: true}
 	s[contentVisibility] = Value{Text: "visible", Known: true}
+	s[msoHide] = Value{Text: "none", Known: true}
 	s[opacity] = Value{Text: "1", Number: 1, Known: true}
 	s[fontSize] = Value{Text: "16px", Number: 16, Known: true}
 	s[color] = Value{Text: "rgba(0,0,0,1)", Known: true, RGBA: RGBA{A: 1}}
@@ -100,6 +101,9 @@ func clamp(v, hi float64) float64 { return math.Min(hi, math.Max(0, v)) }
 // status: 0 known-invalid; 1 resolved; 2 potentially valid but unsupported.
 func resolve(p int, s string, parent, root Style) (Value, int) {
 	s = strings.ToLower(strings.TrimSpace(s))
+	if p >= properties {
+		return resolveLayoutProperty(p, s)
+	}
 	if strings.HasPrefix(s, "\"") || strings.HasPrefix(s, "'") {
 		return Value{}, 0
 	}
@@ -146,6 +150,11 @@ func resolve(p int, s string, parent, root Style) (Value, int) {
 			return Value{Text: s, Known: true}, 1
 		}
 		return Value{}, 0
+	case msoHide:
+		if s == "all" {
+			return Value{Text: s, Known: true}, 1
+		}
+		return Value{}, 0
 	case opacity:
 		scale := 1.0
 		if strings.HasSuffix(s, "%") {
@@ -189,6 +198,9 @@ func resolve(p int, s string, parent, root Style) (Value, int) {
 				return Value{Text: fmt.Sprintf("%gpx", v), Number: v, Known: true}, 1
 			}
 			if s == "smaller" || s == "larger" {
+				if !parent[fontSize].Known {
+					return Value{Text: s}, 1
+				}
 				factor := .8
 				if s == "larger" {
 					factor = 1.2
@@ -221,6 +233,9 @@ func resolve(p int, s string, parent, root Style) (Value, int) {
 		v, ok := number(num)
 		if !ok || v < 0 {
 			return Value{}, 0
+		}
+		if !known {
+			return Value{Text: s}, 1
 		}
 		v *= factor
 		if math.IsInf(v, 0) || math.IsNaN(v) {
@@ -271,6 +286,68 @@ func resolve(p int, s string, parent, root Style) (Value, int) {
 		return Value{Text: colourString(c), RGBA: c, Known: true}, status
 	}
 	return Value{Text: s}, 2
+}
+
+func resolveLayoutProperty(property int, value string) (Value, int) {
+	if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
+		return Value{}, 0
+	}
+	if value == "" {
+		return Value{}, 0
+	}
+	if value == "inherit" || value == "unset" || value == "revert" || value == "revert-layer" || strings.Contains(value, "var(") || strings.Contains(value, "calc(") {
+		return Value{Text: value}, 2
+	}
+	if value == "initial" {
+		switch property {
+		case overflow:
+			value = "visible"
+		case width, height, left, top:
+			value = "auto"
+		case maxHeight:
+			value = "none"
+		case textIndent:
+			value = "0px"
+		}
+	}
+	if property == overflow {
+		if value == "visible" || value == "hidden" || value == "clip" || value == "scroll" || value == "auto" {
+			return Value{Text: value, Known: true}, 1
+		}
+		return Value{Text: value}, 2
+	}
+	return resolveLayoutLength(property, value)
+}
+
+func resolveLayoutLength(property int, value string) (Value, int) {
+	if (property == width || property == height || property == left || property == top) && value == "auto" {
+		return Value{Text: value, Known: true}, 1
+	}
+	if property == maxHeight && value == "none" {
+		return Value{Text: value, Known: true}, 1
+	}
+	unit := ""
+	numberText := value
+	for _, suffix := range []string{"px", "%"} {
+		if strings.HasSuffix(numberText, suffix) {
+			unit = suffix
+			numberText = strings.TrimSuffix(numberText, suffix)
+			break
+		}
+	}
+	n, ok := number(numberText)
+	if !ok {
+		return Value{Text: value}, 2
+	}
+	if property != left && property != top && property != textIndent && n < 0 {
+		return Value{}, 0
+	}
+	// Unitless zero and zero percentages are independent of layout. Non-zero
+	// percentages and other units require dimensions or font metrics.
+	if unit == "%" && n != 0 || unit == "" && n != 0 {
+		return Value{Text: value}, 2
+	}
+	return Value{Text: value, Number: n, Known: true}, 1
 }
 
 var named = map[string]string{"black": "#000000", "silver": "#c0c0c0", "gray": "#808080", "white": "#ffffff", "maroon": "#800000", "red": "#ff0000", "purple": "#800080", "fuchsia": "#ff00ff", "green": "#008000", "lime": "#00ff00", "olive": "#808000", "yellow": "#ffff00", "navy": "#000080", "blue": "#0000ff", "teal": "#008080", "aqua": "#00ffff", "orange": "#ffa500", "rebeccapurple": "#663399"}
@@ -389,7 +466,7 @@ func colourNumber(component string, numberScale, hi float64) (float64, int) {
 	if percentage {
 		component = strings.TrimSuffix(component, "%")
 	}
-	n, ok := number(component)
+	n, ok := colourComponentNumber(component)
 	if !ok {
 		return 0, 0
 	}
@@ -397,6 +474,18 @@ func colourNumber(component string, numberScale, hi float64) (float64, int) {
 		return clamp(n/100*hi, hi), 1
 	}
 	return clamp(n*numberScale, hi), 1
+}
+
+// colourComponentNumber accepts the same syntax as number, but retains
+// representational overflow for the caller to clamp to the colour channel's
+// finite range. The general number parser remains finite-only because layout
+// and arithmetic cannot safely give infinity a contextual meaning.
+func colourComponentNumber(component string) (float64, bool) {
+	if !validCSSNumber(component) {
+		return 0, false
+	}
+	value, _ := strconv.ParseFloat(component, 64)
+	return value, !math.IsNaN(value)
 }
 
 func parseAlpha(component string) (float64, int) {

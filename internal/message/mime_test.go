@@ -2,6 +2,7 @@ package message
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -323,6 +324,66 @@ func TestMIMEExtractionRetainsContentBeyondTwoMiB(t *testing.T) {
 			t.Fatal("multipart MIME content was truncated before its tail")
 		}
 	})
+}
+
+func TestMIMEPartLimitAppliesAcrossMessage(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i < maxMIMEParts; i++ {
+		fmt.Fprintf(&body, "--x\r\nContent-Type: text/plain\r\n\r\npart-%d\r\n", i)
+	}
+	body.WriteString("--x\r\nContent-Type: text/plain\r\n\r\ntail-beyond-part-limit\r\n--x--\r\n")
+	content := extractMIME(`multipart/mixed; boundary="x"`, "", "", []byte(body.String()), 0)
+	if !content.MIMEIncomplete {
+		t.Fatal("MIME part limit was not reported")
+	}
+	if strings.Contains(content.Text, "tail-beyond-part-limit") {
+		t.Fatal("content beyond MIME part limit was processed")
+	}
+}
+
+func TestHTMLPartLimitAppliesAcrossAlternatives(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i <= maxHTMLParts; i++ {
+		fmt.Fprintf(&body, "--x\r\nContent-Type: text/html\r\n\r\n<p>alternative-%d</p>\r\n", i)
+	}
+	body.WriteString("--x--\r\n")
+	content := extractMIME(`multipart/alternative; boundary="x"`, "", "", []byte(body.String()), 0)
+	if !content.ExtractionIncomplete || !content.HTMLFallbackUsed {
+		t.Fatalf("HTML part limit was not reported: %+v", content)
+	}
+	if !strings.Contains(content.Text, fmt.Sprintf("alternative-%d", maxHTMLParts)) {
+		t.Fatalf("selected bounded fallback missing: %q", content.Text)
+	}
+}
+
+func TestHTMLWorkBudgetIsSharedAcrossParts(t *testing.T) {
+	budget := newExtractionBudget()
+	budget.matchWorkRemaining = 1
+	first := htmlToTextWithBudget(`<p>first</p>`, budget)
+	if first.HTMLFallbackUsed {
+		t.Fatal("first HTML part unexpectedly used lexical fallback")
+	}
+	if budget.matchWorkRemaining != 0 {
+		t.Fatalf("remaining match work = %d, want 0", budget.matchWorkRemaining)
+	}
+	second := htmlToTextWithBudget(`<p>second</p>`, budget)
+	if !second.HTMLFallbackUsed || !second.ExtractionIncomplete || second.VisibleText != "" {
+		t.Fatalf("second HTML part did not use incomplete visibility-neutral fallback: %+v", second)
+	}
+}
+
+func TestHTMLByteBudgetIsSharedAcrossParts(t *testing.T) {
+	budget := newExtractionBudget()
+	firstSource := `<p>first</p>`
+	budget.htmlBytesRemaining = len(firstSource)
+	first := htmlToTextWithBudget(firstSource, budget)
+	if first.HTMLFallbackUsed {
+		t.Fatal("HTML at the byte limit unexpectedly used lexical fallback")
+	}
+	second := htmlToTextWithBudget(`<p>second</p>`, budget)
+	if !second.HTMLFallbackUsed || !second.ExtractionIncomplete {
+		t.Fatalf("cumulative HTML byte limit was not enforced: %+v", second)
+	}
 }
 
 func TestMultipartAlternativePrefersHTML(t *testing.T) {

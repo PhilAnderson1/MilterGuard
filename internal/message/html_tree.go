@@ -20,6 +20,13 @@ const (
 	StripHidden
 )
 
+const (
+	maxConditionalFragmentBytes = 64 << 10
+	maxConditionalFragmentNodes = 8192
+	maxConditionalFragmentDepth = 128
+	maxConditionalOutputWork    = 128 << 10
+)
+
 type annotationUsage struct {
 	UsedConcealedTag                      bool
 	UsedVisibilityVariesByViewportSizeTag bool
@@ -195,16 +202,32 @@ func (o *annotatedOutput) String() string {
 	return out.String()
 }
 
-func htmlToText(source string) extractedContent { return extractTreeHTML(source) }
+func htmlToText(source string) extractedContent {
+	return htmlToTextWithBudget(source, newExtractionBudget())
+}
+
+func htmlToTextWithBudget(source string, budget *extractionBudget) extractedContent {
+	limits, ok := budget.htmlLimits(len(source))
+	if !ok {
+		content := extractBoundedHTMLFallback(source)
+		content.ExtractionIncomplete = true
+		return content
+	}
+	return extractTreeHTMLWithLimits(source, limits, budget)
+}
 
 func extractTreeHTML(source string) extractedContent {
-	limits := htmlextract.DefaultLimits()
+	return htmlToText(source)
+}
+
+func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget *extractionBudget) extractedContent {
 	inspection, err := htmlextract.Analyze([]byte(source), limits)
 	if err != nil {
 		// A bounded lexical fallback retains evidence when tree/style processing
 		// cannot complete. It is explicitly reported as incomplete extraction.
 		return extractBoundedHTMLFallback(source)
 	}
+	budget.consumeHTML(inspection.Usage)
 	e := htmlExtraction{inspection: inspection, states: make(map[*xhtml.Node]htmlextract.Text, len(inspection.Text)), elements: make(map[*xhtml.Node]htmlextract.Element, len(inspection.Elements))}
 	for _, state := range inspection.Text {
 		e.states[state.Node] = state
@@ -219,11 +242,45 @@ func extractTreeHTML(source string) extractedContent {
 	if tagged.hasConcealed {
 		stripped = e.render(StripHidden).text
 	}
-	return extractedContent{
-		Text: tagged.text, VisibleText: tagged.visible, StrippedText: stripped,
-		Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
-		HTMLComments: comments,
+	confidentChars := confidentVisibleCharacters(inspection.Text)
+	if inspection.UnresolvedStylesheet {
+		// An unevaluated stylesheet can alter any element in this HTML part, so
+		// none of its text is sufficiently certain to suppress image analysis.
+		confidentChars = 0
 	}
+	return extractedContent{
+		Text: tagged.text, VisibleText: tagged.visible, ConfidentVisibleChars: confidentChars, StrippedText: stripped,
+		Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
+		HTMLComments: comments, CSSIncomplete: inspection.UnresolvedStylesheet,
+	}
+}
+
+// confidentVisibleCharacters is deliberately separate from VisibleText.
+// VisibleText is a useful human-facing estimate and retains uncertain content;
+// only text positively classified as visible may suppress fallback image
+// analysis. Generated link destinations and image descriptions are not DOM
+// text nodes and therefore cannot inflate this count.
+func confidentVisibleCharacters(states []htmlextract.Text) int {
+	count := 0
+	for _, state := range states {
+		if state.Label != "visible" || state.Node == nil {
+			continue
+		}
+		value := compactFormattingPadding(sanitizeSenderText(state.Node.Data))
+		if value == "" || annotationWhitespaceOnly(value) {
+			continue
+		}
+		count += confidentTextCharacters(value)
+	}
+	return count
+}
+
+func confidentTextCharacters(value string) int {
+	value = normalizeHTMLText(compactFormattingPadding(sanitizeSenderText(value)))
+	if value == "" || annotationWhitespaceOnly(value) {
+		return 0
+	}
+	return utf8.RuneCountInString(value)
 }
 
 type htmlCommentStats struct {
@@ -432,59 +489,108 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 	if start < 0 || end <= start+2 {
 		return
 	}
-	fragment, err := xhtml.ParseFragment(strings.NewReader(trimmed[start+2:end]), nil)
+	raw := trimmed[start+2 : end]
+	if len(raw) > maxConditionalFragmentBytes {
+		return
+	}
+	fragment, err := xhtml.ParseFragment(strings.NewReader(raw), nil)
 	if err != nil {
 		return
 	}
 	var content strings.Builder
+	walk := conditionalWalk{}
 	for _, node := range fragment {
-		e.walkConditionalNode(node, &content)
+		if !e.walkConditionalNode(node, &content, &walk, 0) {
+			return
+		}
 	}
 	value := normalizeHTMLText(content.String())
 	if value == "" || annotationWhitespaceOnly(value) {
 		return
 	}
+	for _, destination := range walk.links.links {
+		e.links.AddDestination(destination)
+	}
 	out.write(outputAnnotation{kind: "unknown"}, value)
 	visible.WriteString(value)
 }
 
-func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *strings.Builder) {
+type conditionalWalk struct {
+	nodes      int
+	outputWork int
+	links      linkCollector
+}
+
+func (w *conditionalWalk) enter(depth int) bool {
+	if depth > maxConditionalFragmentDepth || w.nodes >= maxConditionalFragmentNodes {
+		return false
+	}
+	w.nodes++
+	return true
+}
+
+func (w *conditionalWalk) writeString(out *strings.Builder, value string) bool {
+	if len(value) > maxConditionalOutputWork-w.outputWork {
+		return false
+	}
+	w.outputWork += len(value)
+	out.WriteString(value)
+	return true
+}
+
+func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *strings.Builder, walk *conditionalWalk, depth int) bool {
+	if !walk.enter(depth) {
+		return false
+	}
 	if n.Type == xhtml.TextNode {
-		out.WriteString(sanitizeSenderText(n.Data))
-		return
+		return walk.writeString(out, sanitizeSenderText(n.Data))
 	}
 	if n.Type != xhtml.ElementNode && n.Type != xhtml.DocumentNode {
-		return
+		return true
 	}
 	name := strings.ToLower(n.Data)
 	// Outlook conditionals can contain Office configuration XML alongside
 	// alternate message markup. It is presentation code, not recipient-facing
 	// fallback content.
 	if omittedHTMLElement(name) || name == "xml" || strings.HasPrefix(name, "o:") {
-		return
+		return true
 	}
 	if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, "a") {
 		var label strings.Builder
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			e.walkConditionalNode(child, &label)
+			if !e.walkConditionalNode(child, &label, walk, depth+1) {
+				return false
+			}
 		}
 		if destination, ok := e.destination(firstAttr(n, "href")); ok {
-			fmt.Fprintf(out, "[%s](%s)", markdownLabelText(strings.TrimSpace(label.String())), markdownURL(destination))
-			e.links.AddDestination(destination)
+			rendered := fmt.Sprintf("[%s](%s)", markdownLabelText(strings.TrimSpace(label.String())), markdownURL(destination))
+			if !walk.writeString(out, rendered) {
+				return false
+			}
+			walk.links.AddDestination(destination)
 		} else {
-			out.WriteString(label.String())
+			if !walk.writeString(out, label.String()) {
+				return false
+			}
 		}
-		return
+		return true
 	}
 	if isBlockElement(name) || strings.EqualFold(n.Data, "br") {
-		out.WriteByte('\n')
+		if !walk.writeString(out, "\n") {
+			return false
+		}
 	}
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		e.walkConditionalNode(child, out)
+		if !e.walkConditionalNode(child, out, walk, depth+1) {
+			return false
+		}
 	}
 	if isBlockElement(name) {
-		out.WriteByte('\n')
+		if !walk.writeString(out, "\n") {
+			return false
+		}
 	}
+	return true
 }
 
 func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {

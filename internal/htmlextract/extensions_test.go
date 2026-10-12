@@ -13,8 +13,11 @@ func TestConditionalCases(t *testing.T) {
 	cases := []struct{ name, css, want string }{
 		{"mobile", `@media screen and (max-width:600px){p{display:none}}`, "client-dependent"},
 		{"legacy device width", `@media only screen and (max-device-width:600px),only screen and (max-width:600px){p{display:none}}`, "client-dependent"},
-		{"light colour scheme", `@media (prefers-color-scheme:light){p{display:none}}`, "concealed"},
-		{"dark colour scheme", `@media (prefers-color-scheme:dark){p{display:none}}`, "visible"},
+		{"light colour scheme", `@media (prefers-color-scheme:light){p{display:none}}`, "unknown"},
+		{"dark colour scheme", `@media (prefers-color-scheme:dark){p{display:none}}`, "unknown"},
+		{"colour scheme can reveal", `p{display:none}@media (prefers-color-scheme:dark){p{display:block}}`, "unknown"},
+		{"colour scheme overridden", `@media (prefers-color-scheme:dark){p{display:none}}p{display:block}`, "visible"},
+		{"colour scheme scoped elsewhere", `@media (prefers-color-scheme:dark){b{display:none}}`, "visible"},
 		{"intermediate", `p{display:none}@media (min-width:500px) and (max-width:501px){p{display:block}}`, "client-dependent"},
 		{"point", `p{display:none}@media (min-width:500px) and (max-width:500px){p{display:block}}`, "client-dependent"},
 		{"all hidden", `@media (max-width:500px){p{display:none}}@media (min-width:500px){p{display:none}}`, "concealed"},
@@ -121,14 +124,14 @@ func TestMediaCasesShareSelectorWorkBudget(t *testing.T) {
 	matches := matchBudget{limit: firstCaseWork}
 	expressions := expressionBudget{remaining: limits.ExpressionWork}
 	node := &xhtml.Node{Type: xhtml.ElementNode, Data: "p"}
-	first, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 0, false, selectorMatchContext{}, &matches, &expressions)
+	first, _, _, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 0, false, selectorMatchContext{}, &matches, &expressions)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !first[display].Known || first[display].Text != "none" {
 		t.Fatalf("first media case = %+v", first[display])
 	}
-	second, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1000, false, selectorMatchContext{}, &matches, &expressions)
+	second, _, _, _, err := s.elementStyle(node, initial(), initial(), nil, nil, 1000, false, selectorMatchContext{}, &matches, &expressions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +168,93 @@ func TestEmptyClipping(t *testing.T) {
 	}
 }
 
+func TestClipPathApplicabilityToInlineBoxes(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"default inline span", `<span style="clip-path:circle(0)">T</span>`, "visible"},
+		{"declared inline block element", `<div style="display:inline;clip-path:circle(0)">T</div>`, "visible"},
+		{"declared block span", `<span style="display:block;clip-path:circle(0)">T</span>`, "concealed"},
+		{"default block element", `<div style="clip-path:circle(0)">T</div>`, "concealed"},
+		{"positioned inline element", `<span style="position:absolute;clip-path:circle(0)">T</span>`, "concealed"},
+		{"legacy clip remains independent of overflow", `<span style="position:absolute;clip:rect(0,0,0,0)">T</span>`, "concealed"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			in := inspectHTML(t, test.src)
+			if got := findText(t, in, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestMSOHideIsClientDependent(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"inline declaration", `<p style="mso-hide:all">T</p>`, "unknown"},
+		{"stylesheet declaration", `<style>.outlook-hidden{mso-hide:all}</style><p class="outlook-hidden">T</p>`, "unknown"},
+		{"ancestor", `<div style="mso-hide:all"><p>T</p></div>`, "unknown"},
+		{"variable", `<p style="--outlook:all;mso-hide:var(--outlook)">T</p>`, "unknown"},
+		{"later initial value", `<p style="mso-hide:all;mso-hide:initial">T</p>`, "visible"},
+		{"important value", `<p style="mso-hide:all!important;mso-hide:initial">T</p>`, "unknown"},
+		{"universally concealed", `<p style="display:none;mso-hide:all">T</p>`, "concealed"},
+		{"invalid variable", `<p style="mso-hide:var(--missing)">T</p>`, "visible"},
+		{"unsupported value", `<p style="mso-hide:future(1)">T</p>`, "unknown"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			in := inspectHTML(t, test.src)
+			if got := findText(t, in, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
+	cases := []struct{ name, style, want string }{
+		{"zero width", `overflow:hidden;width:0`, "unknown"},
+		{"zero height", `overflow:clip;height:0px`, "unknown"},
+		{"zero max height", `overflow:hidden;max-height:0%`, "unknown"},
+		{"absolute left", `position:absolute;left:-1000px`, "unknown"},
+		{"fixed top", `position:fixed;top:-9999px`, "unknown"},
+		{"negative indent", `text-indent:-1000px`, "unknown"},
+		{"dimension without clipping", `width:0;height:0`, "visible"},
+		{"clipping without zero dimension", `overflow:hidden;width:1px`, "visible"},
+		{"static offset", `position:static;left:-9999px`, "visible"},
+		{"ordinary offset", `position:absolute;left:-999px`, "visible"},
+		{"overridden width", `overflow:hidden;width:0;width:auto`, "visible"},
+		{"overridden overflow", `overflow:hidden;width:0;overflow:visible`, "visible"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			in := inspectHTML(t, `<div style="`+test.style+`"><span>T</span></div>`)
+			if got := findText(t, in, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+
+	in := inspectHTML(t, `<style>.offscreen{position:absolute;left:-9999px}.offscreen{left:0}</style><div class="offscreen">T</div>`)
+	if got := findText(t, in, "T").Label; got != "visible" {
+		t.Fatalf("stylesheet cascade label = %q, want visible", got)
+	}
+	in = inspectHTML(t, `<style>@media(max-width:500px){p{overflow:hidden;width:0}}</style><p>T</p>`)
+	if got := findText(t, in, "T").Label; got != "unknown" {
+		t.Fatalf("media-dependent layout label = %q, want unknown", got)
+	}
+	in = inspectHTML(t, `<p style="--zero:0;overflow:hidden;width:var(--zero)">T</p>`)
+	if got := findText(t, in, "T").Label; got != "unknown" {
+		t.Fatalf("variable layout label = %q, want unknown", got)
+	}
+}
+
 func TestVariables(t *testing.T) {
 	cases := []struct{ name, src, want string }{
 		{"root", `<style>:root{--Hidden:none}p{display:var(--Hidden)}</style><p>T</p>`, "concealed"},
@@ -185,6 +275,12 @@ func TestVariables(t *testing.T) {
 		{"consumer fallback from cycle", `<p style="--a:var(--a);--b:var(--a,none);display:var(--b)">T</p>`, "concealed"},
 		{"boundary no concatenation", `<p style="--n:0;font-size:var(--n)px">T</p>`, "visible"},
 		{"background shorthand", `<p style="--bg:white;background:var(--bg);color:white">T</p>`, "concealed"},
+		{"escaped direct reference", `<p style="--hidden:none;display:var(\2d\2d hidden)">T</p>`, "concealed"},
+		{"escaped transitive reference", `<p style="background:white;color:black;--white:white;--x:var(\2d\2d white);color:var(--x)">T</p>`, "concealed"},
+		{"escaped definition name", `<p style="--\78:none;display:var(--x)">T</p>`, "concealed"},
+		{"escaped reference remains case sensitive", `<p style="--X:none;display:var(\2d\2d x,block)">T</p>`, "visible"},
+		{"escaped missing reference fallback", `<p style="display:var(\2d\2d missing,none)">T</p>`, "concealed"},
+		{"escaped cycle dependency", `<p style="--a:var(\2d\2d b);--b:var(--a);display:var(--a,none)">T</p>`, "concealed"},
 		{"string not substituted", `<p style="--x:'var(--missing)';display:var(--x,none)">T</p>`, "visible"},
 		{"media variable", `<style>:root{--x:none}@media(max-width:500px){:root{--x:block}}p{display:var(--x)}</style><p>T</p>`, "client-dependent"},
 	}
@@ -219,6 +315,50 @@ func TestMalformedCustomPropertyVariableDoesNotWinCascade(t *testing.T) {
 	}
 	if declarations := s.declarations("--x", "var(--missing"); len(declarations) != 1 {
 		t.Fatalf("implicitly closed var() was rejected: %+v", declarations)
+	}
+}
+
+func TestVariableFunctionValidation(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{"reference", `var(--x)`, true},
+		{"implicit close", `var(--x`, true},
+		{"nested fallback", `var(--x,var(--y,var(--z,none)))`, true},
+		{"function fallback", `var(--x,rgb(var(--r),0,0))`, true},
+		{"empty fallback", `var(--x,)`, true},
+		{"additional fallback commas", `var(--x,one,two)`, true},
+		{"empty name", `var()`, false},
+		{"ordinary identifier", `var(name)`, false},
+		{"bare custom prefix", `var(--)`, false},
+		{"two name tokens", `var(--x --y)`, false},
+		{"function as name", `var(calc(--x))`, false},
+		{"malformed nested fallback", `var(--x,var(name))`, false},
+		{"malformed nested in function", `calc(var(name))`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tokens, status := lexValue(test.value)
+			if status != 1 {
+				t.Fatalf("lexing status = %d", status)
+			}
+			if got := validVariableFunctions(tokens); got != test.valid {
+				t.Fatalf("validVariableFunctions(%q) = %t, want %t", test.value, got, test.valid)
+			}
+		})
+	}
+}
+
+func TestVariableFunctionValidationIsBoundedForDeepFallbacks(t *testing.T) {
+	const depth = 1_000
+	value := strings.Repeat(`var(--x,`, depth) + `none` + strings.Repeat(`)`, depth)
+	tokens, status := lexValue(value)
+	if status != 1 || len(tokens) > maxValueTokens || len(value) > maxValueBytes {
+		t.Fatalf("invalid deep-fallback fixture: bytes=%d tokens=%d status=%d", len(value), len(tokens), status)
+	}
+	if !validVariableFunctions(tokens) {
+		t.Fatal("valid deep fallback was rejected")
 	}
 }
 

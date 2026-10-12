@@ -47,10 +47,12 @@ func parseMedia(src string) mediaCondition {
 			case "screen", "all":
 			case "print":
 				a.never = true
-			case "(prefers-color-scheme:light)", "(prefers-color-scheme: light)":
-				// The extractor's agreed canvas is explicitly light mode.
-			case "(prefers-color-scheme:dark)", "(prefers-color-scheme: dark)":
-				a.never = true
+			case "(prefers-color-scheme:light)", "(prefers-color-scheme: light)",
+				"(prefers-color-scheme:dark)", "(prefers-color-scheme: dark)":
+				// The recipient's colour-scheme preference is not known. Keep a
+				// potentially active rule in the cascade as unsupported so only
+				// content actually affected by it becomes uncertain.
+				a.unknown = true
 			default:
 				m := widthFeature.FindStringSubmatch(part)
 				if m == nil {

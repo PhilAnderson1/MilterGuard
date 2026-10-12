@@ -6,7 +6,6 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
-	"strings"
 )
 
 func selectVisionImages(content extractedContent, options VisionOptions) []Image {
@@ -16,7 +15,7 @@ func selectVisionImages(content extractedContent, options VisionOptions) []Image
 	switch options.Mode {
 	case "always":
 	case "fallback":
-		if len([]rune(strings.TrimSpace(content.VisibleText))) >= options.MinTextChars {
+		if content.ConfidentVisibleChars >= options.MinTextChars {
 			return nil
 		}
 	default:

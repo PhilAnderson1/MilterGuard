@@ -1,8 +1,10 @@
 package htmlextract
 
 import (
-	"github.com/tdewolff/parse/v2/css"
 	"strings"
+
+	"github.com/tdewolff/parse/v2/css"
+	"golang.org/x/net/html"
 )
 
 // Empty basic shapes do not require box dimensions. Nonempty shapes are not
@@ -65,23 +67,55 @@ func resolveClip(p int, s string) (Value, int) {
 	}
 	return Value{Text: s}, 2
 }
-func emptyClip(st Style, namespace string) (empty, known bool) {
-	known = st[clipPath].Known
-	if namespace != "" || !st[display].Known || st[display].Text == "contents" {
-		return false, false
+func emptyClip(st Style, n *html.Node, displayDeclared bool) (empty, known, clipPathIgnored bool) {
+	if n.Namespace != "" || !st[display].Known || st[display].Text == "contents" {
+		return false, false, false
 	}
-	if st[clipPath].Known && st[clipPath].Number == 1 {
-		return true, true
+	clipPathIgnored = nonReplacedInlineBox(n, st, displayDeclared)
+	known = st[clipPath].Known || clipPathIgnored
+	if clipPathIgnored {
+		// Continue to evaluate the independent legacy clip property below.
+	} else if st[clipPath].Known && st[clipPath].Number == 1 {
+		return true, true, false
 	}
 	pos := st[position]
 	if pos.Known && (pos.Text == "static" || pos.Text == "relative" || pos.Text == "sticky") {
-		return false, known
+		return false, known, clipPathIgnored
 	}
 	if pos.Known && (pos.Text == "absolute" || pos.Text == "fixed") {
 		if st[clip].Known && st[clip].Number == 1 {
-			return true, true
+			return true, true, clipPathIgnored
 		}
-		return false, known && st[clip].Known
+		return false, known && st[clip].Known, clipPathIgnored
 	}
-	return false, known && st[clip].Known && st[clip].Text == "auto"
+	return false, known && st[clip].Known && st[clip].Text == "auto", clipPathIgnored
+}
+
+// nonReplacedInlineBox identifies the HTML boxes on which current browser
+// engines do not paint clip-path. CSS's initial display value is inline, but
+// the user-agent stylesheet gives many HTML elements a non-inline display, so
+// an undeclared value must also consider the element's normal box type.
+func nonReplacedInlineBox(n *html.Node, st Style, displayDeclared bool) bool {
+	if st[display].Text != "inline" || st[position].Text == "absolute" || st[position].Text == "fixed" || replacedHTMLElement(n.Data) {
+		return false
+	}
+	return displayDeclared || !defaultNonInlineHTMLElement(n.Data)
+}
+
+func replacedHTMLElement(name string) bool {
+	switch name {
+	case "audio", "button", "canvas", "embed", "iframe", "img", "input", "object", "select", "textarea", "video":
+		return true
+	default:
+		return false
+	}
+}
+
+func defaultNonInlineHTMLElement(name string) bool {
+	switch name {
+	case "address", "article", "aside", "blockquote", "body", "caption", "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr", "html", "legend", "li", "listing", "main", "menu", "nav", "ol", "p", "plaintext", "pre", "search", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul", "xmp":
+		return true
+	default:
+		return false
+	}
 }

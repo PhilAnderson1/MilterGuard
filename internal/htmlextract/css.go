@@ -13,6 +13,7 @@ const (
 	display = iota
 	visibility
 	contentVisibility
+	msoHide
 	opacity
 	fontSize
 	color
@@ -34,7 +35,19 @@ const (
 	properties
 )
 
-var names = [properties]string{"display", "visibility", "content-visibility", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path"}
+const (
+	overflow = properties + iota
+	width
+	height
+	maxHeight
+	left
+	top
+	textIndent
+	declarationProperties
+	layoutProperties = declarationProperties - properties
+)
+
+var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "overflow", "width", "height", "max-height", "left", "top", "text-indent"}
 
 type declaration struct {
 	prop          int
@@ -46,7 +59,6 @@ type declaration struct {
 	valueStatus   int
 	tokensReady   bool
 	hasVars       bool
-	hasEscape     bool
 	keyword       string
 	important     bool
 	order         int
@@ -89,10 +101,8 @@ func contextualDeclaration(d declaration) bool {
 func prepareDeclaration(d declaration) declaration {
 	if d.tokensReady {
 		d.hasVars = tokensHaveVariables(d.valueTokens)
-		d.hasEscape = tokensHaveEscape(d.valueTokens)
 	} else {
 		d.hasVars = hasVariables(d.value)
-		d.hasEscape = strings.Contains(d.value, "\\")
 	}
 	if d.custom != "" {
 		d.keyword = strings.ToLower(strings.TrimSpace(d.value))
@@ -139,21 +149,41 @@ type rule struct {
 }
 
 type sheet struct {
-	rules               []rule
-	selectors, order    int
-	limits              Limits
-	planningWork        int64
-	cascadeIncomplete   bool
-	workIncomplete      bool
-	mediaCache          map[mediaCacheKey][]uint8
-	planCount           int
-	conditionDepth      int
-	index               selectorIndex
-	cacheMatches        bool
-	candidateScratch    []selectorRef
-	candidateMarks      []uint32
-	candidateGeneration uint32
-	matchCacheEntries   int
+	rules                []rule
+	selectors, order     int
+	limits               Limits
+	planningWork         int64
+	cascadeIncomplete    bool
+	workIncomplete       bool
+	mediaCache           map[mediaCacheKey][]uint8
+	planCount            int
+	conditionDepth       int
+	index                selectorIndex
+	cacheMatches         bool
+	candidateScratch     []selectorRef
+	candidateMarks       []uint32
+	candidateGeneration  uint32
+	matchCacheEntries    int
+	cssBytes             int
+	importDepth          int
+	unresolvedStylesheet bool
+}
+
+// admitCSS applies allocation-light source bounds before tdewolff's parser is
+// allowed to accumulate a selector or declaration value into a token slice.
+// CSS is counted across style elements and style attributes so splitting a
+// payload into many individually acceptable inputs cannot bypass the document
+// limit.
+func (s *sheet) admitCSS(text string, inline bool) bool {
+	if s.cascadeIncomplete || s.workIncomplete {
+		return false
+	}
+	if len(text) > s.limits.CSSBytes || s.cssBytes > s.limits.CSSBytes-len(text) || !boundedCSSConstructs(text, inline, s.limits.CSSConstructBytes, s.limits.CSSConstructTokens) {
+		s.abandonCascade()
+		return false
+	}
+	s.cssBytes += len(text)
+	return true
 }
 
 func (s *sheet) chargeDeclarationWork(value string) bool {
@@ -320,7 +350,8 @@ func parseDeclarationTokens(ts []valueToken, status int, fallback string) parsed
 		if (t.kind == css.IdentToken || t.kind == css.FunctionToken) && strings.Contains(raw, "\\") {
 			decoded := cssUnescape(raw)
 			decodedTokens, decodedStatus := lexValue(decoded)
-			if decodedStatus == 1 && len(decodedTokens) == 1 && decodedTokens[0].kind == t.kind {
+			sameIdentifierClass := t.kind == css.IdentToken && len(decodedTokens) == 1 && decodedTokens[0].kind == css.CustomPropertyNameToken
+			if decodedStatus == 1 && len(decodedTokens) == 1 && (decodedTokens[0].kind == t.kind || sameIdentifierClass) {
 				raw = decoded
 			} else {
 				unsafe = true
@@ -416,7 +447,7 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 				prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true}),
 			}
 		}
-		return prepareDeclarations(backgroundDeclarations(strings.ToLower(value), imp, s.order))
+		return prepareDeclarations(backgroundDeclarationsTokens(strings.ToLower(value), parsed.tokens, parsed.status, imp, s.order))
 	}
 	if prop == "mask" {
 		return []declaration{prepared(declaration{prop: maskImage, value: value, important: imp, order: s.order, unsupported: true})}
@@ -426,7 +457,7 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 	case "font":
 		affected = []int{fontSize}
 	case "all":
-		for i := 0; i < properties; i++ {
+		for i := 0; i < declarationProperties; i++ {
 			affected = append(affected, i)
 		}
 	}
@@ -447,10 +478,14 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 	if !inline {
 		s.invalidateMediaCache()
 	}
+	if !s.admitCSS(text, inline) {
+		return nil
+	}
 	p := css.NewParser(parse.NewInputString(text), inline)
 	var conditions []mediaCondition
 	defaultNamespace := false
 	current := -1
+	importsAllowed := !inline
 	var out []declaration
 	for {
 		if s.cascadeIncomplete || s.workIncomplete {
@@ -465,6 +500,7 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			}
 			return out
 		case css.BeginAtRuleGrammar:
+			importsAllowed = false
 			vals := tokenString(values)
 			var cond mediaCondition
 			switch strings.ToLower(string(data)) {
@@ -489,10 +525,21 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			}
 			current = -1
 		case css.AtRuleGrammar:
-			if !inline && len(conditions) == 0 && strings.EqualFold(string(data), "@namespace") && defaultNamespaceRule(values) {
+			name := strings.ToLower(string(data))
+			if name == "@import" {
+				if importsAllowed && len(conditions) == 0 {
+					s.parseImport(values)
+				}
+				continue
+			}
+			if name != "@charset" && name != "@layer" {
+				importsAllowed = false
+			}
+			if !inline && len(conditions) == 0 && name == "@namespace" && defaultNamespaceRule(values) {
 				defaultNamespace = true
 			}
 		case css.BeginRulesetGrammar:
+			importsAllowed = false
 			current = -1
 			if inline {
 				// Rulesets are not valid members of a style attribute. In

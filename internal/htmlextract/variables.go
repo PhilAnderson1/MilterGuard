@@ -71,15 +71,6 @@ func tokensHaveVariables(tokens []valueToken) bool {
 	return false
 }
 
-func tokensHaveEscape(tokens []valueToken) bool {
-	for _, token := range tokens {
-		if strings.Contains(token.raw, "\\") {
-			return true
-		}
-	}
-	return false
-}
-
 func containsFold(s, substr string) bool {
 	if substr == "" {
 		return true
@@ -128,42 +119,75 @@ func closing(ts []valueToken, start int) int {
 // custom-property value. CSS requires a custom-property declaration containing
 // a malformed var() to be ignored rather than allowed to win the cascade.
 func validVariableFunctions(ts []valueToken) bool {
-	for i := 0; i < len(ts); i++ {
-		if ts[i].kind != css.FunctionToken || !strings.EqualFold(ts[i].raw, "var(") {
-			continue
+	type frame struct {
+		variable    bool
+		fallback    bool
+		name        valueToken
+		nameTokens  int
+		invalidName bool
+	}
+	var stack []frame
+	validName := func(f frame) bool {
+		if f.invalidName || f.nameTokens != 1 || (f.name.kind != css.IdentToken && f.name.kind != css.CustomPropertyNameToken) {
+			return false
 		}
-		end := closing(ts, i)
-		inner := ts[i+1 : end]
-		comma := -1
-		level := 0
-		for j, token := range inner {
-			switch token.kind {
-			case css.FunctionToken, css.LeftParenthesisToken:
-				level++
-			case css.RightParenthesisToken:
-				level--
-			case css.CommaToken:
-				if level == 0 && comma < 0 {
-					comma = j
-				}
-			}
+		decoded := cssUnescape(f.name.raw)
+		return strings.HasPrefix(decoded, "--") && decoded != "--"
+	}
+	addNameToken := func(token valueToken) {
+		if len(stack) == 0 || !stack[len(stack)-1].variable || stack[len(stack)-1].fallback {
+			return
 		}
-		name := inner
-		if comma >= 0 {
-			name = inner[:comma]
-			if !validVariableFunctions(inner[comma+1:]) {
+		f := &stack[len(stack)-1]
+		if token.kind == css.WhitespaceToken || token.kind == css.CommentToken {
+			return
+		}
+		f.nameTokens++
+		if f.nameTokens == 1 {
+			f.name = token
+		} else {
+			f.invalidName = true
+		}
+	}
+	closeFrame := func() bool {
+		if len(stack) == 0 {
+			return true
+		}
+		last := len(stack) - 1
+		f := stack[last]
+		stack = stack[:last]
+		return !f.variable || validName(f)
+	}
+
+	for _, token := range ts {
+		switch token.kind {
+		case css.FunctionToken:
+			// A nested function before a var()'s comma is part of its name
+			// grammar and therefore makes that name invalid.
+			addNameToken(token)
+			stack = append(stack, frame{variable: strings.EqualFold(token.raw, "var(")})
+		case css.LeftParenthesisToken:
+			addNameToken(token)
+			stack = append(stack, frame{})
+		case css.RightParenthesisToken:
+			if !closeFrame() {
 				return false
 			}
+		case css.CommaToken:
+			if len(stack) > 0 && stack[len(stack)-1].variable && !stack[len(stack)-1].fallback {
+				stack[len(stack)-1].fallback = true
+			} else {
+				addNameToken(token)
+			}
+		default:
+			addNameToken(token)
 		}
-		name = significant(name)
-		if len(name) != 1 || (name[0].kind != css.IdentToken && name[0].kind != css.CustomPropertyNameToken) {
+	}
+	// CSS automatically closes open functions at the end of a declaration.
+	for len(stack) > 0 {
+		if !closeFrame() {
 			return false
 		}
-		decoded := cssUnescape(name[0].raw)
-		if !strings.HasPrefix(decoded, "--") || decoded == "--" {
-			return false
-		}
-		i = end
 	}
 	return true
 }
@@ -178,7 +202,7 @@ func variableRefs(ts []valueToken) []string {
 				j++
 			}
 			if j < len(ts) {
-				out = append(out, ts[j].raw)
+				out = append(out, cssUnescape(ts[j].raw))
 			}
 		}
 	}
@@ -315,10 +339,6 @@ func substitute(d declaration, vars *variableScope, budget *expressionBudget) va
 	if !d.hasVars {
 		return variableValue{d.value, 1}
 	}
-	// Escaped identifiers require CSS unescaping beyond this bounded subset.
-	if d.hasEscape {
-		return variableValue{status: 2}
-	}
 	if !d.tokensReady || d.valueStatus != 1 {
 		return variableValue{status: d.valueStatus}
 	}
@@ -355,10 +375,14 @@ func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget
 				nameTokens = inner[:comma]
 			}
 			nameTokens = significant(nameTokens)
-			if len(nameTokens) != 1 || !strings.HasPrefix(nameTokens[0].raw, "--") || nameTokens[0].raw == "--" {
+			if len(nameTokens) != 1 || (nameTokens[0].kind != css.IdentToken && nameTokens[0].kind != css.CustomPropertyNameToken) {
 				return variableValue{status: 0}
 			}
-			v := lookup(nameTokens[0].raw)
+			name := cssUnescape(nameTokens[0].raw)
+			if !strings.HasPrefix(name, "--") || name == "--" {
+				return variableValue{status: 0}
+			}
+			v := lookup(name)
 			if v.status == 0 && comma >= 0 {
 				v = substituteTokens(inner[comma+1:], lookup, budget, depth+1)
 			}

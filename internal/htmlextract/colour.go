@@ -4,7 +4,6 @@ import (
 	"math"
 	"strings"
 
-	"github.com/tdewolff/parse/v2"
 	"github.com/tdewolff/parse/v2/css"
 	"golang.org/x/net/html"
 )
@@ -24,29 +23,36 @@ const colourThreshold = .005
 // plus CSS-wide keywords. It resets image as well as colour. Other syntax wins
 // as unresolved for both components; a later colour alone cannot reset an image.
 func backgroundDeclarations(value string, important bool, order int) []declaration {
+	tokens, status := lexValue(value)
+	return backgroundDeclarationsTokens(value, tokens, status, important, order)
+}
+
+func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus int, important bool, order int) []declaration {
 	colourValue, image := "transparent", "none"
 	unsupported := false
+	imageColourStatus := 1
 	switch value {
 	case "inherit", "initial", "unset", "revert", "revert-layer":
 		colourValue = value
 		image = value
 	default:
+		if tokenStatus != 1 {
+			return []declaration{{prop: background, value: value, important: important, order: order, unsupported: true}, {prop: backgroundImage, value: value, important: important, order: order, unsupported: true}}
+		}
 		// Tokenize to remove a standalone none, preserving spaces inside rgb().
-		lexer := css.NewLexer(parse.NewInputString(value))
 		depth := 0
 		haveColour := false
 		haveNone := false
 		var b strings.Builder
-		for {
-			tt, data := lexer.Next()
-			if tt == css.ErrorToken {
-				break
-			}
-			s := string(data)
+		for _, valueToken := range tokens {
+			tt, s := valueToken.kind, strings.ToLower(valueToken.raw)
 			if tt == css.FunctionToken {
 				depth++
 			}
-			if s == ")" {
+			if tt == css.RightParenthesisToken {
+				if depth == 0 {
+					return nil
+				}
 				depth--
 			}
 			if depth == 0 && tt == css.IdentToken && s == "none" {
@@ -56,7 +62,7 @@ func backgroundDeclarations(value string, important bool, order int) []declarati
 				haveNone = true
 				continue
 			}
-			b.Write(data)
+			b.WriteString(s)
 		}
 		token := strings.TrimSpace(b.String())
 		if token != "" {
@@ -66,12 +72,16 @@ func backgroundDeclarations(value string, important bool, order int) []declarati
 			if token == "currentcolor" {
 				status = 1
 			}
-			// An image-only background shorthand resets background-color to
-			// transparent. Retain that known fallback while leaving the image
-			// itself unresolved; this permits a useful baseline contrast check.
 			if backgroundImageSyntax(token) {
-				colourValue = "transparent"
-				status = 1
+				// Images paint over the final layer's explicit colour. Preserve
+				// that fallback rather than assuming every image shorthand resets
+				// the colour to transparent.
+				var valid bool
+				colourValue, status, valid = backgroundFallbackColourTokens(tokens)
+				if !valid {
+					return nil
+				}
+				imageColourStatus = status
 				image = token
 				unsupported = true
 			}
@@ -90,10 +100,99 @@ func backgroundDeclarations(value string, important bool, order int) []declarati
 	}
 	colourUnsupported, imageUnsupported := unsupported, unsupported
 	if backgroundImageSyntax(value) {
-		colourUnsupported = false
+		colourUnsupported = imageColourStatus != 1
 		imageUnsupported = true
 	}
 	return []declaration{{prop: background, value: colourValue, important: important, order: order, unsupported: colourUnsupported}, {prop: backgroundImage, value: image, important: important, order: order, unsupported: imageUnsupported}}
+}
+
+// backgroundFallbackColour returns the colour from the final comma-separated
+// background layer. Colour functions nested inside gradients are deliberately
+// ignored. CSS permits a background colour only in the final layer.
+func backgroundFallbackColour(value string) (string, int, bool) {
+	tokens, status := lexValue(value)
+	if status != 1 {
+		return value, 2, true
+	}
+	return backgroundFallbackColourTokens(tokens)
+}
+
+func backgroundFallbackColourTokens(tokens []valueToken) (string, int, bool) {
+	finalStart := 0
+	depth := 0
+	for i, token := range tokens {
+		switch token.kind {
+		case css.FunctionToken, css.LeftParenthesisToken:
+			depth++
+		case css.RightParenthesisToken:
+			if depth > 0 {
+				depth--
+			}
+		case css.CommaToken:
+			if depth == 0 {
+				finalStart = i + 1
+			}
+		}
+	}
+	// A colour in any non-final layer makes the shorthand invalid.
+	if finalStart > 0 {
+		if _, _, count := backgroundLayerColour(tokens[:finalStart-1]); count != 0 {
+			return "", 0, false
+		}
+	}
+	colour, colourStatus, count := backgroundLayerColour(tokens[finalStart:])
+	if count > 1 {
+		return "", 0, false
+	}
+	if count == 0 {
+		return "transparent", 1, true
+	}
+	return colour, colourStatus, true
+}
+
+func backgroundLayerColour(tokens []valueToken) (string, int, int) {
+	var colour string
+	colourStatus, count := 0, 0
+	for i := 0; i < len(tokens); i++ {
+		token := tokens[i]
+		candidate := ""
+		switch token.kind {
+		case css.FunctionToken:
+			end := closing(tokens, i)
+			name := strings.ToLower(cssUnescape(strings.TrimSuffix(token.raw, "(")))
+			if isColourFunction(name) {
+				last := end + 1
+				if last > len(tokens) {
+					last = len(tokens)
+				}
+				candidate = strings.ToLower(tokenText(tokens[i:last]))
+			}
+			i = end
+		case css.IdentToken, css.HashToken:
+			candidate = strings.ToLower(cssUnescape(token.raw))
+		}
+		if candidate == "" {
+			continue
+		}
+		_, candidateStatus := readColour(candidate)
+		if candidate == "currentcolor" {
+			candidateStatus = 1
+		}
+		if candidateStatus == 0 {
+			continue
+		}
+		colour, colourStatus = candidate, candidateStatus
+		count++
+	}
+	return colour, colourStatus, count
+}
+
+func isColourFunction(name string) bool {
+	switch name {
+	case "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color", "color-mix", "device-cmyk", "light-dark":
+		return true
+	}
+	return false
 }
 
 func backgroundImageSyntax(value string) bool {
@@ -186,6 +285,29 @@ type paintLayer struct {
 	opacity                        float64
 	opacityKnown, compositionKnown bool
 	enhancementKnown               bool
+	displayNone                    bool
+}
+
+// propagateHTMLBodyBackground applies the special HTML canvas rule. When the
+// root has no background, the first body child's background is used on the
+// canvas as though it belonged to the root, while the body's used background
+// becomes transparent. Moving the paint between these groups matters when the
+// root or body has opacity or another compositing effect.
+func propagateHTMLBodyBackground(layers []paintLayer) {
+	if len(layers) < 2 {
+		return
+	}
+	root := &layers[len(layers)-2]
+	body := &layers[len(layers)-1]
+	if root.displayNone || body.displayNone || !root.backgroundKnown || root.background.A != 0 || !root.imageKnown {
+		return
+	}
+	root.background = body.background
+	root.backgroundKnown = body.backgroundKnown
+	root.imageKnown = body.imageKnown
+	body.background = RGBA{}
+	body.backgroundKnown = true
+	body.imageKnown = true
 }
 
 func layer(s Style) paintLayer {
@@ -205,6 +327,7 @@ func layer(s Style) paintLayer {
 		opacityKnown:     s[opacity].Known,
 		compositionKnown: known,
 		enhancementKnown: s[position].Known && s[position].Text == "static" && s[textShadow].Known,
+		displayNone:      s[display].Known && s[display].Text == "none",
 	}
 }
 

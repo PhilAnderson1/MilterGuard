@@ -76,6 +76,35 @@ func TestPromptOmitsSmallOrdinaryCommentSummary(t *testing.T) {
 	}
 }
 
+func TestPromptReportsUnresolvedLinkedStylesheetOnce(t *testing.T) {
+	m := New(10_000)
+	m.AddHeader("Content-Type", "text/html; charset=utf-8")
+	m.AddBody([]byte(`<link rel="stylesheet" href="https://example.test/email.css"><p>Visible message</p>`))
+
+	content := m.processedContent()
+	if !content.CSSIncomplete {
+		t.Fatal("unresolved linked stylesheet was not recorded")
+	}
+	if got := strings.TrimSpace(content.VisibleText); got != "Visible message" {
+		t.Fatalf("visible text = %q, want %q", got, "Visible message")
+	}
+	if content.ConfidentVisibleChars != 0 {
+		t.Fatalf("unresolved stylesheet produced %d confident visible characters", content.ConfidentVisibleChars)
+	}
+
+	prompt := m.Prompt(10_000)
+	want := "Linked or imported CSS was not evaluated; email text may include content concealed from the recipient."
+	if got := strings.Count(prompt, want); got != 1 {
+		t.Fatalf("stylesheet limitation count = %d, want 1:\n%s", got, prompt)
+	}
+	if !strings.Contains(prompt, "PROCESSED EMAIL BODY TEXT FOLLOWS") || !strings.Contains(prompt, "Visible message") {
+		t.Fatalf("extracted body missing from prompt:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "<visibility-uncertain>") {
+		t.Fatalf("global stylesheet uncertainty produced per-node annotations:\n%s", prompt)
+	}
+}
+
 func TestHTMLCommentSummaryRequiresCommentsToDominateBody(t *testing.T) {
 	var summary strings.Builder
 	writeHTMLCommentSummary(&summary, htmlCommentStats{Characters: 1195}, strings.Repeat("visible", 1000))
