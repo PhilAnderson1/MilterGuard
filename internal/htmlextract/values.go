@@ -112,56 +112,56 @@ func resolve(p int, s string, parent, root *Style) (Value, valueStatus) {
 		return resolveLayoutProperty(p, s)
 	}
 	if strings.HasPrefix(s, "\"") || strings.HasPrefix(s, "'") {
-		return Value{}, 0
+		return Value{}, valueInvalid
 	}
 	def := initialStyle[p]
 	switch s {
 	case "inherit":
-		return parent[p], 1
+		return parent[p], valueResolved
 	case "initial":
-		return def, 1
+		return def, valueResolved
 	case "unset":
 		if inherits(p) {
-			return parent[p], 1
+			return parent[p], valueResolved
 		}
-		return def, 1
+		return def, valueResolved
 	case "":
-		return Value{}, 0
+		return Value{}, valueInvalid
 	}
 	if strings.Contains(s, "var(") || strings.Contains(s, "calc(") || s == "revert" || s == "revert-layer" {
-		return Value{Text: s}, 2
+		return Value{Text: s}, valueUnsupported
 	}
 	if p == clip || p == clipPath {
 		return resolveClip(p, s)
 	}
 	if p != color && p != background && strings.Contains(s, "(") {
-		return Value{Text: s}, 2
+		return Value{Text: s}, valueUnsupported
 	}
 	switch p {
 	case display:
 		switch s {
 		case "none", "inline", "block", "inline-block", "list-item", "table", "table-row", "table-cell", "table-row-group", "table-header-group", "table-footer-group", "table-column", "table-column-group", "table-caption", "flex", "inline-flex", "grid", "inline-grid", "contents", "flow-root":
-			return Value{Text: s, Known: true}, 1
+			return Value{Text: s, Known: true}, valueResolved
 		}
 		if strings.ContainsAny(s, " ()") || strings.Contains(" run-in ruby ruby-base ruby-text ruby-base-container ruby-text-container math ", " "+s+" ") {
-			return Value{Text: s}, 2
+			return Value{Text: s}, valueUnsupported
 		}
-		return Value{}, 0
+		return Value{}, valueInvalid
 	case visibility:
 		if s == "visible" || s == "hidden" || s == "collapse" {
-			return Value{Text: s, Known: true}, 1
+			return Value{Text: s, Known: true}, valueResolved
 		}
-		return Value{}, 0
+		return Value{}, valueInvalid
 	case contentVisibility:
 		if s == "visible" || s == "hidden" || s == "auto" {
-			return Value{Text: s, Known: true}, 1
+			return Value{Text: s, Known: true}, valueResolved
 		}
-		return Value{}, 0
+		return Value{}, valueInvalid
 	case msoHide:
 		if s == "all" {
-			return Value{Text: s, Known: true}, 1
+			return Value{Text: s, Known: true}, valueResolved
 		}
-		return Value{}, 0
+		return Value{}, valueInvalid
 	case opacity:
 		scale := 1.0
 		if strings.HasSuffix(s, "%") {
@@ -170,121 +170,115 @@ func resolve(p int, s string, parent, root *Style) (Value, valueStatus) {
 		}
 		v, ok := number(s)
 		if !ok {
-			return Value{}, 0
+			return Value{}, valueInvalid
 		}
 		v = clamp(v*scale, 1)
-		return Value{Text: strconv.FormatFloat(v, 'g', -1, 64), Number: v, Known: true}, 1
+		return Value{Text: strconv.FormatFloat(v, 'g', -1, 64), Number: v, Known: true}, valueResolved
 	case fontSize:
 		factor := 1.0
-		num := s
+		num, unit, hasUnit := splitLength(s)
 		known := true
-		switch {
-		case strings.HasSuffix(s, "rem"):
-			num = s[:len(s)-3]
-			factor = root[fontSize].Number
-			known = root[fontSize].Known
-		case strings.HasSuffix(s, "px"):
-			num = s[:len(s)-2]
-		case strings.HasSuffix(s, "pt"):
-			num = s[:len(s)-2]
-			factor = 96.0 / 72
-		case strings.HasSuffix(s, "em"):
-			num = s[:len(s)-2]
-			factor = parent[fontSize].Number
-			known = parent[fontSize].Known
-		case strings.HasSuffix(s, "%"):
-			num = s[:len(s)-1]
-			factor = parent[fontSize].Number / 100
-			known = parent[fontSize].Known
-		default:
+		if hasUnit {
+			switch unit.kind {
+			case lengthUnitRootFont:
+				factor = root[fontSize].Number
+				known = root[fontSize].Known
+			case lengthUnitAbsolute:
+				factor = unit.scale
+			case lengthUnitParentFont:
+				factor = parent[fontSize].Number
+				known = parent[fontSize].Known
+			case lengthUnitPercentage:
+				factor = parent[fontSize].Number / 100
+				known = parent[fontSize].Known
+			case lengthUnitContextual:
+				v, ok := number(num)
+				if !ok {
+					return Value{}, valueInvalid
+				}
+				if v < 0 {
+					return Value{}, valueInvalid
+				}
+				return Value{Text: s}, valueUnsupported
+			}
+		} else {
 			absolute := map[string]float64{
 				"xx-small": 9, "x-small": 12, "small": 13, "medium": 16,
 				"large": 18, "x-large": 24, "xx-large": 32, "xxx-large": 48,
 			}
 			if v, ok := absolute[s]; ok {
-				return Value{Text: fmt.Sprintf("%gpx", v), Number: v, Known: true}, 1
+				return Value{Text: fmt.Sprintf("%gpx", v), Number: v, Known: true}, valueResolved
 			}
 			if s == "smaller" || s == "larger" {
 				if !parent[fontSize].Known {
-					return Value{Text: s}, 1
+					return Value{Text: s}, valueResolved
 				}
 				factor := .8
 				if s == "larger" {
 					factor = 1.2
 				}
 				v := parent[fontSize].Number * factor
-				return Value{Text: fmt.Sprintf("%gpx", v), Number: v, Known: parent[fontSize].Known}, 1
+				return Value{Text: fmt.Sprintf("%gpx", v), Number: v, Known: parent[fontSize].Known}, valueResolved
 			}
 			if v, ok := number(s); ok {
 				if v == 0 {
-					return Value{Text: "0px", Known: true}, 1
+					return Value{Text: "0px", Known: true}, valueResolved
 				}
-				return Value{}, 0
+				return Value{}, valueInvalid
 			}
 			if strings.Contains(s, "(") || s == "math" {
-				return Value{Text: s}, 2
+				return Value{Text: s}, valueUnsupported
 			}
-			// Other CSS length units may be valid, but are outside scope.
-			for _, unit := range []string{"ex", "ch", "lh", "rlh", "cap", "rcap", "ic", "ric", "rex", "rch", "vw", "vh", "vi", "vb", "vmin", "vmax", "svw", "svh", "lvw", "lvh", "dvw", "dvh", "cm", "mm", "q", "in", "pc"} {
-				if strings.HasSuffix(s, unit) {
-					if v, ok := number(strings.TrimSuffix(s, unit)); ok {
-						if v < 0 {
-							return Value{}, 0
-						}
-						return Value{Text: s}, 2
-					}
-				}
-			}
-			return Value{}, 0
+			return Value{}, valueInvalid
 		}
 		v, ok := number(num)
 		if !ok || v < 0 {
-			return Value{}, 0
+			return Value{}, valueInvalid
 		}
 		if !known {
-			return Value{Text: s}, 1
+			return Value{Text: s}, valueResolved
 		}
 		v *= factor
 		if math.IsInf(v, 0) || math.IsNaN(v) {
-			return Value{Text: s}, 2
+			return Value{Text: s}, valueUnsupported
 		}
-		return Value{Text: fmt.Sprintf("%gpx", v), Number: v, Known: known}, 1
+		return Value{Text: fmt.Sprintf("%gpx", v), Number: v, Known: known}, valueResolved
 	case backgroundImage, filter, backdropFilter, maskImage, textShadow, transform:
 		if s == "none" {
-			return Value{Text: s, Known: true}, 1
+			return Value{Text: s, Known: true}, valueResolved
 		}
-		return Value{Text: s}, 2
+		return Value{Text: s}, valueUnsupported
 	case backgroundClip:
 		if s == "border-box" {
-			return Value{Text: s, Known: true}, 1
+			return Value{Text: s, Known: true}, valueResolved
 		}
-		return Value{Text: s}, 2
+		return Value{Text: s}, valueUnsupported
 	case textFill:
 		if s == "currentcolor" {
-			return Value{Text: s, Known: true}, 1
+			return Value{Text: s, Known: true}, valueResolved
 		}
-		return Value{Text: s}, 2
+		return Value{Text: s}, valueUnsupported
 	case position:
 		if s == "static" || s == "relative" || s == "absolute" || s == "fixed" || s == "sticky" {
-			return Value{Text: s, Known: true}, 1
+			return Value{Text: s, Known: true}, valueResolved
 		}
-		return Value{Text: s}, 2
+		return Value{Text: s}, valueUnsupported
 	case textStroke:
 		if s == "0" || s == "0px" {
-			return Value{Text: s, Known: true}, 1
+			return Value{Text: s, Known: true}, valueResolved
 		}
-		return Value{Text: s}, 2
+		return Value{Text: s}, valueUnsupported
 	case blend, backgroundBlend:
 		if s == "normal" {
-			return Value{Text: s, Known: true}, 1
+			return Value{Text: s, Known: true}, valueResolved
 		}
-		return Value{Text: s}, 2
+		return Value{Text: s}, valueUnsupported
 	case color, background:
 		if s == "currentcolor" {
 			if p == color {
-				return parent[color], 1
+				return parent[color], valueResolved
 			}
-			return Value{Text: s, Known: true}, 1
+			return Value{Text: s, Known: true}, valueResolved
 		}
 		c, status := readColour(s)
 		if status != valueResolved {
@@ -292,18 +286,18 @@ func resolve(p int, s string, parent, root *Style) (Value, valueStatus) {
 		}
 		return Value{Text: colourString(c), RGBA: c, Known: true}, status
 	}
-	return Value{Text: s}, 2
+	return Value{Text: s}, valueUnsupported
 }
 
 func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 	if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
-		return Value{}, 0
+		return Value{}, valueInvalid
 	}
 	if value == "" {
-		return Value{}, 0
+		return Value{}, valueInvalid
 	}
 	if value == "inherit" || value == "unset" || value == "revert" || value == "revert-layer" || strings.Contains(value, "var(") || strings.Contains(value, "calc(") {
-		return Value{Text: value}, 2
+		return Value{Text: value}, valueUnsupported
 	}
 	if value == "initial" {
 		switch property {
@@ -323,7 +317,7 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 	}
 	if property == zoom {
 		if value == "normal" {
-			return Value{Text: "1", Number: 1, Known: true}, 1
+			return Value{Text: "1", Number: 1, Known: true}, valueResolved
 		}
 		scale := 1.0
 		numberText := value
@@ -333,22 +327,22 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 		}
 		n, ok := number(numberText)
 		if !ok || n < 0 {
-			return Value{}, 0
+			return Value{}, valueInvalid
 		}
 		n *= scale
-		return Value{Text: value, Number: n, Known: true}, 1
+		return Value{Text: value, Number: n, Known: true}, valueResolved
 	}
 	if property == overflow {
 		parts := strings.Fields(value)
 		if len(parts) < 1 || len(parts) > 2 {
-			return Value{}, 0
+			return Value{}, valueInvalid
 		}
 		for _, part := range parts {
 			if part != "visible" && part != "hidden" && part != "clip" && part != "scroll" && part != "auto" {
-				return Value{}, 0
+				return Value{}, valueInvalid
 			}
 		}
-		return Value{Text: strings.Join(parts, " "), Known: true}, 1
+		return Value{Text: strings.Join(parts, " "), Known: true}, valueResolved
 	}
 	return resolveLayoutLength(property, value)
 }
@@ -356,52 +350,43 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 func resolveLayoutLength(property int, value string) (Value, valueStatus) {
 	if (property == width || property == height || property == left || property == top || property == right || property == bottom ||
 		property == marginTop || property == marginRight || property == marginBottom || property == marginLeft) && value == "auto" {
-		return Value{Text: value, Known: true}, 1
+		return Value{Text: value, Known: true}, valueResolved
 	}
 	if (property == maxWidth || property == maxHeight) && value == "none" {
-		return Value{Text: value, Known: true}, 1
+		return Value{Text: value, Known: true}, valueResolved
 	}
-	unit := ""
-	numberText := value
-	// Longest suffixes must be checked first (for example rem before em).
-	for _, suffix := range []string{"vmin", "vmax", "svw", "svh", "lvw", "lvh", "dvw", "dvh", "rlh", "rcap", "ric", "rex", "rch", "rem", "px", "pt", "pc", "cm", "mm", "in", "ex", "ch", "lh", "cap", "ic", "vw", "vh", "vi", "vb", "em", "q", "%"} {
-		if strings.HasSuffix(numberText, suffix) {
-			unit = suffix
-			numberText = strings.TrimSuffix(numberText, suffix)
-			break
-		}
-	}
+	numberText, unit, hasUnit := splitLength(value)
 	n, ok := number(numberText)
 	if !ok {
 		// A syntactically valid number can overflow float64. It remains a valid
 		// contextual length for visibility purposes rather than becoming an
 		// invalid declaration that silently restores trusted visibility.
-		if unit != "" && validCSSNumber(numberText) {
+		if hasUnit && validCSSNumber(numberText) {
 			if !layoutPropertyAllowsNegative(property) && strings.HasPrefix(numberText, "-") {
-				return Value{}, 0
+				return Value{}, valueInvalid
 			}
 			saturated := math.MaxFloat64
 			if strings.HasPrefix(numberText, "-") {
 				saturated = -saturated
 			}
-			return Value{Text: value, Number: saturated}, 2
+			return Value{Text: value, Number: saturated}, valueUnsupported
 		}
-		return Value{}, 0
+		return Value{}, valueInvalid
 	}
 	if !layoutPropertyAllowsNegative(property) && n < 0 {
-		return Value{}, 0
+		return Value{}, valueInvalid
 	}
 	// Unitless zero and zero in any length unit are independent of layout.
 	// Literal pixel lengths are also directly comparable. Other non-zero
 	// lengths require dimensions or font metrics, but retain their numeric
 	// component so the layout detector can recognize extreme negative values.
-	if unit == "" && n != 0 {
-		return Value{}, 0
+	if !hasUnit && n != 0 {
+		return Value{}, valueInvalid
 	}
-	if n != 0 && unit != "px" {
-		return Value{Text: value, Number: n}, 2
+	if n != 0 && (!hasUnit || unit.suffix != "px") {
+		return Value{Text: value, Number: n}, valueUnsupported
 	}
-	return Value{Text: value, Number: n, Known: true}, 1
+	return Value{Text: value, Number: n, Known: true}, valueResolved
 }
 
 func layoutPropertyAllowsNegative(property int) bool {
@@ -415,9 +400,43 @@ func layoutPropertyAllowsNegative(property int) bool {
 
 var named = map[string]string{"black": "#000000", "silver": "#c0c0c0", "gray": "#808080", "grey": "#808080", "white": "#ffffff", "maroon": "#800000", "red": "#ff0000", "purple": "#800080", "fuchsia": "#ff00ff", "magenta": "#ff00ff", "green": "#008000", "lime": "#00ff00", "olive": "#808000", "yellow": "#ffff00", "navy": "#000080", "blue": "#0000ff", "teal": "#008080", "aqua": "#00ffff", "cyan": "#00ffff", "orange": "#ffa500", "rebeccapurple": "#663399"}
 
+const unsupportedColourNameList = `
+canvas canvastext linktext visitedtext activetext buttonface buttontext
+buttonborder field fieldtext highlight highlighttext selecteditem
+selecteditemtext mark marktext graytext accentcolor accentcolortext
+aliceblue antiquewhite aquamarine azure beige bisque blanchedalmond
+blueviolet brown burlywood cadetblue chartreuse chocolate coral
+cornflowerblue cornsilk crimson cyan darkblue darkcyan darkgoldenrod
+darkgray darkgreen darkgrey darkkhaki darkmagenta darkolivegreen
+darkorange darkorchid darkred darksalmon darkseagreen darkslateblue
+darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue
+dimgray dimgrey dodgerblue firebrick floralwhite forestgreen gainsboro
+ghostwhite gold goldenrod greenyellow grey honeydew hotpink indianred indigo
+ivory khaki lavender lavenderblush lawngreen lemonchiffon lightblue
+lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen lightgrey
+lightpink lightsalmon lightseagreen lightskyblue lightslategray
+lightslategrey lightsteelblue lightyellow limegreen linen magenta
+mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen
+mediumslateblue mediumspringgreen mediumturquoise mediumvioletred
+midnightblue mintcream mistyrose moccasin navajowhite oldlace olivedrab
+orangered orchid palegoldenrod palegreen paleturquoise palevioletred
+papayawhip peachpuff peru pink plum powderblue rosybrown royalblue
+saddlebrown salmon sandybrown seagreen seashell sienna skyblue slateblue
+slategray slategrey snow springgreen steelblue tan thistle tomato turquoise
+violet wheat whitesmoke yellowgreen`
+
+var unsupportedColourNames = func() map[string]struct{} {
+	names := strings.Fields(unsupportedColourNameList)
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
+}()
+
 func readColour(s string) (RGBA, valueStatus) {
 	if s == "transparent" {
-		return RGBA{}, 1
+		return RGBA{}, valueResolved
 	}
 	if v, ok := named[s]; ok {
 		s = v
@@ -427,7 +446,7 @@ func readColour(s string) (RGBA, valueStatus) {
 	if strings.HasPrefix(s, "#") {
 		h := s[1:]
 		if len(h) != 3 && len(h) != 4 && len(h) != 6 && len(h) != 8 {
-			return RGBA{}, 0
+			return RGBA{}, valueInvalid
 		}
 		if len(h) <= 4 {
 			var b strings.Builder
@@ -440,7 +459,7 @@ func readColour(s string) (RGBA, valueStatus) {
 		for i := 0; i < len(h)/2; i++ {
 			v, e := strconv.ParseUint(h[i*2:i*2+2], 16, 8)
 			if e != nil {
-				return RGBA{}, 0
+				return RGBA{}, valueInvalid
 			}
 			c[i] = float64(v)
 			if i == 3 {
@@ -456,24 +475,24 @@ func readColour(s string) (RGBA, valueStatus) {
 		case "hsl", "hsla":
 			return finiteColourResult(parseHSLFunction(body))
 		default:
-			return RGBA{}, 2
+			return RGBA{}, valueUnsupported
 		}
 	} else {
-		if strings.Contains(s, "(") || strings.Contains(" canvas canvastext linktext visitedtext activetext buttonface buttontext buttonborder field fieldtext highlight highlighttext selecteditem selecteditemtext mark marktext graytext accentcolor accentcolortext ", " "+s+" ") {
-			return RGBA{}, 2
+		if strings.Contains(s, "(") {
+			return RGBA{}, valueUnsupported
 		}
 		// Named colours outside the documented basic set remain unresolved.
-		if strings.Contains(" aliceblue antiquewhite aquamarine azure beige bisque blanchedalmond blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue dimgray dimgrey dodgerblue firebrick floralwhite forestgreen gainsboro ghostwhite gold goldenrod greenyellow grey honeydew hotpink indianred indigo ivory khaki lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen lightgrey lightpink lightsalmon lightseagreen lightskyblue lightslategray lightslategrey lightsteelblue lightyellow limegreen linen magenta mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen mediumslateblue mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream mistyrose moccasin navajowhite oldlace olivedrab orangered orchid palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum powderblue rosybrown royalblue saddlebrown salmon sandybrown seagreen seashell sienna skyblue slateblue slategray slategrey snow springgreen steelblue tan thistle tomato turquoise violet wheat whitesmoke yellowgreen ", " "+s+" ") {
-			return RGBA{}, 2
+		if _, ok := unsupportedColourNames[s]; ok {
+			return RGBA{}, valueUnsupported
 		}
-		return RGBA{}, 0
+		return RGBA{}, valueInvalid
 	}
-	return RGBA{c[0] / 255, c[1] / 255, c[2] / 255, c[3]}, 1
+	return RGBA{c[0] / 255, c[1] / 255, c[2] / 255, c[3]}, valueResolved
 }
 
 func finiteColourResult(c RGBA, status valueStatus) (RGBA, valueStatus) {
 	if status == valueResolved && (!finite(c.R) || !finite(c.G) || !finite(c.B) || !finite(c.A)) {
-		return RGBA{}, 2
+		return RGBA{}, valueUnsupported
 	}
 	return c, status
 }
@@ -481,49 +500,49 @@ func finiteColourResult(c RGBA, status valueStatus) (RGBA, valueStatus) {
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func colourFunctionParts(body string) (channels []string, alpha string, legacy bool, status valueStatus) {
-	if strings.Contains(body, "(") || containsFold(body, "from") {
-		return nil, "", false, 2
+	if strings.Contains(body, "(") || strings.Contains(body, "from") {
+		return nil, "", false, valueUnsupported
 	}
 	if strings.Contains(body, ",") {
 		if strings.Contains(body, "/") {
-			return nil, "", true, 0
+			return nil, "", true, valueInvalid
 		}
 		parts := strings.Split(body, ",")
 		if len(parts) != 3 && len(parts) != 4 {
-			return nil, "", true, 0
+			return nil, "", true, valueInvalid
 		}
 		for i := range parts {
 			parts[i] = strings.TrimSpace(parts[i])
 			if parts[i] == "" {
-				return nil, "", true, 0
+				return nil, "", true, valueInvalid
 			}
 		}
 		if len(parts) == 4 {
 			alpha = parts[3]
 		}
-		return parts[:3], alpha, true, 1
+		return parts[:3], alpha, true, valueResolved
 	}
 	if strings.Count(body, "/") > 1 {
-		return nil, "", false, 0
+		return nil, "", false, valueInvalid
 	}
 	parts := strings.SplitN(body, "/", 2)
 	channels = strings.Fields(parts[0])
 	if len(channels) != 3 {
-		return nil, "", false, 0
+		return nil, "", false, valueInvalid
 	}
 	if len(parts) == 2 {
 		alphaParts := strings.Fields(parts[1])
 		if len(alphaParts) != 1 {
-			return nil, "", false, 0
+			return nil, "", false, valueInvalid
 		}
 		alpha = alphaParts[0]
 	}
-	return channels, alpha, false, 1
+	return channels, alpha, false, valueResolved
 }
 
 func colourNumber(component string, numberScale, hi float64) (float64, valueStatus) {
 	if component == "none" || strings.Contains(component, "(") {
-		return 0, 2
+		return 0, valueUnsupported
 	}
 	percentage := strings.HasSuffix(component, "%")
 	if percentage {
@@ -531,12 +550,12 @@ func colourNumber(component string, numberScale, hi float64) (float64, valueStat
 	}
 	n, ok := colourComponentNumber(component)
 	if !ok {
-		return 0, 0
+		return 0, valueInvalid
 	}
 	if percentage {
-		return clamp(n/100*hi, hi), 1
+		return clamp(n/100*hi, hi), valueResolved
 	}
-	return clamp(n*numberScale, hi), 1
+	return clamp(n*numberScale, hi), valueResolved
 }
 
 // colourComponentNumber accepts the same syntax as number, but retains
@@ -553,7 +572,7 @@ func colourComponentNumber(component string) (float64, bool) {
 
 func parseAlpha(component string) (float64, valueStatus) {
 	if component == "" {
-		return 1, 1
+		return 1, valueResolved
 	}
 	return colourNumber(component, 1, 1)
 }
@@ -567,7 +586,7 @@ func parseRGBFunction(body string) (RGBA, valueStatus) {
 		percent := strings.HasSuffix(channels[0], "%")
 		for _, channel := range channels[1:] {
 			if strings.HasSuffix(channel, "%") != percent {
-				return RGBA{}, 0
+				return RGBA{}, valueInvalid
 			}
 		}
 	}
@@ -582,12 +601,12 @@ func parseRGBFunction(body string) (RGBA, valueStatus) {
 	if status != valueResolved {
 		return RGBA{}, status
 	}
-	return RGBA{c[0] / 255, c[1] / 255, c[2] / 255, a}, 1
+	return RGBA{c[0] / 255, c[1] / 255, c[2] / 255, a}, valueResolved
 }
 
 func parseHue(component string) (float64, valueStatus) {
 	if component == "none" || strings.Contains(component, "(") {
-		return 0, 2
+		return 0, valueUnsupported
 	}
 	factor := 1.0
 	switch {
@@ -605,19 +624,19 @@ func parseHue(component string) (float64, valueStatus) {
 	}
 	n, ok := number(component)
 	if !ok {
-		return 0, 0
+		return 0, valueInvalid
 	}
 	n = math.Mod(n*factor, 360)
 	if !finite(n) {
 		// The source number may be finite while conversion to degrees
 		// overflows. Clients need not agree on such extreme values, so retain
 		// uncertainty rather than accepting a known colour containing NaN.
-		return 0, 2
+		return 0, valueUnsupported
 	}
 	if n < 0 {
 		n += 360
 	}
-	return n, 1
+	return n, valueResolved
 }
 
 func parseHSLFunction(body string) (RGBA, valueStatus) {
@@ -630,7 +649,7 @@ func parseHSLFunction(body string) (RGBA, valueStatus) {
 		return RGBA{}, status
 	}
 	if legacy && (!strings.HasSuffix(channels[1], "%") || !strings.HasSuffix(channels[2], "%")) {
-		return RGBA{}, 0
+		return RGBA{}, valueInvalid
 	}
 	s, status := colourNumber(channels[1], .01, 1)
 	if status != valueResolved {
@@ -663,16 +682,9 @@ func parseHSLFunction(body string) (RGBA, valueStatus) {
 		r, b = chroma, x
 	}
 	m := l - chroma/2
-	return RGBA{r + m, g + m, b + m, a}, 1
+	return RGBA{r + m, g + m, b + m, a}, valueResolved
 }
 
 func colourString(c RGBA) string {
 	return fmt.Sprintf("rgba(%g,%g,%g,%g)", c.R*255, c.G*255, c.B*255, c.A)
-}
-func parseColor(s string) (string, valueStatus) {
-	c, status := readColour(s)
-	if status != valueResolved {
-		return s, status
-	}
-	return colourString(c), 1
 }

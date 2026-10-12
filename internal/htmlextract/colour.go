@@ -36,7 +36,7 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 		colourValue = value
 		image = value
 	default:
-		if tokenStatus != 1 {
+		if tokenStatus != valueResolved {
 			return []declaration{{prop: background, value: value, important: important, order: order, unsupported: true}, {prop: backgroundImage, value: value, important: important, order: order, unsupported: true}}
 		}
 		// Tokenize to remove a standalone none, preserving spaces inside rgb().
@@ -100,21 +100,10 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 	}
 	colourUnsupported, imageUnsupported := unsupported, unsupported
 	if backgroundImageSyntax(value) {
-		colourUnsupported = imageColourStatus != 1
+		colourUnsupported = imageColourStatus != valueResolved
 		imageUnsupported = true
 	}
 	return []declaration{{prop: background, value: colourValue, important: important, order: order, unsupported: colourUnsupported}, {prop: backgroundImage, value: image, important: important, order: order, unsupported: imageUnsupported}}
-}
-
-// backgroundFallbackColour returns the colour from the final comma-separated
-// background layer. Colour functions nested inside gradients are deliberately
-// ignored. CSS permits a background colour only in the final layer.
-func backgroundFallbackColour(value string) (string, valueStatus, bool) {
-	tokens, status := lexValue(value)
-	if status != valueResolved {
-		return value, 2, true
-	}
-	return backgroundFallbackColourTokens(tokens)
 }
 
 func backgroundFallbackColourTokens(tokens []valueToken) (string, valueStatus, bool) {
@@ -137,15 +126,15 @@ func backgroundFallbackColourTokens(tokens []valueToken) (string, valueStatus, b
 	// A colour in any non-final layer makes the shorthand invalid.
 	if finalStart > 0 {
 		if _, _, count := backgroundLayerColour(tokens[:finalStart-1]); count != 0 {
-			return "", 0, false
+			return "", valueInvalid, false
 		}
 	}
 	colour, colourStatus, count := backgroundLayerColour(tokens[finalStart:])
 	if count > 1 {
-		return "", 0, false
+		return "", valueInvalid, false
 	}
 	if count == 0 {
-		return "transparent", 1, true
+		return "transparent", valueResolved, true
 	}
 	return colour, colourStatus, true
 }
@@ -176,9 +165,9 @@ func backgroundLayerColour(tokens []valueToken) (string, valueStatus, int) {
 		}
 		_, candidateStatus := readColour(candidate)
 		if candidate == "currentcolor" {
-			candidateStatus = 1
+			candidateStatus = valueResolved
 		}
-		if candidateStatus == 0 {
+		if candidateStatus == valueInvalid {
 			continue
 		}
 		colour, colourStatus = candidate, candidateStatus
@@ -311,7 +300,11 @@ func propagateHTMLBodyBackground(layers []paintLayer) {
 }
 
 func layer(s *Style) paintLayer {
-	known := s[display].Known && s[display].Text != "contents" && (s[clip].Text == "auto" || s[position].Text == "static") && s[clipPath].Text == "none"
+	return layerWithClipOverride(s, false)
+}
+
+func layerWithClipOverride(s *Style, ignoreClipPath bool) paintLayer {
+	known := s[display].Known && s[display].Text != "contents" && (s[clip].Text == "auto" || s[position].Text == "static") && (ignoreClipPath || s[clipPath].Text == "none")
 	// Positioning does not alter the base glyph/background pixels used by this
 	// contrast test. Text shadows can only add painted pixels, so they matter
 	// when the base result would otherwise look concealed, not when it already
@@ -362,6 +355,13 @@ func (c colourResult) inspection() colourInspection {
 // canvas is supplied after known layers; unresolved layers remain unknown. No sibling/layout/image
 // sampling, antialiasing, blending or filter model is implied.
 func evaluateColour(foreground Value, layers []paintLayer, work *matchBudget) colourResult {
+	if !chargeColourEvaluation(foreground, layers, work) {
+		return colourResult{uncertainty: "style-analysis work limit"}
+	}
+	return evaluateColourUncharged(foreground, layers)
+}
+
+func chargeColourEvaluation(foreground Value, layers []paintLayer, work *matchBudget) bool {
 	// Account for the fixed conversion/distance work and, when the foreground
 	// is usable, every ancestor layer the evaluator may inspect. Reserve the
 	// complete cost before starting so exhaustion cannot leave a partially
@@ -371,8 +371,12 @@ func evaluateColour(foreground Value, layers []paintLayer, work *matchBudget) co
 		cost += int64(len(layers))
 	}
 	if work != nil && !work.spend(cost) {
-		return colourResult{uncertainty: "style-analysis work limit"}
+		return false
 	}
+	return true
+}
+
+func evaluateColourUncharged(foreground Value, layers []paintLayer) colourResult {
 	if !foreground.Known {
 		return colourResult{uncertainty: "unresolved foreground"}
 	}

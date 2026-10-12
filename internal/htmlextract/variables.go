@@ -36,7 +36,7 @@ func (b *expressionBudget) charge(n int) bool {
 }
 func lexValue(s string) ([]valueToken, valueStatus) {
 	if len(s) > maxValueBytes {
-		return nil, 2
+		return nil, valueUnsupported
 	}
 	l := css.NewLexer(parse.NewInputString(s))
 	var ts []valueToken
@@ -44,19 +44,19 @@ func lexValue(s string) ([]valueToken, valueStatus) {
 		k, v := l.Next()
 		if k == css.ErrorToken {
 			if !errors.Is(l.Err(), io.EOF) {
-				return nil, 2
+				return nil, valueUnsupported
 			}
 			break
 		}
 		if len(ts) >= maxValueTokens {
-			return nil, 2
+			return nil, valueUnsupported
 		}
 		if k == css.BadStringToken || k == css.BadURLToken {
-			return nil, 0
+			return nil, valueInvalid
 		}
 		ts = append(ts, valueToken{k, string(v)})
 	}
-	return ts, 1
+	return ts, valueResolved
 }
 func hasVariables(s string) bool {
 	return containsFold(s, "var(") || strings.Contains(s, "\\")
@@ -262,7 +262,7 @@ func buildVariables(parent *variableScope, defs map[string]variableDefinition, b
 	for _, name := range ordered {
 		definition := defs[name]
 		d := definition.declaration
-		if !d.tokensReady || d.valueStatus != 1 || d.unsupported || definition.uncertainOrigin {
+		if !d.tokensReady || d.valueStatus != valueResolved || d.unsupported || definition.uncertainOrigin {
 			s.values[name] = variableValue{status: valueUnsupported}
 		} else {
 			tokens[name] = d.valueTokens
@@ -349,9 +349,9 @@ func buildVariables(parent *variableScope, defs map[string]variableDefinition, b
 }
 func substitute(d *declaration, vars *variableScope, budget *expressionBudget) variableValue {
 	if !d.hasVars {
-		return variableValue{d.value, 1}
+		return variableValue{d.value, valueResolved}
 	}
-	if !d.tokensReady || d.valueStatus != 1 {
+	if !d.tokensReady || d.valueStatus != valueResolved {
 		return variableValue{status: d.valueStatus}
 	}
 	return substituteTokens(d.valueTokens, vars.get, budget, 0)
@@ -414,5 +414,5 @@ func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget
 			return variableValue{status: valueUnsupported}
 		}
 	}
-	return variableValue{strings.TrimSpace(out.String()), 1}
+	return variableValue{strings.TrimSpace(out.String()), valueResolved}
 }

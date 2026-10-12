@@ -1,6 +1,7 @@
 package htmlextract
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -63,6 +64,22 @@ const (
 
 var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "overflow", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
 
+// A declaration progresses through these preparation states:
+//
+//   - tokensReady makes valueTokens and valueStatus meaningful. A false value
+//     may mean tokens were deliberately not retained for an ordinary static
+//     declaration, rather than that tokenization failed.
+//   - validityReady makes validity meaningful. Context-dependent declarations
+//     may be validated before evaluation, so validityReady does not imply that
+//     prepared is non-nil.
+//   - prepared holds the complete context-independent result and implies
+//     validityReady. Its duplicate token storage has been released, leaving
+//     tokensReady false and valueTokens nil.
+//   - dependenciesReady makes variableDependencies complete and implies a
+//     custom property with a retained, successfully parsed token stream.
+//
+// Once prepareDeclaration returns, these fields and the retained token slices
+// are immutable; cascade candidates safely retain pointers to declarations.
 type declaration struct {
 	prop                 int
 	value                string
@@ -108,7 +125,8 @@ func contextualDeclaration(d declaration) bool {
 	if value == "smaller" || value == "larger" {
 		return true
 	}
-	return strings.HasSuffix(value, "%") || strings.HasSuffix(value, "em")
+	_, unit, found := splitLength(value)
+	return found && (unit.kind == lengthUnitPercentage || unit.kind == lengthUnitParentFont || unit.kind == lengthUnitRootFont)
 }
 
 // prepareDeclaration performs the context-independent work for a declaration
@@ -338,6 +356,102 @@ type parsedDeclarationValue struct {
 	unsafeWithoutFunction bool
 }
 
+// cssTokensNeedRetention reports whether later declaration processing needs a
+// durable value-token stream. Most ordinary declarations are resolved once
+// immediately and retain only their prepared value. Escapes take the careful
+// path because they may decode into a function name or different token class.
+func cssTokensNeedRetention(prop string, values []css.Token) bool {
+	if prop == "background" {
+		return true
+	}
+	for _, token := range values {
+		if bytes.IndexByte(token.Data, '\\') >= 0 {
+			return true
+		}
+		if token.TokenType != css.FunctionToken {
+			continue
+		}
+		if bytes.EqualFold(token.Data, []byte("var(")) {
+			return true
+		}
+		// Context-sensitive arithmetic is evaluated from tokens so nested
+		// functions and operator boundaries retain their exact meaning.
+		if prop == "font-size" || prop == "opacity" {
+			return true
+		}
+	}
+	return false
+}
+
+// parseUnretainedCSSTokens handles the common static-declaration path without
+// allocating a []valueToken that prepareDeclaration would immediately discard.
+// Token boundaries still determine trimming and !important; comments inside a
+// value become whitespace so removing one cannot join adjacent tokens.
+func parseUnretainedCSSTokens(ts []css.Token, fallback string) parsedDeclarationValue {
+	if len(ts) > maxValueTokens {
+		return parsedDeclarationValue{text: strings.TrimSpace(fallback), status: valueUnsupported}
+	}
+	bytesSeen := 0
+	for _, token := range ts {
+		bytesSeen += len(token.Data)
+		if bytesSeen > maxValueBytes {
+			return parsedDeclarationValue{text: strings.TrimSpace(fallback), status: valueUnsupported}
+		}
+		if token.TokenType == css.BadStringToken || token.TokenType == css.BadURLToken {
+			return parsedDeclarationValue{text: strings.TrimSpace(fallback), status: valueInvalid}
+		}
+	}
+
+	start, end := 0, len(ts)
+	for start < end && (ts[start].TokenType == css.WhitespaceToken || ts[start].TokenType == css.CommentToken) {
+		start++
+	}
+	for end > start && (ts[end-1].TokenType == css.WhitespaceToken || ts[end-1].TokenType == css.CommentToken) {
+		end--
+	}
+
+	important := false
+	last := end - 1
+	if last >= start && ts[last].TokenType == css.IdentToken && bytes.EqualFold(ts[last].Data, []byte("important")) {
+		bang := last - 1
+		for bang >= start && (ts[bang].TokenType == css.WhitespaceToken || ts[bang].TokenType == css.CommentToken) {
+			bang--
+		}
+		if bang >= start && ts[bang].TokenType == css.DelimToken && bytes.Equal(ts[bang].Data, []byte("!")) {
+			important = true
+			end = bang
+			for end > start && (ts[end-1].TokenType == css.WhitespaceToken || ts[end-1].TokenType == css.CommentToken) {
+				end--
+			}
+		}
+	}
+
+	startByte := 0
+	for i := 0; i < start; i++ {
+		startByte += len(ts[i].Data)
+	}
+	endByte := startByte
+	hasComment := false
+	for i := start; i < end; i++ {
+		endByte += len(ts[i].Data)
+		hasComment = hasComment || ts[i].TokenType == css.CommentToken
+	}
+	text := fallback[startByte:endByte]
+	if hasComment {
+		var out strings.Builder
+		out.Grow(endByte - startByte)
+		for i := start; i < end; i++ {
+			if ts[i].TokenType == css.CommentToken {
+				out.WriteByte(' ')
+			} else {
+				out.Write(ts[i].Data)
+			}
+		}
+		text = out.String()
+	}
+	return parsedDeclarationValue{text: text, status: valueResolved, important: important}
+}
+
 // parseDeclarationTokens preserves CSS token boundaries while decoding the
 // identifier escapes that the supported property grammars need. In
 // particular, an escaped '!' remains part of an identifier and cannot become
@@ -374,7 +488,10 @@ func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string
 	unsafe := false
 	hasFunction := false
 	var out strings.Builder
-	preparedTokens := make([]valueToken, 0, end-start)
+	// This token slice is private to the declaration. Compact it in place so
+	// normalization does not allocate a second slice proportional to the value.
+	originalTokens := ts
+	preparedTokens := ts[:0]
 	for i := start; i < end; i++ {
 		t := ts[i]
 		hasFunction = hasFunction || t.kind == css.FunctionToken
@@ -390,7 +507,7 @@ func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string
 			decoded := cssUnescape(raw)
 			decodedTokens, decodedStatus := lexValue(decoded)
 			sameIdentifierClass := t.kind == css.IdentToken && len(decodedTokens) == 1 && decodedTokens[0].kind == css.CustomPropertyNameToken
-			if decodedStatus == 1 && len(decodedTokens) == 1 && (decodedTokens[0].kind == t.kind || sameIdentifierClass) {
+			if decodedStatus == valueResolved && len(decodedTokens) == 1 && (decodedTokens[0].kind == t.kind || sameIdentifierClass) {
 				raw = decoded
 			} else {
 				unsafe = true
@@ -399,10 +516,11 @@ func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string
 		out.WriteString(raw)
 		preparedTokens = append(preparedTokens, valueToken{kind: t.kind, raw: raw})
 	}
+	clear(originalTokens[len(preparedTokens):])
 	return parsedDeclarationValue{
 		text:                  out.String(),
 		tokens:                preparedTokens,
-		status:                1,
+		status:                valueResolved,
 		important:             important,
 		unsafeIdentifier:      unsafe,
 		unsafeWithoutFunction: unsafe && !hasFunction,
@@ -414,23 +532,29 @@ func (s *sheet) declarations(prop, value string) []declaration {
 	return s.declarationsFromTokens(prop, tokens, status, value)
 }
 
-func ownedValueTokens(values []css.Token) ([]valueToken, valueStatus) {
+func ownedValueTokens(values []css.Token, raw string) ([]valueToken, valueStatus) {
 	if len(values) > maxValueTokens {
-		return nil, 2
+		return nil, valueUnsupported
 	}
 	tokens := make([]valueToken, 0, len(values))
-	bytes := 0
+	offset := 0
 	for _, token := range values {
-		bytes += len(token.Data)
-		if bytes > maxValueBytes {
-			return nil, 2
+		next := offset + len(token.Data)
+		if next > maxValueBytes || next > len(raw) {
+			return nil, valueUnsupported
 		}
 		if token.TokenType == css.BadStringToken || token.TokenType == css.BadURLToken {
-			return nil, 0
+			return nil, valueInvalid
 		}
-		tokens = append(tokens, valueToken{kind: token.TokenType, raw: string(token.Data)})
+		// rawTokenString concatenates these exact byte sequences. Slice that one
+		// owned string instead of allocating a separate string for every token.
+		tokens = append(tokens, valueToken{kind: token.TokenType, raw: raw[offset:next]})
+		offset = next
 	}
-	return tokens, 1
+	if offset != len(raw) {
+		return nil, valueUnsupported
+	}
+	return tokens, valueResolved
 }
 
 func normalizeDeclarationProperty(prop string) string {
@@ -483,6 +607,10 @@ func relevantNormalizedDeclarationProperty(prop string) bool {
 func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status valueStatus, fallback string) []declaration {
 	prop = normalizeDeclarationProperty(prop)
 	parsed := parseDeclarationTokens(tokens, status, fallback)
+	return s.declarationsFromParsed(prop, parsed, true)
+}
+
+func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValue, tokensReady bool) []declaration {
 	value := parsed.text
 	imp := parsed.important
 	custom := strings.HasPrefix(prop, "--")
@@ -493,7 +621,7 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 		d.unsupported = d.unsupported || parsed.status == valueUnsupported
 		d.valueTokens = parsed.tokens
 		d.valueStatus = parsed.status
-		d.tokensReady = true
+		d.tokensReady = tokensReady
 		return prepareDeclaration(d)
 	}
 	s.order++
@@ -622,6 +750,9 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 	var conditions []mediaCondition
 	defaultNamespace := false
 	current := -1
+	// CSS permits @import only before ordinary rules and block at-rules. The
+	// statement forms of @charset and @layer do not close that import window;
+	// every assignment below corresponds to syntax that does.
 	importsAllowed := !inline
 	var out []declaration
 	for {
@@ -731,24 +862,27 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 				continue
 			}
 			vals := rawTokenString(values)
-			var valueTokens []valueToken
-			var valueStatus valueStatus
+			var declarations []declaration
 			// tdewolff deliberately exposes a custom-property value as one
 			// opaque CustomPropertyValue token. Lex that payload once here so
 			// var() dependencies and !important retain their CSS token boundaries.
 			if g == css.CustomPropertyGrammar {
-				valueTokens, valueStatus = lexValue(vals)
+				valueTokens, valueStatus := lexValue(vals)
+				declarations = s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)
+			} else if cssTokensNeedRetention(prop, values) {
+				valueTokens, valueStatus := ownedValueTokens(values, vals)
+				declarations = s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)
 			} else {
-				valueTokens, valueStatus = ownedValueTokens(values)
+				declarations = s.declarationsFromParsed(prop, parseUnretainedCSSTokens(values, vals), false)
 			}
 			// A style attribute is a declaration list, not a stylesheet. Some
 			// recoverable parsers nevertheless expose declarations nested in an
 			// invalid at-rule. Such declarations have no unconditional inline
 			// effect and must not override valid top-level declarations.
 			if inline {
-				out = append(out, s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)...)
+				out = append(out, declarations...)
 			} else if current >= 0 {
-				s.rules[current].decls = append(s.rules[current].decls, s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)...)
+				s.rules[current].decls = append(s.rules[current].decls, declarations...)
 			}
 		case css.QualifiedRuleGrammar, css.TokenGrammar:
 		}

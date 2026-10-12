@@ -138,6 +138,12 @@ type elementStyleResult struct {
 	displayDeclared bool
 }
 
+type cascadeWinners struct {
+	properties [properties]candidate
+	layout     [layoutProperties]layoutCandidate
+	variables  map[string]candidate
+}
+
 func (m *mediaEvaluation) evaluate(s *sheet, work *matchBudget) ([]uint8, bool) {
 	if !m.ready {
 		m.states, m.complete = s.mediaStates(m.width, m.fallback, work)
@@ -148,7 +154,7 @@ func (m *mediaEvaluation) evaluate(s *sheet, work *matchBudget) ([]uint8, bool) 
 
 func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, context evaluationContext, resolveUnsupported bool) (Value, valueStatus) {
 	if (d.unsupported || uncertainOrigin) && !resolveUnsupported {
-		return Value{Text: d.value}, 2
+		return Value{Text: d.value}, valueUnsupported
 	}
 	if d.prepared != nil {
 		return d.prepared.value, d.prepared.status
@@ -159,10 +165,10 @@ func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, con
 		return resolve(property, "unset", context.parent, context.root)
 	}
 	if v.status == valueUnsupported {
-		return Value{Text: d.value}, 2
+		return Value{Text: d.value}, valueUnsupported
 	}
 	if len(v.text) > maxValueBytes {
-		return Value{Text: d.value}, 2
+		return Value{Text: d.value}, valueUnsupported
 	}
 	value := strings.ToLower(strings.TrimSpace(v.text))
 	if d.shorthand {
@@ -171,7 +177,7 @@ func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, con
 			if x.prop == property {
 				value = x.value
 				if x.unsupported {
-					return Value{Text: value}, 2
+					return Value{Text: value}, valueUnsupported
 				}
 			}
 		}
@@ -192,6 +198,124 @@ func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, con
 	}
 	return out, status
 }
+
+// collectCascade identifies the declarations that win the CSS cascade for one
+// element. It reserves each declaration list's complete cost before mutating
+// the result so an exhausted work budget can never expose partial winners.
+func (s *sheet) collectCascade(n *html.Node, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, matches *matchBudget, context evaluationContext) (cascadeWinners, bool) {
+	var winners cascadeWinners
+	// Parsed declaration slices are immutable and stable for the duration of
+	// evaluation. Winners retain references plus per-use property/uncertainty
+	// metadata instead of copying and modifying complete declarations.
+	apply := func(ds []declaration, spec cascadia.Specificity, inl, uncertain bool) bool {
+		// Reserve the complete declaration-list cost before changing the
+		// cascade. A failed reservation must not leave a partially applied
+		// style that appears trustworthy.
+		applications := len(ds)
+		for i := range ds {
+			if ds[i].prop == allShorthandProperty {
+				applications += declarationProperties - 1
+			}
+		}
+		if applications > 0 && !matches.spend(int64(applications)*declarationApplyWeight) {
+			return false
+		}
+		applyProperty := func(d *declaration, property int) {
+			c := candidate{d: d, property: property, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
+			if property >= properties {
+				index := property - properties
+				if c.beats(winners.layout[index]) {
+					winners.layout[index] = c
+				}
+				return
+			}
+			if c.beats(winners.properties[property]) {
+				winners.properties[property] = c
+			}
+		}
+		for declarationIndex := range ds {
+			d := &ds[declarationIndex]
+			if d.custom == "" && !d.unsupported {
+				if d.validityReady && d.validity == valueInvalid {
+					continue
+				}
+				if !d.validityReady && !d.hasVars && !d.shorthand {
+					_, status := resolvedDeclaration(d, d.prop, false, context, false)
+					if status == valueInvalid {
+						continue
+					}
+				}
+			}
+			if d.custom != "" {
+				c := candidate{d: d, property: d.prop, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
+				if winners.variables == nil {
+					winners.variables = map[string]candidate{}
+				}
+				if c.beats(winners.variables[d.custom]) {
+					winners.variables[d.custom] = c
+				}
+			} else if d.prop == allShorthandProperty {
+				for property := 0; property < declarationProperties; property++ {
+					applyProperty(d, property)
+				}
+			} else {
+				applyProperty(d, d.prop)
+			}
+		}
+		return true
+	}
+	if !apply(legacy, cascadia.Specificity{}, false, false) {
+		return cascadeWinners{}, false
+	}
+	mediaStates, complete := media.evaluate(s, matches)
+	if !complete {
+		return cascadeWinners{}, false
+	}
+	refs, complete := s.collectCandidates(n, matches)
+	if !complete {
+		return cascadeWinners{}, false
+	}
+	for _, ref := range refs {
+		r := &s.rules[ref.rule]
+		plan := &r.plans[ref.branch]
+		state := int(mediaStates[ref.rule])
+		if state == mediaNo {
+			continue
+		}
+		matched, cached := false, false
+		if s.runtime.cacheMatches && plan.sequence < len(s.runtime.matchCaches) {
+			state := s.runtime.matchCaches[plan.sequence][n]
+			matched, cached = state == 2, state != 0
+		}
+		if !cached {
+			if !matches.spend(selectorMatchCost(plan, selectorContext, matches.limit)) {
+				return cascadeWinners{}, false
+			}
+			if plan.uncertain {
+				matched = plan.scope.Match(n)
+			} else {
+				matched = plan.matcher.Match(n)
+			}
+			s.cacheMatch(plan, n, matched)
+		}
+		if matched {
+			if plan.uncertain {
+				if !apply(r.decls, plan.specificity, false, true) {
+					return cascadeWinners{}, false
+				}
+			} else {
+				if !apply(r.decls, plan.specificity, false, state == mediaUnknown) {
+					return cascadeWinners{}, false
+				}
+			}
+		}
+	}
+	if !apply(inline, cascadia.Specificity{}, true, false) {
+		return cascadeWinners{}, false
+	}
+	return winners, true
+}
+
 func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *variableScope, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, matches *matchBudget, budget *expressionBudget) elementStyleResult {
 	if s.cascadeIncomplete || s.workIncomplete {
 		if s.workIncomplete {
@@ -213,133 +337,22 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 			st[i] = parent[i]
 		}
 	}
-	var wins [properties]candidate
-	var layoutWins [layoutProperties]layoutCandidate
-	var vars map[string]candidate
 	context := evaluationContext{parent: parent, root: root, vars: parentVars, budget: budget}
-	// Parsed declaration slices are immutable and stable for the duration of
-	// evaluation. Winners retain references plus per-use property/uncertainty
-	// metadata instead of copying and modifying complete declarations.
-	apply := func(ds []declaration, spec cascadia.Specificity, inl, uncertain bool) bool {
-		// Reserve the complete declaration-list cost before changing the
-		// cascade. A failed reservation must not leave a partially applied
-		// style that appears trustworthy.
-		applications := len(ds)
-		for i := range ds {
-			if ds[i].prop == allShorthandProperty {
-				applications += declarationProperties - 1
-			}
-		}
-		if applications > 0 && !matches.spend(int64(applications)*declarationApplyWeight) {
-			return false
-		}
-		applyProperty := func(d *declaration, property int) {
-			c := candidate{d: d, property: property, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
-			if property >= properties {
-				index := property - properties
-				if c.beats(layoutWins[index]) {
-					layoutWins[index] = c
-				}
-				return
-			}
-			if c.beats(wins[property]) {
-				wins[property] = c
-			}
-		}
-		for declarationIndex := range ds {
-			d := &ds[declarationIndex]
-			if d.custom == "" && !d.unsupported {
-				if d.validityReady && d.validity == 0 {
-					continue
-				}
-				if !d.validityReady && !d.hasVars && !d.shorthand {
-					_, status := resolvedDeclaration(d, d.prop, false, context, false)
-					if status == valueInvalid {
-						continue
-					}
-				}
-			}
-			if d.custom != "" {
-				c := candidate{d: d, property: d.prop, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
-				if vars == nil {
-					vars = map[string]candidate{}
-				}
-				if c.beats(vars[d.custom]) {
-					vars[d.custom] = c
-				}
-			} else if d.prop == allShorthandProperty {
-				for property := 0; property < declarationProperties; property++ {
-					applyProperty(d, property)
-				}
-			} else {
-				applyProperty(d, d.prop)
-			}
-		}
-		return true
-	}
-	matchIncomplete := func() elementStyleResult {
+	winners, complete := s.collectCascade(n, legacy, inline, media, selectorContext, matches, context)
+	if !complete {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
-	if !apply(legacy, cascadia.Specificity{}, false, false) {
-		return matchIncomplete()
-	}
-	mediaStates, complete := media.evaluate(s, matches)
-	if !complete {
-		return matchIncomplete()
-	}
-	refs, complete := s.collectCandidates(n, matches)
-	if !complete {
-		return matchIncomplete()
-	}
-	for _, ref := range refs {
-		r := &s.rules[ref.rule]
-		plan := &r.plans[ref.branch]
-		state := int(mediaStates[ref.rule])
-		if state == mediaNo {
-			continue
-		}
-		matched, cached := false, false
-		if s.runtime.cacheMatches && plan.sequence < len(s.runtime.matchCaches) {
-			state := s.runtime.matchCaches[plan.sequence][n]
-			matched, cached = state == 2, state != 0
-		}
-		if !cached {
-			if !matches.spend(selectorMatchCost(plan, selectorContext, matches.limit)) {
-				return matchIncomplete()
-			}
-			if plan.uncertain {
-				matched = plan.scope.Match(n)
-			} else {
-				matched = plan.matcher.Match(n)
-			}
-			s.cacheMatch(plan, n, matched)
-		}
-		if matched {
-			if plan.uncertain {
-				if !apply(r.decls, plan.specificity, false, true) {
-					return matchIncomplete()
-				}
-			} else {
-				if !apply(r.decls, plan.specificity, false, state == mediaUnknown) {
-					return matchIncomplete()
-				}
-			}
-		}
-	}
-	if !apply(inline, cascadia.Specificity{}, true, false) {
-		return matchIncomplete()
-	}
 	var defs map[string]variableDefinition
-	if len(vars) > 0 {
+	if len(winners.variables) > 0 {
 		defs = map[string]variableDefinition{}
-		for n, c := range vars {
+		for n, c := range winners.variables {
 			defs[n] = variableDefinition{declaration: c.d, uncertainOrigin: c.uncertainOrigin}
 		}
 	}
 	scope := buildVariables(parentVars, defs, budget)
 	context.vars = scope
 	for i := 0; i < properties; i++ {
-		c := wins[i]
+		c := winners.properties[i]
 		if c.set {
 			v, status := resolvedDeclaration(c.d, c.property, c.uncertainOrigin, context, false)
 			if status == valueUnsupported {
@@ -351,9 +364,9 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	if st[background].Text == "currentcolor" {
 		st[background] = st[color]
 	}
-	layoutUncertain := layoutVisibilityUncertain(&layoutWins, &st, context)
+	layoutUncertain := layoutVisibilityUncertain(&winners.layout, &st, context)
 	return elementStyleResult{
 		style: st, variables: scope, layoutUncertain: layoutUncertain,
-		displayDeclared: wins[display].set,
+		displayDeclared: winners.properties[display].set,
 	}
 }

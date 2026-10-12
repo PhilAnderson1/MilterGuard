@@ -630,7 +630,7 @@ func TestNumbersAndColours(t *testing.T) {
 		want float64
 	}{{"0", 0}, {"2px", 2}, {"1.5pt", 2}, {".125em", 2}, {"12.5%", 2}, {".125rem", 2}} {
 		v, st := resolve(fontSize, c.v, initialPtr(), initialPtr())
-		if st != 1 || v.Number != c.want {
+		if st != valueResolved || v.Number != c.want {
 			t.Fatal(c, v, st)
 		}
 	}
@@ -639,13 +639,13 @@ func TestNumbersAndColours(t *testing.T) {
 		want float64
 	}{{"-2", 0}, {"200%", 1}, {".25", .25}} {
 		v, st := resolve(opacity, c.v, initialPtr(), initialPtr())
-		if st != 1 || v.Number != c.want {
+		if st != valueResolved || v.Number != c.want {
 			t.Fatal(c, v, st)
 		}
 	}
 	for _, c := range []struct{ v, want string }{{"#123", "rgba(17,34,51,1)"}, {"#1234", "rgba(17,34,51,0.26666666666666666)"}, {"#11223344", "rgba(17,34,51,0.26666666666666666)"}, {"rgb(100%,0%,0%)", "rgba(255,0,0,1)"}, {"rgba(255,0,0,.5)", "rgba(255,0,0,0.5)"}, {"red", "rgba(255,0,0,1)"}, {"transparent", "rgba(0,0,0,0)"}} {
 		v, st := parseColor(c.v)
-		if st != 1 || v != c.want {
+		if st != valueResolved || v != c.want {
 			t.Fatal(c, v, st)
 		}
 	}
@@ -659,18 +659,47 @@ func TestNumbersAndColours(t *testing.T) {
 	}
 }
 
+func TestSplitLengthUnits(t *testing.T) {
+	for _, want := range lengthUnits {
+		input := "1" + want.suffix
+		numberText, got, found := splitLength(input)
+		if !found || numberText != "1" || got != want {
+			t.Errorf("splitLength(%q) = %q, %+v, %t; want 1, %+v, true", input, numberText, got, found, want)
+		}
+	}
+	for _, test := range []struct {
+		input, suffix string
+	}{
+		{"1rem", "rem"},
+		{"1rlh", "rlh"},
+		{"1rcap", "rcap"},
+		{"1ric", "ric"},
+		{"1rex", "rex"},
+		{"1rch", "rch"},
+		{"1dvw", "dvw"},
+	} {
+		_, unit, found := splitLength(test.input)
+		if !found || unit.suffix != test.suffix {
+			t.Errorf("splitLength(%q) suffix = %q, found=%t; want %q", test.input, unit.suffix, found, test.suffix)
+		}
+	}
+	if numberText, _, found := splitLength("1"); found || numberText != "1" {
+		t.Fatalf("splitLength(unitless) = %q, found=%t", numberText, found)
+	}
+}
+
 func TestUnknownRelativeFontSizePreservesSpecifiedText(t *testing.T) {
 	parent, root := initial(), initial()
 	parent[fontSize] = Value{Text: "1vw"}
 	root[fontSize] = Value{Text: "1vw"}
 	for _, specified := range []string{"1em", "50%", "smaller", "larger"} {
 		value, status := resolve(fontSize, specified, &parent, &root)
-		if status != 1 || value.Known || value.Text != specified {
+		if status != valueResolved || value.Known || value.Text != specified {
 			t.Errorf("resolve(font-size, %q) = %+v, status %d", specified, value, status)
 		}
 	}
 	value, status := resolve(fontSize, "1rem", initialPtr(), &root)
-	if status != 1 || value.Known || value.Text != "1rem" {
+	if status != valueResolved || value.Known || value.Text != "1rem" {
 		t.Fatalf("resolve(font-size, 1rem) = %+v, status %d", value, status)
 	}
 }
@@ -894,6 +923,28 @@ func TestColourLayerTraversalConsumesSharedWorkBudget(t *testing.T) {
 	}
 }
 
+func TestColourMemoRetainsPerTextWorkCharge(t *testing.T) {
+	style := initial()
+	runner := viewingCaseRunner{
+		matches: &matchBudget{limit: 100},
+		layers:  []paintLayer{layer(&style)},
+	}
+	first := runner.evaluateColour(style[color])
+	firstCharge := runner.matches.used
+	if !first.known || firstCharge == 0 {
+		t.Fatalf("first colour evaluation = %+v, budget=%+v", first, runner.matches)
+	}
+	second := runner.evaluateColour(style[color])
+	if second != first || runner.matches.used != 2*firstCharge {
+		t.Fatalf("memoized colour evaluation = %+v, budget=%+v; first=%+v, charge=%d", second, runner.matches, first, firstCharge)
+	}
+	runner.layerGeneration++
+	third := runner.evaluateColour(style[color])
+	if third != first || runner.matches.used != 3*firstCharge {
+		t.Fatalf("invalidated colour evaluation = %+v, budget=%+v", third, runner.matches)
+	}
+}
+
 func TestSelectorWorkBudgetStopsBeforePartialCascadeIsTrusted(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MatchWork = 5
@@ -954,7 +1005,7 @@ func TestSelectorIndexSkipsIrrelevantInactiveRules(t *testing.T) {
 func TestDeclarationsPrepareContextFreeValuesOnce(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	static := s.declarations("color", "rgb(1 2 3)")
-	if len(static) != 1 || static[0].prepared == nil || static[0].prepared.status != 1 || !static[0].prepared.value.Known {
+	if len(static) != 1 || static[0].prepared == nil || static[0].prepared.status != valueResolved || !static[0].prepared.value.Known {
 		t.Fatalf("static declaration was not prepared: %+v", static)
 	}
 	contextual := s.declarations("font-size", "50%")
@@ -1059,7 +1110,7 @@ func TestOversizedDeclarationValueIsPreparedAsUnresolved(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	value := "rgb(" + strings.Repeat("0", maxValueBytes) + ")"
 	ds := s.declarations("color", value)
-	if len(ds) != 1 || ds[0].prepared == nil || ds[0].prepared.status != 2 {
+	if len(ds) != 1 || ds[0].prepared == nil || ds[0].prepared.status != valueUnsupported {
 		t.Fatalf("oversized declaration was not bounded: %+v", ds)
 	}
 }

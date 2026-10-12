@@ -103,7 +103,7 @@ func TestBasicNamedColourAliases(t *testing.T) {
 		t.Run(test.alias, func(t *testing.T) {
 			alias, aliasStatus := readColour(test.alias)
 			canonical, canonicalStatus := readColour(test.canonical)
-			if aliasStatus != 1 || canonicalStatus != 1 || alias != canonical {
+			if aliasStatus != valueResolved || canonicalStatus != valueResolved || alias != canonical {
 				t.Fatalf("%s = (%+v, %d), %s = (%+v, %d)", test.alias, alias, aliasStatus, test.canonical, canonical, canonicalStatus)
 			}
 			text := colourText(t, `<p style="color:`+test.alias+`;background:`+test.canonical+`">T</p>`)
@@ -163,7 +163,7 @@ func TestModernRGBAndHSLColours(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.value, func(t *testing.T) {
 			got, status := readColour(c.value)
-			if status != 1 {
+			if status != valueResolved {
 				t.Fatalf("status = %d", status)
 			}
 			near(t, got.R, c.want.R, 1e-12)
@@ -179,12 +179,12 @@ func TestModernRGBAndHSLColours(t *testing.T) {
 		`hsl(0, 100, 50%)`,
 		`rgb(0 0 / 1)`,
 	} {
-		if _, status := readColour(value); status != 0 {
+		if _, status := readColour(value); status != valueInvalid {
 			t.Errorf("%q status = %d, want invalid", value, status)
 		}
 	}
 	for _, value := range []string{`rgb(none 0 0)`, `rgb(from red r g b)`, `lab(50% 0 0)`} {
-		if _, status := readColour(value); status != 2 {
+		if _, status := readColour(value); status != valueUnsupported {
 			t.Errorf("%q status = %d, want unresolved", value, status)
 		}
 	}
@@ -206,7 +206,7 @@ func TestNonFiniteHSLResultsRemainUncertain(t *testing.T) {
 		`hsla(-1e306turn,0%,0%,1)`,
 	} {
 		colour, status := readColour(value)
-		if status != 2 {
+		if status != valueUnsupported {
 			t.Errorf("readColour(%q) status = %d, want unresolved", value, status)
 		}
 		if !finite(colour.R) || !finite(colour.G) || !finite(colour.B) || !finite(colour.A) {

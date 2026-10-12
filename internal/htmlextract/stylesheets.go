@@ -13,7 +13,7 @@ import (
 const maxImportDepth = 8
 
 func stylesheetLink(n *html.Node) (href, media string, applies bool) {
-	if n.Namespace != "" || n.Data != "link" || hasHTMLAttr(n, "disabled") {
+	if n.Namespace != "" || n.Data != "link" || hasAttr(n, "disabled") {
 		return "", "", false
 	}
 	relations := strings.Fields(strings.ToLower(attr(n, "rel")))
@@ -37,15 +37,6 @@ func stylesheetLink(n *html.Node) (href, media string, applies bool) {
 	}
 	href = strings.TrimSpace(attr(n, "href"))
 	return href, media, href != ""
-}
-
-func hasHTMLAttr(n *html.Node, key string) bool {
-	for _, attribute := range n.Attr {
-		if strings.EqualFold(attribute.Key, key) {
-			return true
-		}
-	}
-	return false
 }
 
 func mediaCanApply(value string) bool {

@@ -11,7 +11,7 @@ import (
 // evidence of visibility: their relationship to text needs layout.
 func resolveClip(p int, s string) (Value, valueStatus) {
 	if p == clipPath && s == "none" || p == clip && s == "auto" {
-		return Value{Text: s, Known: true}, 1
+		return Value{Text: s, Known: true}, valueResolved
 	}
 	ts, status := lexValue(s)
 	if status != valueResolved {
@@ -23,10 +23,10 @@ func resolveClip(p int, s string) (Value, valueStatus) {
 			f := strings.ToLower(ts[0].raw)
 			arg := ts[1].raw
 			if f == "circle(" && (arg == "0" || arg == "0px" || arg == "0%") || f == "inset(" && arg == "50%" {
-				return Value{Text: s, Number: 1, Known: true}, 1
+				return Value{Text: s, Number: 1, Known: true}, valueResolved
 			}
 		}
-		return Value{Text: s}, 2
+		return Value{Text: s}, valueUnsupported
 	}
 	if len(ts) >= 2 && ts[0].raw == "rect(" && ts[len(ts)-1].kind == css.RightParenthesisToken {
 		args := ts[1 : len(ts)-1]
@@ -35,7 +35,7 @@ func resolveClip(p int, s string) (Value, valueStatus) {
 			for i, t := range args {
 				if i%2 == 1 {
 					if t.kind != css.CommaToken {
-						return Value{}, 0
+						return Value{}, valueInvalid
 					}
 				} else {
 					parts = append(parts, t)
@@ -44,28 +44,28 @@ func resolveClip(p int, s string) (Value, valueStatus) {
 		} else if len(args) == 4 {
 			parts = args
 		} else {
-			return Value{}, 0
+			return Value{}, valueInvalid
 		}
 		var v [4]float64
 		for i, t := range parts {
 			if t.kind != css.DimensionToken && !(t.kind == css.NumberToken && t.raw == "0") {
-				return Value{Text: s}, 2
+				return Value{Text: s}, valueUnsupported
 			}
 			x := t.raw
 			if x != "0" && !strings.HasSuffix(x, "px") {
-				return Value{Text: s}, 2
+				return Value{Text: s}, valueUnsupported
 			}
 			n, ok := number(strings.TrimSuffix(x, "px"))
 			if !ok {
-				return Value{}, 0
+				return Value{}, valueInvalid
 			}
 			v[i] = n
 		}
 		if v[0] >= v[2] || v[3] >= v[1] {
-			return Value{Text: s, Number: 1, Known: true}, 1
+			return Value{Text: s, Number: 1, Known: true}, valueResolved
 		}
 	}
-	return Value{Text: s}, 2
+	return Value{Text: s}, valueUnsupported
 }
 func emptyClip(st *Style, n *html.Node, displayDeclared bool) (empty, known, inlineClipPathUncertain bool) {
 	if n.Namespace != "" || !st[display].Known || st[display].Text == "contents" {

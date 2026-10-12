@@ -37,13 +37,13 @@ func evalMath(prop int, src string, parent, root *Style, budget *expressionBudge
 
 func evalMathTokens(prop int, src string, ts []valueToken, parent, root *Style, budget *expressionBudget) (Value, valueStatus) {
 	if !budget.charge(len(ts)) {
-		return Value{Text: src}, 2
+		return Value{Text: src}, valueUnsupported
 	}
 	// Binary + and - require whitespace on both sides (comments alone do not suffice).
 	for i, t := range ts {
 		if t.kind == css.DelimToken && (t.raw == "+" || t.raw == "-") {
 			if i == 0 || i+1 == len(ts) || ts[i-1].kind != css.WhitespaceToken || ts[i+1].kind != css.WhitespaceToken {
-				return Value{}, 0
+				return Value{}, valueInvalid
 			}
 		}
 	}
@@ -56,10 +56,10 @@ func evalMathTokens(prop int, src string, ts []valueToken, parent, root *Style, 
 		return Value{Text: src}, p.status
 	}
 	if prop == fontSize && !q.length || prop == opacity && q.length {
-		return Value{}, 0
+		return Value{}, valueInvalid
 	}
 	if math.IsNaN(q.n) || math.IsInf(q.n, 0) {
-		return Value{Text: src}, 2
+		return Value{Text: src}, valueUnsupported
 	}
 	q.n = math.Max(0, q.n)
 	if prop == opacity {
@@ -69,7 +69,7 @@ func evalMathTokens(prop int, src string, ts []valueToken, parent, root *Style, 
 	if prop == fontSize {
 		txt += "px"
 	}
-	return Value{Text: txt, Number: q.n, Known: true}, 1
+	return Value{Text: txt, Number: q.n, Known: true}, valueResolved
 }
 func (p *mathParser) expr(min int) quantity {
 	left := p.atom()
@@ -223,32 +223,29 @@ func (p *mathParser) atom() quantity {
 			return quantity{}
 		}
 		s := strings.ToLower(t.raw)
-		for _, unit := range []string{"rem", "px", "pt", "em"} {
-			if strings.HasSuffix(s, unit) {
-				v, ok := number(strings.TrimSuffix(s, unit))
-				if !ok {
-					p.status = valueInvalid
-				}
-				factor := 1.0
-				switch unit {
-				case "pt":
-					factor = 96.0 / 72
-				case "em":
-					factor = p.parent[fontSize].Number
-					if !p.parent[fontSize].Known {
-						p.status = valueUnsupported
-					}
-				case "rem":
-					factor = p.root[fontSize].Number
-					if !p.root[fontSize].Known {
-						p.status = valueUnsupported
-					}
-				}
-				return quantity{v * factor, true}
+		numberText, unit, found := splitLength(s)
+		if !found || unit.kind == lengthUnitContextual || unit.kind == lengthUnitPercentage {
+			p.status = valueUnsupported
+			return quantity{}
+		}
+		v, ok := number(numberText)
+		if !ok {
+			p.status = valueInvalid
+		}
+		factor := unit.scale
+		switch unit.kind {
+		case lengthUnitParentFont:
+			factor = p.parent[fontSize].Number
+			if !p.parent[fontSize].Known {
+				p.status = valueUnsupported
+			}
+		case lengthUnitRootFont:
+			factor = p.root[fontSize].Number
+			if !p.root[fontSize].Known {
+				p.status = valueUnsupported
 			}
 		}
-		p.status = valueUnsupported
-		return quantity{}
+		return quantity{v * factor, true}
 	}
 	if t.kind == css.IdentToken {
 		p.status = valueUnsupported

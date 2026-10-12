@@ -295,7 +295,7 @@ func TestLayoutDimensionsDoNotConsumeExpressionWorkWithoutClipping(t *testing.T)
 	context := evaluationContext{
 		parent: initialPtr(),
 		root:   initialPtr(),
-		vars:   &variableScope{values: map[string]variableValue{"--width": {text: "0", status: 1}}},
+		vars:   &variableScope{values: map[string]variableValue{"--width": {text: "0", status: valueResolved}}},
 		budget: &budget,
 	}
 	style := initial()
@@ -429,7 +429,7 @@ func TestVariableFunctionValidation(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tokens, status := lexValue(test.value)
-			if status != 1 {
+			if status != valueResolved {
 				t.Fatalf("lexing status = %d", status)
 			}
 			if got := validVariableFunctions(tokens); got != test.valid {
@@ -443,7 +443,7 @@ func TestVariableFunctionValidationIsBoundedForDeepFallbacks(t *testing.T) {
 	const depth = 1_000
 	value := strings.Repeat(`var(--x,`, depth) + `none` + strings.Repeat(`)`, depth)
 	tokens, status := lexValue(value)
-	if status != 1 || len(tokens) > maxValueTokens || len(value) > maxValueBytes {
+	if status != valueResolved || len(tokens) > maxValueTokens || len(value) > maxValueBytes {
 		t.Fatalf("invalid deep-fallback fixture: bytes=%d tokens=%d status=%d", len(value), len(tokens), status)
 	}
 	if !validVariableFunctions(tokens) {
@@ -454,7 +454,7 @@ func TestVariableFunctionValidationIsBoundedForDeepFallbacks(t *testing.T) {
 func TestDeclarationValueTokensAreCached(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	ds := s.declarations("--payload", "var(--missing, none)")
-	if len(ds) != 1 || !ds[0].tokensReady || ds[0].valueStatus != 1 || len(ds[0].valueTokens) == 0 {
+	if len(ds) != 1 || !ds[0].tokensReady || ds[0].valueStatus != valueResolved || len(ds[0].valueTokens) == 0 {
 		t.Fatalf("declaration was not prepared: %+v", ds)
 	}
 	if !ds[0].dependenciesReady || len(ds[0].variableDependencies) != 1 || ds[0].variableDependencies[0] != "--missing" {
@@ -468,7 +468,7 @@ func TestDeclarationValueTokensAreCached(t *testing.T) {
 	d.value = strings.Repeat("x", maxValueBytes+1)
 	budget := expressionBudget{remaining: 100}
 	scope := buildVariables(nil, map[string]variableDefinition{"--payload": {declaration: &d}}, &budget)
-	if got := scope.get("--payload"); got.status != 1 || got.text != "none" {
+	if got := scope.get("--payload"); got.status != valueResolved || got.text != "none" {
 		t.Fatalf("cached value was not used: %+v", got)
 	}
 }
@@ -485,7 +485,7 @@ func TestMalformedValueSuffixIsNotTruncated(t *testing.T) {
 	}
 
 	tokens, status := lexValue(`var(--x)<junk>`)
-	if status != 1 || tokenText(tokens) != `var(--x)<junk>` {
+	if status != valueResolved || tokenText(tokens) != `var(--x)<junk>` {
 		t.Fatalf("tokens = %+v, status = %d", tokens, status)
 	}
 }
@@ -498,7 +498,7 @@ func TestExpressionBudgetStopsCachedVariableTraversal(t *testing.T) {
 	if !budget.exhausted {
 		t.Fatal("expression budget was not exhausted")
 	}
-	if got := scope.get("--payload"); got.status != 2 {
+	if got := scope.get("--payload"); got.status != valueUnsupported {
 		t.Fatalf("value after budget exhaustion = %+v", got)
 	}
 }

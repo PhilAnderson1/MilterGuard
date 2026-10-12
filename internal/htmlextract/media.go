@@ -8,6 +8,11 @@ import (
 	"strings"
 )
 
+const (
+	maxMediaBreakpoints           = 512
+	mediaPlanningWorkLimitDivisor = 4
+)
+
 // A condition is a disjunction of alternatives; nested conditions are ANDed.
 // Unknown is deliberately not false, including in partially supported queries.
 type widthBound struct {
@@ -158,7 +163,9 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 	basePlanningWork := s.planningWork
 	var planningWork int64
 	charge := func(cost int64) bool {
-		limit := s.limits.MatchWork / 4
+		// Breakpoint discovery is admission-control work, so reserve at most a
+		// fixed fraction of the total selector/matching budget for it.
+		limit := s.limits.MatchWork / mediaPlanningWorkLimitDivisor
 		if cost < 0 || planningWork > limit || cost > limit-planningWork {
 			return false
 		}
@@ -177,7 +184,7 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 					if !unique[b.value] {
 						unique[b.value] = true
 						bounds = append(bounds, b.value)
-						if len(bounds) > 512 {
+						if len(bounds) > maxMediaBreakpoints {
 							return []float64{1024}, true
 						}
 					}
@@ -210,6 +217,9 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 			candidates = append(candidates, after)
 		}
 	}
+	// Each activation vector becomes one string key. Candidate generation is
+	// bounded by maxMediaBreakpoints, so these short-lived allocations cannot
+	// grow with an unbounded number of media-query endpoints.
 	seen := map[string]bool{}
 	var widths []float64
 	s.runtime.mediaCache = make(map[mediaCacheKey][]uint8)
@@ -233,17 +243,4 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 		s.runtime.mediaCache[mediaCacheKey{width: w}] = states
 	}
 	return widths, false
-}
-
-func aggregateLabel(bits visibilityLabel) string {
-	if bits&labelUnknown != 0 {
-		return "unknown"
-	}
-	if bits&(labelVisible|labelConcealed) == labelVisible|labelConcealed {
-		return "client-dependent"
-	}
-	if bits&labelConcealed != 0 {
-		return "concealed"
-	}
-	return "visible"
 }

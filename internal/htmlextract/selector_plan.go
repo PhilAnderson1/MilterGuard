@@ -684,11 +684,6 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 	s.runtime.matchCacheEntries = 0
 }
 
-func (s *sheet) candidates(n *html.Node) []selectorRef {
-	refs, _ := s.collectCandidates(n, nil)
-	return refs
-}
-
 // collectCandidates builds the union of relevant selector-index buckets. A
 // selector plan belongs to exactly one bucket, so the first reference also
 // serves as that bucket's stable identity. Marking before append prevents a
