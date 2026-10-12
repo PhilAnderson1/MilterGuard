@@ -485,7 +485,7 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 		return
 	}
 	start := strings.Index(trimmed, "]>")
-	end := strings.LastIndex(strings.ToLower(trimmed), "<![endif]")
+	end := lastIndexASCIIFold(trimmed, "<![endif]")
 	if start < 0 || end <= start+2 {
 		return
 	}
@@ -513,6 +513,35 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 	}
 	out.write(outputAnnotation{kind: "unknown"}, value)
 	visible.WriteString(value)
+}
+
+// lastIndexASCIIFold finds an ASCII syntax marker without transforming the
+// input. Unicode case conversion can change a string's byte length, making an
+// index obtained from the converted copy unsafe for slicing the original.
+func lastIndexASCIIFold(value, marker string) int {
+	if marker == "" {
+		return len(value)
+	}
+	for start := len(value) - len(marker); start >= 0; start-- {
+		matched := true
+		for i := range marker {
+			left, right := value[start+i], marker[i]
+			if left >= 'A' && left <= 'Z' {
+				left += 'a' - 'A'
+			}
+			if right >= 'A' && right <= 'Z' {
+				right += 'a' - 'A'
+			}
+			if left != right {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return start
+		}
+	}
+	return -1
 }
 
 type conditionalWalk struct {

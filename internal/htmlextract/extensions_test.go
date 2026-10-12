@@ -174,8 +174,9 @@ func TestClipPathApplicabilityToInlineBoxes(t *testing.T) {
 		src  string
 		want string
 	}{
-		{"default inline span", `<span style="clip-path:circle(0)">T</span>`, "visible"},
-		{"declared inline block element", `<div style="display:inline;clip-path:circle(0)">T</div>`, "visible"},
+		{"default inline span", `<span style="clip-path:circle(0)">T</span>`, "unknown"},
+		{"declared inline block element", `<div style="display:inline;clip-path:circle(0)">T</div>`, "unknown"},
+		{"inline without clip path", `<span>T</span>`, "visible"},
 		{"declared block span", `<span style="display:block;clip-path:circle(0)">T</span>`, "concealed"},
 		{"default block element", `<div style="clip-path:circle(0)">T</div>`, "concealed"},
 		{"positioned inline element", `<span style="position:absolute;clip-path:circle(0)">T</span>`, "concealed"},
@@ -221,14 +222,47 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 	cases := []struct{ name, style, want string }{
 		{"zero width", `overflow:hidden;width:0`, "unknown"},
 		{"zero height", `overflow:clip;height:0px`, "unknown"},
+		{"zero max width", `overflow:hidden;max-width:0`, "unknown"},
 		{"zero max height", `overflow:hidden;max-height:0%`, "unknown"},
+		{"subpixel height", `overflow:hidden;height:.001px`, "unknown"},
+		{"tiny width", `overflow:hidden;width:1e-30px`, "unknown"},
+		{"subpixel max height", `overflow:hidden;max-height:.0001px`, "unknown"},
+		{"one pixel clipped width", `overflow:hidden;width:1px`, "unknown"},
+		{"one pixel clipped height", `overflow:hidden;height:1px`, "unknown"},
+		{"two-axis vertical clipping", `overflow:visible hidden;height:0`, "unknown"},
+		{"two-axis horizontal clipping", `overflow:hidden visible;width:0`, "unknown"},
 		{"absolute left", `position:absolute;left:-1000px`, "unknown"},
 		{"fixed top", `position:fixed;top:-9999px`, "unknown"},
+		{"absolute relative-unit left", `position:absolute;left:-3000em`, "unknown"},
+		{"overflowing absolute left", `position:absolute;left:-1e999px`, "unknown"},
+		{"fixed bottom", `position:fixed;bottom:-3000px`, "unknown"},
+		{"absolute right", `position:absolute;right:-3000px`, "unknown"},
 		{"negative indent", `text-indent:-1000px`, "unknown"},
+		{"percentage indent", `text-indent:-500%`, "unknown"},
+		{"overflowing indent", `text-indent:-1e999px`, "unknown"},
+		{"calculated overflowing offset", `position:absolute;left:calc(-1px * 1e400)`, "unknown"},
+		{"extreme negative margin", `margin-left:-9999px`, "unknown"},
+		{"extreme relative margin", `margin-top:-100vh`, "unknown"},
+		{"extreme margin shorthand", `margin:0 0 0 -9999px`, "unknown"},
+		{"unresolved margin shorthand", `margin:var(--possibly-extreme)`, "unknown"},
+		{"zero zoom", `zoom:0`, "unknown"},
+		{"tiny zoom", `zoom:.001`, "unknown"},
+		{"tiny percentage zoom", `zoom:1%`, "unknown"},
 		{"dimension without clipping", `width:0;height:0`, "visible"},
-		{"clipping without zero dimension", `overflow:hidden;width:1px`, "visible"},
+		{"clipping with readable dimension", `overflow:hidden;width:2px`, "visible"},
+		{"contextual subunit dimension", `overflow:hidden;height:.001%`, "visible"},
+		{"ordinary responsive maximum", `overflow:hidden;max-width:100%;height:auto`, "visible"},
+		{"wrong-axis clipping", `overflow:hidden visible;height:0`, "visible"},
+		{"invalid overflow ignored", `overflow:hidden;height:0;overflow:banana`, "unknown"},
 		{"static offset", `position:static;left:-9999px`, "visible"},
 		{"ordinary offset", `position:absolute;left:-999px`, "visible"},
+		{"ordinary relative offset", `position:absolute;left:-2em`, "visible"},
+		{"ordinary negative margin", `margin-left:-10px`, "visible"},
+		{"overridden margin", `margin-left:-9999px;margin-left:0`, "visible"},
+		{"shorthand overrides margin", `margin-left:-9999px;margin:0`, "visible"},
+		{"ordinary zoom", `zoom:1`, "visible"},
+		{"normal zoom", `zoom:normal`, "visible"},
+		{"overridden zoom", `zoom:0;zoom:100%`, "visible"},
 		{"overridden width", `overflow:hidden;width:0;width:auto`, "visible"},
 		{"overridden overflow", `overflow:hidden;width:0;overflow:visible`, "visible"},
 	}
@@ -252,6 +286,43 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 	in = inspectHTML(t, `<p style="--zero:0;overflow:hidden;width:var(--zero)">T</p>`)
 	if got := findText(t, in, "T").Label; got != "unknown" {
 		t.Fatalf("variable layout label = %q, want unknown", got)
+	}
+}
+
+func TestUncertainLayoutWinnerCannotProduceTrustedReveal(t *testing.T) {
+	for _, test := range []struct {
+		name, css string
+	}{
+		{
+			"environment media condition",
+			`p{overflow:hidden;height:0}@media(prefers-color-scheme:dark){p{overflow:visible}}`,
+		},
+		{
+			"unsupported selector",
+			`p{overflow:hidden;height:0}p:has(b){overflow:visible}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			in := inspectHTML(t, `<style>`+test.css+`</style><p>T</p>`)
+			if got := findText(t, in, "T").Label; got != "unknown" {
+				t.Fatalf("uncertain layout reveal label = %q, want unknown", got)
+			}
+		})
+	}
+
+	in := inspectHTML(t, `<style>p{overflow:hidden;height:0}@media(prefers-color-scheme:dark){p{overflow:visible}}p{overflow:visible}</style><p>T</p>`)
+	if got := findText(t, in, "T").Label; got != "visible" {
+		t.Fatalf("definite later layout override label = %q, want visible", got)
+	}
+
+	limits := DefaultLimits()
+	limits.MediaCases = 1
+	in, err := (processor{Limits: limits}).process([]byte(`<style>p{overflow:hidden;height:0}@media(max-width:500px){p{overflow:visible}}</style><p>T</p>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findText(t, in, "T").Label; got != "unknown" {
+		t.Fatalf("fallback media layout reveal label = %q, want unknown", got)
 	}
 }
 

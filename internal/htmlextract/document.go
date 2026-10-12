@@ -475,13 +475,16 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 				document.styles.loadStylesheetReference(href, media)
 			}
 			if n.Data == "style" && (e.scope == "" || e.scope == "head") {
-				var css strings.Builder
-				for c := n.FirstChild; c != nil; c = c.NextSibling {
-					if c.Type == html.TextNode {
-						css.WriteString(c.Data)
+				styles := &document.styles
+				if !styles.cascadeIncomplete && !styles.workIncomplete {
+					remaining := styles.limits.CSSBytes - styles.cssBytes
+					css, complete := boundedStyleText(n, remaining)
+					if !complete {
+						styles.abandonCascade()
+					} else {
+						styles.parseStylesheet(css, attr(n, "media"))
 					}
 				}
-				document.styles.parseStylesheet(css.String(), attr(n, "media"))
 			}
 			if value := attr(n, "style"); value != "" {
 				document.inlineDecls[n] = document.styles.parseCSS(value, true)
@@ -493,6 +496,23 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		}
 	}
 	return document, nil
+}
+
+func boundedStyleText(style *html.Node, maximum int) (string, bool) {
+	if maximum < 0 {
+		return "", false
+	}
+	var css strings.Builder
+	for child := style.FirstChild; child != nil; child = child.NextSibling {
+		if child.Type != html.TextNode {
+			continue
+		}
+		if len(child.Data) > maximum-css.Len() {
+			return "", false
+		}
+		css.WriteString(child.Data)
+	}
+	return css.String(), true
 }
 
 func (p processor) process(input []byte) (Document, error) {
@@ -576,11 +596,11 @@ func (p processor) process(input []byte) (Document, error) {
 					if err != nil {
 						return in, err
 					}
-					empty, known, clipPathIgnored := emptyClip(f.style, n, displayDeclared)
+					empty, known, inlineClipPathUncertain := emptyClip(f.style, n, displayDeclared)
 					f.clipped = f.clipped || empty
 					f.clipKnown = f.clipKnown && known
 					paintStyle := f.style
-					if clipPathIgnored {
+					if inlineClipPathUncertain {
 						paintStyle[clipPath] = initialStyle[clipPath]
 					}
 					layers = append(layers, layer(paintStyle))
@@ -619,8 +639,8 @@ func (p processor) process(input []byte) (Document, error) {
 						bit := labelBit(decision.label)
 						if caseIndex == 0 {
 							elementLabels = append(elementLabels, bit)
-						} else {
-							elementLabels[elementIndex] |= bit
+						} else if !mergeViewingCaseLabel(elementLabels, elementIndex, bit) {
+							return in, fmt.Errorf("internal: viewing-case element count exceeded first case")
 						}
 						if caseIndex == 0 {
 							in.Elements = append(in.Elements, Element{Node: n, Label: decision.label, ConcealmentReasons: decision.reasons, EffectiveOpacity: f.alpha})
@@ -637,8 +657,8 @@ func (p processor) process(input []byte) (Document, error) {
 						bit := labelBit(decision.label)
 						if caseIndex == 0 {
 							labels = append(labels, bit)
-						} else {
-							labels[textIndex] |= bit
+						} else if !mergeViewingCaseLabel(labels, textIndex, bit) {
+							return in, fmt.Errorf("internal: viewing-case text count exceeded first case")
 						}
 						if caseIndex == 0 {
 							text := Text{Label: decision.label, FontSize: st[fontSize].Text, EffectiveOpacity: f.alpha, ConcealmentReasons: decision.reasons, Node: n}
@@ -665,6 +685,8 @@ func (p processor) process(input []byte) (Document, error) {
 		if caseIndex == 0 {
 			firstText = in.Text
 			firstElements = in.Elements
+		} else if textIndex != len(labels) || elementIndex != len(elementLabels) {
+			return in, fmt.Errorf("internal: viewing-case traversal shape changed: text %d/%d, elements %d/%d", textIndex, len(labels), elementIndex, len(elementLabels))
 		}
 		if matches.exhausted && caseIndex+1 < len(widths) {
 			// All later cases would receive unresolved styles. Mark their
@@ -702,4 +724,12 @@ func (p processor) process(input []byte) (Document, error) {
 	}
 	in.Usage.ExpressionWorkExhausted = budget.exhausted
 	return in, nil
+}
+
+func mergeViewingCaseLabel(labels []uint8, index int, bit uint8) bool {
+	if index < 0 || index >= len(labels) {
+		return false
+	}
+	labels[index] |= bit
+	return true
 }

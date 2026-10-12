@@ -170,6 +170,19 @@ func TestCSSByteLimitAppliesAcrossParserInputs(t *testing.T) {
 	}
 }
 
+func TestCSSByteLimitAppliesBeforeStyleTextCollection(t *testing.T) {
+	limits := DefaultLimits()
+	limits.CSSBytes = len(`p{display:none}`)
+	source := `<style>p{display:none}</style><style>` + strings.Repeat("x", limits.CSSBytes+1) + `</style><p>T</p>`
+	document, err := (processor{Limits: limits}).process([]byte(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findText(t, document, "T").Label; got != "unknown" {
+		t.Fatalf("label = %q, want unknown", got)
+	}
+}
+
 func TestOversizedCSSMakesVisibilityUnknown(t *testing.T) {
 	limits := DefaultLimits()
 	limits.CSSConstructBytes = 32
@@ -332,6 +345,50 @@ func TestCascade(t *testing.T) {
 		})
 	}
 }
+
+func TestAllShorthandIsStoredOnceAndChargedForEveryProperty(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	inline := s.declarations("all", "revert")
+	if len(inline) != 1 || inline[0].prop != allShorthandProperty {
+		t.Fatalf("all shorthand declarations = %+v", inline)
+	}
+
+	wantWork := elementTraversalWork + int64(declarationProperties)*declarationApplyWeight
+	matches := matchBudget{limit: wantWork}
+	expressions := expressionBudget{remaining: s.limits.ExpressionWork}
+	style, _, _, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, inline, 1024, false, selectorMatchContext{}, &matches, &expressions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matches.exhausted || matches.used != wantWork {
+		t.Fatalf("all shorthand work = %+v, want %d", matches, wantWork)
+	}
+	if style[display].Known {
+		t.Fatalf("all shorthand display = %+v, want unresolved", style[display])
+	}
+
+	matches = matchBudget{limit: wantWork - 1}
+	expressions = expressionBudget{remaining: s.limits.ExpressionWork}
+	if _, _, _, _, err := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initial(), initial(), nil, inline, 1024, false, selectorMatchContext{}, &matches, &expressions); err != nil {
+		t.Fatal(err)
+	}
+	if !matches.exhausted {
+		t.Fatal("all shorthand partially applied after its complete work reservation failed")
+	}
+}
+
+func TestRepeatedAllShorthandsDoNotAmplifyStoredDeclarations(t *testing.T) {
+	const declarations = 1_000
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS("p{"+strings.Repeat("all:x;", declarations)+"}", false)
+	if s.cascadeIncomplete || s.workIncomplete {
+		t.Fatalf("ordinary-size stylesheet was abandoned: %+v", s)
+	}
+	if len(s.rules) != 1 || len(s.rules[0].decls) != declarations {
+		t.Fatalf("stored declarations = %d, want %d", len(s.rules[0].decls), declarations)
+	}
+}
+
 func TestInlineDeclarationsDecodeCSSIdentifierEscapes(t *testing.T) {
 	for _, style := range []string{
 		`displa\79 :none`,
@@ -570,6 +627,19 @@ func TestConditionsAndRecovery(t *testing.T) {
 				t.Fatalf("%s want %s %+v", got, c.want, in)
 			}
 		})
+	}
+}
+
+func TestViewingCaseLabelMergeRejectsShapeMismatch(t *testing.T) {
+	labels := []uint8{labelBit("visible")}
+	if !mergeViewingCaseLabel(labels, 0, labelBit("unknown")) {
+		t.Fatal("valid viewing-case label was rejected")
+	}
+	if labels[0] != labelBit("visible")|labelBit("unknown") {
+		t.Fatalf("merged label bits = %b", labels[0])
+	}
+	if mergeViewingCaseLabel(labels, -1, labelBit("unknown")) || mergeViewingCaseLabel(labels, len(labels), labelBit("unknown")) {
+		t.Fatal("out-of-range viewing-case label was accepted")
 	}
 }
 
@@ -888,6 +958,20 @@ func TestDeclarationValuesShareWorkBudget(t *testing.T) {
 	}
 }
 
+func TestSelectorPlanningSharesWorkBudget(t *testing.T) {
+	selector := strings.Repeat(".a", 20)
+	limits := DefaultLimits()
+	limits.MatchWork = int64(len(selector))
+	s := sheet{limits: limits}
+	s.parseCSS(selector+`{display:none}`, false)
+	if !s.workIncomplete {
+		t.Fatal("selector planning did not exhaust the shared work budget")
+	}
+	if s.planCount != 0 || len(s.rules) != 0 {
+		t.Fatalf("selector was planned after budget exhaustion: plans=%d rules=%d", s.planCount, len(s.rules))
+	}
+}
+
 func TestSiblingSelectorWorkIsWeighted(t *testing.T) {
 	const nodes = 100
 	const limit = int64(1_000_000)
@@ -908,6 +992,16 @@ func TestSiblingSelectorWorkIsWeighted(t *testing.T) {
 	plan = planSelectorList("a ~ b ~ p", &sequence)[0]
 	if bound, additive := plannedSelectorCost(plan.complexity, selectorAttributeProfile{}, 1, nodes, limit), selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, 1, nodes, limit); bound <= additive {
 		t.Fatalf("nested sibling bound %d did not exceed additive cost %d", bound, additive)
+	}
+
+	maxInt := int(^uint(0) >> 1)
+	sequence = 0
+	plan = planSelectorList("q ~ p", &sequence)[0]
+	if got := selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, 1, maxInt, limit); got != limit+1 {
+		t.Fatalf("overflowing execution cost = %d, want %d", got, limit+1)
+	}
+	if got := plannedSelectorCost(plan.complexity, selectorAttributeProfile{}, 1, maxInt, limit); got != limit+1 {
+		t.Fatalf("overflowing planned cost = %d, want %d", got, limit+1)
 	}
 }
 
@@ -979,6 +1073,19 @@ func TestOverComplexSelectorBecomesUncertainBeforeMatching(t *testing.T) {
 	}
 	if !plan.uncertain || plan.matcher != nil || plan.scope == nil {
 		t.Fatalf("over-complex selector was not converted to uncertainty: %+v", plan)
+	}
+}
+
+func TestConservativeSelectorScopeAlwaysHasSafeFallback(t *testing.T) {
+	node := &html.Node{Type: html.ElementNode, Data: "p"}
+	for _, prefix := range []string{"", "*", "["} {
+		if matcher := compileConservativeScope(prefix); matcher == nil || !matcher.Match(node) {
+			t.Fatalf("scope %q did not use a universal fallback", prefix)
+		}
+	}
+	matcher := compileConservativeScope("div")
+	if matcher == nil || matcher.Match(node) {
+		t.Fatal("valid conservative scope lost its tag constraint")
 	}
 }
 

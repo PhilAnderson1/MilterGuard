@@ -93,9 +93,10 @@ type candidate struct {
 }
 
 type layoutCandidate struct {
-	d           *declaration
-	set, inline bool
-	spec        cascadia.Specificity
+	d               declaration
+	set, inline     bool
+	uncertainOrigin bool
+	spec            cascadia.Specificity
 }
 
 func (c candidate) beats(old candidate) bool {
@@ -203,8 +204,30 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 		// Reserve the complete declaration-list cost before changing the
 		// cascade. A failed reservation must not leave a partially applied
 		// style that appears trustworthy.
-		if len(ds) > 0 && !matches.spend(int64(len(ds))*declarationApplyWeight) {
+		applications := len(ds)
+		for i := range ds {
+			if ds[i].prop == allShorthandProperty {
+				applications += declarationProperties - 1
+			}
+		}
+		if applications > 0 && !matches.spend(int64(applications)*declarationApplyWeight) {
 			return false
+		}
+		applyProperty := func(d declaration, property int) {
+			d.prop = property
+			if property >= properties {
+				c := layoutCandidate{d: d, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
+				index := property - properties
+				if c.beats(layoutWins[index]) {
+					layoutWins[index] = c
+				}
+				return
+			}
+			d.unsupported = d.unsupported || uncertain
+			c := candidate{d: d, set: true, inline: inl, spec: spec}
+			if c.beats(wins[property]) {
+				wins[property] = c
+			}
 		}
 		for declarationIndex := range ds {
 			d := ds[declarationIndex]
@@ -228,18 +251,12 @@ func (s *sheet) elementStyle(n *html.Node, parent, root Style, parentVars *varia
 				if c.beats(vars[d.custom]) {
 					vars[d.custom] = c
 				}
-			} else if d.prop >= properties {
-				c := layoutCandidate{d: &ds[declarationIndex], set: true, inline: inl, spec: spec}
-				index := d.prop - properties
-				if c.beats(layoutWins[index]) {
-					layoutWins[index] = c
+			} else if d.prop == allShorthandProperty {
+				for property := 0; property < declarationProperties; property++ {
+					applyProperty(d, property)
 				}
 			} else {
-				d.unsupported = d.unsupported || uncertain
-				c := candidate{d: d, set: true, inline: inl, spec: spec}
-				if c.beats(wins[d.prop]) {
-					wins[d.prop] = c
-				}
+				applyProperty(d, d.prop)
 			}
 		}
 		return true

@@ -3,6 +3,7 @@ package message
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestTreeExtractorAppliesEmbeddedCSSDeclaredAfterContent(t *testing.T) {
@@ -208,6 +209,30 @@ func TestTreeExtractorBoundsConditionalCommentFragments(t *testing.T) {
 			got := htmlToText(`Before<!--[if mso]>` + test.content + `<![endif]-->After`)
 			if got.Text != "BeforeAfter" || got.VisibleText != "BeforeAfter" || len(got.Links) != 0 {
 				t.Fatalf("bounded conditional fragment leaked partial evidence: text=%q visible=%q links=%v", got.Text, got.VisibleText, got.Links)
+			}
+		})
+	}
+}
+
+func TestTreeExtractorPreservesConditionalCommentOffsetsAcrossUnicodeCaseFolding(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		prefix string
+		end    string
+	}{
+		{name: "kelvin sign", prefix: strings.Repeat("\u212a", 20), end: "<![endif]"},
+		{name: "ohm sign", prefix: strings.Repeat("\u2126", 20), end: "<![endif]"},
+		{name: "capital sharp s", prefix: strings.Repeat("\u1e9e", 20), end: "<![endif]"},
+		{name: "capital dotted i", prefix: strings.Repeat("\u0130", 20), end: "<![endif]"},
+		{name: "mixed-case marker", prefix: "", end: "<![EnDiF]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := htmlToText(`Before<!--[if mso]>` + test.prefix + `URGENT hidden offer` + test.end + `-->After`)
+			if !strings.Contains(got.Text, test.prefix+`URGENT hidden offer`) {
+				t.Fatalf("conditional content was truncated: %q", got.Text)
+			}
+			if !utf8.ValidString(got.Text) {
+				t.Fatalf("conditional content contains invalid UTF-8: %q", got.Text)
 			}
 		})
 	}

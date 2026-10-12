@@ -91,6 +91,29 @@ func TestColourThreshold(t *testing.T) {
 	near(t, *inside.inspection.colour.Distance, .00297480818, 2e-9)
 	near(t, *outside.inspection.colour.Distance, .00595183731, 2e-9)
 }
+
+func TestBasicNamedColourAliases(t *testing.T) {
+	for _, test := range []struct {
+		alias, canonical string
+	}{
+		{"grey", "gray"},
+		{"cyan", "aqua"},
+		{"magenta", "fuchsia"},
+	} {
+		t.Run(test.alias, func(t *testing.T) {
+			alias, aliasStatus := readColour(test.alias)
+			canonical, canonicalStatus := readColour(test.canonical)
+			if aliasStatus != 1 || canonicalStatus != 1 || alias != canonical {
+				t.Fatalf("%s = (%+v, %d), %s = (%+v, %d)", test.alias, alias, aliasStatus, test.canonical, canonical, canonicalStatus)
+			}
+			text := colourText(t, `<p style="color:`+test.alias+`;background:`+test.canonical+`">T</p>`)
+			if text.Label != "concealed" || !text.inspection.colour.Known {
+				t.Fatalf("matching alias colours = %+v", text)
+			}
+		})
+	}
+}
+
 func TestColourInheritanceAttributesAndCascade(t *testing.T) {
 	cases := []struct {
 		name, src, want string
@@ -350,6 +373,41 @@ func TestCompositionUncertaintyAndIndependentReasons(t *testing.T) {
 	v = colourText(t, `<p style="filter:blur(1px);filter:none;background:white;color:white">T</p>`)
 	if !v.inspection.colour.Concealed {
 		t.Fatal(v)
+	}
+}
+
+func TestVendorPrefixedConcealmentEffectsMakeVisibilityUncertain(t *testing.T) {
+	for _, effect := range []string{
+		`-webkit-mask-image:url(mask.png)`,
+		`-webkit-mask:url(mask.png)`,
+		`-webkit-transform:scale(0)`,
+		`-ms-transform:scale(0)`,
+		`-webkit-text-stroke-width:20px;-webkit-text-stroke-color:white`,
+	} {
+		t.Run(effect, func(t *testing.T) {
+			v := colourText(t, `<p style="background:red;color:white;`+effect+`">T</p>`)
+			if v.inspection.colour.Known || v.Label != "unknown" {
+				t.Fatalf("vendor effect %q remained trusted: %+v", effect, v)
+			}
+		})
+	}
+}
+
+func TestVendorPrefixedAliasesShareCanonicalCascadeSlots(t *testing.T) {
+	for _, style := range []string{
+		`-webkit-mask-image:url(mask.png);mask-image:none`,
+		`mask-image:url(mask.png);-webkit-mask-image:none`,
+		`-webkit-transform:scale(0);transform:none`,
+		`transform:scale(0);-webkit-transform:none`,
+		`-ms-transform:scale(0);transform:none`,
+		`-webkit-text-stroke:20px white;-webkit-text-stroke-width:0`,
+	} {
+		t.Run(style, func(t *testing.T) {
+			v := colourText(t, `<p style="background:red;color:white;`+style+`">T</p>`)
+			if !v.inspection.colour.Known || v.Label != "visible" {
+				t.Fatalf("vendor alias did not share canonical cascade for %q: %+v", style, v)
+			}
+		})
 	}
 }
 

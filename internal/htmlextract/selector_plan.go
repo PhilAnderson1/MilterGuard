@@ -149,7 +149,7 @@ func selectorCompoundCost(compound compoundComplexity, profile selectorAttribute
 type selectorPlan struct {
 	source      string
 	matcher     cascadia.Sel
-	scope       cascadia.Sel
+	scope       cascadia.Matcher
 	specificity cascadia.Specificity
 	complexity  selectorComplexity
 	execution   selectorComplexity
@@ -471,14 +471,15 @@ func positiveCompoundPrefix(compound string) string {
 	return strings.TrimSpace(compound)
 }
 
-func compileConservativeScope(prefix string) cascadia.Sel {
+var universalScopeMatcher cascadia.Matcher = cascadia.Selector(func(*html.Node) bool { return true })
+
+func compileConservativeScope(prefix string) cascadia.Matcher {
 	if prefix == "" || prefix == "*" {
-		group, _ := cascadia.ParseGroup("*")
-		return group[0]
+		return universalScopeMatcher
 	}
 	group, err := cascadia.ParseGroup(prefix)
 	if err != nil || len(group) != 1 {
-		group, _ = cascadia.ParseGroup("*")
+		return universalScopeMatcher
 	}
 	return group[0]
 }
@@ -555,7 +556,7 @@ func plannedSelectorCost(c selectorComplexity, profile selectorAttributeProfile,
 		case ' ':
 			factor = int64(depth + 1)
 		case '+', '~':
-			factor = mul(int64(nodes+1), siblingMatchWeight)
+			factor = siblingSelectorCost(nodes, cap)
 		}
 		cost = add(selectorCompoundCost(c.compounds[i+1], profile, limit), mul(cost, factor))
 	}
@@ -577,7 +578,7 @@ func selectorExecutionCost(c selectorComplexity, profile selectorAttributeProfil
 		case ' ':
 			extra = int64(depth + 1)
 		case '+', '~':
-			extra = int64(nodes+1) * siblingMatchWeight
+			extra = siblingSelectorCost(nodes, limit+1)
 		}
 		if extra > limit-cost {
 			return limit + 1
@@ -585,6 +586,22 @@ func selectorExecutionCost(c selectorComplexity, profile selectorAttributeProfil
 		cost += extra
 	}
 	return cost
+}
+
+func siblingSelectorCost(nodes int, cap int64) int64 {
+	if nodes < 0 || cap <= 0 {
+		return cap
+	}
+	nodeCount := int64(nodes)
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if nodeCount == maxInt64 {
+		return cap
+	}
+	nodeCount++
+	if nodeCount >= cap || nodeCount > cap/siblingMatchWeight {
+		return cap
+	}
+	return nodeCount * siblingMatchWeight
 }
 
 func selectorMatchCost(plan *selectorPlan, context selectorMatchContext, limit int64) int64 {

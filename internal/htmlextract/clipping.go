@@ -67,34 +67,36 @@ func resolveClip(p int, s string) (Value, int) {
 	}
 	return Value{Text: s}, 2
 }
-func emptyClip(st Style, n *html.Node, displayDeclared bool) (empty, known, clipPathIgnored bool) {
+func emptyClip(st Style, n *html.Node, displayDeclared bool) (empty, known, inlineClipPathUncertain bool) {
 	if n.Namespace != "" || !st[display].Known || st[display].Text == "contents" {
 		return false, false, false
 	}
-	clipPathIgnored = nonReplacedInlineBox(n, st, displayDeclared)
-	known = st[clipPath].Known || clipPathIgnored
-	if clipPathIgnored {
-		// Continue to evaluate the independent legacy clip property below.
+	inlineClipPathUncertain = st[clipPath].Text != "none" && nonReplacedInlineBox(n, st, displayDeclared)
+	known = st[clipPath].Known && !inlineClipPathUncertain
+	if inlineClipPathUncertain {
+		// The specification applies clip-path to inline boxes, but email-client
+		// implementations can differ. Do not claim either concealment or
+		// visibility; continue to evaluate the independent legacy clip property.
 	} else if st[clipPath].Known && st[clipPath].Number == 1 {
 		return true, true, false
 	}
 	pos := st[position]
 	if pos.Known && (pos.Text == "static" || pos.Text == "relative" || pos.Text == "sticky") {
-		return false, known, clipPathIgnored
+		return false, known, inlineClipPathUncertain
 	}
 	if pos.Known && (pos.Text == "absolute" || pos.Text == "fixed") {
 		if st[clip].Known && st[clip].Number == 1 {
-			return true, true, clipPathIgnored
+			return true, true, inlineClipPathUncertain
 		}
-		return false, known && st[clip].Known, clipPathIgnored
+		return false, known && st[clip].Known, inlineClipPathUncertain
 	}
-	return false, known && st[clip].Known && st[clip].Text == "auto", clipPathIgnored
+	return false, known && st[clip].Known && st[clip].Text == "auto", inlineClipPathUncertain
 }
 
-// nonReplacedInlineBox identifies the HTML boxes on which current browser
-// engines do not paint clip-path. CSS's initial display value is inline, but
-// the user-agent stylesheet gives many HTML elements a non-inline display, so
-// an undeclared value must also consider the element's normal box type.
+// nonReplacedInlineBox identifies boxes for which email-client clip-path
+// behavior cannot safely be assumed. CSS's initial display value is inline,
+// but the user-agent stylesheet gives many HTML elements a non-inline display,
+// so an undeclared value must also consider the element's normal box type.
 func nonReplacedInlineBox(n *html.Node, st Style, displayDeclared bool) bool {
 	if st[display].Text != "inline" || st[position].Text == "absolute" || st[position].Text == "fixed" || replacedHTMLElement(n.Data) {
 		return false

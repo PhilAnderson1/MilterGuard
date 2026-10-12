@@ -39,15 +39,28 @@ const (
 	overflow = properties + iota
 	width
 	height
+	maxWidth
 	maxHeight
 	left
 	top
+	right
+	bottom
 	textIndent
+	marginTop
+	marginRight
+	marginBottom
+	marginLeft
+	zoom
 	declarationProperties
 	layoutProperties = declarationProperties - properties
+	// allShorthandProperty is an internal sentinel. Keep one declaration for
+	// the source shorthand and broadcast it across the tracked properties only
+	// while applying the cascade; eagerly materialising every property permits
+	// severe memory amplification from a small stylesheet.
+	allShorthandProperty = declarationProperties
 )
 
-var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "overflow", "width", "height", "max-height", "left", "top", "text-indent"}
+var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "overflow", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
 
 type declaration struct {
 	prop          int
@@ -186,7 +199,7 @@ func (s *sheet) admitCSS(text string, inline bool) bool {
 	return true
 }
 
-func (s *sheet) chargeDeclarationWork(value string) bool {
+func (s *sheet) chargePlanningWork(value string) bool {
 	cost := int64(len(value) + 1)
 	if cost < 1 || s.planningWork > s.limits.MatchWork || cost > s.limits.MatchWork-s.planningWork {
 		s.workIncomplete = true
@@ -399,6 +412,23 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 	if !strings.HasPrefix(prop, "--") {
 		prop = strings.ToLower(prop)
 	}
+	// Some email clients implement concealment-capable properties only under
+	// historical engine prefixes. Canonicalize only explicit aliases whose
+	// behavior maps onto an existing tracked property; arbitrary prefix
+	// stripping could give unrelated vendor extensions incorrect semantics.
+	switch prop {
+	case "-webkit-mask":
+		prop = "mask"
+	case "-webkit-mask-image":
+		prop = "mask-image"
+	case "-webkit-transform", "-ms-transform":
+		prop = "transform"
+	case "-webkit-text-stroke-width":
+		// Stroke colour cannot affect rendering while the width is zero. A
+		// non-zero or unresolved width makes the existing stroke-effect slot
+		// uncertain, including when a separate stroke colour is also present.
+		prop = "-webkit-text-stroke"
+	}
 	parsed := parseDeclarationTokens(tokens, status, fallback)
 	value := parsed.text
 	imp := parsed.important
@@ -416,6 +446,24 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 	s.order++
 	if custom {
 		return []declaration{prepared(declaration{prop: -1, custom: prop, value: value, important: imp, order: s.order})}
+	}
+	if prop == "margin" {
+		values, ok, uncertain := marginShorthandValues(value)
+		if !ok {
+			return nil
+		}
+		properties := [...]int{marginTop, marginRight, marginBottom, marginLeft}
+		out := make([]declaration, 0, len(properties))
+		for i, property := range properties {
+			componentTokens, componentStatus := lexValue(values[i])
+			d := declaration{
+				prop: property, value: values[i], important: imp, order: s.order,
+				unsupported: uncertain || parsed.status == 2 || parsed.unsafeIdentifier,
+				valueTokens: componentTokens, valueStatus: componentStatus, tokensReady: true,
+			}
+			out = append(out, prepareDeclaration(d))
+		}
+		return out
 	}
 	// None of the tracked property grammars accepts an arbitrary identifier.
 	// If decoding it would change its token type or boundaries, it cannot be a
@@ -457,9 +505,7 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 	case "font":
 		affected = []int{fontSize}
 	case "all":
-		for i := 0; i < declarationProperties; i++ {
-			affected = append(affected, i)
-		}
+		return []declaration{prepared(declaration{prop: allShorthandProperty, value: value, important: imp, order: s.order, unsupported: true})}
 	}
 	if len(affected) > 0 {
 		out := make([]declaration, 0, len(affected))
@@ -469,6 +515,44 @@ func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status 
 		return out
 	}
 	return nil
+}
+
+func marginShorthandValues(value string) ([4]string, bool, bool) {
+	var out [4]string
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return out, false, false
+	}
+	// Functions can contain whitespace and expand to multiple components via
+	// variables. Preserve their cascade effect conservatively rather than
+	// incorrectly splitting their argument text.
+	if strings.Contains(value, "(") {
+		for i := range out {
+			out[i] = value
+		}
+		return out, true, true
+	}
+	fields := strings.Fields(value)
+	if len(fields) < 1 || len(fields) > 4 {
+		return out, false, false
+	}
+	switch len(fields) {
+	case 1:
+		out = [4]string{fields[0], fields[0], fields[0], fields[0]}
+	case 2:
+		out = [4]string{fields[0], fields[1], fields[0], fields[1]}
+	case 3:
+		out = [4]string{fields[0], fields[1], fields[2], fields[1]}
+	case 4:
+		copy(out[:], fields)
+	}
+	for i, component := range out {
+		property := [...]int{marginTop, marginRight, marginBottom, marginLeft}[i]
+		if _, status := resolveLayoutProperty(property, component); status == 0 {
+			return [4]string{}, false, false
+		}
+	}
+	return out, true, false
 }
 
 // parseCSS consumes the syntax library's recoverable stream. Unknown
@@ -552,6 +636,9 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 				s.abandonCascade()
 				return out
 			}
+			if !s.chargePlanningWork(selector) {
+				return out
+			}
 			plans := planSelectorList(selector, &s.planCount)
 			if len(plans) == 0 {
 				continue
@@ -582,7 +669,7 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			// with an escaped whitespace character. Preserve the raw token data
 			// so it cannot be mistaken for insignificant surrounding space.
 			vals := rawTokenString(values)
-			if !s.chargeDeclarationWork(vals) {
+			if !s.chargePlanningWork(vals) {
 				return out
 			}
 			valueTokens, valueStatus := ownedValueTokens(values)

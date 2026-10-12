@@ -302,33 +302,62 @@ func resolveLayoutProperty(property int, value string) (Value, int) {
 		switch property {
 		case overflow:
 			value = "visible"
-		case width, height, left, top:
+		case width, height, left, top, right, bottom:
 			value = "auto"
-		case maxHeight:
+		case maxWidth, maxHeight:
 			value = "none"
 		case textIndent:
 			value = "0px"
+		case marginTop, marginRight, marginBottom, marginLeft:
+			value = "0px"
+		case zoom:
+			value = "1"
 		}
 	}
-	if property == overflow {
-		if value == "visible" || value == "hidden" || value == "clip" || value == "scroll" || value == "auto" {
-			return Value{Text: value, Known: true}, 1
+	if property == zoom {
+		if value == "normal" {
+			return Value{Text: "1", Number: 1, Known: true}, 1
 		}
-		return Value{Text: value}, 2
+		scale := 1.0
+		numberText := value
+		if strings.HasSuffix(numberText, "%") {
+			scale = .01
+			numberText = strings.TrimSuffix(numberText, "%")
+		}
+		n, ok := number(numberText)
+		if !ok || n < 0 {
+			return Value{}, 0
+		}
+		n *= scale
+		return Value{Text: value, Number: n, Known: true}, 1
+	}
+	if property == overflow {
+		parts := strings.Fields(value)
+		if len(parts) < 1 || len(parts) > 2 {
+			return Value{}, 0
+		}
+		for _, part := range parts {
+			if part != "visible" && part != "hidden" && part != "clip" && part != "scroll" && part != "auto" {
+				return Value{}, 0
+			}
+		}
+		return Value{Text: strings.Join(parts, " "), Known: true}, 1
 	}
 	return resolveLayoutLength(property, value)
 }
 
 func resolveLayoutLength(property int, value string) (Value, int) {
-	if (property == width || property == height || property == left || property == top) && value == "auto" {
+	if (property == width || property == height || property == left || property == top || property == right || property == bottom ||
+		property == marginTop || property == marginRight || property == marginBottom || property == marginLeft) && value == "auto" {
 		return Value{Text: value, Known: true}, 1
 	}
-	if property == maxHeight && value == "none" {
+	if (property == maxWidth || property == maxHeight) && value == "none" {
 		return Value{Text: value, Known: true}, 1
 	}
 	unit := ""
 	numberText := value
-	for _, suffix := range []string{"px", "%"} {
+	// Longest suffixes must be checked first (for example rem before em).
+	for _, suffix := range []string{"vmin", "vmax", "svw", "svh", "lvw", "lvh", "dvw", "dvh", "rlh", "rcap", "ric", "rex", "rch", "rem", "px", "pt", "pc", "cm", "mm", "in", "ex", "ch", "lh", "cap", "ic", "vw", "vh", "vi", "vb", "em", "q", "%"} {
 		if strings.HasSuffix(numberText, suffix) {
 			unit = suffix
 			numberText = strings.TrimSuffix(numberText, suffix)
@@ -337,20 +366,47 @@ func resolveLayoutLength(property int, value string) (Value, int) {
 	}
 	n, ok := number(numberText)
 	if !ok {
-		return Value{Text: value}, 2
-	}
-	if property != left && property != top && property != textIndent && n < 0 {
+		// A syntactically valid number can overflow float64. It remains a valid
+		// contextual length for visibility purposes rather than becoming an
+		// invalid declaration that silently restores trusted visibility.
+		if unit != "" && validCSSNumber(numberText) {
+			if !layoutPropertyAllowsNegative(property) && strings.HasPrefix(numberText, "-") {
+				return Value{}, 0
+			}
+			saturated := math.MaxFloat64
+			if strings.HasPrefix(numberText, "-") {
+				saturated = -saturated
+			}
+			return Value{Text: value, Number: saturated}, 2
+		}
 		return Value{}, 0
 	}
-	// Unitless zero and zero percentages are independent of layout. Non-zero
-	// percentages and other units require dimensions or font metrics.
-	if unit == "%" && n != 0 || unit == "" && n != 0 {
-		return Value{Text: value}, 2
+	if !layoutPropertyAllowsNegative(property) && n < 0 {
+		return Value{}, 0
+	}
+	// Unitless zero and zero in any length unit are independent of layout.
+	// Literal pixel lengths are also directly comparable. Other non-zero
+	// lengths require dimensions or font metrics, but retain their numeric
+	// component so the layout detector can recognize extreme negative values.
+	if unit == "" && n != 0 {
+		return Value{}, 0
+	}
+	if n != 0 && unit != "px" {
+		return Value{Text: value, Number: n}, 2
 	}
 	return Value{Text: value, Number: n, Known: true}, 1
 }
 
-var named = map[string]string{"black": "#000000", "silver": "#c0c0c0", "gray": "#808080", "white": "#ffffff", "maroon": "#800000", "red": "#ff0000", "purple": "#800080", "fuchsia": "#ff00ff", "green": "#008000", "lime": "#00ff00", "olive": "#808000", "yellow": "#ffff00", "navy": "#000080", "blue": "#0000ff", "teal": "#008080", "aqua": "#00ffff", "orange": "#ffa500", "rebeccapurple": "#663399"}
+func layoutPropertyAllowsNegative(property int) bool {
+	switch property {
+	case left, top, right, bottom, textIndent, marginTop, marginRight, marginBottom, marginLeft:
+		return true
+	default:
+		return false
+	}
+}
+
+var named = map[string]string{"black": "#000000", "silver": "#c0c0c0", "gray": "#808080", "grey": "#808080", "white": "#ffffff", "maroon": "#800000", "red": "#ff0000", "purple": "#800080", "fuchsia": "#ff00ff", "magenta": "#ff00ff", "green": "#008000", "lime": "#00ff00", "olive": "#808000", "yellow": "#ffff00", "navy": "#000080", "blue": "#0000ff", "teal": "#008080", "aqua": "#00ffff", "cyan": "#00ffff", "orange": "#ffa500", "rebeccapurple": "#663399"}
 
 func readColour(s string) (RGBA, int) {
 	if s == "transparent" {
