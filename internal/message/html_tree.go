@@ -222,12 +222,12 @@ func extractTreeHTML(source string) extractedContent {
 
 func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget *extractionBudget) extractedContent {
 	inspection, err := htmlextract.Analyze([]byte(source), limits)
+	budget.consumeHTML(inspection.Usage)
 	if err != nil {
 		// A bounded lexical fallback retains evidence when tree/style processing
 		// cannot complete. It is explicitly reported as incomplete extraction.
 		return extractBoundedHTMLFallback(source)
 	}
-	budget.consumeHTML(inspection.Usage)
 	e := htmlExtraction{inspection: inspection, states: make(map[*xhtml.Node]*htmlextract.Text, len(inspection.Text)), elements: make(map[*xhtml.Node]*htmlextract.Element, len(inspection.Elements))}
 	for i := range inspection.Text {
 		state := &inspection.Text[i]

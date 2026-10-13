@@ -202,6 +202,28 @@ func TestCSSConstructTokenLimitPrecedesFullParser(t *testing.T) {
 	}
 }
 
+func TestCSSConstructPreflightMirrorsVendorPrefixedAtRules(t *testing.T) {
+	limits := DefaultLimits()
+	limits.CSSConstructBytes = 32
+	for _, atRule := range []string{"@-x-media screen", "@-x-supports (display:block)", "@-moz-document url-prefix()", "@-webkit-keyframes pulse"} {
+		t.Run(atRule, func(t *testing.T) {
+			source := atRule + `{` + strings.Repeat(`p{color:red}`, 10) + `}`
+			if len(source) <= limits.CSSConstructBytes {
+				t.Fatalf("test source is only %d bytes", len(source))
+			}
+			if !boundedCSSConstructs(source, false, limits.CSSConstructBytes, limits.CSSConstructTokens) {
+				t.Fatal("bounded nested rules were treated as one construct")
+			}
+		})
+	}
+}
+
+func TestCSSConstructPreflightDoesNotPromoteUnknownVendorAtRule(t *testing.T) {
+	if got := atRuleContext("@-x-widget"); got != cssDeclarationList {
+		t.Fatalf("unknown vendor at-rule context = %v, want declaration list", got)
+	}
+}
+
 func TestCSSByteLimitAppliesAcrossParserInputs(t *testing.T) {
 	limits := DefaultLimits()
 	limits.CSSBytes = len(`p{display:none}`) + len(`div{display:none}`)
@@ -255,10 +277,54 @@ func TestAnalyzeDoesNotPreallocateCallerDepth(t *testing.T) {
 	}
 }
 
+func TestTreeDepthAllowsParserImpliedAncestors(t *testing.T) {
+	limits := DefaultLimits()
+	boundary := strings.Repeat(`<div>`, limits.Depth) + `T`
+	document, err := Analyze([]byte(boundary), limits)
+	if err != nil {
+		t.Fatalf("boundary fragment rejected: %v", err)
+	}
+	if document.Usage.Depth <= limits.Depth || document.Usage.Depth > limits.Depth+impliedTreeDepthMargin {
+		t.Fatalf("boundary fragment depth = %d, want parser margin above %d", document.Usage.Depth, limits.Depth)
+	}
+
+	withTableWrapper := strings.Repeat(`<div>`, limits.Depth-3) + `<table><tr><td>T`
+	if document, err = Analyze([]byte(withTableWrapper), limits); err != nil {
+		t.Fatalf("boundary table fragment rejected: %v", err)
+	}
+	if document.Usage.Depth <= limits.Depth || document.Usage.Depth > limits.Depth+impliedTreeDepthMargin {
+		t.Fatalf("boundary table depth = %d, want parser margin above %d", document.Usage.Depth, limits.Depth)
+	}
+
+	if _, err = Analyze([]byte(strings.Repeat(`<div>`, limits.Depth+1)), limits); err == nil || !strings.Contains(err.Error(), "lexical depth") {
+		t.Fatalf("explicit over-limit nesting error = %v, want lexical-depth rejection", err)
+	}
+}
+
 func TestOnlyGeneratedContentElementsAreRetained(t *testing.T) {
 	document := inspectHTML(t, `<div><p>T</p><img src="x"><input type="button" value="Go"><span>U</span></div>`)
 	if len(document.Elements) != 2 || document.Elements[0].Node.Data != "img" || document.Elements[1].Node.Data != "input" {
 		t.Fatalf("retained elements = %+v", document.Elements)
+	}
+}
+
+func TestInertImageLikeElementsAreNotRetained(t *testing.T) {
+	source := `<body>` +
+		`<img id="visible-image" src="visible"><input id="visible-input" type="button" value="Go">` +
+		`<template><img id="template-image"><input id="template-input"></template>` +
+		`<iframe><img id="iframe-image"><input id="iframe-input"></iframe>` +
+		`<noembed><img id="noembed-image"><input id="noembed-input"></noembed>` +
+		`<noframes><img id="noframes-image"><input id="noframes-input"></noframes>` +
+		`<object><img id="object-image"><input id="object-input"></object>`
+	document := inspectHTML(t, source)
+	if len(document.Elements) != 2 {
+		t.Fatalf("retained elements = %d, want only two active elements: %+v", len(document.Elements), document.Elements)
+	}
+	if got := attr(document.Elements[0].Node, "id"); got != "visible-image" {
+		t.Fatalf("first retained element = %q, want visible-image", got)
+	}
+	if got := attr(document.Elements[1].Node, "id"); got != "visible-input" {
+		t.Fatalf("second retained element = %q, want visible-input", got)
 	}
 }
 
@@ -830,6 +896,27 @@ func TestLinkedAndImportedStylesheets(t *testing.T) {
 	}
 }
 
+func TestStyleElementRequiresCSSMIMEType(t *testing.T) {
+	for _, test := range []struct {
+		name, typ, want string
+	}{
+		{"absent", "", "concealed"},
+		{"empty", ` type=""`, "concealed"},
+		{"CSS type", ` type="text/css"`, "concealed"},
+		{"mixed-case CSS type", ` type="Text/CSS"`, "concealed"},
+		{"CSS type parameters", ` type="text/css; charset=utf-8"`, "concealed"},
+		{"non-CSS type", ` type="text/plain"`, "visible"},
+		{"malformed type", ` type="text/css; charset"`, "visible"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, `<style`+test.typ+`>p{display:none}</style><p>T</p>`)
+			if got := findText(t, document, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestUnrelatedUnsupportedCSSDoesNotMakeDocumentUncertain(t *testing.T) {
 	for _, src := range []string{
 		`<link rel="stylesheet" href="https://example.test/email.css"><p>T</p>`,
@@ -1113,6 +1200,20 @@ func TestCSSLimitAbandonmentPreservesResourceUsage(t *testing.T) {
 	}
 }
 
+func TestFailedAnalysisReturnsConsumedResourceUsage(t *testing.T) {
+	source := `<style>p{display:none}</style>` + strings.Repeat(`<table><td>`, DefaultLimits().Depth/2) + `T`
+	document, err := Analyze([]byte(source), DefaultLimits())
+	if err == nil || !strings.Contains(err.Error(), "tree depth") {
+		t.Fatalf("Analyze error = %v, want tree-depth rejection", err)
+	}
+	if document.Root != nil || len(document.Text) != 0 || len(document.Elements) != 0 {
+		t.Fatalf("failed analysis exposed partial document content: %+v", document)
+	}
+	if document.Usage.InputBytes != len(source) || document.Usage.MatchWork == 0 || document.Usage.Rules != 1 || document.Usage.Selectors != 1 {
+		t.Fatalf("failed analysis discarded resource usage: %+v", document.Usage)
+	}
+}
+
 func TestCSSAbandonmentReleasesPreparedElementMetadata(t *testing.T) {
 	limits := DefaultLimits()
 	limits.Rules = 1
@@ -1225,6 +1326,35 @@ func TestAttributeAwareSelectorBoundRejectsExpensiveBacktracking(t *testing.T) {
 	context := selectorMatchContext{current: profile, path: profile, document: profile, depth: 104, nodes: 108}
 	if cost := selectorMatchCost(plan, context, limits.MatchWork); cost <= limits.MatchWork {
 		t.Fatalf("attribute-heavy selector match cost = %d, want over %d", cost, limits.MatchWork)
+	}
+}
+
+func TestSelectorAttributeCountWorkRoundsUp(t *testing.T) {
+	for _, test := range []struct {
+		attributes int
+		want       int64
+	}{
+		{attributes: 0, want: 0},
+		{attributes: 1, want: 1},
+		{attributes: 8, want: 1},
+		{attributes: 9, want: 2},
+		{attributes: 49_000, want: 6_125},
+	} {
+		if got := selectorAttributeCountWork(test.attributes); got != test.want {
+			t.Errorf("selectorAttributeCountWork(%d) = %d, want %d", test.attributes, got, test.want)
+		}
+	}
+}
+
+func TestSelectorAttributeProfileChargesTinyAttributes(t *testing.T) {
+	node := &html.Node{Type: html.ElementNode, Data: "p"}
+	for i := range 9 {
+		node.Attr = append(node.Attr, html.Attribute{Key: string(rune('a' + i))})
+	}
+	var profile selectorAttributeProfile
+	profile.observe(node)
+	if profile.attributes != 2 {
+		t.Fatalf("tiny attribute work = %d, want 2", profile.attributes)
 	}
 }
 
@@ -1751,6 +1881,29 @@ func BenchmarkSiblingSelectorPhases(b *testing.B) {
 			}
 		}
 	})
+}
+
+func BenchmarkDeepMediaRuleStorage(b *testing.B) {
+	var source strings.Builder
+	for range 127 {
+		source.WriteString(`@media all{`)
+	}
+	for range 9_000 {
+		source.WriteString(`p{display:none}`)
+	}
+	for range 127 {
+		source.WriteByte('}')
+	}
+	input := []byte(`<style>` + source.String() + `</style><p>T</p>`)
+	limits := DefaultLimits()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(input)))
+	b.ResetTimer()
+	for range b.N {
+		if _, err := Analyze(input, limits); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 func TestReferenceRegressions(t *testing.T) {

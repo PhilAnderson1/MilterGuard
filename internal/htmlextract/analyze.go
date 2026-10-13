@@ -140,7 +140,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					f.alpha *= a.Number
 					f.alphaKnown = f.alphaKnown && a.Known
 				}
-				if n.Data == "img" || n.Data == "input" {
+				if f.scope == scopeActive && (n.Data == "img" || n.Data == "input") {
 					decision := decideVisibility(style, f.presentationState, nil)
 					if first {
 						r.results.elementLabels = append(r.results.elementLabels, decision.label)
@@ -196,19 +196,16 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 func (p processor) process(input []byte) (Document, error) {
 	document, err := p.parseDocument(input)
 	if err != nil {
-		return Document{}, err
+		return Document{
+			Usage:                parsedResourceUsage(len(input), &document),
+			UnresolvedStylesheet: document.styles.unresolvedStylesheet,
+		}, err
 	}
 	root := document.root
 	s := &document.styles
 	in := Document{
-		Root: root,
-		Usage: ResourceUsage{
-			InputBytes: len(input), Nodes: max(document.nodeCount, document.lexical.nodes),
-			TextNodes:  max(document.textCount, document.lexical.textNodes),
-			Attributes: max(document.attributeCount, document.lexical.attributes),
-			Depth:      max(document.treeDepth, document.lexical.depth), CSSDepth: s.conditionDepth,
-			Rules: s.rulesSeen, Selectors: s.selectors, CSSLimitExceeded: s.cascadeIncomplete,
-		},
+		Root:                 root,
+		Usage:                parsedResourceUsage(len(input), &document),
 		UnresolvedStylesheet: s.unresolvedStylesheet,
 	}
 	s.buildSelectorIndex(document.treeDepth, document.nodeCount)
@@ -239,6 +236,7 @@ func (p processor) process(input []byte) (Document, error) {
 	}
 	for caseIndex, width := range widths {
 		if err := runner.run(width, fallback, caseIndex == 0); err != nil {
+			recordEvaluationUsage(&in.Usage, &matches, &budget, exprLimit, s)
 			return in, err
 		}
 		if matches.exhausted && caseIndex+1 < len(widths) {
@@ -269,14 +267,36 @@ func (p processor) process(input []byte) (Document, error) {
 		}
 	}
 	in.Elements = results.elements
-	in.Usage.MatchWork = matches.used
-	in.Usage.MatchWorkExhausted = matches.exhausted || s.workIncomplete
-	in.Usage.ExpressionWork = exprLimit - budget.remaining
-	if in.Usage.ExpressionWork > exprLimit {
-		in.Usage.ExpressionWork = exprLimit
-	}
-	in.Usage.ExpressionWorkExhausted = budget.exhausted
+	recordEvaluationUsage(&in.Usage, &matches, &budget, exprLimit, s)
 	return in, nil
+}
+
+func parsedResourceUsage(inputBytes int, document *parsedDocument) ResourceUsage {
+	s := &document.styles
+	return ResourceUsage{
+		InputBytes: inputBytes,
+		Nodes:      max(document.nodeCount, document.lexical.nodes),
+		TextNodes:  max(document.textCount, document.lexical.textNodes),
+		Attributes: max(document.attributeCount, document.lexical.attributes),
+		Depth:      max(document.treeDepth, document.lexical.depth),
+		CSSDepth:   s.conditionDepth,
+		Rules:      s.rulesSeen,
+		Selectors:  s.selectors,
+		MatchWork:  s.planningWork,
+
+		CSSLimitExceeded:   s.cascadeIncomplete,
+		MatchWorkExhausted: s.workIncomplete,
+	}
+}
+
+func recordEvaluationUsage(usage *ResourceUsage, matches *matchBudget, expressions *expressionBudget, expressionLimit int64, styles *sheet) {
+	usage.MatchWork = matches.used
+	usage.MatchWorkExhausted = matches.exhausted || styles.workIncomplete
+	usage.ExpressionWork = expressionLimit - expressions.remaining
+	if usage.ExpressionWork > expressionLimit {
+		usage.ExpressionWork = expressionLimit
+	}
+	usage.ExpressionWorkExhausted = expressions.exhausted
 }
 
 func mergeViewingCaseLabel(labels []visibilityLabel, index int, bit visibilityLabel) bool {

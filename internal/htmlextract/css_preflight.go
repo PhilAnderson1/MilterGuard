@@ -169,8 +169,17 @@ func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 }
 
 func atRuleContext(name string) cssPreflightContext {
+	// tdewolff removes a leading vendor identifier before dispatching an
+	// at-rule, so @-vendor-media and @media both contain a rule list. Mirror
+	// that structural decision here; otherwise the preflight can mistake all
+	// of the nested rules for one oversized declaration construct.
+	if strings.HasPrefix(name, "@-") {
+		if end := strings.IndexByte(name[2:], '-'); end >= 0 {
+			name = "@" + name[end+3:]
+		}
+	}
 	switch name {
-	case "@media", "@supports", "@document", "@-moz-document", "@layer", "@keyframes", "@-webkit-keyframes":
+	case "@media", "@supports", "@document", "@layer", "@keyframes":
 		return cssRuleList
 	default:
 		return cssDeclarationList

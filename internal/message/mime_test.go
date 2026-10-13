@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 )
 
 func TestPromptDecodesMultipart(t *testing.T) {
@@ -369,6 +371,24 @@ func TestHTMLWorkBudgetIsSharedAcrossParts(t *testing.T) {
 	second := htmlToTextWithBudget(`<p>second</p>`, budget)
 	if !second.HTMLFallbackUsed || !second.ExtractionIncomplete || second.VisibleText != "" {
 		t.Fatalf("second HTML part did not use incomplete visibility-neutral fallback: %+v", second)
+	}
+}
+
+func TestFailedHTMLPartConsumesSharedWorkBudget(t *testing.T) {
+	budget := newExtractionBudget()
+	before := budget.matchWorkRemaining
+	source := `<style>p{display:none}</style>` + strings.Repeat(`<table><td>`, htmlextract.DefaultLimits().Depth/2) + `fallback evidence`
+	failed := htmlToTextWithBudget(source, budget)
+	if !failed.HTMLFallbackUsed || !strings.Contains(failed.Text, "fallback evidence") {
+		t.Fatalf("failed HTML analysis did not retain fallback evidence: %+v", failed)
+	}
+	if budget.matchWorkRemaining >= before {
+		t.Fatalf("failed HTML part consumed no shared work: before=%d after=%d", before, budget.matchWorkRemaining)
+	}
+	afterFailure := budget.matchWorkRemaining
+	second := htmlToTextWithBudget(`<p>second</p>`, budget)
+	if second.HTMLFallbackUsed || budget.matchWorkRemaining >= afterFailure {
+		t.Fatalf("subsequent part did not inherit reduced budget: content=%+v before=%d after=%d", second, afterFailure, budget.matchWorkRemaining)
 	}
 }
 

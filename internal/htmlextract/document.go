@@ -118,6 +118,12 @@ type elementPreparation struct {
 	selector       selectorAttributeProfile
 }
 
+// The HTML5 tree builder can insert structural ancestors absent from a source
+// fragment, notably html/body and table wrappers such as tbody. Author-owned
+// lexical nesting remains bounded by Limits.Depth before parsing; this small
+// margin prevents those generated nodes from rejecting a boundary document.
+const impliedTreeDepthMargin = 4
+
 func (p selectorAttributeProfile) empty() bool {
 	return p.classes == 0 && p.ids == 0 && p.attributes == 0
 }
@@ -131,10 +137,10 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		return document, fmt.Errorf("limit: input bytes > %d", p.Limits.InputBytes)
 	}
 	lexical, err := measurePreflight(input, p.Limits)
+	document.lexical = lexical
 	if err != nil {
 		return document, err
 	}
-	document.lexical = lexical
 	// Email extraction does not execute scripts; parse noscript fallback content
 	// in the corresponding HTML5 tree-construction mode.
 	root, err := html.ParseWithOptions(bytes.NewReader(input), html.ParseOptionEnableScripting(false))
@@ -167,7 +173,9 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		e.entered = true
 		e.next = e.n.FirstChild
 		n := e.n
-		if e.depth > p.Limits.Depth {
+		// Use subtraction after the greater-than check rather than adding the
+		// margin to a caller-provided limit, which could overflow int.
+		if e.depth > p.Limits.Depth && e.depth-p.Limits.Depth > impliedTreeDepthMargin {
 			return document, fmt.Errorf("limit: tree depth > %d", p.Limits.Depth)
 		}
 		if e.depth > document.treeDepth {
@@ -196,7 +204,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			if href, media, applies := stylesheetLink(n); applies && (e.scope == scopeActive || e.scope == scopeHead) {
 				document.styles.loadStylesheetReference(href, media)
 			}
-			if n.Data == "style" && (e.scope == scopeActive || e.scope == scopeHead) {
+			if n.Data == "style" && cssTypeAttributeApplies(n) && (e.scope == scopeActive || e.scope == scopeHead) {
 				styles := &document.styles
 				if !styles.cascadeIncomplete && !styles.workIncomplete {
 					remaining := styles.limits.CSSBytes - styles.cssBytes
@@ -217,7 +225,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || !prepared.selector.empty() {
 				document.elements[n] = prepared
 			}
-			if n.Data == "img" || n.Data == "input" {
+			if e.scope == scopeActive && (n.Data == "img" || n.Data == "input") {
 				document.extractableElementCount++
 			}
 		}

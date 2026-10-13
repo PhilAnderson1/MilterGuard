@@ -382,6 +382,7 @@ func evaluateColourUncharged(foreground Value, layers []paintLayer) colourResult
 	}
 	ink, ground := foreground.RGBA, RGBA{}
 	uncertainEnhancement := false
+	unresolvedGroundImage := false
 	for i := len(layers) - 1; i >= 0; i-- {
 		p := layers[i]
 		if !p.compositionKnown {
@@ -394,12 +395,12 @@ func evaluateColourUncharged(foreground Value, layers []paintLayer) colourResult
 			return colourResult{uncertainty: "unresolved group opacity"}
 		}
 		// Resolve the solid fallback independently from an image layer. Images
-		// and gradients are not fetched or sampled, but they do not make clearly
-		// contrasting fallback text categorically uncertain. They remain
-		// relevant when the fallback would otherwise prove concealment.
+		// and gradients are not fetched or sampled. If one contributes beneath
+		// the text, the fallback colour cannot establish either visibility or
+		// concealment because the image paints over it.
 		if (!p.backgroundKnown || !p.imageKnown) && (ink.A < 1 || ground.A < 1) {
 			if p.backgroundKnown && !p.imageKnown {
-				uncertainEnhancement = true
+				unresolvedGroundImage = true
 			} else {
 				return colourResult{uncertainty: "unresolved background or image"}
 			}
@@ -416,6 +417,9 @@ func evaluateColourUncharged(foreground Value, layers []paintLayer) colourResult
 	ink = over(ink, RGBA{1, 1, 1, 1})
 	ground = over(ground, RGBA{1, 1, 1, 1})
 	distance := labDistance(oklab(ink), oklab(ground))
+	if unresolvedGroundImage {
+		return colourResult{uncertainty: "unsupported background image"}
+	}
 	if uncertainEnhancement && colourConcealed(distance) {
 		return colourResult{uncertainty: "unsupported image or composition effect"}
 	}

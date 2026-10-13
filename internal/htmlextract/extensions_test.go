@@ -74,7 +74,7 @@ func TestViewingCasesHardCap(t *testing.T) {
 }
 
 func TestMediaStateWorkAndPlanningCache(t *testing.T) {
-	dense := rule{conditions: []mediaCondition{{
+	dense := rule{conditions: &conditionFrame{condition: mediaCondition{
 		{bounds: []widthBound{{}, {}, {}}},
 		{bounds: []widthBound{{}, {}}},
 	}}}
@@ -104,6 +104,23 @@ func TestMediaStateWorkAndPlanningCache(t *testing.T) {
 	enough := matchBudget{limit: cost}
 	if _, complete := s.mediaStates(1024, true, &enough); !complete || enough.used != cost || enough.exhausted {
 		t.Fatalf("fallback media state was not charged exactly: %+v", enough)
+	}
+}
+
+func TestRulesShareImmutableConditionStack(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`@media all{@media screen{p{display:none}b{display:none}i{display:none}}}`, false)
+	if len(s.rules) != 3 {
+		t.Fatalf("rules = %d, want 3", len(s.rules))
+	}
+	conditions := s.rules[0].conditions
+	if conditions == nil || conditions.parent == nil {
+		t.Fatalf("nested condition chain missing: %+v", conditions)
+	}
+	for i := 1; i < len(s.rules); i++ {
+		if s.rules[i].conditions != conditions {
+			t.Fatalf("rule %d copied rather than shared its condition stack", i)
+		}
 	}
 }
 
@@ -225,17 +242,35 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 		{"one pixel clipped height", `overflow:hidden;height:1px`, "unknown"},
 		{"two-axis vertical clipping", `overflow:visible hidden;height:0`, "unknown"},
 		{"two-axis horizontal clipping", `overflow:hidden visible;width:0`, "unknown"},
+		{"horizontal longhand clipping", `overflow-x:hidden;width:0`, "unknown"},
+		{"vertical longhand clipping", `overflow-y:clip;height:0`, "unknown"},
+		{"vertical longhand after shorthand", `overflow:visible;overflow-y:hidden;height:0`, "unknown"},
+		{"important vertical longhand", `overflow-y:hidden!important;overflow:visible;height:0`, "unknown"},
+		{"important shorthand beats vertical longhand", `overflow:hidden!important;overflow-y:visible;height:0`, "unknown"},
+		{"variable vertical longhand", `--clip:hidden;overflow-y:var(--clip);height:0`, "unknown"},
+		{"calculated zero height", `overflow:hidden;height:calc(100vh - 100vh)`, "unknown"},
+		{"calculated zero width", `overflow:hidden;width:calc(1px - 1px)`, "unknown"},
+		{"minimum zero width", `overflow:hidden;width:min(0px,1px)`, "unknown"},
+		{"maximum calculated zero height", `overflow:hidden;height:max(0px,calc(1vh - 1vh))`, "unknown"},
+		{"clamped zero width", `overflow:hidden;width:clamp(0px,0vw,1px)`, "unknown"},
 		{"absolute left", `position:absolute;left:-1000px`, "unknown"},
 		{"fixed top", `position:fixed;top:-9999px`, "unknown"},
 		{"absolute relative-unit left", `position:absolute;left:-3000em`, "unknown"},
 		{"overflowing absolute left", `position:absolute;left:-1e999px`, "unknown"},
 		{"fixed bottom", `position:fixed;bottom:-3000px`, "unknown"},
 		{"absolute right", `position:absolute;right:-3000px`, "unknown"},
+		{"positive absolute left", `position:absolute;left:100000px`, "unknown"},
+		{"positive absolute right", `position:absolute;right:100000px`, "unknown"},
+		{"positive fixed top", `position:fixed;top:5000px`, "unknown"},
+		{"positive relative-unit left", `position:absolute;left:100em`, "unknown"},
 		{"negative indent", `text-indent:-1000px`, "unknown"},
+		{"positive indent", `text-indent:50000px`, "unknown"},
 		{"percentage indent", `text-indent:-500%`, "unknown"},
+		{"positive percentage indent", `text-indent:100%`, "unknown"},
 		{"overflowing indent", `text-indent:-1e999px`, "unknown"},
 		{"calculated overflowing offset", `position:absolute;left:calc(-1px * 1e400)`, "unknown"},
 		{"extreme negative margin", `margin-left:-9999px`, "unknown"},
+		{"extreme positive margin", `margin-left:100000px`, "unknown"},
 		{"extreme relative margin", `margin-top:-100vh`, "unknown"},
 		{"extreme margin shorthand", `margin:0 0 0 -9999px`, "unknown"},
 		{"unresolved margin shorthand", `margin:var(--possibly-extreme)`, "unknown"},
@@ -243,15 +278,25 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 		{"tiny zoom", `zoom:.001`, "unknown"},
 		{"tiny percentage zoom", `zoom:1%`, "unknown"},
 		{"dimension without clipping", `width:0;height:0`, "visible"},
+		{"calculated dimension without clipping", `height:calc(100vh - 100vh)`, "visible"},
+		{"minimum dimension without clipping", `width:min(0px,1px)`, "visible"},
 		{"clipping with readable dimension", `overflow:hidden;width:2px`, "visible"},
 		{"contextual subunit dimension", `overflow:hidden;height:.001%`, "visible"},
 		{"ordinary responsive maximum", `overflow:hidden;max-width:100%;height:auto`, "visible"},
 		{"wrong-axis clipping", `overflow:hidden visible;height:0`, "visible"},
+		{"wrong horizontal longhand", `overflow-x:hidden;height:0`, "visible"},
+		{"wrong vertical longhand", `overflow-y:hidden;width:0`, "visible"},
+		{"shorthand overrides horizontal longhand", `overflow-x:hidden;overflow:visible;width:0`, "visible"},
+		{"horizontal longhand overrides shorthand", `overflow:hidden;overflow-x:visible;width:0`, "visible"},
+		{"shorthand overrides vertical longhand", `overflow-y:hidden;overflow:visible;height:0`, "visible"},
 		{"invalid overflow ignored", `overflow:hidden;height:0;overflow:banana`, "unknown"},
 		{"static offset", `position:static;left:-9999px`, "visible"},
 		{"ordinary offset", `position:absolute;left:-999px`, "visible"},
+		{"ordinary positive offset", `position:absolute;left:999px`, "visible"},
 		{"ordinary relative offset", `position:absolute;left:-2em`, "visible"},
+		{"ordinary positive relative offset", `position:absolute;left:99em`, "visible"},
 		{"ordinary negative margin", `margin-left:-10px`, "visible"},
+		{"ordinary positive margin", `margin-left:999px`, "visible"},
 		{"overridden margin", `margin-left:-9999px;margin-left:0`, "visible"},
 		{"shorthand overrides margin", `margin-left:-9999px;margin:0`, "visible"},
 		{"ordinary zoom", `zoom:1`, "visible"},
@@ -468,7 +513,7 @@ func TestDeclarationValueTokensAreCached(t *testing.T) {
 	d.value = strings.Repeat("x", maxValueBytes+1)
 	budget := expressionBudget{remaining: 100}
 	scope := buildVariables(nil, map[string]variableDefinition{"--payload": {declaration: &d}}, &budget)
-	if got := scope.get("--payload"); got.status != valueResolved || got.text != "none" {
+	if got := scope.get("--payload", &budget); got.status != valueResolved || got.text != "none" {
 		t.Fatalf("cached value was not used: %+v", got)
 	}
 }
@@ -498,8 +543,30 @@ func TestExpressionBudgetStopsCachedVariableTraversal(t *testing.T) {
 	if !budget.exhausted {
 		t.Fatal("expression budget was not exhausted")
 	}
-	if got := scope.get("--payload"); got.status != valueUnsupported {
+	if got := scope.get("--payload", &budget); got.status != valueUnsupported {
 		t.Fatalf("value after budget exhaustion = %+v", got)
+	}
+}
+
+func TestVariableScopeLookupChargesEachFrame(t *testing.T) {
+	root := &variableScope{values: map[string]variableValue{"--x": {text: "none", status: valueResolved}}}
+	middle := &variableScope{parent: root}
+	leaf := &variableScope{parent: middle}
+
+	budget := expressionBudget{remaining: 3}
+	if got := leaf.get("--x", &budget); got.status != valueResolved || got.text != "none" {
+		t.Fatalf("deep lookup = %+v, want resolved none", got)
+	}
+	if budget.remaining != 0 || budget.exhausted {
+		t.Fatalf("three-frame lookup budget = %+v, want exactly consumed", budget)
+	}
+
+	budget = expressionBudget{remaining: 2}
+	if got := leaf.get("--x", &budget); got.status != valueUnsupported {
+		t.Fatalf("under-budget lookup = %+v, want unsupported", got)
+	}
+	if !budget.exhausted {
+		t.Fatal("under-budget scope traversal did not exhaust expression work")
 	}
 }
 

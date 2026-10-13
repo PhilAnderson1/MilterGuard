@@ -25,6 +25,14 @@ type mediaAlternative struct {
 }
 type mediaCondition []mediaAlternative
 
+// conditionFrame is an immutable persistent stack. Rules in the same at-rule
+// scope share the complete chain instead of copying one slice header per
+// enclosing condition into every rule.
+type conditionFrame struct {
+	condition mediaCondition
+	parent    *conditionFrame
+}
+
 const (
 	mediaNo = iota
 	mediaYes
@@ -100,7 +108,8 @@ func (c mediaCondition) state(width float64) int {
 }
 func (r rule) mediaState(width float64, fallback bool) int {
 	result := mediaYes
-	for _, c := range r.conditions {
+	for frame := r.conditions; frame != nil; frame = frame.parent {
+		c := frame.condition
 		x := c.state(width)
 		if fallback { // Only invariant, unconditional conditions can be certain.
 			variable := false
@@ -126,7 +135,8 @@ func (r rule) mediaState(width float64, fallback bool) int {
 // fixed multiplier that can underestimate a dense comma-separated query.
 func calculatedMediaStateWork(r rule, fallback bool) int64 {
 	work := int64(1)
-	for _, condition := range r.conditions {
+	for frame := r.conditions; frame != nil; frame = frame.parent {
+		condition := frame.condition
 		work++
 		for _, alternative := range condition {
 			work += 1 + int64(len(alternative.bounds))
@@ -178,7 +188,8 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 		if !charge(r.mediaStateWork(false)) {
 			return []float64{1024}, true
 		}
-		for _, c := range r.conditions {
+		for frame := r.conditions; frame != nil; frame = frame.parent {
+			c := frame.condition
 			for _, a := range c {
 				for _, b := range a.bounds {
 					if !unique[b.value] {

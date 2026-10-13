@@ -296,12 +296,12 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 	if value == "" {
 		return Value{}, valueInvalid
 	}
-	if value == "inherit" || value == "unset" || value == "revert" || value == "revert-layer" || strings.Contains(value, "var(") || strings.Contains(value, "calc(") {
+	if value == "inherit" || value == "unset" || value == "revert" || value == "revert-layer" || strings.Contains(value, "var(") || isMath(value) {
 		return Value{Text: value}, valueUnsupported
 	}
 	if value == "initial" {
 		switch property {
-		case overflow:
+		case overflowX, overflowY:
 			value = "visible"
 		case width, height, left, top, right, bottom:
 			value = "auto"
@@ -332,9 +332,9 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 		n *= scale
 		return Value{Text: value, Number: n, Known: true}, valueResolved
 	}
-	if property == overflow {
+	if property == overflowX || property == overflowY {
 		parts := strings.Fields(value)
-		if len(parts) < 1 || len(parts) > 2 {
+		if len(parts) != 1 {
 			return Value{}, valueInvalid
 		}
 		for _, part := range parts {

@@ -12,6 +12,15 @@ import (
 
 const maxImportDepth = 8
 
+func cssTypeAttributeApplies(n *html.Node) bool {
+	typ := strings.TrimSpace(attr(n, "type"))
+	if typ == "" {
+		return true
+	}
+	mediaType, _, err := mime.ParseMediaType(typ)
+	return err == nil && strings.EqualFold(mediaType, "text/css")
+}
+
 func stylesheetLink(n *html.Node) (href, media string, applies bool) {
 	if n.Namespace != "" || n.Data != "link" || hasAttr(n, "disabled") {
 		return "", "", false
@@ -25,11 +34,8 @@ func stylesheetLink(n *html.Node) (href, media string, applies bool) {
 	if !stylesheet || alternate {
 		return "", "", false
 	}
-	if typ := strings.TrimSpace(attr(n, "type")); typ != "" {
-		mediaType, _, err := mime.ParseMediaType(typ)
-		if err != nil || !strings.EqualFold(mediaType, "text/css") {
-			return "", "", false
-		}
+	if !cssTypeAttributeApplies(n) {
+		return "", "", false
 	}
 	media = attr(n, "media")
 	if !mediaCanApply(media) {

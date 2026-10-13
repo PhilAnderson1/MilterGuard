@@ -172,12 +172,23 @@ func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, con
 	}
 	value := strings.ToLower(strings.TrimSpace(v.text))
 	if d.shorthand {
-		ds := backgroundDeclarations(value, d.important, d.order)
-		for _, x := range ds {
-			if x.prop == property {
-				value = x.value
-				if x.unsupported {
-					return Value{Text: value}, valueUnsupported
+		if property == overflowX || property == overflowY {
+			values, ok, uncertain := overflowShorthandValues(value)
+			if !ok {
+				return Value{}, valueInvalid
+			}
+			value = values[property-overflowX]
+			if uncertain {
+				return Value{Text: value}, valueUnsupported
+			}
+		} else {
+			ds := backgroundDeclarations(value, d.important, d.order)
+			for _, x := range ds {
+				if x.prop == property {
+					value = x.value
+					if x.unsupported {
+						return Value{Text: value}, valueUnsupported
+					}
 				}
 			}
 		}

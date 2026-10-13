@@ -41,14 +41,17 @@ type selectorAttributeProfile struct {
 }
 
 const selectorBytesPerWorkUnit = 16
-const selectorAttributesPerWorkUnit = 16
+const selectorAttributesPerWorkUnit = 8
 
 func selectorByteWork(bytes int) int64 {
 	return int64(bytes / selectorBytesPerWorkUnit)
 }
 
 func selectorAttributeCountWork(attributes int) int64 {
-	return int64(attributes / selectorAttributesPerWorkUnit)
+	if attributes <= 0 {
+		return 0
+	}
+	return (int64(attributes) + selectorAttributesPerWorkUnit - 1) / selectorAttributesPerWorkUnit
 }
 
 func (p *selectorAttributeProfile) observe(n *html.Node) {

@@ -1,8 +1,11 @@
 package htmlextract
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
-const extremeOffscreenPixels = -1000
+const extremeOffscreenPixels = 1000
 
 // layoutVisibilityUncertain recognizes a deliberately narrow set of common
 // hiding patterns without attempting layout. These combinations are evidence
@@ -20,8 +23,8 @@ func layoutVisibilityUncertain(wins *[layoutProperties]layoutCandidate, style *S
 	// Resolve only declarations that can complete a hiding pattern. Width is
 	// extremely common in email, but is irrelevant unless overflow clips it;
 	// likewise offsets are irrelevant on a statically positioned element.
-	overflowResult := resolveLayoutCandidate(&wins[overflow-properties], context)
-	clipX, clipY := overflowClippingAxes(overflowResult)
+	clipX := overflowClips(resolveLayoutCandidate(&wins[overflowX-properties], context))
+	clipY := overflowClips(resolveLayoutCandidate(&wins[overflowY-properties], context))
 	zeroX := clipX && (zeroLayoutCandidate(resolveLayoutCandidate(&wins[width-properties], context)) ||
 		zeroLayoutCandidate(resolveLayoutCandidate(&wins[maxWidth-properties], context)))
 	zeroY := clipY && (zeroLayoutCandidate(resolveLayoutCandidate(&wins[height-properties], context)) ||
@@ -32,11 +35,11 @@ func layoutVisibilityUncertain(wins *[layoutProperties]layoutCandidate, style *S
 	extremeOffset := false
 	if positioned {
 		for _, property := range [...]int{left, top, right, bottom} {
-			extremeOffset = extremeOffset || extremeNegativeOffset(resolveLayoutCandidate(&wins[property-properties], context))
+			extremeOffset = extremeOffset || extremeOffsetMagnitude(resolveLayoutCandidate(&wins[property-properties], context))
 		}
 	}
 
-	extremeIndent := extremeNegativeOffset(resolveLayoutCandidate(&wins[textIndent-properties], context))
+	extremeIndent := extremeOffsetMagnitude(resolveLayoutCandidate(&wins[textIndent-properties], context))
 	extremeMargin := false
 	for _, property := range [...]int{marginTop, marginRight, marginBottom, marginLeft} {
 		extremeMargin = extremeMargin || extremeOrUnresolvedMargin(resolveLayoutCandidate(&wins[property-properties], context))
@@ -65,28 +68,30 @@ func resolveLayoutCandidate(candidate *layoutCandidate, context evaluationContex
 	return layoutResult{value: value, status: status, set: true}
 }
 
-func overflowClippingAxes(result layoutResult) (x, y bool) {
+func overflowClips(result layoutResult) bool {
 	if !result.set {
-		return false, false
+		return false
 	}
 	if result.status != valueResolved || !result.value.Known {
 		// An unresolved but potentially valid overflow value might select a
 		// clipping mode. It matters only when paired with a zero dimension.
-		return true, true
+		return true
 	}
-	parts := strings.Fields(result.value.Text)
-	if len(parts) == 1 {
-		parts = append(parts, parts[0])
-	}
-	if len(parts) != 2 {
-		return false, false
-	}
-	clips := func(value string) bool { return value == "hidden" || value == "clip" }
-	return clips(parts[0]), clips(parts[1])
+	return result.value.Text == "hidden" || result.value.Text == "clip"
 }
 
 func zeroLayoutCandidate(result layoutResult) bool {
-	if !result.set || result.status != valueResolved || !result.value.Known || result.value.Text == "auto" || result.value.Text == "none" {
+	if !result.set || result.status == valueInvalid || result.value.Text == "auto" || result.value.Text == "none" {
+		return false
+	}
+	// CSS math can resolve a dimension to zero using viewport, percentage or
+	// other contextual units that this extractor deliberately does not lay out.
+	// It is concealment evidence only when overflow clips the same axis; callers
+	// enforce that condition before consulting this result.
+	if result.status == valueUnsupported && isMath(result.value.Text) {
+		return true
+	}
+	if result.status != valueResolved || !result.value.Known {
 		return false
 	}
 	if result.value.Number == 0 {
@@ -98,32 +103,32 @@ func zeroLayoutCandidate(result layoutResult) bool {
 	return result.value.Number > 0 && result.value.Number <= 1 && strings.HasSuffix(result.value.Text, "px")
 }
 
-func extremeNegativeOffset(result layoutResult) bool {
+func extremeOffsetMagnitude(result layoutResult) bool {
 	if !result.set || result.status == valueInvalid {
 		return false
 	}
 	if strings.HasSuffix(result.value.Text, "px") {
-		return result.value.Number <= extremeOffscreenPixels
+		return math.Abs(result.value.Number) >= extremeOffscreenPixels
 	}
-	if result.status == valueUnsupported && strings.Contains(result.value.Text, "calc(") {
+	if result.status == valueUnsupported && isMath(result.value.Text) {
 		// Calculation evaluation for layout lengths requires unit algebra and
-		// layout context. An unresolved calculated offset can be extremely
-		// negative, so it cannot establish trusted visibility.
+		// layout context. An unresolved calculated offset can have an extreme
+		// magnitude in either direction, so it cannot establish visibility.
 		return true
 	}
-	if result.status != valueUnsupported || result.value.Number >= 0 {
+	if result.status != valueUnsupported {
 		return false
 	}
 	if strings.HasSuffix(result.value.Text, "%") {
-		return result.value.Number <= -100
+		return math.Abs(result.value.Number) >= 100
 	}
 	// Relative and physical units cannot be converted without layout context.
-	// Only very large negative magnitudes are concealment evidence.
-	return result.value.Number <= -100
+	// Only very large magnitudes are concealment evidence.
+	return math.Abs(result.value.Number) >= 100
 }
 
 func extremeOrUnresolvedMargin(result layoutResult) bool {
-	if extremeNegativeOffset(result) {
+	if extremeOffsetMagnitude(result) {
 		return true
 	}
 	// A margin function may resolve to one or more extreme negative values, but

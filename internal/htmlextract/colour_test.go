@@ -245,7 +245,9 @@ func TestBackgroundLayersAndResets(t *testing.T) {
 		{"fallback colour then image", `<p style="background:red url(x);color:red">T</p>`, false, false},
 		{"multilayer final fallback colour", `<p style="background:url(x),red;color:red">T</p>`, false, false},
 		{"gradient with fallback colour", `<p style="background:linear-gradient(blue,green) red;color:red">T</p>`, false, false},
-		{"contrasting image fallback", `<p style="background:url(x) red;color:black">T</p>`, true, false},
+		{"contrasting image fallback", `<p style="background:url(x) red;color:black">T</p>`, false, false},
+		{"uniform gradient over contrasting fallback", `<p style="background:linear-gradient(#111,#111) white;color:#111">T</p>`, false, false},
+		{"repeating gradient over contrasting fallback", `<p style="background:repeating-linear-gradient(red 0,red 1px) white;color:red">T</p>`, false, false},
 		{"invalid colour in non-final layer", `<p style="background:white;background:red,url(x);color:white">T</p>`, true, true},
 		{"image after shorthand", `<p style="background:white;background-image:url(x);color:white">T</p>`, false, false},
 		{"gradient", `<p style="background:linear-gradient(white,white);color:white">T</p>`, false, false},
@@ -413,8 +415,6 @@ func TestVendorPrefixedAliasesShareCanonicalCascadeSlots(t *testing.T) {
 
 func TestDecorativeEffectsDoNotMakeReadableTextUncertain(t *testing.T) {
 	for _, property := range []string{
-		`background:linear-gradient(to bottom,#fff,#ddd)`,
-		`background-image:url(x)`,
 		`position:absolute`,
 		`text-shadow:1px 1px 1px white`,
 	} {
@@ -423,9 +423,18 @@ func TestDecorativeEffectsDoNotMakeReadableTextUncertain(t *testing.T) {
 			t.Errorf("%s: %+v", property, v)
 		}
 	}
+	for _, property := range []string{
+		`background:linear-gradient(to bottom,#fff,#ddd)`,
+		`background-image:url(x)`,
+	} {
+		v := colourText(t, `<p style="color:black;`+property+`">T</p>`)
+		if v.inspection.colour.Known || v.Label != "unknown" {
+			t.Errorf("unresolved background %s was trusted: %+v", property, v)
+		}
+	}
 
-	// An unresolved effect still prevents a colour-based concealment claim
-	// when the solid fallback itself matches the foreground.
+	// An unresolved image also prevents a colour-based concealment claim when
+	// the solid fallback itself matches the foreground.
 	v := colourText(t, `<p style="color:white;background:white;background-image:url(x)">T</p>`)
 	if v.inspection.colour.Known || v.Label != "unknown" {
 		t.Fatal(v)

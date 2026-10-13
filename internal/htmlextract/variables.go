@@ -224,8 +224,11 @@ type variableDefinition struct {
 	uncertainOrigin bool
 }
 
-func (s *variableScope) get(name string) variableValue {
+func (s *variableScope) get(name string, budget *expressionBudget) variableValue {
 	for ; s != nil; s = s.parent {
+		if !budget.charge(1) {
+			return variableValue{status: valueUnsupported}
+		}
 		if v, ok := s.values[name]; ok {
 			return v
 		}
@@ -319,7 +322,7 @@ func buildVariables(parent *variableScope, defs map[string]variableDefinition, b
 		}
 		definition, local := defs[n]
 		if !local {
-			return parent.get(n)
+			return parent.get(n, budget)
 		}
 		d := definition.declaration
 		if depth > maxExpressionDepth {
@@ -328,7 +331,7 @@ func buildVariables(parent *variableScope, defs map[string]variableDefinition, b
 		var v variableValue
 		switch d.keyword {
 		case "inherit", "unset":
-			v = parent.get(n)
+			v = parent.get(n, budget)
 		case "initial":
 			v = variableValue{status: valueInvalid}
 		case "revert", "revert-layer":
@@ -354,7 +357,9 @@ func substitute(d *declaration, vars *variableScope, budget *expressionBudget) v
 	if !d.tokensReady || d.valueStatus != valueResolved {
 		return variableValue{status: d.valueStatus}
 	}
-	return substituteTokens(d.valueTokens, vars.get, budget, 0)
+	return substituteTokens(d.valueTokens, func(name string) variableValue {
+		return vars.get(name, budget)
+	}, budget, 0)
 }
 func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget *expressionBudget, depth int) variableValue {
 	if depth > maxExpressionDepth || !budget.charge(len(ts)) {

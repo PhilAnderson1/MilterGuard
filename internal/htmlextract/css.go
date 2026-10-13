@@ -38,7 +38,8 @@ const (
 )
 
 const (
-	overflow = properties + iota
+	overflowX = properties + iota
+	overflowY
 	width
 	height
 	maxWidth
@@ -62,7 +63,7 @@ const (
 	allShorthandProperty = declarationProperties
 )
 
-var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "overflow", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
+var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "overflow-x", "overflow-y", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
 
 // A declaration progresses through these preparation states:
 //
@@ -189,7 +190,7 @@ func prepareDeclarations(ds []declaration) []declaration {
 type rule struct {
 	plans                        []selectorPlan
 	decls                        []declaration
-	conditions                   []mediaCondition
+	conditions                   *conditionFrame
 	mediaWork, fallbackMediaWork int64
 }
 
@@ -599,7 +600,7 @@ func relevantNormalizedDeclarationProperty(prop string) bool {
 		}
 	}
 	switch prop {
-	case "margin", "background", "mask", "font", "all":
+	case "margin", "overflow", "background", "mask", "font", "all":
 		return true
 	default:
 		return false
@@ -643,6 +644,25 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 				prop: property, value: values[i], important: imp, order: s.order,
 				unsupported: uncertain || parsed.status == valueUnsupported || parsed.unsafeIdentifier,
 				valueTokens: componentTokens, valueStatus: componentStatus, tokensReady: true,
+			}
+			out = append(out, prepareDeclaration(d))
+		}
+		return out
+	}
+	if prop == "overflow" {
+		values, ok, uncertain := overflowShorthandValues(value)
+		if !ok {
+			return nil
+		}
+		properties := [...]int{overflowX, overflowY}
+		out := make([]declaration, 0, len(properties))
+		for i, property := range properties {
+			d := declaration{
+				prop: property, value: value, important: imp, order: s.order, shorthand: true,
+				unsupported: uncertain || parsed.status == valueUnsupported || parsed.unsafeIdentifier,
+			}
+			if !uncertain {
+				d.value = values[i]
 			}
 			out = append(out, prepareDeclaration(d))
 		}
@@ -700,6 +720,29 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	return nil
 }
 
+func overflowShorthandValues(value string) ([2]string, bool, bool) {
+	var out [2]string
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return out, false, false
+	}
+	// Functions can contain whitespace or substitute one or two components.
+	// Retain the complete shorthand for resolution after variable substitution.
+	if strings.Contains(value, "(") {
+		out[0], out[1] = value, value
+		return out, true, true
+	}
+	parts := strings.Fields(value)
+	if len(parts) < 1 || len(parts) > 2 {
+		return out, false, false
+	}
+	out[0], out[1] = parts[0], parts[0]
+	if len(parts) == 2 {
+		out[1] = parts[1]
+	}
+	return out, true, false
+}
+
 func marginShorthandValues(value string) ([4]string, bool, bool) {
 	var out [4]string
 	value = strings.TrimSpace(value)
@@ -749,7 +792,8 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 		return nil
 	}
 	p := css.NewParser(parse.NewInputString(text), inline)
-	var conditions []mediaCondition
+	var conditions *conditionFrame
+	conditionDepth := 0
 	defaultNamespace := false
 	current := -1
 	// CSS permits @import only before ordinary rules and block at-rules. The
@@ -781,23 +825,25 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			default:
 				cond = mediaCondition{{unknown: true}}
 			}
-			if len(conditions) >= s.limits.Depth {
+			if conditionDepth >= s.limits.Depth {
 				s.abandonCascade()
 				return out
 			}
-			conditions = append(conditions, cond)
-			if len(conditions) > s.conditionDepth {
-				s.conditionDepth = len(conditions)
+			conditions = &conditionFrame{condition: cond, parent: conditions}
+			conditionDepth++
+			if conditionDepth > s.conditionDepth {
+				s.conditionDepth = conditionDepth
 			}
 		case css.EndAtRuleGrammar:
-			if len(conditions) > 0 {
-				conditions = conditions[:len(conditions)-1]
+			if conditions != nil {
+				conditions = conditions.parent
+				conditionDepth--
 			}
 			current = -1
 		case css.AtRuleGrammar:
 			name := strings.ToLower(string(data))
 			if name == "@import" {
-				if importsAllowed && len(conditions) == 0 {
+				if importsAllowed && conditions == nil {
 					s.parseImport(values)
 				}
 				continue
@@ -805,7 +851,7 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			if name != "@charset" && name != "@layer" {
 				importsAllowed = false
 			}
-			if !inline && len(conditions) == 0 && name == "@namespace" && defaultNamespaceRule(values) {
+			if !inline && conditions == nil && name == "@namespace" && defaultNamespaceRule(values) {
 				defaultNamespace = true
 			}
 		case css.BeginRulesetGrammar:
@@ -845,7 +891,7 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 				s.abandonCascade()
 				return out
 			}
-			r := rule{plans: plans, conditions: append([]mediaCondition(nil), conditions...)}
+			r := rule{plans: plans, conditions: conditions}
 			r.prepareMediaWork()
 			s.rules = append(s.rules, r)
 			current = len(s.rules) - 1
@@ -859,7 +905,7 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 				return out
 			}
 			prop := normalizeDeclarationProperty(string(data))
-			applicable := (inline && len(conditions) == 0) || (!inline && current >= 0)
+			applicable := (inline && conditions == nil) || (!inline && current >= 0)
 			if !applicable || !relevantNormalizedDeclarationProperty(prop) {
 				continue
 			}
@@ -906,7 +952,7 @@ func (s *sheet) attachMediaCondition(firstRule int, media string) {
 	}
 	condition := parseMedia(media)
 	for i := firstRule; i < len(s.rules); i++ {
-		s.rules[i].conditions = append([]mediaCondition{condition}, s.rules[i].conditions...)
+		s.rules[i].conditions = &conditionFrame{condition: condition, parent: s.rules[i].conditions}
 		s.rules[i].prepareMediaWork()
 	}
 }
