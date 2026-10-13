@@ -35,7 +35,7 @@ DECISION
 
 Reconcile the four stages against the complete evidence, including the strongest counterevidence.
 
-Select `unwanted` only when positive evidence supports it over `legitimate`. Missing proof of a relationship or consent is insufficient. A merely possible legitimate explanation must not outweigh stronger evidence of unwanted contact. Do not speculate about domain compromise when aligned authentication passes unless the message contains independent evidence.
+Select `unwanted` only when positive evidence supports it over `legitimate`. Missing proof of a relationship or consent is insufficient. A merely possible legitimate explanation must not outweigh stronger evidence of unwanted contact.
 
 Apply the same restraint to both hypotheses: do not invent facts, relationships, authorisation or intentions to strengthen either explanation or explain away inconsistencies. Do not count repeated, correlated or derived observations as independent support. Discard reasons that depend on unsupported assumptions.
 
