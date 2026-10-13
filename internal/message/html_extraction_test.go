@@ -893,7 +893,7 @@ func TestBoundedLinksRecognizesBackslashEscapedMarkdownURL(t *testing.T) {
 
 func TestLongURLsAreRepresentedRatherThanDiscarded(t *testing.T) {
 	link := "https://tracker.example/click/" + strings.Repeat("a", 700) + "?campaign=notice&signature=END"
-	displayed := promptURL(link)
+	displayed := promptURL(link, true)
 	if utf8.RuneCountInString(displayed) > maxPromptURLChars ||
 		!strings.HasPrefix(displayed, "https://tracker.example/click/") ||
 		strings.Contains(displayed, "…") || strings.Contains(displayed, "URL-truncated") ||
@@ -902,16 +902,16 @@ func TestLongURLsAreRepresentedRatherThanDiscarded(t *testing.T) {
 	}
 
 	got := htmlToText(`<a href="` + link + `">Review notice</a>`)
-	if len(got.Links) != 1 || got.Links[0] != link {
-		t.Fatalf("full URL was not retained for deduplication: %v", got.Links)
+	if len(got.Links) != 1 || got.Links[0] != displayed {
+		t.Fatalf("compacted URL was not retained for deduplication: %v", got.Links)
 	}
-	if !strings.Contains(got.Text, markdownURL(link)) {
-		t.Fatalf("HTML extraction did not retain the complete URL: %q", got.Text)
+	if !strings.Contains(got.Text, markdownURL(displayed)) || strings.Contains(got.Text, link) {
+		t.Fatalf("HTML extraction did not render the compacted URL: %q", got.Text)
 	}
-	if links := boundedLinks([]string{link}); len(links) != 1 || links[0] != displayed {
+	if links := boundedLinks([]string{displayed}); len(links) != 1 || links[0] != displayed {
 		t.Fatalf("independent long-link evidence = %v, want %q", links, displayed)
 	}
-	if missing := boundedLinksMissingFromBody([]string{link}, got.Text); len(missing) != 0 {
+	if missing := boundedLinksMissingFromBody([]string{displayed}, got.Text); len(missing) != 0 {
 		t.Fatalf("bounded inline URL was emitted again: %v", missing)
 	}
 }
@@ -923,8 +923,50 @@ func TestPromptURLCompactionCanBeDisabled(t *testing.T) {
 	m.AddBody([]byte(`<a href="` + link + `">Review notice</a>`))
 
 	analysis := m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 2000, VisionOptions{Mode: "off"}, HTMLProcessingControl{DisableURLCompaction: true})
-	if !strings.Contains(analysis.Prompt, markdownURL(link)) || strings.Contains(analysis.Prompt, promptURL(link)) {
+	if !strings.Contains(analysis.Prompt, markdownURL(link)) || strings.Contains(analysis.Prompt, promptURL(link, true)) {
 		t.Fatalf("full URL was not preserved in prompt: %q", analysis.Prompt)
+	}
+}
+
+func TestOverflowLinksUseSelectedURLRepresentation(t *testing.T) {
+	link := "https://tracker.example/click/" + strings.Repeat("a", 700) + "?campaign=notice&signature=END"
+	displayed := promptURL(link, true)
+	for _, test := range []struct {
+		name    string
+		control HTMLProcessingControl
+		want    string
+		reject  string
+	}{
+		{name: "compacted", want: displayed, reject: link},
+		{name: "full", control: HTMLProcessingControl{DisableURLCompaction: true}, want: link, reject: displayed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := New(4096)
+			m.AddHeader("Content-Type", "text/html")
+			m.AddBody([]byte(`<p>` + strings.Repeat("body ", 100) + `</p><a href="` + link + `">Review notice</a>`))
+
+			analysis := m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 100, VisionOptions{Mode: "off"}, test.control)
+			if !strings.Contains(analysis.Prompt, "EXTRACTED LINKS") || !strings.Contains(analysis.Prompt, test.want) {
+				t.Fatalf("selected overflow URL missing from prompt: %q", analysis.Prompt)
+			}
+			if test.reject != test.want && strings.Contains(analysis.Prompt, test.reject) {
+				t.Fatalf("unselected overflow URL representation present: %q", analysis.Prompt)
+			}
+		})
+	}
+}
+
+func TestVisibleBodyRetainsUncompactedPlainTextURL(t *testing.T) {
+	link := "https://tracker.example/click/" + strings.Repeat("a", 700) + "?signature=END"
+	m := New(4096)
+	m.AddHeader("Content-Type", "text/plain")
+	m.AddBody([]byte("Open " + link))
+
+	if got := m.VisibleBody(4096); !strings.Contains(got, link) {
+		t.Fatalf("visible body URL was compacted: %q", got)
+	}
+	if prompt := m.Prompt(4096); strings.Contains(prompt, link) || !strings.Contains(prompt, promptURL(link, true)) {
+		t.Fatalf("prompt did not use compacted plain-text URL: %q", prompt)
 	}
 }
 
@@ -935,7 +977,7 @@ func TestPromptCompactsLinkedImageDestination(t *testing.T) {
 	m.AddBody([]byte(`<a href="` + link + `"><img src="https://images.example/logo.png" alt="Logo"></a>`))
 
 	prompt := m.Prompt(2000)
-	if strings.Contains(prompt, link) || !strings.Contains(prompt, promptURL(link)) {
+	if strings.Contains(prompt, link) || !strings.Contains(prompt, promptURL(link, true)) {
 		t.Fatalf("linked-image destination was not compacted independently: %q", prompt)
 	}
 	if !strings.Contains(prompt, `https://images.example/logo.png`+`)](`) {
@@ -945,7 +987,7 @@ func TestPromptCompactsLinkedImageDestination(t *testing.T) {
 
 func TestLongURLRepresentationMakesActualHostExplicit(t *testing.T) {
 	link := "https://" + strings.Repeat("trusted.example", 40) + "@evil.example/verify/" + strings.Repeat("x", 300)
-	displayed := promptURL(link)
+	displayed := promptURL(link, true)
 	if !strings.HasPrefix(displayed, "https://[userinfo-omitted]@evil.example/verify/") ||
 		strings.Contains(displayed, "…") || strings.Contains(displayed, "URL-truncated") ||
 		utf8.RuneCountInString(displayed) > maxPromptURLChars {
@@ -955,7 +997,7 @@ func TestLongURLRepresentationMakesActualHostExplicit(t *testing.T) {
 
 func TestLongURLRepresentationPreservesExecutablePathEnding(t *testing.T) {
 	link := "https://downloads.example/releases/" + strings.Repeat("archive-", 20) + "setup.exe?signature=" + strings.Repeat("x", 700)
-	displayed := promptURL(link)
+	displayed := promptURL(link, true)
 	if utf8.RuneCountInString(displayed) > maxPromptURLChars ||
 		!strings.HasPrefix(displayed, "https://downloads.example/") ||
 		!strings.Contains(displayed, "setup.exe") || strings.Contains(displayed, "URL-truncated") {
@@ -966,7 +1008,7 @@ func TestLongURLRepresentationPreservesExecutablePathEnding(t *testing.T) {
 func TestLongURLRepresentationPreservesQueryStructure(t *testing.T) {
 	embedded := "https%3A%2F%2Fwww.amazon.co.uk%2Fgp%2Fcss%2Forder-history%3Fref_%3Ddelivery"
 	link := "https://www.amazon.co.uk/gp/r.html?C=campaign&M=" + strings.Repeat("message", 20) + "&U=" + embedded + "&H=" + strings.Repeat("signature", 20) + "&ref_=delivery_notice"
-	displayed := promptURL(link)
+	displayed := promptURL(link, true)
 	for _, evidence := range []string{
 		"https://www.amazon.co.uk/gp/r.html?", "C=campaign", "&M=", "&U=https%3A%2F%2Fwww.amazon.co.uk", "&H=", "&ref_=delivery_notice",
 	} {
@@ -985,7 +1027,7 @@ func TestLongPlainTextURLIsBoundedBeforeBodySampling(t *testing.T) {
 	m.AddHeader("Content-Type", "text/plain")
 	m.AddBody([]byte("Open " + link + " after reading the important text which follows."))
 	prompt := m.Prompt(600)
-	if strings.Contains(prompt, link) || !strings.Contains(prompt, promptURL(link)) ||
+	if strings.Contains(prompt, link) || !strings.Contains(prompt, promptURL(link, true)) ||
 		!strings.Contains(prompt, "important text which follows") || strings.Contains(prompt, "EXTRACTED LINKS") {
 		t.Fatalf("plain-text long URL prompt = %q", prompt)
 	}
@@ -1025,7 +1067,10 @@ func TestPlainURLHarvestingPreservesBalancedDelimiters(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := findHTTPURLs(test.text)
+			var got []string
+			walkPlainHTTPURLs(test.text, maxExtractedLinks*2, func(link string, _, _ int) {
+				got = append(got, link)
+			})
 			if len(got) != 1 || got[0] != test.want {
 				t.Fatalf("harvested URLs = %v, want [%s]", got, test.want)
 			}

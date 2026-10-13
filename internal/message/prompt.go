@@ -3,7 +3,6 @@ package message
 import (
 	"fmt"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -27,8 +26,6 @@ var promptHeaders = map[string]bool{
 	"date": true, "from": true,
 	"reply-to": true, "return-path": true, "subject": true,
 }
-
-var plainHTTPURL = regexp.MustCompile(`(?i)https?://[^\s<>"']+`)
 
 // BuildAnalysis produces the bounded text and optional decoded inline images
 // supplied to the AI client after MIME and HTML processing.
@@ -83,8 +80,7 @@ func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars
 			b.WriteString("- Linked or imported CSS was not evaluated; email text may include content not visible to the recipient.\n")
 		}
 	}
-	compactURLs := !control.DisableURLCompaction
-	body, bodyTruncated, concealedRemoved := selectProcessedBodyWithURLCompaction(content, maxChars, compactURLs)
+	body, bodyTruncated, concealedRemoved := selectProcessedBody(content, maxChars)
 	if bodyTruncated || content.ExtractionIncomplete {
 		if !strings.Contains(b.String(), "\nANALYSIS LIMITATIONS:\n") {
 			b.WriteString("\nANALYSIS LIMITATIONS:\n")
@@ -96,7 +92,7 @@ func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars
 			b.WriteString("- HTML processing limits prevented complete extraction; only available content is included.\n")
 		}
 	}
-	if links := boundedLinksMissingFromBodyWithURLCompaction(content.Links, body, compactURLs); len(links) > 0 {
+	if links := boundedLinksMissingFromBody(content.Links, body); len(links) > 0 {
 		b.WriteString("\nEXTRACTED LINKS (retained independently of body sampling):\n")
 		for _, link := range links {
 			fmt.Fprintf(&b, "- %s\n", sanitize(link))
@@ -389,13 +385,9 @@ func sampleBody(body string, maxChars int) string {
 }
 
 func selectProcessedBody(content extractedContent, maxChars int) (body string, truncated, concealedRemoved bool) {
-	return selectProcessedBodyWithURLCompaction(content, maxChars, true)
-}
-
-func selectProcessedBodyWithURLCompaction(content extractedContent, maxChars int, compactURLs bool) (body string, truncated, concealedRemoved bool) {
-	body = boundPromptURLs(content.Text, compactURLs)
+	body = content.Text
 	if utf8.RuneCountInString(body) > maxChars && content.HasConcealedContent {
-		body = boundPromptURLs(content.StrippedText, compactURLs)
+		body = content.StrippedText
 		concealedRemoved = true
 	}
 	if utf8.RuneCountInString(body) > maxChars {
@@ -406,32 +398,6 @@ func selectProcessedBodyWithURLCompaction(content extractedContent, maxChars int
 		body += "\n[HTML extraction incomplete; processing limits prevented extraction of the remainder]"
 	}
 	return body, truncated, concealedRemoved
-}
-
-func boundPromptURLs(value string, compact bool) string {
-	if !compact {
-		return value
-	}
-	return plainHTTPURL.ReplaceAllStringFunc(value, compactPromptURLMatch)
-}
-
-func compactPromptURLMatch(match string) string {
-	// A linked Markdown image has no whitespace between its image URL and
-	// destination: ![label](image)](destination). The deliberately permissive
-	// plain-URL expression sees both as one match. Split that renderer-generated
-	// boundary so each URL is compacted independently.
-	if boundary := strings.Index(match, "]("); boundary >= 0 && hasHTTPPrefix(match[boundary+2:]) {
-		return compactPromptURLMatch(match[:boundary]) + "](" + compactPromptURLMatch(match[boundary+2:])
-	}
-	link := trimPlainURLPunctuation(match)
-	if link == "" {
-		return match
-	}
-	displayed := promptURL(link)
-	if displayed == link {
-		return match
-	}
-	return displayed + match[len(link):]
 }
 
 func hasHTTPPrefix(value string) bool {
@@ -486,15 +452,90 @@ func runeByteOffsets(value string, runeIndexes ...int) []int {
 	return offsets
 }
 
-func findHTTPURLs(text string) []string {
-	matches := plainHTTPURL.FindAllString(text, maxExtractedLinks*2)
-	links := make([]string, 0, len(matches))
-	for _, match := range matches {
-		if match = trimPlainURLPunctuation(match); match != "" {
-			links = append(links, match)
+// rewritePlainTextURLs handles URLs embedded in otherwise unstructured text.
+// HTML href/src destinations take the direct rendering path and do not need a
+// second scan over the completed body.
+func rewritePlainTextURLs(text string, compact bool, links *linkCollector) string {
+	var rewritten strings.Builder
+	last := 0
+	changed := false
+	walkPlainHTTPURLs(text, -1, func(link string, start, end int) {
+		var displayed string
+		if links != nil {
+			displayed = links.AddDestination(link)
+		} else {
+			displayed = promptURL(link, compact)
 		}
+		if displayed == link {
+			return
+		}
+		if !changed {
+			rewritten.Grow(len(text))
+		}
+		rewritten.WriteString(text[last:start])
+		rewritten.WriteString(displayed)
+		last = end
+		changed = true
+	})
+	if !changed {
+		return text
 	}
-	return links
+	rewritten.WriteString(text[last:])
+	return rewritten.String()
+}
+
+func walkPlainHTTPURLs(text string, limit int, visit func(link string, start, end int)) {
+	found := 0
+	for search := 0; search < len(text) && (limit < 0 || found < limit); {
+		start := nextHTTPPrefix(text, search)
+		if start < 0 {
+			return
+		}
+		end := start
+		for end < len(text) && !plainURLDelimiter(text[end]) {
+			end++
+		}
+		link := trimPlainURLPunctuation(text[start:end])
+		if link != "" {
+			linkEnd := start + len(link)
+			visit(link, start, linkEnd)
+			found++
+			search = linkEnd
+			continue
+		}
+		search = start + 1
+	}
+}
+
+func nextHTTPPrefix(text string, start int) int {
+	for start < len(text) {
+		lower := strings.IndexByte(text[start:], 'h')
+		upper := strings.IndexByte(text[start:], 'H')
+		switch {
+		case lower < 0:
+			lower = upper
+		case upper >= 0 && upper < lower:
+			lower = upper
+		}
+		if lower < 0 {
+			return -1
+		}
+		candidate := start + lower
+		if hasHTTPPrefix(text[candidate:]) {
+			return candidate
+		}
+		start = candidate + 1
+	}
+	return -1
+}
+
+func plainURLDelimiter(character byte) bool {
+	switch character {
+	case ' ', '\t', '\n', '\f', '\r', '<', '>', '"', '\'':
+		return true
+	default:
+		return false
+	}
 }
 
 func trimPlainURLPunctuation(value string) string {
@@ -531,10 +572,6 @@ func trimPlainURLPunctuation(value string) string {
 }
 
 func boundedLinks(candidates []string) []string {
-	return boundedLinksWithURLCompaction(candidates, true)
-}
-
-func boundedLinksWithURLCompaction(candidates []string, compact bool) []string {
 	seen := make(map[string]bool)
 	links := make([]string, 0, min(len(candidates), maxExtractedLinks))
 	chars := 0
@@ -544,11 +581,7 @@ func boundedLinksWithURLCompaction(candidates []string, compact bool) []string {
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || seen[candidate] {
 			continue
 		}
-		displayed := candidate
-		if compact {
-			displayed = promptURL(candidate)
-		}
-		candidateChars := utf8.RuneCountInString(displayed)
+		candidateChars := utf8.RuneCountInString(candidate)
 		if chars+candidateChars > maxExtractedLinkChars {
 			continue
 		}
@@ -556,27 +589,19 @@ func boundedLinksWithURLCompaction(candidates []string, compact bool) []string {
 			break
 		}
 		seen[candidate] = true
-		links = append(links, displayed)
+		links = append(links, candidate)
 		chars += candidateChars
 	}
 	return links
 }
 
 func boundedLinksMissingFromBody(candidates []string, body string) []string {
-	return boundedLinksMissingFromBodyWithURLCompaction(candidates, body, true)
-}
-
-func boundedLinksMissingFromBodyWithURLCompaction(candidates []string, body string, compact bool) []string {
 	missing := make([]string, 0, len(candidates))
 	for _, link := range candidates {
 		link = strings.TrimSpace(link)
-		displayed := link
-		if compact {
-			displayed = promptURL(link)
-		}
-		if !strings.Contains(body, link) && !strings.Contains(body, displayed) && !strings.Contains(body, markdownURL(displayed)) {
+		if !strings.Contains(body, link) && !strings.Contains(body, markdownURL(link)) {
 			missing = append(missing, link)
 		}
 	}
-	return boundedLinksWithURLCompaction(missing, compact)
+	return boundedLinks(missing)
 }

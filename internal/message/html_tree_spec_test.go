@@ -345,7 +345,7 @@ func TestHTMLAnalysisFallbackUsesDocumentLevelNotice(t *testing.T) {
 }
 
 func TestBoundedHTMLFallbackStreamsAttributesAndKeepsFirstDestination(t *testing.T) {
-	got := extractBoundedHTMLFallback(`<base ignored="x" href="https://example.test/root/"><a class="offer" href="first" href="second">Review</a><img alt="notice" src="cid:image-id">`)
+	got := extractBoundedHTMLFallback(`<base ignored="x" href="https://example.test/root/"><a class="offer" href="first" href="second">Review</a><img alt="notice" src="cid:image-id">`, true)
 	if len(got.Links) != 1 || got.Links[0] != "https://example.test/root/first" {
 		t.Fatalf("fallback links = %#v", got.Links)
 	}

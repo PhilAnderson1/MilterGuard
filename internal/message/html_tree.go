@@ -45,6 +45,7 @@ type htmlExtraction struct {
 	links       linkCollector
 	images      imageRefCollector
 	anchorDepth int
+	compactURLs bool
 }
 
 type outputAnnotation struct {
@@ -209,13 +210,13 @@ func htmlToText(source string) extractedContent {
 func htmlToTextWithBudget(source string, budget *extractionBudget) extractedContent {
 	budget.htmlParts++
 	if budget.useFallback() {
-		content := extractBoundedHTMLFallback(source)
+		content := extractBoundedHTMLFallback(source, budget.compactURLs)
 		content.HTMLCPULimitExceeded = true
 		return content
 	}
 	limits, ok := budget.htmlLimits(len(source))
 	if !ok {
-		content := extractBoundedHTMLFallback(source)
+		content := extractBoundedHTMLFallback(source, budget.compactURLs)
 		content.ExtractionIncomplete = true
 		return content
 	}
@@ -230,16 +231,22 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 	inspection, err := htmlextract.AnalyzeWithStop([]byte(source), limits, budget.shouldFallback)
 	budget.consumeHTML(inspection.Usage)
 	if htmlextract.IsStopped(err) || budget.useFallback() {
-		content := extractBoundedHTMLFallback(source)
+		content := extractBoundedHTMLFallback(source, budget.compactURLs)
 		content.HTMLCPULimitExceeded = true
 		return content
 	}
 	if err != nil {
 		// A bounded lexical fallback retains evidence when tree/style processing
 		// cannot complete. It is explicitly reported as incomplete extraction.
-		return extractBoundedHTMLFallback(source)
+		return extractBoundedHTMLFallback(source, budget.compactURLs)
 	}
-	e := htmlExtraction{inspection: inspection, states: make(map[*xhtml.Node]*htmlextract.Text, len(inspection.Text)), elements: make(map[*xhtml.Node]*htmlextract.Element, len(inspection.Elements))}
+	e := htmlExtraction{
+		inspection:  inspection,
+		states:      make(map[*xhtml.Node]*htmlextract.Text, len(inspection.Text)),
+		elements:    make(map[*xhtml.Node]*htmlextract.Element, len(inspection.Elements)),
+		compactURLs: budget.compactURLs,
+		links:       linkCollector{compactURLs: budget.compactURLs},
+	}
 	for i := range inspection.Text {
 		state := &inspection.Text[i]
 		e.states[state.Node] = state
@@ -425,6 +432,7 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 		e.anchorDepth--
 		destination, ok := e.destination(firstAttr(n, "href"))
 		if ok {
+			destination = e.links.AddDestination(destination)
 			plain := strings.TrimSpace(label.plainText())
 			if plain == "" {
 				plain = "link"
@@ -441,7 +449,6 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 				out.WriteString(markdownURL(destination))
 				out.WriteByte(')')
 			}
-			e.links.AddDestination(destination)
 		} else {
 			for _, chunk := range label.chunks {
 				out.writeBytes(chunk.annotation, label.chunkBytes(chunk))
@@ -471,28 +478,29 @@ func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode
 	if content == "" {
 		return
 	}
+	promptContent := rewritePlainTextURLs(content, e.compactURLs, &e.links)
 	state := e.elements[n]
 	if state == nil {
-		out.WriteString(content)
+		out.WriteString(promptContent)
 		visible.WriteString(content)
 		return
 	}
 	switch state.Label {
 	case "concealed":
 		if mode == StripHidden {
-			out.write(outputAnnotation{kind: "stripped"}, content)
+			out.write(outputAnnotation{kind: "stripped"}, promptContent)
 			return
 		}
 		reason, value := elementConcealmentReason(state)
-		out.write(outputAnnotation{kind: "concealed", reason: reason, value: value}, content)
+		out.write(outputAnnotation{kind: "concealed", reason: reason, value: value}, promptContent)
 	case "client-dependent":
-		out.write(outputAnnotation{kind: "client-dependent"}, content)
+		out.write(outputAnnotation{kind: "client-dependent"}, promptContent)
 		visible.WriteString(content)
 	case "unknown":
-		out.write(outputAnnotation{kind: "unknown"}, content)
+		out.write(outputAnnotation{kind: "unknown"}, promptContent)
 		visible.WriteString(content)
 	default:
-		out.WriteString(content)
+		out.WriteString(promptContent)
 		visible.WriteString(content)
 	}
 }
@@ -516,7 +524,7 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 		return
 	}
 	var content strings.Builder
-	walk := conditionalWalk{}
+	walk := conditionalWalk{links: linkCollector{compactURLs: e.compactURLs}}
 	for _, node := range fragment {
 		if !e.walkConditionalNode(node, &content, &walk, 0) {
 			return
@@ -563,9 +571,10 @@ func lastIndexASCIIFold(value, marker string) int {
 }
 
 type conditionalWalk struct {
-	nodes      int
-	outputWork int
-	links      linkCollector
+	nodes       int
+	outputWork  int
+	links       linkCollector
+	anchorDepth int
 }
 
 func (w *conditionalWalk) enter(depth int) bool {
@@ -590,7 +599,13 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *strings.Builder
 		return false
 	}
 	if n.Type == xhtml.TextNode {
-		return walk.writeString(out, sanitizeSenderText(n.Data))
+		value := sanitizeSenderText(n.Data)
+		if walk.anchorDepth > 0 {
+			value = rewritePlainTextURLs(value, e.compactURLs, nil)
+		} else {
+			value = rewritePlainTextURLs(value, e.compactURLs, &walk.links)
+		}
+		return walk.writeString(out, value)
 	}
 	if n.Type != xhtml.ElementNode && n.Type != xhtml.DocumentNode {
 		return true
@@ -604,17 +619,20 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *strings.Builder
 	}
 	if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, "a") {
 		var label strings.Builder
+		walk.anchorDepth++
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
 			if !e.walkConditionalNode(child, &label, walk, depth+1) {
+				walk.anchorDepth--
 				return false
 			}
 		}
+		walk.anchorDepth--
 		if destination, ok := e.destination(firstAttr(n, "href")); ok {
+			destination = walk.links.AddDestination(destination)
 			rendered := fmt.Sprintf("[%s](%s)", markdownLabelText(strings.TrimSpace(label.String())), markdownURL(destination))
 			if !walk.writeString(out, rendered) {
 				return false
 			}
-			walk.links.AddDestination(destination)
 		} else {
 			if !walk.writeString(out, label.String()) {
 				return false
@@ -649,9 +667,14 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 	if state == nil {
 		return // source in head/style/script/title/template or another inert scope
 	}
-	outText := text
+	var outText string
 	if e.anchorDepth > 0 {
-		outText = markdownLabelText(text)
+		// Text resembling a URL inside an anchor label is sender-visible text,
+		// not an independently validated destination.
+		outText = rewritePlainTextURLs(text, e.compactURLs, nil)
+		outText = markdownLabelText(outText)
+	} else {
+		outText = rewritePlainTextURLs(text, e.compactURLs, &e.links)
 	}
 	// Presentation annotations around whitespace add noise without carrying a
 	// visibility claim about message content. This includes decoded HTML space
@@ -868,6 +891,7 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 	}
 	raw := strings.TrimSpace(firstAttr(n, "src"))
 	alt := sanitizeSenderText(firstAttr(n, "alt"))
+	alt = rewritePlainTextURLs(alt, e.compactURLs, nil)
 	var rendered string
 	if strings.HasPrefix(strings.ToLower(raw), "cid:") {
 		id := normalizeContentID(raw[4:])
@@ -883,8 +907,8 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 		if alt == "" {
 			alt = "image"
 		}
+		destination = e.links.AddDestination(destination)
 		rendered = fmt.Sprintf(" ![%s](%s) ", markdownLabelText(alt), markdownURL(destination))
-		e.links.AddDestination(destination)
 	}
 	if rendered == "" {
 		return
@@ -1082,22 +1106,24 @@ func normalizeHTMLText(value string) string {
 	return strings.Trim(b.String(), " \t\r\n\f")
 }
 
-func (collector *linkCollector) AddDestination(candidate string) {
+func (collector *linkCollector) AddDestination(candidate string) string {
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
-		return
+		return ""
 	}
+	candidate = promptURL(candidate, collector.compactURLs)
 	if collector.seen == nil {
 		collector.seen = make(map[string]struct{})
 	}
 	if _, exists := collector.seen[candidate]; exists {
-		return
+		return candidate
 	}
-	characters := utf8.RuneCountInString(promptURL(candidate))
+	characters := utf8.RuneCountInString(candidate)
 	if len(collector.links) >= maxExtractedLinks || collector.chars+characters > maxExtractedLinkChars {
-		return
+		return candidate
 	}
 	collector.seen[candidate] = struct{}{}
 	collector.links = append(collector.links, candidate)
 	collector.chars += characters
+	return candidate
 }

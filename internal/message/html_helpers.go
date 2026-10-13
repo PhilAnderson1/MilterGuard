@@ -15,9 +15,10 @@ var markdownURLReplacer = strings.NewReplacer(
 )
 
 type linkCollector struct {
-	links []string
-	seen  map[string]struct{}
-	chars int
+	links       []string
+	seen        map[string]struct{}
+	chars       int
+	compactURLs bool
 }
 
 type imageRefCollector struct {
@@ -60,11 +61,13 @@ func markdownLabelText(value string) string {
 
 func markdownURL(value string) string { return markdownURLReplacer.Replace(value) }
 
-// promptURL compacts a URL's LLM-facing representation without discarding its
-// structure. Validation and deduplication continue to use the complete URL.
-// Oversized path segments and query values are shortened independently so the
-// host, parameter names and useful value prefixes remain visible.
-func promptURL(value string) string {
+// promptURL selects a URL's LLM-facing representation. Oversized path segments
+// and query values are shortened independently so the host, parameter names
+// and useful value prefixes remain visible.
+func promptURL(value string, compact bool) string {
+	if !compact {
+		return value
+	}
 	parsed, err := url.Parse(value)
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
 		return compactURLPart(value, maxPromptURLChars)
@@ -172,10 +175,10 @@ func compactURLPartChanged(value string, limit int) (string, bool) {
 // extractBoundedHTMLFallback retains tokenizer text after a tree/style resource
 // limit. It never bypasses the primary limits and deliberately makes no
 // visibility claim; callers disclose that extraction was incomplete.
-func extractBoundedHTMLFallback(source string) extractedContent {
+func extractBoundedHTMLFallback(source string, compactURLs bool) extractedContent {
 	z := xhtml.NewTokenizer(bytes.NewBufferString(source))
 	var text strings.Builder
-	var links linkCollector
+	links := linkCollector{compactURLs: compactURLs}
 	var images imageRefCollector
 	var base *url.URL
 	baseSeen, suppressed := false, 0
@@ -259,7 +262,7 @@ func extractBoundedHTMLFallback(source string) extractedContent {
 		complete = false
 	}
 	value := normalizeHTMLText(sanitizeSenderText(text.String()))
-	links.AddAllHTTP(findHTTPURLs(value))
+	value = rewritePlainTextURLs(value, compactURLs, &links)
 	return extractedContent{Text: value, HTMLFallbackUsed: true,
 		Links: links.links, ImageRefs: images.refs, ExtractionIncomplete: !complete}
 }
@@ -279,10 +282,4 @@ func fallbackDestination(raw string, base *url.URL) (string, bool) {
 		}
 	}
 	return u.String(), true
-}
-
-func (collector *linkCollector) AddAllHTTP(values []string) {
-	for _, value := range values {
-		collector.AddDestination(value)
-	}
 }

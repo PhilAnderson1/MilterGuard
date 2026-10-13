@@ -36,6 +36,7 @@ type extractionBudget struct {
 	shouldFallback          func() bool
 	forceFallback           bool
 	cpuLimitExceeded        bool
+	compactURLs             bool
 }
 
 func newExtractionBudget() *extractionBudget {
@@ -56,6 +57,7 @@ func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBu
 		expressionWorkRemaining: limits.ExpressionWork,
 		shouldFallback:          control.ShouldFallback,
 		forceFallback:           control.ForceFallback,
+		compactURLs:             !control.DisableURLCompaction,
 	}
 }
 
@@ -279,10 +281,12 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		return content
 	}
 	text := decodeCharset(params["charset"], decoded)
+	links := linkCollector{compactURLs: budget.compactURLs}
+	promptText := rewritePlainTextURLs(text, budget.compactURLs, &links)
 	return extractedContent{
-		Text: text, VisibleText: text,
+		Text: promptText, VisibleText: text,
 		ConfidentVisibleChars: confidentTextCharacters(text),
-		Links:                 findHTTPURLs(text), TransferIncomplete: transferIncomplete,
+		Links:                 links.links, TransferIncomplete: transferIncomplete,
 	}
 }
 
