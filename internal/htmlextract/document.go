@@ -8,10 +8,10 @@ import (
 	"golang.org/x/net/html"
 )
 
-// Text describes one extractable text node. Label is aggregated across every
-// evaluated viewing case. FontSize, EffectiveOpacity and ConcealmentReasons
-// describe the first evaluated case and provide representative rendering
-// evidence rather than a second cross-case aggregate.
+// Text describes one extractable text node. Label and ConcealmentReasons are
+// aggregated across every evaluated viewing case. FontSize and
+// EffectiveOpacity begin with the narrowest-case values; when either explains
+// concealment in another case, its evidence is retained from a concealing case.
 type Text struct {
 	Label              string
 	FontSize           string
@@ -28,8 +28,9 @@ type textInspection struct {
 	colour colourInspection
 }
 
-// Element describes an image-like element. Label is aggregated across viewing
-// cases; EffectiveOpacity and ConcealmentReasons come from the first case.
+// Element describes an image-like element. Label and ConcealmentReasons are
+// aggregated across viewing cases. EffectiveOpacity begins with the
+// narrowest-case value and retains the lowest concealing opacity encountered.
 type Element struct {
 	Node               *html.Node
 	Label              string
@@ -66,6 +67,10 @@ func attr(n *html.Node, key string) string {
 		}
 	}
 	return ""
+}
+
+func hiddenInput(n *html.Node) bool {
+	return n.Namespace == "" && n.Data == "input" && equalASCIIFold(strings.TrimSpace(attr(n, "type")), "hidden")
 }
 
 type nodeScope uint8
@@ -136,7 +141,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	if len(input) > p.Limits.InputBytes {
 		return document, fmt.Errorf("limit: input bytes > %d", p.Limits.InputBytes)
 	}
-	lexical, err := measurePreflight(input, p.Limits)
+	lexical, err := measurePreflightWithStop(input, p.Limits, p.shouldStop)
 	document.lexical = lexical
 	if err != nil {
 		return document, err
@@ -148,6 +153,9 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		return document, err
 	}
 	document.root = root
+	if p.stopped() {
+		return document, errStopped
+	}
 	document.styles = sheet{limits: p.Limits}
 	document.elements = make(map[*html.Node]elementPreparation)
 	type entry struct {
@@ -182,6 +190,9 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			document.treeDepth = e.depth
 		}
 		document.nodeCount++
+		if document.nodeCount&255 == 0 && p.stopped() {
+			return document, errStopped
+		}
 		if document.nodeCount > p.Limits.Nodes {
 			return document, fmt.Errorf("limit: tree nodes > %d", p.Limits.Nodes)
 		}
@@ -190,6 +201,9 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			if document.textCount > p.Limits.TextNodes {
 				return document, fmt.Errorf("limit: tree text nodes > %d", p.Limits.TextNodes)
 			}
+		}
+		if n.Type == html.CommentNode && (e.scope == scopeActive || e.scope == scopeHead) {
+			document.styles.parseMSOConditionalStyles(n.Data)
 		}
 		if n.Type == html.ElementNode {
 			document.attributeCount += len(n.Attr)
@@ -201,7 +215,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			document.attributeWork.classes = max(document.attributeWork.classes, prepared.selector.classes)
 			document.attributeWork.ids = max(document.attributeWork.ids, prepared.selector.ids)
 			document.attributeWork.attributes = max(document.attributeWork.attributes, prepared.selector.attributes)
-			if href, media, applies := stylesheetLink(n); applies && (e.scope == scopeActive || e.scope == scopeHead) {
+			if href, media, applies := document.styles.stylesheetLink(n); applies && (e.scope == scopeActive || e.scope == scopeHead) {
 				document.styles.loadStylesheetReference(href, media)
 			}
 			if n.Data == "style" && cssTypeAttributeApplies(n) && (e.scope == scopeActive || e.scope == scopeHead) {
@@ -212,7 +226,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 					if !complete {
 						styles.abandonCascade()
 					} else {
-						styles.parseStylesheet(css, attr(n, "media"))
+						styles.parseStylesheet(css, attr(n, "media"), n.Namespace != "")
 					}
 				}
 			}

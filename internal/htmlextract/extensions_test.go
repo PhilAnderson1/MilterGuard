@@ -202,6 +202,22 @@ func TestEmptyClipping(t *testing.T) {
 	}
 }
 
+func TestDisplayContentsHasNoClippableBox(t *testing.T) {
+	style := initial()
+	style[display] = Value{Text: "contents", Known: true}
+	style[clipPath] = Value{Text: "circle(0px)", Number: 1, Known: true}
+	node := &xhtml.Node{Type: xhtml.ElementNode, Data: "div"}
+	empty, known, inlineUncertain := emptyClip(&style, node, true)
+	if empty || !known || inlineUncertain {
+		t.Fatalf("display:contents clipping = empty:%t known:%t inline-uncertain:%t", empty, known, inlineUncertain)
+	}
+
+	foreign := &xhtml.Node{Type: xhtml.ElementNode, Data: "g", Namespace: "svg"}
+	if _, foreignKnown, _ := emptyClip(&style, foreign, true); foreignKnown {
+		t.Fatal("foreign-namespace clipping was treated as known")
+	}
+}
+
 func TestClipPathApplicabilityToInlineBoxes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -277,6 +293,8 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 		{"maximum calculated zero height", `overflow:hidden;height:max(0px,calc(1vh - 1vh))`, "unknown"},
 		{"clamped zero width", `overflow:hidden;width:clamp(0px,0vw,1px)`, "unknown"},
 		{"absolute left", `position:absolute;left:-1000px`, "unknown"},
+		{"sub-threshold absolute left", `position:absolute;left:-250px`, "unknown"},
+		{"sub-threshold positive absolute left", `position:absolute;left:250px`, "unknown"},
 		{"fixed top", `position:fixed;top:-9999px`, "unknown"},
 		{"absolute relative-unit left", `position:absolute;left:-3000em`, "unknown"},
 		{"overflowing absolute left", `position:absolute;left:-1e999px`, "unknown"},
@@ -287,10 +305,16 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 		{"positive fixed top", `position:fixed;top:5000px`, "unknown"},
 		{"positive relative-unit left", `position:absolute;left:100em`, "unknown"},
 		{"negative indent", `text-indent:-1000px`, "unknown"},
+		{"sub-threshold negative indent", `text-indent:-300px`, "unknown"},
 		{"positive indent", `text-indent:50000px`, "unknown"},
 		{"percentage indent", `text-indent:-500%`, "unknown"},
 		{"positive percentage indent", `text-indent:100%`, "unknown"},
 		{"overflowing indent", `text-indent:-1e999px`, "unknown"},
+		{"extreme negative letter spacing", `letter-spacing:-9999px`, "unknown"},
+		{"boundary negative letter spacing", `letter-spacing:-8px`, "unknown"},
+		{"extreme relative letter spacing", `letter-spacing:-1em`, "unknown"},
+		{"extreme negative word spacing", `word-spacing:-9999px`, "unknown"},
+		{"calculated negative letter spacing", `letter-spacing:calc(-1em)`, "unknown"},
 		{"calculated overflowing offset", `position:absolute;left:calc(-1px * 1e400)`, "unknown"},
 		{"extreme negative margin", `margin-left:-9999px`, "unknown"},
 		{"extreme positive margin", `margin-left:100000px`, "unknown"},
@@ -314,8 +338,15 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 		{"shorthand overrides vertical longhand", `overflow-y:hidden;overflow:visible;height:0`, "visible"},
 		{"invalid overflow ignored", `overflow:hidden;height:0;overflow:banana`, "unknown"},
 		{"static offset", `position:static;left:-9999px`, "visible"},
-		{"ordinary offset", `position:absolute;left:-999px`, "visible"},
-		{"ordinary positive offset", `position:absolute;left:999px`, "visible"},
+		{"just below offset threshold", `position:absolute;left:-249px`, "visible"},
+		{"just below positive offset threshold", `position:absolute;left:249px`, "visible"},
+		{"just below indent threshold", `text-indent:-249px`, "visible"},
+		{"ordinary negative letter spacing", `letter-spacing:-.7px`, "visible"},
+		{"ordinary negative word spacing", `word-spacing:-2px`, "visible"},
+		{"positive letter spacing", `letter-spacing:9999px`, "visible"},
+		{"normal letter spacing", `letter-spacing:normal`, "visible"},
+		{"overridden letter spacing", `letter-spacing:-9999px;letter-spacing:normal`, "visible"},
+		{"zero line height alone", `line-height:0`, "visible"},
 		{"ordinary relative offset", `position:absolute;left:-2em`, "visible"},
 		{"ordinary positive relative offset", `position:absolute;left:99em`, "visible"},
 		{"ordinary negative margin", `margin-left:-10px`, "visible"},
@@ -348,6 +379,92 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 	in = inspectHTML(t, `<p style="--zero:0;overflow:hidden;width:var(--zero)">T</p>`)
 	if got := findText(t, in, "T").Label; got != "unknown" {
 		t.Fatalf("variable layout label = %q, want unknown", got)
+	}
+}
+
+func TestElementPaintAndGeometryVisibility(t *testing.T) {
+	cases := []struct {
+		name, source, want string
+		reason             string
+	}{
+		{"filter", `<img style="filter:opacity(0)">`, "unknown", ""},
+		{"transform", `<img style="transform:scale(0)">`, "unknown", ""},
+		{"blend", `<img style="mix-blend-mode:multiply">`, "unknown", ""},
+		{"mask", `<img style="mask-image:url(mask.png)">`, "unknown", ""},
+		{"zero CSS width", `<img style="width:0">`, "concealed", "empty-clip"},
+		{"one-pixel CSS height", `<img style="height:1px">`, "concealed", "empty-clip"},
+		{"percentage zero width", `<img style="width:0%">`, "concealed", "empty-clip"},
+		{"ordinary CSS size", `<img style="width:2px;height:2px">`, "visible", ""},
+		{"hidden input", `<input type="hidden">`, "concealed", "display-none"},
+		{"ordinary input", `<input type="text">`, "visible", ""},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, test.source)
+			if len(document.Elements) != 1 {
+				t.Fatalf("elements = %d, want 1", len(document.Elements))
+			}
+			element := document.Elements[0]
+			if element.Label != test.want {
+				t.Fatalf("label = %q, want %q", element.Label, test.want)
+			}
+			if test.reason != "" && (len(element.ConcealmentReasons) == 0 || element.ConcealmentReasons[0] != test.reason) {
+				t.Fatalf("reasons = %v, want %q", element.ConcealmentReasons, test.reason)
+			}
+		})
+	}
+}
+
+func TestForeignNamespaceStylesheetIsUncertain(t *testing.T) {
+	cases := []struct {
+		name, source, want string
+	}{
+		{"SVG style", `<svg><style>div.secret{display:none}</style></svg><div class="secret">T</div>`, "unknown"},
+		{"MathML style", `<math><style>div.secret{display:none}</style></math><div class="secret">T</div>`, "unknown"},
+		{"ordinary HTML style", `<style>div.secret{display:none}</style><div class="secret">T</div>`, "concealed"},
+		{"unmatched SVG style", `<svg><style>div.other{display:none}</style></svg><div class="secret">T</div>`, "visible"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, test.source)
+			if got := findText(t, document, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNoscriptVisibilityIsClientDependent(t *testing.T) {
+	document := inspectHTML(t, `<html><body><noscript><p>Fallback</p><p style="display:none">Hidden fallback</p></noscript></body></html>`)
+	if got := findText(t, document, "Fallback").Label; got != "unknown" {
+		t.Fatalf("noscript fallback label = %q, want unknown", got)
+	}
+	hidden := findText(t, document, "Hidden fallback")
+	if hidden.Label != "concealed" || len(hidden.ConcealmentReasons) == 0 || hidden.ConcealmentReasons[0] != "display-none" {
+		t.Fatalf("concealed noscript fallback = %+v", hidden)
+	}
+}
+
+func TestMSOConditionalStylesheetIsUncertain(t *testing.T) {
+	cases := []struct {
+		name, source, want string
+	}{
+		{"MSO style", `<!--[if mso]><style>#target{visibility:hidden}</style><![endif]--><p id="target">T</p>`, "unknown"},
+		{"versioned MSO style", `<!--[if gte mso 9]><STYLE media="all">#target{display:none}</STYLE><![endif]--><p id="target">T</p>`, "unknown"},
+		{"ordinary comment", `<!--<style>#target{display:none}</style>--><p id="target">T</p>`, "visible"},
+		{"unrelated conditional", `<!--[if IE]><style>#target{display:none}</style><![endif]--><p id="target">T</p>`, "visible"},
+		{"unmatched MSO style", `<!--[if mso]><style>#other{display:none}</style><![endif]--><p id="target">T</p>`, "visible"},
+		{"later HTML override", `<!--[if mso]><style>#target{display:none}</style><![endif]--><style>#target{display:block}</style><p id="target">T</p>`, "visible"},
+		{"ordinary conditional width", `<!--[if lte mso 11]><style>#target{width:100%!important}</style><![endif]--><div id="target" style="width:100%"><p>T</p></div>`, "visible"},
+		{"conditional layout reveal", `<style>#target{overflow:hidden;height:0}</style><!--[if mso]><style>#target{overflow:visible}</style><![endif]--><p id="target">T</p>`, "unknown"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, test.source)
+			if got := findText(t, document, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -432,6 +549,12 @@ func TestVariables(t *testing.T) {
 		{"consumer fallback from cycle", `<p style="--a:var(--a);--b:var(--a,none);display:var(--b)">T</p>`, "concealed"},
 		{"boundary no concatenation", `<p style="--n:0;font-size:var(--n)px">T</p>`, "visible"},
 		{"background shorthand", `<p style="--bg:white;background:var(--bg);color:white">T</p>`, "concealed"},
+		{"square block closer in foreground fallback", `<div style="background:#000;color:#fff"><p style="--a:#000;color:var(--a,[x)])">T</p></div>`, "concealed"},
+		{"curly block closer in foreground fallback", `<div style="background:#000;color:#fff"><p style="--a:#000;color:var(--a,{x)})">T</p></div>`, "concealed"},
+		{"square block closer in background fallback", `<div style="background:#000;color:#fff"><p style="--bg:#fff;background:var(--bg,[x)])">T</p></div>`, "concealed"},
+		{"curly block closer in background fallback", `<div style="background:#000;color:#fff"><p style="--bg:#fff;background:var(--bg,{x)})">T</p></div>`, "concealed"},
+		{"square block closer in stylesheet variable", `<style>div{background:#000;color:#fff}p{--a:#000;color:var(--a,[x)])}</style><div><p>T</p></div>`, "concealed"},
+		{"curly block closer in stylesheet variable", `<style>div{background:#000;color:#fff}p{--a:#000;color:var(--a,{x)})}</style><div><p>T</p></div>`, "concealed"},
 		{"escaped direct reference", `<p style="--hidden:none;display:var(\2d\2d hidden)">T</p>`, "concealed"},
 		{"escaped transitive reference", `<p style="background:white;color:black;--white:white;--x:var(\2d\2d white);color:var(--x)">T</p>`, "concealed"},
 		{"escaped definition name", `<p style="--\78:none;display:var(--x)">T</p>`, "concealed"},
@@ -446,6 +569,26 @@ func TestVariables(t *testing.T) {
 			in := inspectHTML(t, c.src)
 			if v := findText(t, in, "T"); v.Label != c.want {
 				t.Fatalf("want %s: %+v", c.want, v)
+			}
+		})
+	}
+}
+
+func TestCSSWhitespaceIsNotUnicodeWhitespace(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{"NBSP after background colour", `<span style="color:#fff;background:black ">T</span>`, "concealed"},
+		{"ideographic space after background colour", `<span style="color:#fff;background:black　">T</span>`, "concealed"},
+		{"vertical tab after visibility", "<span style=\"visibility:hidden\v\">T</span>", "visible"},
+		{"vertical tab after font size", "<span style=\"font-size:0px\v\">T</span>", "visible"},
+		{"vertical tab after opacity", "<span style=\"opacity:0\v\">T</span>", "visible"},
+		{"NBSP after display value", `<span style="display:none;display:block ">T</span>`, "concealed"},
+		{"NBSP is not a colour component separator", `<span style="background:#fff;color:rgb(255 255 255)">T</span>`, "visible"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			in := inspectHTML(t, test.src)
+			if got := findText(t, in, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
 			}
 		})
 	}
@@ -535,7 +678,7 @@ func TestDeclarationValueTokensAreCached(t *testing.T) {
 	d := ds[0]
 	d.value = strings.Repeat("x", maxValueBytes+1)
 	budget := expressionBudget{remaining: 100}
-	scope := buildVariables(nil, map[string]variableDefinition{"--payload": {declaration: &d}}, nil, &budget)
+	scope := buildVariables(nil, map[string]candidate{"--payload": {d: &d}}, nil, &budget)
 	if got := scope.get("--payload", &budget); got.status != valueResolved || got.text != "none" {
 		t.Fatalf("cached value was not used: %+v", got)
 	}
@@ -562,12 +705,49 @@ func TestExpressionBudgetStopsCachedVariableTraversal(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	d := s.declarations("--payload", "var(--a) var(--b) var(--c)")[0]
 	budget := expressionBudget{remaining: 1}
-	scope := buildVariables(nil, map[string]variableDefinition{"--payload": {declaration: &d}}, nil, &budget)
+	scope := buildVariables(nil, map[string]candidate{"--payload": {d: &d}}, nil, &budget)
 	if !budget.exhausted {
 		t.Fatal("expression budget was not exhausted")
 	}
 	if got := scope.get("--payload", &budget); got.status != valueUnsupported {
 		t.Fatalf("value after budget exhaustion = %+v", got)
+	}
+}
+
+func TestMathLexingChargesSourceBytesFirst(t *testing.T) {
+	source := "calc(1px + 2px)"
+	budget := expressionBudget{remaining: int64(len(source) - 1)}
+	if _, status := evalMath(fontSize, source, &initialStyle, &initialStyle, &budget); status != valueUnsupported {
+		t.Fatalf("math status = %d, want unsupported", status)
+	}
+	if !budget.exhausted {
+		t.Fatal("math source-byte charge did not exhaust budget")
+	}
+}
+
+func TestExhaustedExpressionBudgetSkipsCascadeAllocation(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	inline := s.parseCSS(`--size:1px;font-size:var(--size)`, true)
+	s.buildSelectorIndex(1, 1)
+	matches := matchBudget{limit: s.limits.MatchWork, used: s.planningWork}
+	expressions := expressionBudget{remaining: s.limits.ExpressionWork}
+	node := &xhtml.Node{Type: xhtml.ElementNode, Data: "p"}
+	first := s.elementStyle(node, &initialStyle, &initialStyle, nil, nil, inline, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
+	if first.variables == nil || s.runtime.variableScratch == nil {
+		t.Fatal("resolved variables did not release cascade scratch storage")
+	}
+	scratch := s.runtime.variableScratch
+	scratch["--stale"] = candidate{}
+	_ = s.elementStyle(node, &initialStyle, &initialStyle, nil, nil, inline, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
+	if _, found := scratch["--stale"]; found || len(scratch) != 1 {
+		t.Fatalf("cascade variable scratch was not cleared and reused: %+v", scratch)
+	}
+
+	expressions.exhausted = true
+	s.runtime.variableScratch = nil
+	result := s.elementStyle(node, &initialStyle, &initialStyle, nil, nil, inline, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
+	if s.runtime.variableScratch != nil || result.style[fontSize].Known || result.variables != nil {
+		t.Fatalf("exhausted expression evaluation allocated or resolved state: result=%+v scratch=%+v", result, s.runtime.variableScratch)
 	}
 }
 

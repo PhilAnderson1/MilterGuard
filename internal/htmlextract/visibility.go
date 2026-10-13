@@ -55,6 +55,15 @@ func initialPresentationState() presentationState {
 	return presentationState{alpha: 1, alphaKnown: true, displayKnown: true, contentKnown: true, msoKnown: true, clipKnown: true}
 }
 
+func elementPaintKnown(style *Style) bool {
+	for _, property := range [...]int{filter, blend, maskImage, transform} {
+		if !style[property].Known {
+			return false
+		}
+	}
+	return true
+}
+
 func decideVisibility(style *Style, state presentationState, colour *colourResult) visibilityDecision {
 	var mask concealmentReason
 	visibilityReason := concealedVisibilityReason(style[visibility])

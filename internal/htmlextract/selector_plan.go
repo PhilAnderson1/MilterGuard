@@ -40,6 +40,14 @@ type selectorAttributeProfile struct {
 	classes, ids, attributes int64
 }
 
+// selectorAttributeCandidates records the non-empty selector-index buckets
+// selected by an element's immutable id and class attributes. Building this
+// once avoids re-tokenizing an ancestor's class value for every descendant and
+// every viewing case.
+type selectorAttributeCandidates struct {
+	direct, ancestor [][]selectorRef
+}
+
 const selectorBytesPerWorkUnit = 16
 const selectorAttributesPerWorkUnit = 8
 
@@ -168,11 +176,47 @@ type selectorPlan struct {
 
 func (p *selectorPlan) makeUncertain() {
 	p.uncertain = true
-	p.scope = compileConservativeScope(p.scopePrefix)
+	scope, execution := p.conservativeScope()
+	p.scope = compileConservativeScope(scope)
 	p.matcher = nil
 	p.ancestorChain = nil
 	p.specificity = cascadia.Specificity{1<<30 - 1, 1<<30 - 1, 1<<30 - 1}
-	p.execution = scopeSelectorComplexity(p.scopePrefix)
+	p.execution = execution
+}
+
+// conservativeScope retains only conditions that are necessary for the full
+// selector to match. In particular, an understood final descendant or child
+// relationship is safe to preserve even when an earlier, expensive part of
+// the selector has to be abandoned. This prevents a rule such as
+// "u + .body .product img" from degrading all the way to every img element.
+func (p *selectorPlan) conservativeScope() (string, selectorComplexity) {
+	fallback := scopeSelectorComplexity(p.scopePrefix)
+	if p.scopePrefix == "" || p.scopePrefix == "*" || len(p.complexity.compounds) < 2 {
+		return p.scopePrefix, fallback
+	}
+	last := len(p.complexity.compounds) - 1
+	combinator := p.complexity.combinators[last-1]
+	if combinator != ' ' && combinator != '>' {
+		return p.scopePrefix, fallback
+	}
+	right := trimCSSWhitespace(p.complexity.compounds[last].source)
+	left := trimCSSWhitespace(p.complexity.compounds[last-1].source)
+	if right != p.scopePrefix || left == "" || left == "*" || positiveCompoundPrefix(left) != left {
+		return p.scopePrefix, fallback
+	}
+	separator := " "
+	if combinator == '>' {
+		separator = ">"
+	}
+	scope := left + separator + right
+	group, err := cascadia.ParseGroup(scope)
+	if err != nil || len(group) != 1 {
+		return p.scopePrefix, fallback
+	}
+	return scope, selectorComplexity{
+		compounds:   []compoundComplexity{p.complexity.compounds[last-1], p.complexity.compounds[last]},
+		combinators: []byte{combinator},
+	}
 }
 
 // compileAncestorChain prepares selectors composed solely of descendant and
@@ -235,7 +279,7 @@ func planSelectorList(source string, nextSequence *int) []selectorPlan {
 	start, brackets, parens := 0, 0, 0
 	var quote byte
 	appendBranch := func(end int) {
-		branch := strings.TrimSpace(source[start:end])
+		branch := trimCSSWhitespace(source[start:end])
 		if branch == "" {
 			return
 		}
@@ -294,7 +338,7 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 	complexity := selectorComplexity{}
 	var compoundPrefixes []string
 	finishCompound := func(end int) {
-		part := strings.TrimSpace(branch[compoundStart:end])
+		part := trimCSSWhitespace(branch[compoundStart:end])
 		if part != "" {
 			complexity.compounds = append(complexity.compounds, selectorCompoundComplexity(part))
 			compoundPrefixes = append(compoundPrefixes, positiveCompoundPrefix(part))
@@ -360,7 +404,7 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 			for nameEnd < len(branch) && isSelectorNameByte(branch[nameEnd]) {
 				nameEnd++
 			}
-			name := strings.ToLower(branch[nameStart:nameEnd])
+			name := asciiLower(branch[nameStart:nameEnd])
 			switch name {
 			case "hover", "focus", "focus-visible", "focus-within", "active", "visited":
 				inactive = true
@@ -392,7 +436,7 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 			}
 			prevExplicit := i > 0 && strings.ContainsRune(">+~", rune(branch[i-1]))
 			nextExplicit := j < len(branch) && strings.ContainsRune(">+~", rune(branch[j]))
-			if !prevExplicit && !nextExplicit && strings.TrimSpace(branch[compoundStart:i]) != "" && j < len(branch) {
+			if !prevExplicit && !nextExplicit && trimCSSWhitespace(branch[compoundStart:i]) != "" && j < len(branch) {
 				finishCompound(i)
 				complexity.combinators = append(complexity.combinators, ' ')
 				combinators++
@@ -420,7 +464,7 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 	if inactive {
 		return selectorPlan{}, false
 	}
-	prefix := positiveCompoundPrefix(strings.TrimSpace(branch[rightmostStart:]))
+	prefix := positiveCompoundPrefix(trimCSSWhitespace(branch[rightmostStart:]))
 	key := selectorIndexKey(prefix)
 	if key.kind == selectorUniversal {
 		ancestorOnly := true
@@ -479,7 +523,7 @@ func positiveCompoundPrefix(compound string) string {
 			continue
 		}
 		if compound[i] == ':' || compound[i] == '[' {
-			return strings.TrimSpace(compound[:i])
+			return trimCSSWhitespace(compound[:i])
 		}
 		if compound[i] == '|' {
 			// Cascadia does not implement CSS namespaces. A namespace prefix is
@@ -502,13 +546,13 @@ func positiveCompoundPrefix(compound string) string {
 			// Foreign element names are case-sensitive. The existing HTML tag
 			// index and Cascadia's type selector both fold names to lower case,
 			// so retain a local-name constraint only when folding is a no-op.
-			if local := compound[start:end]; local != strings.ToLower(local) {
+			if local := compound[start:end]; local != asciiLower(local) {
 				return ""
 			}
-			return strings.ToLower(compound[start:end])
+			return asciiLower(compound[start:end])
 		}
 	}
-	return strings.TrimSpace(compound)
+	return trimCSSWhitespace(compound)
 }
 
 var universalScopeMatcher cascadia.Matcher = cascadia.Selector(func(*html.Node) bool { return true })
@@ -554,7 +598,7 @@ func selectorIndexKey(prefix string) selectorKey {
 			if tag != "" {
 				return selectorKey{}
 			}
-			tag = strings.ToLower(value)
+			tag = asciiLower(value)
 		}
 	}
 	if id != "" {
@@ -780,7 +824,7 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 		for branchIndex := range s.rules[ruleIndex].plans {
 			plan := &s.rules[ruleIndex].plans[branchIndex]
 			if plan.uncertain {
-				plan.cost = selectorExecutionCost(plan.execution, selectorAttributeProfile{}, 0, 1, s.limits.MatchWork)
+				plan.cost = selectorExecutionCost(plan.execution, selectorAttributeProfile{}, depth, nodes, s.limits.MatchWork)
 			} else {
 				plan.bound = plannedSelectorCost(plan.complexity, selectorAttributeProfile{}, depth, nodes, s.limits.MatchWork)
 				plan.cost = selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, depth, nodes, s.limits.MatchWork)
@@ -788,7 +832,7 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 				// their recursive Cascadia bound is no longer an admission risk.
 				if plan.ancestorChain == nil && plan.bound > s.limits.MatchWork {
 					plan.makeUncertain()
-					plan.cost = selectorExecutionCost(plan.execution, selectorAttributeProfile{}, 0, 1, s.limits.MatchWork)
+					plan.cost = selectorExecutionCost(plan.execution, selectorAttributeProfile{}, depth, nodes, s.limits.MatchWork)
 				}
 			}
 			ref := selectorRef{rule: ruleIndex, branch: branchIndex, sequence: plan.sequence}
@@ -814,7 +858,83 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 	s.index = index
 	s.runtime.matchCaches = nil
 	s.runtime.ancestorStates = nil
+	s.runtime.attributeCandidates = nil
 	s.runtime.matchCacheEntries = 0
+}
+
+func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *matchBudget) (selectorAttributeCandidates, bool) {
+	if len(node.Attr) == 0 {
+		return selectorAttributeCandidates{}, true
+	}
+	if cached, ok := s.runtime.attributeCandidates[node]; ok {
+		return cached, true
+	}
+	var cached selectorAttributeCandidates
+	if budget != nil && !budget.spend(int64(len(node.Attr))) {
+		return cached, false
+	}
+	var id, classes string
+	var idSeen, classesSeen bool
+	for _, attribute := range node.Attr {
+		switch attribute.Key {
+		case "id":
+			if !idSeen {
+				id, idSeen = attribute.Val, true
+			}
+		case "class":
+			if !classesSeen {
+				classes, classesSeen = attribute.Val, true
+			}
+		}
+		if idSeen && classesSeen {
+			break
+		}
+	}
+	appendIndexed := func(value string, direct, ancestor map[string][]selectorRef) bool {
+		lookups := 0
+		if len(direct) != 0 {
+			lookups++
+		}
+		if len(ancestor) != 0 {
+			lookups++
+		}
+		if budget != nil && lookups != 0 && !budget.spend(int64(lookups)) {
+			return false
+		}
+		if bucket := direct[value]; len(bucket) != 0 {
+			cached.direct = append(cached.direct, bucket)
+		}
+		if bucket := ancestor[value]; len(bucket) != 0 {
+			cached.ancestor = append(cached.ancestor, bucket)
+		}
+		return true
+	}
+	if id != "" && !appendIndexed(id, s.index.ids, s.index.ancestorIDs) {
+		return selectorAttributeCandidates{}, false
+	}
+	if classes != "" {
+		if budget != nil && !budget.spend(1+selectorByteWork(len(classes))) {
+			return selectorAttributeCandidates{}, false
+		}
+		for start := 0; start < len(classes); {
+			for start < len(classes) && isCSSSpace(classes[start]) {
+				start++
+			}
+			end := start
+			for end < len(classes) && !isCSSSpace(classes[end]) {
+				end++
+			}
+			if end > start && !appendIndexed(classes[start:end], s.index.classes, s.index.ancestorClasses) {
+				return selectorAttributeCandidates{}, false
+			}
+			start = end
+		}
+	}
+	if s.runtime.attributeCandidates == nil {
+		s.runtime.attributeCandidates = make(map[*html.Node]selectorAttributeCandidates)
+	}
+	s.runtime.attributeCandidates[node] = cached
+	return cached, true
 }
 
 // collectCandidates builds the union of relevant selector-index buckets. A
@@ -851,61 +971,21 @@ func (s *sheet) collectCandidates(n *html.Node, budget *matchBudget) ([]selector
 		}
 		return true
 	}
-	appendAttributes := func(node *html.Node, idIndex, classIndex map[string][]selectorRef) bool {
-		if len(idIndex) == 0 && len(classIndex) == 0 {
-			return true
-		}
-		if budget != nil && len(node.Attr) != 0 && !budget.spend(int64(len(node.Attr))) {
-			return false
-		}
-		var id, classes string
-		var idSeen, classesSeen bool
-		for _, attribute := range node.Attr {
-			switch attribute.Key {
-			case "id":
-				if !idSeen {
-					id, idSeen = attribute.Val, true
-				}
-			case "class":
-				if !classesSeen {
-					classes, classesSeen = attribute.Val, true
-				}
-			}
-			if idSeen && classesSeen {
-				break
-			}
-		}
-		if id != "" && !appendBucket(idIndex[id]) {
-			return false
-		}
-		if classes != "" {
-			if budget != nil && !budget.spend(1+selectorByteWork(len(classes))) {
-				return false
-			}
-			for start := 0; start < len(classes); {
-				for start < len(classes) && isCSSSpace(classes[start]) {
-					start++
-				}
-				end := start
-				for end < len(classes) && !isCSSSpace(classes[end]) {
-					end++
-				}
-				if end > start && !appendBucket(classIndex[classes[start:end]]) {
-					return false
-				}
-				start = end
-			}
-		}
-		return true
-	}
 	if !appendBucket(s.index.universal) || !appendBucket(s.index.tags[n.Data]) {
 		s.runtime.candidateScratch = refs
 		return nil, false
 	}
 	if len(s.index.ids) != 0 || len(s.index.classes) != 0 {
-		if !appendAttributes(n, s.index.ids, s.index.classes) {
+		attributes, complete := s.attributeCandidateBuckets(n, budget)
+		if !complete {
 			s.runtime.candidateScratch = refs
 			return nil, false
+		}
+		for _, bucket := range attributes.direct {
+			if !appendBucket(bucket) {
+				s.runtime.candidateScratch = refs
+				return nil, false
+			}
 		}
 	}
 	if len(s.index.ancestorTags) != 0 || len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
@@ -918,9 +998,16 @@ func (s *sheet) collectCandidates(n *html.Node, budget *matchBudget) ([]selector
 				return nil, false
 			}
 			if len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
-				if !appendAttributes(ancestor, s.index.ancestorIDs, s.index.ancestorClasses) {
+				attributes, complete := s.attributeCandidateBuckets(ancestor, budget)
+				if !complete {
 					s.runtime.candidateScratch = refs
 					return nil, false
+				}
+				for _, bucket := range attributes.ancestor {
+					if !appendBucket(bucket) {
+						s.runtime.candidateScratch = refs
+						return nil, false
+					}
 				}
 			}
 		}

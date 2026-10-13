@@ -19,7 +19,7 @@ type mathParser struct {
 }
 
 func isMath(s string) bool {
-	s = strings.ToLower(strings.TrimSpace(s))
+	s = normalizeCSSKeyword(s)
 	for _, f := range []string{"calc(", "min(", "max(", "clamp("} {
 		if strings.HasPrefix(s, f) {
 			return true
@@ -28,6 +28,12 @@ func isMath(s string) bool {
 	return false
 }
 func evalMath(prop int, src string, parent, root *Style, budget *expressionBudget) (Value, valueStatus) {
+	// Substituted values do not have a reusable token stream. Charge their byte
+	// scan before invoking the lexer so an exhausted budget cannot repeatedly
+	// allocate tokens for values it will subsequently reject.
+	if !budget.charge(len(src)) {
+		return Value{Text: src}, valueUnsupported
+	}
 	ts, status := lexValue(src)
 	if status != valueResolved {
 		return Value{Text: src}, status
@@ -135,7 +141,7 @@ func (p *mathParser) atom() quantity {
 	t := p.ts[p.at]
 	p.at++
 	if t.kind == css.FunctionToken || t.kind == css.LeftParenthesisToken {
-		name := strings.ToLower(t.raw)
+		name := asciiLower(t.raw)
 		if t.kind == css.LeftParenthesisToken {
 			name = "calc("
 		}
@@ -222,7 +228,7 @@ func (p *mathParser) atom() quantity {
 			p.status = valueInvalid
 			return quantity{}
 		}
-		s := strings.ToLower(t.raw)
+		s := asciiLower(t.raw)
 		numberText, unit, found := splitLength(s)
 		if !found || unit.kind == lengthUnitContextual || unit.kind == lengthUnitPercentage {
 			p.status = valueUnsupported

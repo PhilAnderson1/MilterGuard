@@ -1,6 +1,7 @@
 package htmlextract
 
 import (
+	"errors"
 	"fmt"
 
 	"golang.org/x/net/html"
@@ -9,7 +10,14 @@ import (
 type processor struct {
 	Limits           Limits
 	retainInspection bool // tests only; production results retain compact decisions
+	shouldStop       func() bool
 }
+
+var errStopped = errors.New("HTML processing stopped")
+
+// IsStopped reports whether analysis ended because the caller's external
+// resource guard requested the bounded fallback.
+func IsStopped(err error) bool { return errors.Is(err, errStopped) }
 
 // Analyze parses and resolves a document once and retains the tree alongside
 // the per-text-node presentation decisions used by message extraction.
@@ -17,6 +25,16 @@ func Analyze(input []byte, limits Limits) (Document, error) {
 	p := processor{Limits: limits}
 	return p.process(input)
 }
+
+// AnalyzeWithStop is Analyze with a cooperative stop check. The callback is
+// sampled between bounded phases and during long traversals; library calls
+// already in progress cannot be interrupted.
+func AnalyzeWithStop(input []byte, limits Limits, shouldStop func() bool) (Document, error) {
+	p := processor{Limits: limits, shouldStop: shouldStop}
+	return p.process(input)
+}
+
+func (p processor) stopped() bool { return p.shouldStop != nil && p.shouldStop() }
 
 type viewingCaseResults struct {
 	text           []Text
@@ -56,6 +74,8 @@ type viewingCaseRunner struct {
 	layers           []paintLayer
 	layerGeneration  uint64
 	colourMemo       colourMemo
+	shouldStop       func() bool
+	visited          int
 }
 
 func (r *viewingCaseRunner) evaluateColour(foreground Value) colourResult {
@@ -82,6 +102,10 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 	r.layerGeneration = 0
 	r.colourMemo.valid = false
 	for len(r.frames) > 0 {
+		r.visited++
+		if r.visited&255 == 0 && r.shouldStop != nil && r.shouldStop() {
+			return errStopped
+		}
 		f := &r.frames[len(r.frames)-1]
 		n := f.n
 		if !f.entered {
@@ -142,15 +166,37 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					f.alphaKnown = f.alphaKnown && a.Known
 				}
 				if f.scope == scopeActive && (n.Data == "img" || n.Data == "input") {
-					decision := decideVisibility(style, f.presentationState, nil)
+					elementState := f.presentationState
+					if resolved.elementGeometryConcealed {
+						elementState.clipped = true
+					}
+					if !elementPaintKnown(style) {
+						elementState.layoutUncertain = true
+					}
+					if hiddenInput(n) {
+						elementState.none = true
+					}
+					decision := decideVisibility(style, elementState, nil)
 					if first {
 						r.results.elementLabels = append(r.results.elementLabels, decision.label)
 						r.results.elementReasons = append(r.results.elementReasons, decision.reasons)
 						r.results.elements = append(r.results.elements, Element{Node: n, EffectiveOpacity: f.alpha})
 					} else if !mergeViewingCaseLabel(r.results.elementLabels, elementIndex, decision.label) {
 						return fmt.Errorf("internal: viewing-case element count exceeded first case")
+					} else {
+						r.results.elementReasons[elementIndex] |= decision.reasons
+						if decision.reasons&reasonOpacity != 0 && f.alpha < r.results.elements[elementIndex].EffectiveOpacity {
+							r.results.elements[elementIndex].EffectiveOpacity = f.alpha
+						}
 					}
 					elementIndex++
+				}
+				if n.Namespace == "" && n.Data == "noscript" {
+					// Email clients disagree on whether noscript fallback content is
+					// rendered or removed during sanitization. Retain the subtree for
+					// analysis, but do not claim that otherwise readable content is
+					// definitely visible to the recipient.
+					f.layoutUncertain = true
 				}
 			}
 			f.scope = nodeContentScope(n, f.scope)
@@ -168,6 +214,14 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					r.results.text = append(r.results.text, text)
 				} else if !mergeViewingCaseLabel(r.results.textLabels, textIndex, decision.label) {
 					return fmt.Errorf("internal: viewing-case text count exceeded first case")
+				} else {
+					r.results.textReasons[textIndex] |= decision.reasons
+					if decision.reasons&reasonOpacity != 0 && f.alpha < r.results.text[textIndex].EffectiveOpacity {
+						r.results.text[textIndex].EffectiveOpacity = f.alpha
+					}
+					if decision.reasons&reasonFontSize != 0 {
+						r.results.text[textIndex].FontSize = style[fontSize].Text
+					}
 				}
 				textIndex++
 			}
@@ -195,6 +249,9 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 }
 
 func (p processor) process(input []byte) (Document, error) {
+	if p.stopped() {
+		return Document{}, errStopped
+	}
 	document, err := p.parseDocument(input)
 	if err != nil {
 		return Document{
@@ -209,7 +266,13 @@ func (p processor) process(input []byte) (Document, error) {
 		Usage:                parsedResourceUsage(len(input), &document),
 		UnresolvedStylesheet: s.unresolvedStylesheet,
 	}
+	if p.stopped() {
+		return in, errStopped
+	}
 	s.buildSelectorIndex(document.treeDepth, document.nodeCount)
+	if p.stopped() {
+		return in, errStopped
+	}
 	cap := p.Limits.MediaCases
 	if cap < 1 || cap > MaxViewingCases {
 		cap = MaxViewingCases
@@ -234,13 +297,18 @@ func (p processor) process(input []byte) (Document, error) {
 		frames:     make([]viewingCaseFrame, 0, document.treeDepth+1),
 		styleStack: make([]Style, 0, document.treeDepth+1),
 		layers:     make([]paintLayer, 0, document.treeDepth),
+		shouldStop: p.shouldStop,
 	}
 	for caseIndex, width := range widths {
+		if p.stopped() {
+			recordEvaluationUsage(&in.Usage, &matches, &budget, exprLimit, s)
+			return in, errStopped
+		}
 		if err := runner.run(width, fallback, caseIndex == 0); err != nil {
 			recordEvaluationUsage(&in.Usage, &matches, &budget, exprLimit, s)
 			return in, err
 		}
-		if matches.exhausted && caseIndex+1 < len(widths) {
+		if (matches.exhausted || budget.exhausted) && caseIndex+1 < len(widths) {
 			// All later cases would receive unresolved styles. Mark their
 			// contribution directly instead of repeatedly traversing the DOM.
 			unknown := labelUnknown
@@ -283,6 +351,7 @@ func parsedResourceUsage(inputBytes int, document *parsedDocument) ResourceUsage
 		CSSDepth:   s.conditionDepth,
 		Rules:      s.rulesSeen,
 		Selectors:  s.selectors,
+		CSSBytes:   s.cssBytes,
 		MatchWork:  s.planningWork,
 
 		CSSLimitExceeded:   s.cascadeIncomplete,

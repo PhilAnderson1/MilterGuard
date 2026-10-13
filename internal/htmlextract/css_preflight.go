@@ -110,7 +110,7 @@ func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 			case css.RightBraceToken:
 				popContext()
 			case css.AtKeywordToken:
-				atRule = strings.ToLower(string(data))
+				atRule = asciiLower(string(data))
 				phase = cssPrelude
 			default:
 				if context == cssRuleList {

@@ -106,15 +106,21 @@ confidently identified as concealed and leaves location markers. If the result
 is still too large, it retains one continuous prefix and reports the omitted
 remainder. Independently extracted links remain available within their limits.
 
+`ai.compact_prompt_urls` defaults to `true`. It shortens unusually long URL
+components in the model-facing body while retaining domains and query parameter
+names. Set it to `false` to give the model complete URLs; this preserves more
+forensic evidence at the cost of additional input tokens and potentially
+earlier body truncation.
+
 `ai.max_html_parse_cpu_ms` limits the CPU time used to convert an HTML message
-into its complete analysis prompt. The default is 250 milliseconds; `0`
-disables this protection. CPU time excludes time spent descheduled, so unrelated
-server load does not by itself consume the allowance. Exceeding the limit skips
-the AI request and produces an unwanted-mail rejection decision. In enforce
-mode, that rejection adds the usual sending-IP reputation strike, including the
-configured short block and repeat-offender escalation. IP and reverse-DNS
-allowlists still apply. `ai.html_dos_reject_message` sets the dedicated SMTP
-rejection text returned for this decision.
+into its analysis prompt. The default is 250 milliseconds; `0` disables the
+limit. CPU time excludes time spent descheduled, so unrelated server load does
+not by itself consume the allowance. `ai.html_parse_cpu_limit_action` controls
+what happens at the limit: `fallback` switches to bounded lexical extraction
+and continues AI analysis, `reject` rejects without changing IP reputation, and
+`dos-reject` (the default) rejects and applies the usual sending-IP reputation
+block and repeat-offender escalation. IP and reverse-DNS allowlists still apply.
+`ai.html_dos_reject_message` sets the dedicated SMTP text for `dos-reject`.
 
 Set `ai.incomplete_body_action` to `scan` (the default) to classify the retained
 body with an explicit limitation notice. Set it to `reject` to record a

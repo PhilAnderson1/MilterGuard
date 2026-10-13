@@ -64,7 +64,7 @@ func hasVariables(s string) bool {
 
 func tokensHaveVariables(tokens []valueToken) bool {
 	for _, token := range tokens {
-		if token.kind == css.FunctionToken && strings.EqualFold(token.raw, "var(") {
+		if token.kind == css.FunctionToken && equalASCIIFold(token.raw, "var(") {
 			return true
 		}
 	}
@@ -76,7 +76,7 @@ func containsFold(s, substr string) bool {
 		return true
 	}
 	for i := 0; i+len(substr) <= len(s); i++ {
-		if strings.EqualFold(s[i:i+len(substr)], substr) {
+		if equalASCIIFold(s[i:i+len(substr)], substr) {
 			return true
 		}
 	}
@@ -98,17 +98,110 @@ func significant(ts []valueToken) []valueToken {
 	}
 	return out
 }
-func closing(ts []valueToken, start int) int {
-	depth := 1
-	for i := start + 1; i < len(ts); i++ {
-		switch ts[i].kind {
-		case css.FunctionToken, css.LeftParenthesisToken:
-			depth++
-		case css.RightParenthesisToken:
-			depth--
-			if depth == 0 {
-				return i
+
+func expectedClosingToken(kind css.TokenType) (css.TokenType, bool) {
+	switch kind {
+	case css.FunctionToken, css.LeftParenthesisToken:
+		return css.RightParenthesisToken, true
+	case css.LeftBracketToken:
+		return css.RightBracketToken, true
+	case css.LeftBraceToken:
+		return css.RightBraceToken, true
+	default:
+		return 0, false
+	}
+}
+
+func isClosingToken(kind css.TokenType) bool {
+	switch kind {
+	case css.RightParenthesisToken, css.RightBracketToken, css.RightBraceToken:
+		return true
+	default:
+		return false
+	}
+}
+
+// advanceDelimiters follows CSS component-value block matching. A closing
+// token only closes the corresponding innermost block; a mismatched closer is
+// part of that block and must not prematurely close an enclosing function.
+func advanceDelimiters(stack []css.TokenType, kind css.TokenType) ([]css.TokenType, bool) {
+	if closer, ok := expectedClosingToken(kind); ok {
+		return append(stack, closer), false
+	}
+	if !isClosingToken(kind) {
+		return stack, false
+	}
+	if len(stack) == 0 || stack[len(stack)-1] != kind {
+		return stack, false
+	}
+	return stack[:len(stack)-1], true
+}
+
+// parserCompatibleCSS works around a parser recovery divergence for a closing
+// parenthesis inside a nested [] or {} component block. CSS Syntax keeps that
+// parenthesis in the inner block, but the declaration parser otherwise treats
+// it as closing the surrounding function and drops the declaration. Escaping
+// only that mismatched delimiter preserves its character value while allowing
+// the parser to expose the declaration to our component-value evaluator.
+// Ordinary CSS takes the allocation-free fast path.
+func parserCompatibleCSS(text string) string {
+	if !containsFold(text, "var(") || !strings.Contains(text, ")") || (!strings.Contains(text, "[") && !strings.Contains(text, "{")) {
+		return text
+	}
+	l := css.NewLexer(parse.NewInputString(text))
+	var stack []css.TokenType
+	var b strings.Builder
+	changed := false
+	parenthesisBlocks := 0
+	offset := 0
+	for {
+		kind, raw := l.Next()
+		if kind == css.ErrorToken {
+			if !errors.Is(l.Err(), io.EOF) {
+				return text
 			}
+			break
+		}
+		if kind == css.RightParenthesisToken && len(stack) > 0 && stack[len(stack)-1] != kind && parenthesisBlocks > 0 {
+			if !changed {
+				b.Grow(len(text) + 1)
+				b.WriteString(text[:offset])
+				changed = true
+			}
+			if changed {
+				b.WriteByte('\\')
+			}
+		}
+		if changed {
+			b.Write(raw)
+		}
+		offset += len(raw)
+		if closer, ok := expectedClosingToken(kind); ok && closer == css.RightParenthesisToken {
+			parenthesisBlocks++
+		}
+		var matched bool
+		stack, matched = advanceDelimiters(stack, kind)
+		if matched && kind == css.RightParenthesisToken {
+			parenthesisBlocks--
+		}
+	}
+	if !changed {
+		return text
+	}
+	return b.String()
+}
+
+func closing(ts []valueToken, start int) int {
+	closer, ok := expectedClosingToken(ts[start].kind)
+	if !ok {
+		return len(ts)
+	}
+	stack := []css.TokenType{closer}
+	for i := start + 1; i < len(ts); i++ {
+		var matched bool
+		stack, matched = advanceDelimiters(stack, ts[i].kind)
+		if matched && len(stack) == 0 {
+			return i
 		}
 	}
 	// CSS automatically closes an open function at end of input.
@@ -125,6 +218,7 @@ func validVariableFunctions(ts []valueToken) bool {
 		name        valueToken
 		nameTokens  int
 		invalidName bool
+		closer      css.TokenType
 	}
 	var stack []frame
 	validName := func(f frame) bool {
@@ -165,11 +259,16 @@ func validVariableFunctions(ts []valueToken) bool {
 			// A nested function before a var()'s comma is part of its name
 			// grammar and therefore makes that name invalid.
 			addNameToken(token)
-			stack = append(stack, frame{variable: strings.EqualFold(token.raw, "var(")})
-		case css.LeftParenthesisToken:
+			stack = append(stack, frame{variable: equalASCIIFold(token.raw, "var("), closer: css.RightParenthesisToken})
+		case css.LeftParenthesisToken, css.LeftBracketToken, css.LeftBraceToken:
 			addNameToken(token)
-			stack = append(stack, frame{})
-		case css.RightParenthesisToken:
+			closer, _ := expectedClosingToken(token.kind)
+			stack = append(stack, frame{closer: closer})
+		case css.RightParenthesisToken, css.RightBracketToken, css.RightBraceToken:
+			if len(stack) == 0 || stack[len(stack)-1].closer != token.kind {
+				addNameToken(token)
+				continue
+			}
 			if !closeFrame() {
 				return false
 			}
@@ -196,7 +295,7 @@ func validVariableFunctions(ts []valueToken) bool {
 func variableRefs(ts []valueToken) []string {
 	var out []string
 	for i, t := range ts {
-		if t.kind == css.FunctionToken && strings.EqualFold(t.raw, "var(") {
+		if t.kind == css.FunctionToken && equalASCIIFold(t.raw, "var(") {
 			j := i + 1
 			for j < len(ts) && (ts[j].kind == css.WhitespaceToken || ts[j].kind == css.CommentToken) {
 				j++
@@ -216,14 +315,9 @@ type variableValue struct {
 type variableScope struct {
 	parent              *variableScope
 	values              map[string]variableValue
-	unresolved          map[string]variableDefinition
+	unresolved          map[string]candidate
 	colourDependent     map[string]bool
 	hasColourDependency bool
-}
-
-type variableDefinition struct {
-	declaration     *declaration
-	uncertainOrigin bool
 }
 
 func (s *variableScope) get(name string, budget *expressionBudget) variableValue {
@@ -250,7 +344,7 @@ func (s *variableScope) colourSchemeDependent(name string) bool {
 	return false
 }
 
-func unresolvedVariableScope(parent *variableScope, defs map[string]variableDefinition, alternate map[string]bool) *variableScope {
+func unresolvedVariableScope(parent *variableScope, defs map[string]candidate, alternate map[string]bool) *variableScope {
 	dependent := make(map[string]bool, len(defs)+len(alternate))
 	for name := range defs {
 		dependent[name] = true
@@ -263,7 +357,7 @@ func unresolvedVariableScope(parent *variableScope, defs map[string]variableDefi
 
 // A scope stores only this element's computed overrides. Parent references have
 // already been substituted, so a child's --b cannot change inherited --a:var(--b).
-func buildVariables(parent *variableScope, defs map[string]variableDefinition, alternate map[string]bool, budget *expressionBudget) *variableScope {
+func buildVariables(parent *variableScope, defs map[string]candidate, alternate map[string]bool, budget *expressionBudget) *variableScope {
 	if len(defs) == 0 && len(alternate) == 0 {
 		return parent
 	}
@@ -282,7 +376,7 @@ func buildVariables(parent *variableScope, defs map[string]variableDefinition, a
 	var path []string
 	for _, name := range ordered {
 		definition := defs[name]
-		d := definition.declaration
+		d := definition.d
 		if !d.tokensReady || d.valueStatus != valueResolved || d.unsupported || definition.uncertainOrigin {
 			s.values[name] = variableValue{status: valueUnsupported}
 		} else {
@@ -312,8 +406,8 @@ func buildVariables(parent *variableScope, defs map[string]variableDefinition, a
 		states[n] = 1
 		path = append(path, n)
 		definition := defs[n]
-		dependencies := definition.declaration.variableDependencies
-		if !definition.declaration.dependenciesReady {
+		dependencies := definition.d.variableDependencies
+		if !definition.d.dependenciesReady {
 			dependencies = variableRefs(tokens[n])
 		}
 		for _, ref := range dependencies {
@@ -342,7 +436,7 @@ func buildVariables(parent *variableScope, defs map[string]variableDefinition, a
 		if !local {
 			return parent.get(n, budget)
 		}
-		d := definition.declaration
+		d := definition.d
 		if depth > maxExpressionDepth {
 			return variableValue{status: valueUnsupported}
 		}
@@ -387,18 +481,18 @@ func buildVariables(parent *variableScope, defs map[string]variableDefinition, a
 		if !local {
 			return parent.colourSchemeDependent(name)
 		}
-		if !budget.charge(1 + len(definition.declaration.variableDependencies)) {
+		if !budget.charge(1 + len(definition.d.variableDependencies)) {
 			s.colourDependent[name] = true
 			s.hasColourDependency = true
 			return true
 		}
 		dependencyState[name] = 1
 		dependent := false
-		switch definition.declaration.keyword {
+		switch definition.d.keyword {
 		case "inherit", "unset":
 			dependent = parent.colourSchemeDependent(name)
 		default:
-			for _, ref := range definition.declaration.variableDependencies {
+			for _, ref := range definition.d.variableDependencies {
 				if dependsOnColourScheme(ref, depth+1) {
 					dependent = true
 				}
@@ -438,24 +532,18 @@ func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget
 	var out strings.Builder
 	for i := 0; i < len(ts); i++ {
 		t := ts[i]
-		if t.kind != css.FunctionToken || !strings.EqualFold(t.raw, "var(") {
+		if t.kind != css.FunctionToken || !equalASCIIFold(t.raw, "var(") {
 			out.WriteString(t.raw)
 		} else {
 			end := closing(ts, i)
 			inner := ts[i+1 : end]
 			comma := -1
-			level := 0
+			var stack []css.TokenType
 			for j, v := range inner {
-				switch v.kind {
-				case css.FunctionToken, css.LeftParenthesisToken:
-					level++
-				case css.RightParenthesisToken:
-					level--
-				case css.CommaToken:
-					if level == 0 && comma < 0 {
-						comma = j
-					}
+				if v.kind == css.CommaToken && len(stack) == 0 && comma < 0 {
+					comma = j
 				}
+				stack, _ = advanceDelimiters(stack, v.kind)
 			}
 			nameTokens := inner
 			if comma >= 0 {
@@ -489,5 +577,5 @@ func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget
 			return variableValue{status: valueUnsupported}
 		}
 	}
-	return variableValue{strings.TrimSpace(out.String()), valueResolved}
+	return variableValue{trimCSSWhitespace(out.String()), valueResolved}
 }

@@ -114,6 +114,22 @@ func TestBasicNamedColourAliases(t *testing.T) {
 	}
 }
 
+func TestCSSKeywordsUseASCIICaseFolding(t *testing.T) {
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{"mixed-case ASCII colour", `<p style="color:white;background:BLaCK">T</p>`, "visible"},
+		{"Kelvin sign is not ASCII k", `<p style="color:white;background:blacK">T</p>`, "concealed"},
+		{"Kelvin sign cannot fabricate property", `<p style="color:white;background:white;masK-image:url(x)">T</p>`, "concealed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := colourText(t, test.source).Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestColourInheritanceAttributesAndCascade(t *testing.T) {
 	cases := []struct {
 		name, src, want string

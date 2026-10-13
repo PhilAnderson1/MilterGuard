@@ -34,6 +34,9 @@ func (r *activityRepository) AddActivity(ctx context.Context, event stores.Activ
 	if !r.available() {
 		return fmt.Errorf("activity repository is unavailable")
 	}
+	if !validActivityEvent(event.EventType, event.Outcome) {
+		return fmt.Errorf("invalid activity event type %d and outcome %d", event.EventType, event.Outcome)
+	}
 	if event.OccurredAt.IsZero() {
 		event.OccurredAt = r.now().UTC()
 	}
@@ -54,6 +57,23 @@ func (r *activityRepository) AddActivity(ctx context.Context, event stores.Activ
 		return fmt.Errorf("insert activity event: %w", err)
 	}
 	return nil
+}
+
+func validActivityEvent(eventType stores.ActivityEventType, outcome stores.ActivityOutcome) bool {
+	switch eventType {
+	case stores.ActivityEventScan:
+		return outcome >= stores.ActivityOutcomeAccepted && outcome <= stores.ActivityOutcomeResponseFailed
+	case stores.ActivityEventIPRejection, stores.ActivityEventAttachmentRejection, stores.ActivityEventProtectedSenderDomainRejection:
+		return outcome == stores.ActivityOutcomeRejected || outcome == stores.ActivityOutcomeResponseFailed
+	case stores.ActivityEventCorrespondentAccept, stores.ActivityEventTrustedDomainAccept:
+		return outcome == stores.ActivityOutcomeAccepted || outcome == stores.ActivityOutcomeResponseFailed
+	case stores.ActivityEventSenderBlocklist:
+		return outcome == stores.ActivityOutcomeAccepted || outcome == stores.ActivityOutcomeRejected
+	case stores.ActivityEventHTMLDoS, stores.ActivityEventHTMLLimit:
+		return outcome == stores.ActivityOutcomeAccepted || outcome == stores.ActivityOutcomeRejected || outcome == stores.ActivityOutcomeResponseFailed
+	default:
+		return false
+	}
 }
 
 func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.ActivityQuery) (stores.ActivitySummary, error) {
@@ -85,6 +105,8 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 		coalesce(sum(quantity) FILTER (WHERE event_type = :sender_blocklist AND outcome = :accepted), 0),
 		count(*) FILTER (WHERE event_type = :html_dos AND outcome = :rejected),
 		count(*) FILTER (WHERE event_type = :html_dos AND outcome = :accepted),
+		count(*) FILTER (WHERE event_type = :html_limit AND outcome = :rejected),
+		count(*) FILTER (WHERE event_type = :html_limit AND outcome = :accepted),
 		coalesce(sum(token_cost) FILTER (WHERE event_type = :scan), 0)
 		FROM activity WHERE occurred_at_ms >= :since AND occurred_at_ms < :before`,
 		sql.Named("scan", stores.ActivityEventScan),
@@ -97,6 +119,7 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 		sql.Named("protected_sender_domain_rejection", stores.ActivityEventProtectedSenderDomainRejection),
 		sql.Named("sender_blocklist", stores.ActivityEventSenderBlocklist),
 		sql.Named("html_dos", stores.ActivityEventHTMLDoS),
+		sql.Named("html_limit", stores.ActivityEventHTMLLimit),
 		sql.Named("since", unixMillis(since)),
 		sql.Named("before", unixMillis(before))).Scan(
 		&summary.ScanTotal, &summary.ScanRejections, &summary.ScanAccepted,
@@ -104,7 +127,8 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 		&summary.TrustedDomainAccepts, &summary.AttachmentRejections,
 		&summary.ProtectedSenderDomainRejections, &summary.SenderBlocklistRejections,
 		&summary.SenderBlocklistRecipientRemovals, &summary.HTMLDoSRejections,
-		&summary.HTMLDoSAccepted, &summary.TokenCost)
+		&summary.HTMLDoSAccepted, &summary.HTMLLimitRejections,
+		&summary.HTMLLimitAccepted, &summary.TokenCost)
 	if err != nil {
 		return stores.ActivitySummary{}, fmt.Errorf("aggregate activity: %w", err)
 	}

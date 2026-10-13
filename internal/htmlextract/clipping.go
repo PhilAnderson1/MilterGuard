@@ -20,7 +20,7 @@ func resolveClip(p int, s string) (Value, valueStatus) {
 	ts = significant(ts)
 	if p == clipPath {
 		if len(ts) == 3 && ts[0].kind == css.FunctionToken && ts[2].kind == css.RightParenthesisToken {
-			f := strings.ToLower(ts[0].raw)
+			f := asciiLower(ts[0].raw)
 			arg := ts[1].raw
 			if f == "circle(" && (arg == "0" || arg == "0px" || arg == "0%") || f == "inset(" && arg == "50%" {
 				return Value{Text: s, Number: 1, Known: true}, valueResolved
@@ -68,8 +68,14 @@ func resolveClip(p int, s string) (Value, valueStatus) {
 	return Value{Text: s}, valueUnsupported
 }
 func emptyClip(st *Style, n *html.Node, displayDeclared bool) (empty, known, inlineClipPathUncertain bool) {
-	if n.Namespace != "" || !st[display].Known || st[display].Text == "contents" {
+	if n.Namespace != "" || !st[display].Known {
 		return false, false, false
+	}
+	if st[display].Text == "contents" {
+		// display:contents generates no principal box on which clip or
+		// clip-path could operate. Its child boxes therefore inherit no clipping
+		// uncertainty from these declarations.
+		return false, true, false
 	}
 	inlineClipPathUncertain = st[clipPath].Text != "none" && nonReplacedInlineBox(n, st, displayDeclared)
 	known = st[clipPath].Known && !inlineClipPathUncertain

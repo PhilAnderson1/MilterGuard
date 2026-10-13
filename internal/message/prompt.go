@@ -12,11 +12,15 @@ import (
 )
 
 const (
-	maxExtractedLinks       = 100
-	maxExtractedLinkChars   = 8192
-	maxExtractedLinkLength  = 2048
-	maxConnectionValueRunes = 255
-	maxReverseDNSNames      = 5
+	maxExtractedLinks           = 100
+	maxExtractedLinkChars       = 8192
+	maxExtractedReferenceLength = 2048
+	maxPromptURLChars           = 512
+	maxPromptURLPathChars       = 64
+	maxPromptURLParameterChars  = 50
+	maxPromptURLFragmentChars   = 50
+	maxConnectionValueRunes     = 255
+	maxReverseDNSNames          = 5
 )
 
 var promptHeaders = map[string]bool{
@@ -29,6 +33,12 @@ var plainHTTPURL = regexp.MustCompile(`(?i)https?://[^\s<>"']+`)
 // BuildAnalysis produces the bounded text and optional decoded inline images
 // supplied to the AI client after MIME and HTML processing.
 func (m *Message) BuildAnalysis(context AnalysisContext, maxChars int, vision VisionOptions) Analysis {
+	return m.BuildAnalysisWithHTMLControl(context, maxChars, vision, HTMLProcessingControl{})
+}
+
+// BuildAnalysisWithHTMLControl is BuildAnalysis with an optional externally
+// measured HTML-processing limit. It is used by the Milter's thread-CPU guard.
+func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars int, vision VisionOptions, control HTMLProcessingControl) Analysis {
 	keys := make([]string, 0, len(m.headers))
 	for key := range m.headers {
 		if promptHeaders[key] && !(context.AuthenticatedSubmission && key == "from") {
@@ -54,7 +64,7 @@ func (m *Message) BuildAnalysis(context AnalysisContext, maxChars int, vision Vi
 			fmt.Fprintf(&b, "%s: %s\n", canonicalHeaderName(key), promptHeaderValue(value))
 		}
 	}
-	content := m.processedContent()
+	content := m.processedContentWithHTMLControl(control)
 	if m.BodyTruncated || content.MIMEIncomplete || content.TransferIncomplete || content.HTMLFallbackUsed || content.CSSIncomplete {
 		b.WriteString("\nANALYSIS LIMITATIONS:\n")
 		if m.BodyTruncated {
@@ -73,7 +83,8 @@ func (m *Message) BuildAnalysis(context AnalysisContext, maxChars int, vision Vi
 			b.WriteString("- Linked or imported CSS was not evaluated; email text may include content not visible to the recipient.\n")
 		}
 	}
-	body, bodyTruncated, concealedRemoved := selectProcessedBody(content, maxChars)
+	compactURLs := !control.DisableURLCompaction
+	body, bodyTruncated, concealedRemoved := selectProcessedBodyWithURLCompaction(content, maxChars, compactURLs)
 	if bodyTruncated || content.ExtractionIncomplete {
 		if !strings.Contains(b.String(), "\nANALYSIS LIMITATIONS:\n") {
 			b.WriteString("\nANALYSIS LIMITATIONS:\n")
@@ -85,7 +96,7 @@ func (m *Message) BuildAnalysis(context AnalysisContext, maxChars int, vision Vi
 			b.WriteString("- HTML processing limits prevented complete extraction; only available content is included.\n")
 		}
 	}
-	if links := boundedLinksMissingFromBody(content.Links, body); len(links) > 0 {
+	if links := boundedLinksMissingFromBodyWithURLCompaction(content.Links, body, compactURLs); len(links) > 0 {
 		b.WriteString("\nEXTRACTED LINKS (retained independently of body sampling):\n")
 		for _, link := range links {
 			fmt.Fprintf(&b, "- %s\n", sanitize(link))
@@ -102,7 +113,8 @@ func (m *Message) BuildAnalysis(context AnalysisContext, maxChars int, vision Vi
 	b.WriteString(body)
 	return Analysis{Prompt: b.String(), Images: images, HasHTML: content.HTML, BodyTruncated: bodyTruncated, BodyExtractionIncomplete: content.ExtractionIncomplete, ConcealedContentRemoved: concealedRemoved, HasConcealedContent: content.HasConcealedContent,
 		UsedInvisibleTag: finalAnnotations.UsedInvisibleTag, UsedVisibilityVariesByViewportSizeTag: finalAnnotations.UsedVisibilityVariesByViewportSizeTag,
-		UsedVisibilityUncertainTag: finalAnnotations.UsedVisibilityUncertainTag, UsedHiddenContentStrippedTag: finalAnnotations.UsedHiddenContentStrippedTag}
+		UsedVisibilityUncertainTag: finalAnnotations.UsedVisibilityUncertainTag, UsedHiddenContentStrippedTag: finalAnnotations.UsedHiddenContentStrippedTag,
+		HTMLCPULimitExceeded: content.HTMLCPULimitExceeded}
 }
 
 func writeHTMLCommentSummary(b *strings.Builder, comments htmlCommentStats, body string) {
@@ -158,7 +170,13 @@ func (m *Message) VisibleBody(maxChars int) string {
 }
 
 func (m *Message) processedContent() extractedContent {
-	content := extractMIME(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", m.BodyBytes(), 0)
+	return m.processedContentWithHTMLControl(HTMLProcessingControl{})
+}
+
+func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl) extractedContent {
+	budget := newExtractionBudgetWithControl(control)
+	content := extractMIMEWithBudget(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", m.BodyBytes(), 0, budget)
+	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
 	content.Text = strings.ToValidUTF8(content.Text, "�")
 	content.VisibleText = strings.ToValidUTF8(content.VisibleText, "�")
 	content.StrippedText = strings.ToValidUTF8(content.StrippedText, "�")
@@ -371,9 +389,13 @@ func sampleBody(body string, maxChars int) string {
 }
 
 func selectProcessedBody(content extractedContent, maxChars int) (body string, truncated, concealedRemoved bool) {
-	body = content.Text
+	return selectProcessedBodyWithURLCompaction(content, maxChars, true)
+}
+
+func selectProcessedBodyWithURLCompaction(content extractedContent, maxChars int, compactURLs bool) (body string, truncated, concealedRemoved bool) {
+	body = boundPromptURLs(content.Text, compactURLs)
 	if utf8.RuneCountInString(body) > maxChars && content.HasConcealedContent {
-		body = content.StrippedText
+		body = boundPromptURLs(content.StrippedText, compactURLs)
 		concealedRemoved = true
 	}
 	if utf8.RuneCountInString(body) > maxChars {
@@ -384,6 +406,37 @@ func selectProcessedBody(content extractedContent, maxChars int) (body string, t
 		body += "\n[HTML extraction incomplete; processing limits prevented extraction of the remainder]"
 	}
 	return body, truncated, concealedRemoved
+}
+
+func boundPromptURLs(value string, compact bool) string {
+	if !compact {
+		return value
+	}
+	return plainHTTPURL.ReplaceAllStringFunc(value, compactPromptURLMatch)
+}
+
+func compactPromptURLMatch(match string) string {
+	// A linked Markdown image has no whitespace between its image URL and
+	// destination: ![label](image)](destination). The deliberately permissive
+	// plain-URL expression sees both as one match. Split that renderer-generated
+	// boundary so each URL is compacted independently.
+	if boundary := strings.Index(match, "]("); boundary >= 0 && hasHTTPPrefix(match[boundary+2:]) {
+		return compactPromptURLMatch(match[:boundary]) + "](" + compactPromptURLMatch(match[boundary+2:])
+	}
+	link := trimPlainURLPunctuation(match)
+	if link == "" {
+		return match
+	}
+	displayed := promptURL(link)
+	if displayed == link {
+		return match
+	}
+	return displayed + match[len(link):]
+}
+
+func hasHTTPPrefix(value string) bool {
+	return len(value) >= len("http://") && (strings.EqualFold(value[:len("http://")], "http://") ||
+		len(value) >= len("https://") && strings.EqualFold(value[:len("https://")], "https://"))
 }
 
 func annotationUsageFromBody(body string) annotationUsage {
@@ -478,6 +531,10 @@ func trimPlainURLPunctuation(value string) string {
 }
 
 func boundedLinks(candidates []string) []string {
+	return boundedLinksWithURLCompaction(candidates, true)
+}
+
+func boundedLinksWithURLCompaction(candidates []string, compact bool) []string {
 	seen := make(map[string]bool)
 	links := make([]string, 0, min(len(candidates), maxExtractedLinks))
 	chars := 0
@@ -487,27 +544,39 @@ func boundedLinks(candidates []string) []string {
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || seen[candidate] {
 			continue
 		}
-		candidateChars := len([]rune(candidate))
-		if candidateChars > maxExtractedLinkLength || chars+candidateChars > maxExtractedLinkChars {
+		displayed := candidate
+		if compact {
+			displayed = promptURL(candidate)
+		}
+		candidateChars := utf8.RuneCountInString(displayed)
+		if chars+candidateChars > maxExtractedLinkChars {
 			continue
 		}
 		if len(links) >= maxExtractedLinks {
 			break
 		}
 		seen[candidate] = true
-		links = append(links, candidate)
+		links = append(links, displayed)
 		chars += candidateChars
 	}
 	return links
 }
 
 func boundedLinksMissingFromBody(candidates []string, body string) []string {
+	return boundedLinksMissingFromBodyWithURLCompaction(candidates, body, true)
+}
+
+func boundedLinksMissingFromBodyWithURLCompaction(candidates []string, body string, compact bool) []string {
 	missing := make([]string, 0, len(candidates))
 	for _, link := range candidates {
 		link = strings.TrimSpace(link)
-		if !strings.Contains(body, link) && !strings.Contains(body, markdownURL(link)) {
+		displayed := link
+		if compact {
+			displayed = promptURL(link)
+		}
+		if !strings.Contains(body, link) && !strings.Contains(body, displayed) && !strings.Contains(body, markdownURL(displayed)) {
 			missing = append(missing, link)
 		}
 	}
-	return boundedLinks(missing)
+	return boundedLinksWithURLCompaction(missing, compact)
 }

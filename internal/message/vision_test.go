@@ -120,7 +120,8 @@ func TestVisionFallbackIgnoresGeneratedLinkAndImageEvidenceForTextThreshold(t *t
 		Mode: "fallback", MinTextChars: 20, MaxImages: 2,
 		MaxBytes: 1 << 20, MaxPixels: 100,
 	})
-	if !strings.Contains(analysis.Prompt, longDestination) || !strings.Contains(analysis.Prompt, "![Long generated image description](cid:notice)") {
+	if !strings.Contains(analysis.Prompt, promptURL(longDestination)) || strings.Contains(analysis.Prompt, longDestination) ||
+		!strings.Contains(analysis.Prompt, "![Long generated image description](cid:notice)") {
 		t.Fatalf("link or image evidence missing from prompt: %s", analysis.Prompt)
 	}
 	if len(analysis.Images) != 1 {

@@ -145,7 +145,9 @@ type AIConfig struct {
 	Retries                     int      `yaml:"retries"`
 	MaxConcurrent               int      `yaml:"max_concurrent"`
 	MaxBodyChars                int      `yaml:"max_body_chars"`
+	CompactPromptURLs           bool     `yaml:"compact_prompt_urls"`
 	MaxHTMLParseCPUMilliseconds int      `yaml:"max_html_parse_cpu_ms"`
+	HTMLParseCPULimitAction     string   `yaml:"html_parse_cpu_limit_action"`
 	HTMLDoSRejectMessage        string   `yaml:"html_dos_reject_message"`
 	IncompleteBodyAction        string   `yaml:"incomplete_body_action"`
 	VisionMode                  string   `yaml:"vision_mode"`
@@ -265,10 +267,11 @@ func defaults() Config {
 		},
 		AI: AIConfig{
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
-			Model: "qwen/qwen3.6-35b-a3b", DisableThinking: true,
-			PromptFile: "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
-			Retries: 2, MaxConcurrent: 8, MaxBodyChars: 50000, MaxHTMLParseCPUMilliseconds: 250,
-			HTMLDoSRejectMessage: "Message rejected due to suspected HTML/CSS denial-of-service attack", IncompleteBodyAction: "scan",
+			DisableThinking: true,
+			PromptFile:      "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
+			Retries: 2, MaxConcurrent: 8, MaxBodyChars: 50000, CompactPromptURLs: true, MaxHTMLParseCPUMilliseconds: 250,
+			HTMLParseCPULimitAction: "dos-reject",
+			HTMLDoSRejectMessage:    "Message rejected due to suspected HTML/CSS denial-of-service attack", IncompleteBodyAction: "scan",
 			VisionMode: "fallback", VisionMinTextChars: 500,
 			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000,
 			SiteURL: "https://github.com/PhilAnderson1/MilterGuard", AppName: "MilterGuard",

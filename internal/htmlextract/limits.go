@@ -83,6 +83,7 @@ type ResourceUsage struct {
 	CSSDepth                int
 	Rules                   int
 	Selectors               int
+	CSSBytes                int
 	MediaCases              int
 	MatchWork               int64
 	ExpressionWork          int64

@@ -1,8 +1,6 @@
 package htmlextract
 
 import (
-	"strings"
-
 	"github.com/andybalholm/cascadia"
 	"golang.org/x/net/html"
 )
@@ -135,6 +133,7 @@ type elementStyleResult struct {
 	style                        Style
 	variables                    *variableScope
 	layoutUncertain              bool
+	elementGeometryConcealed     bool
 	displayDeclared              bool
 	alternateColourSchemeReasons concealmentReason
 }
@@ -173,7 +172,7 @@ func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, con
 	if len(v.text) > maxValueBytes {
 		return Value{Text: d.value}, valueUnsupported
 	}
-	value := strings.ToLower(strings.TrimSpace(v.text))
+	value := normalizeCSSKeyword(v.text)
 	if d.shorthand {
 		if property == overflowX || property == overflowY {
 			values, ok, uncertain := overflowShorthandValues(value)
@@ -276,7 +275,12 @@ func (s *sheet) collectCascade(n *html.Node, legacy, inline []declaration, media
 			if d.custom != "" {
 				c := candidate{d: d, property: d.prop, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
 				if winners.variables == nil {
-					winners.variables = map[string]candidate{}
+					if s.runtime.variableScratch == nil {
+						s.runtime.variableScratch = make(map[string]candidate)
+					} else {
+						clear(s.runtime.variableScratch)
+					}
+					winners.variables = s.runtime.variableScratch
 				}
 				if c.beats(winners.variables[d.custom]) {
 					winners.variables[d.custom] = c
@@ -339,7 +343,7 @@ func (s *sheet) collectCascade(n *html.Node, legacy, inline []declaration, media
 				if !apply(r.decls, plan.specificity, false, false, true, false) {
 					return cascadeWinners{}, false
 				}
-			} else if plan.uncertain {
+			} else if plan.uncertain || r.uncertainOrigin {
 				if !apply(r.decls, plan.specificity, false, true, state == mediaYesColourScheme, true) {
 					return cascadeWinners{}, false
 				}
@@ -368,6 +372,12 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	if matches.exhausted {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
+	// Expression exhaustion makes all subsequent computed values unknowable.
+	// Stop before cascade collection and variable-scope allocation; unresolved
+	// styles conservatively produce visibility-uncertain output.
+	if budget.exhausted {
+		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
+	}
 	if !matches.spend(elementTraversalWork) {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
@@ -382,14 +392,18 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	if !complete {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
-	var defs map[string]variableDefinition
-	if len(winners.variables) > 0 {
-		defs = map[string]variableDefinition{}
-		for n, c := range winners.variables {
-			defs[n] = variableDefinition{declaration: c.d, uncertainOrigin: c.uncertainOrigin}
-		}
+	scope := buildVariables(parentVars, winners.variables, winners.alternateColourSchemeVars, budget)
+	// Normally buildVariables copies computed values into its own scope, making
+	// the cascade map reusable. An unresolved scope retains the map so it can
+	// distinguish unknown local definitions from inherited variables.
+	if scope != nil && scope.unresolved != nil && winners.variables != nil {
+		s.runtime.variableScratch = nil
+	} else if winners.variables != nil {
+		s.runtime.variableScratch = winners.variables
 	}
-	scope := buildVariables(parentVars, defs, winners.alternateColourSchemeVars, budget)
+	if budget.exhausted {
+		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
+	}
 	context.vars = scope
 	for i := 0; i < properties; i++ {
 		c := winners.properties[i]
@@ -412,9 +426,9 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	if st[background].Text == "currentcolor" {
 		st[background] = st[color]
 	}
-	layoutUncertain := layoutVisibilityUncertain(&winners.layout, &st, context)
+	layoutUncertain, elementGeometryConcealed := layoutVisibility(&winners.layout, &st, context, n)
 	return elementStyleResult{
-		style: st, variables: scope, layoutUncertain: layoutUncertain,
+		style: st, variables: scope, layoutUncertain: layoutUncertain, elementGeometryConcealed: elementGeometryConcealed,
 		displayDeclared:              winners.properties[display].set,
 		alternateColourSchemeReasons: winners.alternateColourSchemeReasons,
 	}
@@ -440,7 +454,8 @@ func alternateColourSchemeEffects(d *declaration) concealmentReason {
 		backgroundBlend, maskImage, backgroundClip, textShadow, textFill, textStroke:
 		return reasonColour
 	case clip, clipPath, overflowX, overflowY, width, height, maxWidth, maxHeight,
-		left, top, right, bottom, textIndent, marginTop, marginRight, marginBottom,
+		left, top, right, bottom, textIndent, letterSpacing, wordSpacing,
+		marginTop, marginRight, marginBottom,
 		marginLeft, zoom, transform, position:
 		return reasonEmptyClip
 	default:

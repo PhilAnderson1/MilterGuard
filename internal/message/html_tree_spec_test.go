@@ -165,12 +165,23 @@ func TestTreeExtractorUnderstandsLegacyDeviceWidthEmailCSS(t *testing.T) {
 	}
 }
 
+func TestTreeExtractorIgnoresHarmlessMSOConditionalWidth(t *testing.T) {
+	got := htmlToText(`<!--[if lte mso 11]><style>.column{width:100%!important}</style><![endif]-->
+		<div class="column" style="width:100%"><img src="https://example.test/status.png" width="18" height="18" alt="Completed"><p>Package status</p></div>`)
+	if strings.Contains(got.Text, "<visibility-uncertain>") {
+		t.Fatalf("ordinary Outlook-only width made content uncertain: %s", got.Text)
+	}
+	if !strings.Contains(got.Text, "Package status") || !strings.Contains(got.Text, "![Completed]") {
+		t.Fatalf("expected content was not retained: %s", got.Text)
+	}
+}
+
 func TestTreeExtractorRetainsFallbackPresentationsWithoutPresentationCode(t *testing.T) {
 	got := htmlToText(`<html><body><noscript><a href="https://example.test/review">Review account</a></noscript><!--[if mso]><p>Outlook notice</p><![endif]--><!--[if mso]><p>&nbsp;</p><![endif]--><!--[if mso]><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]--></body></html>`)
-	if !strings.Contains(got.Text, `[Review account](https://example.test/review)`) {
+	if !strings.Contains(got.Text, `Review account`) || !strings.Contains(got.Text, `https://example.test/review`) || !strings.Contains(got.Text, `<visibility-uncertain>`) {
 		t.Fatalf("noscript fallback = %q", got.Text)
 	}
-	if !strings.Contains(got.Text, `<visibility-uncertain>Outlook notice</visibility-uncertain>`) {
+	if !strings.Contains(got.Text, "Outlook notice</visibility-uncertain>") {
 		t.Fatalf("conditional fallback = %q", got.Text)
 	}
 	if strings.Contains(got.Text, "[if mso]") || strings.Contains(got.Text, "endif") {

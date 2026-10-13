@@ -28,6 +28,7 @@ type evaluationResult struct {
 	tokenCost       float64
 	htmlCPUTime     time.Duration
 	htmlCPUExceeded bool
+	htmlCPUAction   string
 	rejectMessage   string
 	err             error
 	latency         time.Duration
@@ -61,15 +62,29 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		return s.analysisFailure(ctx.Err(), started, mode, aiErrorAction)
 	}
 
-	prepared, htmlCPUTime, cpuMeasured := s.buildAnalysis(msg, analysisContext)
+	prepared, htmlCPUTime, cpuMeasured, htmlCPUExceeded := s.buildAnalysis(msg, analysisContext)
 	maximumHTMLCPU := time.Duration(s.ai.MaxHTMLParseCPUMilliseconds) * time.Millisecond
-	if prepared.HasHTML && cpuMeasured && htmlCPUTime > maximumHTMLCPU {
+	actionOnHTMLLimit := s.ai.HTMLParseCPULimitAction
+	if actionOnHTMLLimit == "" {
+		// Preserve the historical behaviour for programmatic configurations
+		// which predate the explicit action setting.
+		actionOnHTMLLimit = "dos-reject"
+	}
+	if prepared.HasHTML && cpuMeasured && (htmlCPUExceeded || htmlCPUTime > maximumHTMLCPU) && actionOnHTMLLimit != "fallback" {
 		proposed := actionReject
+		rejectMessage := ""
+		classification := ai.Classification("")
+		score := float64(0)
+		if actionOnHTMLLimit == "dos-reject" {
+			rejectMessage = s.ai.HTMLDoSRejectMessage
+			classification = ai.ClassificationUnwanted
+			score = 1
+		}
 		return evaluationResult{
 			proposed: proposed, selected: selectActionForMode(proposed, mode),
-			classification: ai.ClassificationUnwanted, score: 1,
+			classification: classification, score: score,
 			reasons:     []string{"HTML processing exceeded the configured CPU-time limit"},
-			htmlCPUTime: htmlCPUTime, htmlCPUExceeded: true, rejectMessage: s.ai.HTMLDoSRejectMessage,
+			htmlCPUTime: htmlCPUTime, htmlCPUExceeded: true, htmlCPUAction: actionOnHTMLLimit, rejectMessage: rejectMessage,
 			latency: time.Since(started),
 		}
 	}
@@ -94,25 +109,29 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		failure.visionImages = len(input.Images)
 		failure.tokenCost = tokenCost
 		failure.htmlCPUTime = htmlCPUTime
+		failure.htmlCPUExceeded = prepared.HasHTML && htmlCPUExceeded
+		failure.htmlCPUAction = actionOnHTMLLimit
 		return failure
 	}
 
 	decision := aiResult.Decision
 	proposed, selected := s.applyPolicy(decision, mode, rejectScore)
 	return evaluationResult{
-		proposed:       proposed,
-		selected:       selected,
-		classification: decision.Classification,
-		score:          decision.Score,
-		reasons:        decision.Reasons,
-		visionImages:   len(input.Images),
-		tokenCost:      tokenCost,
-		htmlCPUTime:    htmlCPUTime,
-		latency:        time.Since(started),
+		proposed:        proposed,
+		selected:        selected,
+		classification:  decision.Classification,
+		score:           decision.Score,
+		reasons:         decision.Reasons,
+		visionImages:    len(input.Images),
+		tokenCost:       tokenCost,
+		htmlCPUTime:     htmlCPUTime,
+		htmlCPUExceeded: prepared.HasHTML && htmlCPUExceeded,
+		htmlCPUAction:   actionOnHTMLLimit,
+		latency:         time.Since(started),
 	}
 }
 
-func (s *analysisService) buildAnalysis(msg *message.Message, analysisContext message.AnalysisContext) (message.Analysis, time.Duration, bool) {
+func (s *analysisService) buildAnalysis(msg *message.Message, analysisContext message.AnalysisContext) (message.Analysis, time.Duration, bool, bool) {
 	vision := message.VisionOptions{
 		Mode:         s.ai.VisionMode,
 		MinTextChars: s.ai.VisionMinTextChars,
@@ -120,8 +139,9 @@ func (s *analysisService) buildAnalysis(msg *message.Message, analysisContext me
 		MaxBytes:     s.ai.MaxImageBytes,
 		MaxPixels:    s.ai.MaxImagePixels,
 	}
+	control := message.HTMLProcessingControl{DisableURLCompaction: !s.ai.CompactPromptURLs}
 	if s.ai.MaxHTMLParseCPUMilliseconds == 0 {
-		return msg.BuildAnalysis(analysisContext, s.ai.MaxBodyChars, vision), 0, false
+		return msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control), 0, false, false
 	}
 	clock := currentThreadCPUTime
 	if s.threadCPUTime != nil {
@@ -130,12 +150,39 @@ func (s *analysisService) buildAnalysis(msg *message.Message, analysisContext me
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	started, startedOK := clock()
-	prepared := msg.BuildAnalysis(analysisContext, s.ai.MaxBodyChars, vision)
+	maximum := time.Duration(s.ai.MaxHTMLParseCPUMilliseconds) * time.Millisecond
+	exceeded := false
+	shouldFallback := func() bool {
+		if exceeded || !startedOK {
+			return exceeded
+		}
+		current, ok := clock()
+		if ok && current >= started && current-started > maximum {
+			exceeded = true
+		}
+		return exceeded
+	}
+	control.ShouldFallback = shouldFallback
+	prepared := msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control)
 	finished, finishedOK := clock()
 	if !startedOK || !finishedOK || finished < started {
-		return prepared, 0, false
+		return prepared, 0, false, prepared.HTMLCPULimitExceeded
 	}
-	return prepared, finished - started, true
+	duration := finished - started
+	exceeded = exceeded || prepared.HTMLCPULimitExceeded || duration > maximum
+	if exceeded && prepared.HasHTML && s.ai.HTMLParseCPULimitAction == "fallback" && !prepared.HTMLCPULimitExceeded {
+		// The final prompt-building phase crossed the limit after the last HTML
+		// checkpoint. Rebuild cheaply so fallback mode never submits a fully
+		// processed over-budget representation.
+		control.ShouldFallback = nil
+		control.ForceFallback = true
+		prepared = msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control)
+		last, ok := clock()
+		if ok && last >= started {
+			duration = last - started
+		}
+	}
+	return prepared, duration, true, exceeded
 }
 
 func tokenCost(usage ai.Usage, cfg config.AIConfig) float64 {

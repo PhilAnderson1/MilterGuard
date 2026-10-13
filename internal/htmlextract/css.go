@@ -49,6 +49,8 @@ const (
 	right
 	bottom
 	textIndent
+	letterSpacing
+	wordSpacing
 	marginTop
 	marginRight
 	marginBottom
@@ -63,7 +65,7 @@ const (
 	allShorthandProperty = declarationProperties
 )
 
-var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "overflow-x", "overflow-y", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
+var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "overflow-x", "overflow-y", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "letter-spacing", "word-spacing", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
 
 // A declaration progresses through these preparation states:
 //
@@ -110,7 +112,7 @@ type preparedDeclaration struct {
 // element's inherited/root style. Variables and shorthands are handled by the
 // caller because their substituted value may change this answer.
 func contextualDeclaration(d declaration) bool {
-	value := strings.ToLower(strings.TrimSpace(d.value))
+	value := normalizeCSSKeyword(d.value)
 	if value == "inherit" || value == "unset" {
 		return true
 	}
@@ -143,7 +145,7 @@ func prepareDeclaration(d declaration) declaration {
 		d.hasVars = hasVariables(d.value)
 	}
 	if d.custom != "" {
-		d.keyword = strings.ToLower(strings.TrimSpace(d.value))
+		d.keyword = normalizeCSSKeyword(d.value)
 	}
 	if (d.custom != "" || d.hasVars) && !d.tokensReady {
 		d.valueTokens, d.valueStatus = lexValue(d.value)
@@ -168,7 +170,7 @@ func prepareDeclaration(d declaration) declaration {
 		d.valueTokens = nil
 		d.tokensReady = false
 	} else if d.custom == "" && !d.hasVars && !d.shorthand && !d.unsupported {
-		value := strings.ToLower(strings.TrimSpace(d.value))
+		value := normalizeCSSKeyword(d.value)
 		if (d.prop == fontSize || d.prop == opacity) && isMath(value) && d.tokensReady && d.valueStatus == valueResolved {
 			budget := expressionBudget{remaining: int64(maxValueTokens * 4)}
 			_, d.validity = evalMathTokens(d.prop, value, d.valueTokens, &initialStyle, &initialStyle, &budget)
@@ -192,6 +194,7 @@ type rule struct {
 	decls                        []declaration
 	conditions                   *conditionFrame
 	mediaWork, fallbackMediaWork int64
+	uncertainOrigin              bool
 }
 
 // sheetRuntime contains evaluation caches and reusable scratch storage. Rules,
@@ -200,11 +203,13 @@ type sheetRuntime struct {
 	mediaCache          map[mediaCacheKey][]uint8
 	cacheMatches        bool
 	matchCaches         []map[*html.Node]uint8
+	attributeCandidates map[*html.Node]selectorAttributeCandidates
 	candidateScratch    []selectorRef
 	candidateMarks      []uint32
 	candidateGeneration uint32
 	ancestorNodes       []*html.Node
 	ancestorStates      []map[*html.Node]ancestorChainState
+	variableScratch     map[string]candidate
 	matchCacheEntries   int
 }
 
@@ -220,6 +225,7 @@ type sheet struct {
 	conditionDepth       int
 	index                selectorIndex
 	cssBytes             int
+	mediaConditions      map[string]mediaCondition
 	importDepth          int
 	unresolvedStylesheet bool
 	runtime              sheetRuntime
@@ -234,7 +240,17 @@ func (s *sheet) admitCSS(text string, inline bool) bool {
 	if s.cascadeIncomplete || s.workIncomplete {
 		return false
 	}
-	if len(text) > s.limits.CSSBytes || s.cssBytes > s.limits.CSSBytes-len(text) || !boundedCSSConstructs(text, inline, s.limits.CSSConstructBytes, s.limits.CSSConstructTokens) {
+	if len(text) > s.limits.CSSBytes || s.cssBytes > s.limits.CSSBytes-len(text) {
+		s.abandonCascade()
+		return false
+	}
+	// Account for the complete lexer/preflight pass before doing it. Selector
+	// and declaration processing below is charged separately because it is an
+	// additional pass over those token ranges.
+	if !s.chargePlanningBytes(len(text)) {
+		return false
+	}
+	if !boundedCSSConstructs(text, inline, s.limits.CSSConstructBytes, s.limits.CSSConstructTokens) {
 		s.abandonCascade()
 		return false
 	}
@@ -277,7 +293,7 @@ func (s *sheet) invalidateMediaCache() {
 }
 
 func tokenString(v []css.Token) string {
-	return strings.TrimSpace(rawTokenString(v))
+	return trimCSSWhitespace(rawTokenString(v))
 }
 
 func rawTokenString(v []css.Token) string {
@@ -374,7 +390,7 @@ func cssTokensNeedRetention(prop string, values []css.Token) bool {
 		if token.TokenType != css.FunctionToken {
 			continue
 		}
-		if bytes.EqualFold(token.Data, []byte("var(")) {
+		if equalASCIIFoldBytes(token.Data, "var(") {
 			return true
 		}
 		// Context-sensitive arithmetic is evaluated from tokens so nested
@@ -392,16 +408,16 @@ func cssTokensNeedRetention(prop string, values []css.Token) bool {
 // value become whitespace so removing one cannot join adjacent tokens.
 func parseUnretainedCSSTokens(ts []css.Token, fallback string) parsedDeclarationValue {
 	if len(ts) > maxValueTokens {
-		return parsedDeclarationValue{text: strings.TrimSpace(fallback), status: valueUnsupported}
+		return parsedDeclarationValue{text: trimCSSWhitespace(fallback), status: valueUnsupported}
 	}
 	bytesSeen := 0
 	for _, token := range ts {
 		bytesSeen += len(token.Data)
 		if bytesSeen > maxValueBytes {
-			return parsedDeclarationValue{text: strings.TrimSpace(fallback), status: valueUnsupported}
+			return parsedDeclarationValue{text: trimCSSWhitespace(fallback), status: valueUnsupported}
 		}
 		if token.TokenType == css.BadStringToken || token.TokenType == css.BadURLToken {
-			return parsedDeclarationValue{text: strings.TrimSpace(fallback), status: valueInvalid}
+			return parsedDeclarationValue{text: trimCSSWhitespace(fallback), status: valueInvalid}
 		}
 	}
 
@@ -415,7 +431,7 @@ func parseUnretainedCSSTokens(ts []css.Token, fallback string) parsedDeclaration
 
 	important := false
 	last := end - 1
-	if last >= start && ts[last].TokenType == css.IdentToken && bytes.EqualFold(ts[last].Data, []byte("important")) {
+	if last >= start && ts[last].TokenType == css.IdentToken && equalASCIIFoldBytes(ts[last].Data, "important") {
 		bang := last - 1
 		for bang >= start && (ts[bang].TokenType == css.WhitespaceToken || ts[bang].TokenType == css.CommentToken) {
 			bang--
@@ -462,7 +478,7 @@ func parseUnretainedCSSTokens(ts []css.Token, fallback string) parsedDeclaration
 // string trimming.
 func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string) parsedDeclarationValue {
 	if status != valueResolved {
-		return parsedDeclarationValue{text: strings.TrimSpace(fallback), tokens: ts, status: status}
+		return parsedDeclarationValue{text: trimCSSWhitespace(fallback), tokens: ts, status: status}
 	}
 	start, end := 0, len(ts)
 	for start < end && (ts[start].kind == css.WhitespaceToken || ts[start].kind == css.CommentToken) {
@@ -474,7 +490,7 @@ func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string
 
 	important := false
 	last := end - 1
-	if last >= start && ts[last].kind == css.IdentToken && strings.EqualFold(cssUnescape(ts[last].raw), "important") {
+	if last >= start && ts[last].kind == css.IdentToken && equalASCIIFold(cssUnescape(ts[last].raw), "important") {
 		bang := last - 1
 		for bang >= start && (ts[bang].kind == css.WhitespaceToken || ts[bang].kind == css.CommentToken) {
 			bang--
@@ -563,7 +579,7 @@ func ownedValueTokens(values []css.Token, raw string) ([]valueToken, valueStatus
 func normalizeDeclarationProperty(prop string) string {
 	prop = cssUnescape(prop)
 	if !strings.HasPrefix(prop, "--") {
-		prop = strings.ToLower(prop)
+		prop = asciiLower(prop)
 	}
 	// Some email clients implement concealment-capable properties only under
 	// historical engine prefixes. Canonicalize only explicit aliases whose
@@ -698,7 +714,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 				prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true}),
 			}
 		}
-		return prepareDeclarations(backgroundDeclarationsTokens(strings.ToLower(value), parsed.tokens, parsed.status, imp, s.order))
+		return prepareDeclarations(backgroundDeclarationsTokens(asciiLower(value), parsed.tokens, parsed.status, imp, s.order))
 	}
 	if prop == "mask" {
 		return []declaration{prepared(declaration{prop: maskImage, value: value, important: imp, order: s.order, unsupported: true})}
@@ -722,7 +738,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 
 func overflowShorthandValues(value string) ([2]string, bool, bool) {
 	var out [2]string
-	value = strings.TrimSpace(value)
+	value = trimCSSWhitespace(value)
 	if value == "" {
 		return out, false, false
 	}
@@ -732,7 +748,7 @@ func overflowShorthandValues(value string) ([2]string, bool, bool) {
 		out[0], out[1] = value, value
 		return out, true, true
 	}
-	parts := strings.Fields(value)
+	parts := splitCSSWhitespace(value)
 	if len(parts) < 1 || len(parts) > 2 {
 		return out, false, false
 	}
@@ -745,7 +761,7 @@ func overflowShorthandValues(value string) ([2]string, bool, bool) {
 
 func marginShorthandValues(value string) ([4]string, bool, bool) {
 	var out [4]string
-	value = strings.TrimSpace(value)
+	value = trimCSSWhitespace(value)
 	if value == "" {
 		return out, false, false
 	}
@@ -758,7 +774,7 @@ func marginShorthandValues(value string) ([4]string, bool, bool) {
 		}
 		return out, true, true
 	}
-	fields := strings.Fields(value)
+	fields := splitCSSWhitespace(value)
 	if len(fields) < 1 || len(fields) > 4 {
 		return out, false, false
 	}
@@ -791,7 +807,9 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 	if !s.admitCSS(text, inline) {
 		return nil
 	}
-	p := css.NewParser(parse.NewInputString(text), inline)
+	parserText := parserCompatibleCSS(text)
+	parserCompatibilityApplied := parserText != text
+	p := css.NewParser(parse.NewInputString(parserText), inline)
 	var conditions *conditionFrame
 	conditionDepth := 0
 	defaultNamespace := false
@@ -815,11 +833,19 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			return out
 		case css.BeginAtRuleGrammar:
 			importsAllowed = false
+			// Descriptor declarations inside @page, @font-face and similar
+			// blocks never belong to an enclosing qualified rule. Clear the
+			// active rule before tdewolff emits the block's declarations so
+			// they cannot override declarations on that outer selector.
+			current = -1
+			if !s.chargePlanningTokens(values) {
+				return out
+			}
 			vals := tokenString(values)
 			var cond mediaCondition
-			switch strings.ToLower(string(data)) {
+			switch asciiLower(string(data)) {
 			case "@media":
-				cond = parseMedia(vals)
+				cond = s.parseMediaCondition(vals)
 			case "@font-face", "@keyframes", "@-webkit-keyframes":
 				cond = mediaCondition{{schemes: colourSchemeBoth, never: true}}
 			default:
@@ -841,7 +867,10 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			}
 			current = -1
 		case css.AtRuleGrammar:
-			name := strings.ToLower(string(data))
+			if !s.chargePlanningTokens(values) {
+				return out
+			}
+			name := asciiLower(string(data))
 			if name == "@import" {
 				if importsAllowed && conditions == nil {
 					s.parseImport(values)
@@ -911,10 +940,17 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			}
 			vals := rawTokenString(values)
 			var declarations []declaration
-			// tdewolff deliberately exposes a custom-property value as one
-			// opaque CustomPropertyValue token. Lex that payload once here so
-			// var() dependencies and !important retain their CSS token boundaries.
-			if g == css.CustomPropertyGrammar {
+			if parserCompatibilityApplied && strings.Contains(vals, `\)`) {
+				// Restore the original component token before our evaluator sees
+				// it. The escape exists only to prevent the declaration parser
+				// from closing the surrounding function prematurely.
+				vals = strings.ReplaceAll(vals, `\)`, `)`)
+				valueTokens, valueStatus := lexValue(vals)
+				declarations = s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)
+			} else if g == css.CustomPropertyGrammar {
+				// tdewolff deliberately exposes a custom-property value as one
+				// opaque CustomPropertyValue token. Lex that payload once here so
+				// var() dependencies and !important retain their CSS token boundaries.
 				valueTokens, valueStatus := lexValue(vals)
 				declarations = s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)
 			} else if cssTokensNeedRetention(prop, values) {
@@ -940,17 +976,26 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 // parseStylesheet parses a style element and applies the element's media
 // attribute to every rule it contributes. Conditions already attached by
 // nested at-rules are retained, making the conditions conjunctive.
-func (s *sheet) parseStylesheet(text, media string) {
+func (s *sheet) parseStylesheet(text, media string, uncertainOrigin bool) {
 	firstRule := len(s.rules)
 	s.parseCSS(text, false)
+	if uncertainOrigin {
+		s.markRulesUncertain(firstRule)
+	}
 	s.attachMediaCondition(firstRule, media)
 }
 
+func (s *sheet) markRulesUncertain(firstRule int) {
+	for i := firstRule; i < len(s.rules); i++ {
+		s.rules[i].uncertainOrigin = true
+	}
+}
+
 func (s *sheet) attachMediaCondition(firstRule int, media string) {
-	if strings.TrimSpace(media) == "" {
+	if trimCSSWhitespace(media) == "" {
 		return
 	}
-	condition := parseMedia(media)
+	condition := s.parseMediaCondition(media)
 	for i := firstRule; i < len(s.rules); i++ {
 		s.rules[i].conditions = &conditionFrame{condition: condition, parent: s.rules[i].conditions}
 		s.rules[i].prepareMediaWork()

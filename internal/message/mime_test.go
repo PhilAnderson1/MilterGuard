@@ -406,6 +406,38 @@ func TestHTMLByteBudgetIsSharedAcrossParts(t *testing.T) {
 	}
 }
 
+func TestHTMLAdditiveLimitsAreSharedAcrossParts(t *testing.T) {
+	budget := newExtractionBudget()
+	usage := htmlextract.ResourceUsage{
+		Nodes: 11, TextNodes: 7, Attributes: 5, CSSBytes: 13, Rules: 3, Selectors: 4,
+	}
+	budget.consumeHTML(usage)
+	limits, ok := budget.htmlLimits(len(`<p>T</p>`))
+	if !ok {
+		t.Fatal("remaining additive budget was rejected")
+	}
+	defaults := htmlextract.DefaultLimits()
+	if limits.Nodes != defaults.Nodes-usage.Nodes || limits.TextNodes != defaults.TextNodes-usage.TextNodes ||
+		limits.Attributes != defaults.Attributes-usage.Attributes || limits.CSSBytes != defaults.CSSBytes-usage.CSSBytes ||
+		limits.Rules != defaults.Rules-usage.Rules || limits.Selectors != defaults.Selectors-usage.Selectors {
+		t.Fatalf("additive limits were not propagated: %+v", limits)
+	}
+}
+
+func TestHTMLCSSByteBudgetIsSharedAcrossParts(t *testing.T) {
+	const cssText = `p{display:none}`
+	budget := newExtractionBudget()
+	budget.cssBytesRemaining = len(cssText)
+	first := htmlToTextWithBudget(`<style>`+cssText+`</style><p>first</p>`, budget)
+	if first.HTMLFallbackUsed || budget.cssBytesRemaining != 0 {
+		t.Fatalf("first HTML part did not consume exact CSS budget: content=%+v remaining=%d", first, budget.cssBytesRemaining)
+	}
+	second := htmlToTextWithBudget(`<p>second</p>`, budget)
+	if !second.HTMLFallbackUsed || !second.ExtractionIncomplete {
+		t.Fatalf("exhausted cumulative CSS budget was not enforced: %+v", second)
+	}
+}
+
 func TestMultipartAlternativePrefersHTML(t *testing.T) {
 	m := New(10000)
 	m.AddHeader("Content-Type", `multipart/alternative; boundary="x"`)

@@ -25,17 +25,49 @@ type extractionBudget struct {
 	parts                   int
 	htmlParts               int
 	htmlBytesRemaining      int
+	nodesRemaining          int
+	textNodesRemaining      int
+	attributesRemaining     int
+	cssBytesRemaining       int
+	rulesRemaining          int
+	selectorsRemaining      int
 	matchWorkRemaining      int64
 	expressionWorkRemaining int64
+	shouldFallback          func() bool
+	forceFallback           bool
+	cpuLimitExceeded        bool
 }
 
 func newExtractionBudget() *extractionBudget {
+	return newExtractionBudgetWithControl(HTMLProcessingControl{})
+}
+
+func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBudget {
 	limits := htmlextract.DefaultLimits()
 	return &extractionBudget{
 		htmlBytesRemaining:      limits.InputBytes,
+		nodesRemaining:          limits.Nodes,
+		textNodesRemaining:      limits.TextNodes,
+		attributesRemaining:     limits.Attributes,
+		cssBytesRemaining:       limits.CSSBytes,
+		rulesRemaining:          limits.Rules,
+		selectorsRemaining:      limits.Selectors,
 		matchWorkRemaining:      limits.MatchWork,
 		expressionWorkRemaining: limits.ExpressionWork,
+		shouldFallback:          control.ShouldFallback,
+		forceFallback:           control.ForceFallback,
 	}
+}
+
+func (b *extractionBudget) useFallback() bool {
+	if b.cpuLimitExceeded {
+		return true
+	}
+	if b.forceFallback || (b.shouldFallback != nil && b.shouldFallback()) {
+		b.cpuLimitExceeded = true
+		return true
+	}
+	return false
 }
 
 func (b *extractionBudget) takePart() bool {
@@ -47,19 +79,30 @@ func (b *extractionBudget) takePart() bool {
 }
 
 func (b *extractionBudget) htmlLimits(bytes int) (htmlextract.Limits, bool) {
-	b.htmlParts++
-	if b.htmlParts > maxHTMLParts || bytes > b.htmlBytesRemaining || b.matchWorkRemaining <= 0 || b.expressionWorkRemaining <= 0 {
+	if b.htmlParts > maxHTMLParts || bytes > b.htmlBytesRemaining || b.nodesRemaining <= 0 || b.textNodesRemaining <= 0 || b.attributesRemaining <= 0 || b.cssBytesRemaining <= 0 || b.matchWorkRemaining <= 0 || b.expressionWorkRemaining <= 0 {
 		b.htmlBytesRemaining = 0
 		return htmlextract.Limits{}, false
 	}
 	b.htmlBytesRemaining -= bytes
 	limits := htmlextract.DefaultLimits()
+	limits.Nodes = b.nodesRemaining
+	limits.TextNodes = b.textNodesRemaining
+	limits.Attributes = b.attributesRemaining
+	limits.CSSBytes = b.cssBytesRemaining
+	limits.Rules = b.rulesRemaining
+	limits.Selectors = b.selectorsRemaining
 	limits.MatchWork = b.matchWorkRemaining
 	limits.ExpressionWork = b.expressionWorkRemaining
 	return limits, true
 }
 
 func (b *extractionBudget) consumeHTML(usage htmlextract.ResourceUsage) {
+	b.nodesRemaining = remainingInt(b.nodesRemaining, usage.Nodes)
+	b.textNodesRemaining = remainingInt(b.textNodesRemaining, usage.TextNodes)
+	b.attributesRemaining = remainingInt(b.attributesRemaining, usage.Attributes)
+	b.cssBytesRemaining = remainingInt(b.cssBytesRemaining, usage.CSSBytes)
+	b.rulesRemaining = remainingInt(b.rulesRemaining, usage.Rules)
+	b.selectorsRemaining = remainingInt(b.selectorsRemaining, usage.Selectors)
 	if usage.MatchWorkExhausted || usage.MatchWork >= b.matchWorkRemaining {
 		b.matchWorkRemaining = 0
 	} else {
@@ -70,6 +113,13 @@ func (b *extractionBudget) consumeHTML(usage htmlextract.ResourceUsage) {
 	} else {
 		b.expressionWorkRemaining -= usage.ExpressionWork
 	}
+}
+
+func remainingInt(remaining, used int) int {
+	if used >= remaining {
+		return 0
+	}
+	return remaining - used
 }
 
 type extractedContent struct {
@@ -85,6 +135,7 @@ type extractedContent struct {
 	TransferIncomplete    bool
 	ExtractionIncomplete  bool
 	HTMLFallbackUsed      bool
+	HTMLCPULimitExceeded  bool
 	CSSIncomplete         bool
 	HasConcealedContent   bool
 	HTMLComments          htmlCommentStats
@@ -172,6 +223,8 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 			}
 			selected.MIMEIncomplete = mimeIncomplete
 			selected.TransferIncomplete = transferIncomplete || nestedTransferIncomplete
+			selected.HTML = selected.HTML || budget.htmlParts > 0
+			selected.HTMLCPULimitExceeded = selected.HTMLCPULimitExceeded || budget.cpuLimitExceeded
 			return selected
 		}
 		var combined extractedContent
@@ -193,6 +246,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 			combined.HasConcealedContent = combined.HasConcealedContent || part.HasConcealedContent
 			combined.ExtractionIncomplete = combined.ExtractionIncomplete || part.ExtractionIncomplete
 			combined.HTMLFallbackUsed = combined.HTMLFallbackUsed || part.HTMLFallbackUsed
+			combined.HTMLCPULimitExceeded = combined.HTMLCPULimitExceeded || part.HTMLCPULimitExceeded
 			combined.CSSIncomplete = combined.CSSIncomplete || part.CSSIncomplete
 			combined.HTMLComments.add(part.HTMLComments)
 		}
@@ -201,6 +255,8 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		combined.VisibleText = strings.Join(visibleTextParts, "\n\n")
 		combined.MIMEIncomplete = mimeIncomplete
 		combined.TransferIncomplete = transferIncomplete || nestedTransferIncomplete
+		combined.HTML = combined.HTML || budget.htmlParts > 0
+		combined.HTMLCPULimitExceeded = combined.HTMLCPULimitExceeded || budget.cpuLimitExceeded
 		return combined
 	}
 	if mediaType == "message/rfc822" {

@@ -40,22 +40,17 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 			return []declaration{{prop: background, value: value, important: important, order: order, unsupported: true}, {prop: backgroundImage, value: value, important: important, order: order, unsupported: true}}
 		}
 		// Tokenize to remove a standalone none, preserving spaces inside rgb().
-		depth := 0
+		var stack []css.TokenType
 		haveColour := false
 		haveNone := false
 		var b strings.Builder
 		for _, valueToken := range tokens {
-			tt, s := valueToken.kind, strings.ToLower(valueToken.raw)
-			if tt == css.FunctionToken {
-				depth++
+			tt, s := valueToken.kind, asciiLower(valueToken.raw)
+			if isClosingToken(tt) && len(stack) == 0 {
+				return nil
 			}
-			if tt == css.RightParenthesisToken {
-				if depth == 0 {
-					return nil
-				}
-				depth--
-			}
-			if depth == 0 && tt == css.IdentToken && s == "none" {
+			stack, _ = advanceDelimiters(stack, tt)
+			if len(stack) == 0 && tt == css.IdentToken && s == "none" {
 				if haveNone {
 					unsupported = true
 				}
@@ -64,7 +59,7 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 			}
 			b.WriteString(s)
 		}
-		token := strings.TrimSpace(b.String())
+		token := trimCSSWhitespace(b.String())
 		if token != "" {
 			haveColour = true
 			colourValue = token
@@ -108,20 +103,12 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 
 func backgroundFallbackColourTokens(tokens []valueToken) (string, valueStatus, bool) {
 	finalStart := 0
-	depth := 0
+	var stack []css.TokenType
 	for i, token := range tokens {
-		switch token.kind {
-		case css.FunctionToken, css.LeftParenthesisToken:
-			depth++
-		case css.RightParenthesisToken:
-			if depth > 0 {
-				depth--
-			}
-		case css.CommaToken:
-			if depth == 0 {
-				finalStart = i + 1
-			}
+		if token.kind == css.CommaToken && len(stack) == 0 {
+			finalStart = i + 1
 		}
+		stack, _ = advanceDelimiters(stack, token.kind)
 	}
 	// A colour in any non-final layer makes the shorthand invalid.
 	if finalStart > 0 {
@@ -148,17 +135,17 @@ func backgroundLayerColour(tokens []valueToken) (string, valueStatus, int) {
 		switch token.kind {
 		case css.FunctionToken:
 			end := closing(tokens, i)
-			name := strings.ToLower(cssUnescape(strings.TrimSuffix(token.raw, "(")))
+			name := asciiLower(cssUnescape(strings.TrimSuffix(token.raw, "(")))
 			if isColourFunction(name) {
 				last := end + 1
 				if last > len(tokens) {
 					last = len(tokens)
 				}
-				candidate = strings.ToLower(tokenText(tokens[i:last]))
+				candidate = asciiLower(tokenText(tokens[i:last]))
 			}
 			i = end
 		case css.IdentToken, css.HashToken:
-			candidate = strings.ToLower(cssUnescape(token.raw))
+			candidate = asciiLower(cssUnescape(token.raw))
 		}
 		if candidate == "" {
 			continue
@@ -185,7 +172,7 @@ func isColourFunction(name string) bool {
 }
 
 func backgroundImageSyntax(value string) bool {
-	value = strings.ToLower(value)
+	value = asciiLower(value)
 	return strings.Contains(value, "url(") || strings.Contains(value, "gradient(") || strings.Contains(value, "image-set(") || strings.Contains(value, "cross-fade(")
 }
 
@@ -194,7 +181,7 @@ func backgroundImageSyntax(value string) bool {
 // legacy spellings are unresolved, and cannot prove colour concealment.
 func legacyDeclarations(n *html.Node) []declaration {
 	var result []declaration
-	if hasAttr(n, "hidden") && strings.EqualFold(strings.TrimSpace(attr(n, "hidden")), "until-found") {
+	if hasAttr(n, "hidden") && equalASCIIFold(strings.TrimSpace(attr(n, "hidden")), "until-found") {
 		// Hidden-until-found retains a generated box but does not paint its
 		// contents. Model the browser's presentational content-visibility hint
 		// separately from display so display:block cannot reveal the text.
@@ -205,7 +192,7 @@ func legacyDeclarations(n *html.Node) []declaration {
 		result = append(result, declaration{prop: display, value: "none", order: -2})
 	}
 	add := func(prop int, value string) {
-		value = strings.ToLower(strings.TrimSpace(value))
+		value = asciiLower(strings.TrimSpace(value))
 		if value == "" || value == "transparent" {
 			return
 		}

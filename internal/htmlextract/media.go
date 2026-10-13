@@ -55,16 +55,16 @@ func parseMedia(src string) mediaCondition {
 		return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
 	}
 	var result mediaCondition
-	for _, raw := range strings.Split(strings.ToLower(src), ",") {
+	for _, raw := range strings.Split(asciiLower(src), ",") {
 		a := mediaAlternative{schemes: colourSchemeBoth}
-		raw = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "only "))
+		raw = trimCSSWhitespace(strings.TrimPrefix(trimCSSWhitespace(raw), "only "))
 		// The supported subset has no functions or nested query parentheses.
 		parts := regexpAnd.Split(raw, -1)
 		if len(parts) > 16 {
 			return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
 		}
 		for _, part := range parts {
-			part = strings.TrimSpace(part)
+			part = trimCSSWhitespace(part)
 			switch part {
 			case "screen", "all":
 			case "print":

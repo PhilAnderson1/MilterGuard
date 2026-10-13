@@ -149,6 +149,14 @@ func TestOpenMigratesPreviousSchemaAndPreservesActivity(t *testing.T) {
 		(occurred_at_ms, event_type, outcome) VALUES (2, 8, 2)`); err != nil {
 		t.Fatalf("new HTML DoS activity type rejected after migration: %v", err)
 	}
+	if _, err := store.Exec(context.Background(), `INSERT INTO activity
+		(occurred_at_ms, event_type, outcome) VALUES (3, 9, 2)`); err != nil {
+		t.Fatalf("new HTML CPU-limit activity type rejected after migration: %v", err)
+	}
+	if _, err := store.Exec(context.Background(), `INSERT INTO activity
+		(occurred_at_ms, event_type, outcome) VALUES (4, 99, 1)`); err != nil {
+		t.Fatalf("future positive activity type rejected by schema: %v", err)
+	}
 }
 
 func TestOpenDisablesAutomaticWALCheckpointing(t *testing.T) {

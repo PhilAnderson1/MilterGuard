@@ -107,7 +107,7 @@ const (
 )
 
 func resolve(p int, s string, parent, root *Style) (Value, valueStatus) {
-	s = strings.ToLower(strings.TrimSpace(s))
+	s = normalizeCSSKeyword(s)
 	if p >= properties {
 		return resolveLayoutProperty(p, s)
 	}
@@ -309,6 +309,8 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 			value = "none"
 		case textIndent:
 			value = "0px"
+		case letterSpacing, wordSpacing:
+			value = "normal"
 		case marginTop, marginRight, marginBottom, marginLeft:
 			value = "0px"
 		case zoom:
@@ -333,7 +335,7 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 		return Value{Text: value, Number: n, Known: true}, valueResolved
 	}
 	if property == overflowX || property == overflowY {
-		parts := strings.Fields(value)
+		parts := splitCSSWhitespace(value)
 		if len(parts) != 1 {
 			return Value{}, valueInvalid
 		}
@@ -343,6 +345,9 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 			}
 		}
 		return Value{Text: strings.Join(parts, " "), Known: true}, valueResolved
+	}
+	if (property == letterSpacing || property == wordSpacing) && value == "normal" {
+		return Value{Text: value, Known: true}, valueResolved
 	}
 	return resolveLayoutLength(property, value)
 }
@@ -391,7 +396,8 @@ func resolveLayoutLength(property int, value string) (Value, valueStatus) {
 
 func layoutPropertyAllowsNegative(property int) bool {
 	switch property {
-	case left, top, right, bottom, textIndent, marginTop, marginRight, marginBottom, marginLeft:
+	case left, top, right, bottom, textIndent, letterSpacing, wordSpacing,
+		marginTop, marginRight, marginBottom, marginLeft:
 		return true
 	default:
 		return false
@@ -512,7 +518,7 @@ func colourFunctionParts(body string) (channels []string, alpha string, legacy b
 			return nil, "", true, valueInvalid
 		}
 		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+			parts[i] = trimCSSWhitespace(parts[i])
 			if parts[i] == "" {
 				return nil, "", true, valueInvalid
 			}
@@ -526,12 +532,12 @@ func colourFunctionParts(body string) (channels []string, alpha string, legacy b
 		return nil, "", false, valueInvalid
 	}
 	parts := strings.SplitN(body, "/", 2)
-	channels = strings.Fields(parts[0])
+	channels = splitCSSWhitespace(parts[0])
 	if len(channels) != 3 {
 		return nil, "", false, valueInvalid
 	}
 	if len(parts) == 2 {
-		alphaParts := strings.Fields(parts[1])
+		alphaParts := splitCSSWhitespace(parts[1])
 		if len(alphaParts) != 1 {
 			return nil, "", false, valueInvalid
 		}

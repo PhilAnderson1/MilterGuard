@@ -44,6 +44,10 @@ type lexicalUsage struct {
 }
 
 func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
+	return measurePreflightWithStop(b, l, nil)
+}
+
+func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexicalUsage, error) {
 	z := html.NewTokenizer(bytes.NewReader(b))
 	var stack []lexicalFrame
 	open := make(map[string]int)
@@ -72,6 +76,9 @@ func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
 		switch t {
 		case html.StartTagToken, html.SelfClosingTagToken, html.EndTagToken, html.TextToken, html.CommentToken, html.DoctypeToken:
 			usage.treeBuilderTokens++
+			if usage.treeBuilderTokens&255 == 0 && shouldStop != nil && shouldStop() {
+				return usage, errStopped
+			}
 			if usage.treeBuilderTokens > l.Nodes {
 				return usage, fmt.Errorf("limit: lexical nodes > %d", l.Nodes)
 			}

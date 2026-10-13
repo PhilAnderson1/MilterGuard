@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestHTMLPreservesLinkTextAndDestination(t *testing.T) {
@@ -476,6 +477,34 @@ func TestHTMLFontSizeZeroPreservesImageEvidence(t *testing.T) {
 	}
 }
 
+func TestHTMLImagePaintAndCSSGeometryAnnotations(t *testing.T) {
+	const image = `https://example.test/promo.png`
+	geometry := htmlToText(`<img style="width:0" src="` + image + `" alt="Promotion">`)
+	if want := `<invisible reason="empty-clip"> ![Promotion](` + image + `) </invisible>`; geometry.Text != want {
+		t.Fatalf("zero-width image = %q, want %q", geometry.Text, want)
+	}
+	paint := htmlToText(`<img style="filter:opacity(0)" src="` + image + `" alt="Promotion">`)
+	if want := `<visibility-uncertain> ![Promotion](` + image + `) </visibility-uncertain>`; paint.Text != want {
+		t.Fatalf("paint-dependent image = %q, want %q", paint.Text, want)
+	}
+}
+
+func TestHTMLForeignNamespaceStylesheetIsAnnotatedAsUncertain(t *testing.T) {
+	got := htmlToText(`<svg><style>.secret{display:none}</style></svg><p class="secret">Visible in some clients</p>`)
+	want := `<visibility-uncertain>Visible in some clients</visibility-uncertain>`
+	if got.Text != want {
+		t.Fatalf("foreign stylesheet output = %q, want %q", got.Text, want)
+	}
+}
+
+func TestHTMLMSOConditionalStylesheetIsAnnotatedAsUncertain(t *testing.T) {
+	got := htmlToText(`<!--[if mso]><style>#target{visibility:hidden}</style><![endif]--><p id="target">Visible outside Outlook</p>`)
+	want := `<visibility-uncertain>Visible outside Outlook</visibility-uncertain>`
+	if got.Text != want {
+		t.Fatalf("conditional stylesheet output = %q, want %q", got.Text, want)
+	}
+}
+
 func TestHTMLAttributesRequireExactNames(t *testing.T) {
 	m := New(4096)
 	m.AddHeader("Content-Type", "text/html; charset=UTF-8")
@@ -807,7 +836,7 @@ func TestHTMLCIDImageReferencesAreBoundedAndDeduplicated(t *testing.T) {
 
 func TestCIDImageReferenceSizeLimits(t *testing.T) {
 	var collector imageRefCollector
-	collector.Add(strings.Repeat("x", maxExtractedLinkLength+1))
+	collector.Add(strings.Repeat("x", maxExtractedReferenceLength+1))
 	if len(collector.refs) != 0 {
 		t.Fatalf("oversized CID reference was retained: %v", collector.refs)
 	}
@@ -859,6 +888,106 @@ func TestBoundedLinksRecognizesBackslashEscapedMarkdownURL(t *testing.T) {
 	link := `https://example.test/path\`
 	if missing := boundedLinksMissingFromBody([]string{link}, `[label](`+markdownURL(link)+`)`); len(missing) != 0 {
 		t.Fatalf("escaped Markdown URL considered missing: %v", missing)
+	}
+}
+
+func TestLongURLsAreRepresentedRatherThanDiscarded(t *testing.T) {
+	link := "https://tracker.example/click/" + strings.Repeat("a", 700) + "?campaign=notice&signature=END"
+	displayed := promptURL(link)
+	if utf8.RuneCountInString(displayed) > maxPromptURLChars ||
+		!strings.HasPrefix(displayed, "https://tracker.example/click/") ||
+		strings.Contains(displayed, "…") || strings.Contains(displayed, "URL-truncated") ||
+		!strings.HasSuffix(displayed, "signature=END") {
+		t.Fatalf("bounded URL = %q", displayed)
+	}
+
+	got := htmlToText(`<a href="` + link + `">Review notice</a>`)
+	if len(got.Links) != 1 || got.Links[0] != link {
+		t.Fatalf("full URL was not retained for deduplication: %v", got.Links)
+	}
+	if !strings.Contains(got.Text, markdownURL(link)) {
+		t.Fatalf("HTML extraction did not retain the complete URL: %q", got.Text)
+	}
+	if links := boundedLinks([]string{link}); len(links) != 1 || links[0] != displayed {
+		t.Fatalf("independent long-link evidence = %v, want %q", links, displayed)
+	}
+	if missing := boundedLinksMissingFromBody([]string{link}, got.Text); len(missing) != 0 {
+		t.Fatalf("bounded inline URL was emitted again: %v", missing)
+	}
+}
+
+func TestPromptURLCompactionCanBeDisabled(t *testing.T) {
+	link := "https://tracker.example/click/" + strings.Repeat("a", 700) + "?campaign=notice&signature=END"
+	m := New(4096)
+	m.AddHeader("Content-Type", "text/html")
+	m.AddBody([]byte(`<a href="` + link + `">Review notice</a>`))
+
+	analysis := m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 2000, VisionOptions{Mode: "off"}, HTMLProcessingControl{DisableURLCompaction: true})
+	if !strings.Contains(analysis.Prompt, markdownURL(link)) || strings.Contains(analysis.Prompt, promptURL(link)) {
+		t.Fatalf("full URL was not preserved in prompt: %q", analysis.Prompt)
+	}
+}
+
+func TestPromptCompactsLinkedImageDestination(t *testing.T) {
+	link := "https://click.example/ls/click?upn=" + strings.Repeat("tracking", 80)
+	m := New(4096)
+	m.AddHeader("Content-Type", "text/html")
+	m.AddBody([]byte(`<a href="` + link + `"><img src="https://images.example/logo.png" alt="Logo"></a>`))
+
+	prompt := m.Prompt(2000)
+	if strings.Contains(prompt, link) || !strings.Contains(prompt, promptURL(link)) {
+		t.Fatalf("linked-image destination was not compacted independently: %q", prompt)
+	}
+	if !strings.Contains(prompt, `https://images.example/logo.png`+`)](`) {
+		t.Fatalf("linked-image Markdown structure was damaged: %q", prompt)
+	}
+}
+
+func TestLongURLRepresentationMakesActualHostExplicit(t *testing.T) {
+	link := "https://" + strings.Repeat("trusted.example", 40) + "@evil.example/verify/" + strings.Repeat("x", 300)
+	displayed := promptURL(link)
+	if !strings.HasPrefix(displayed, "https://[userinfo-omitted]@evil.example/verify/") ||
+		strings.Contains(displayed, "…") || strings.Contains(displayed, "URL-truncated") ||
+		utf8.RuneCountInString(displayed) > maxPromptURLChars {
+		t.Fatalf("long user-information URL = %q", displayed)
+	}
+}
+
+func TestLongURLRepresentationPreservesExecutablePathEnding(t *testing.T) {
+	link := "https://downloads.example/releases/" + strings.Repeat("archive-", 20) + "setup.exe?signature=" + strings.Repeat("x", 700)
+	displayed := promptURL(link)
+	if utf8.RuneCountInString(displayed) > maxPromptURLChars ||
+		!strings.HasPrefix(displayed, "https://downloads.example/") ||
+		!strings.Contains(displayed, "setup.exe") || strings.Contains(displayed, "URL-truncated") {
+		t.Fatalf("executable URL representation = %q", displayed)
+	}
+}
+
+func TestLongURLRepresentationPreservesQueryStructure(t *testing.T) {
+	embedded := "https%3A%2F%2Fwww.amazon.co.uk%2Fgp%2Fcss%2Forder-history%3Fref_%3Ddelivery"
+	link := "https://www.amazon.co.uk/gp/r.html?C=campaign&M=" + strings.Repeat("message", 20) + "&U=" + embedded + "&H=" + strings.Repeat("signature", 20) + "&ref_=delivery_notice"
+	displayed := promptURL(link)
+	for _, evidence := range []string{
+		"https://www.amazon.co.uk/gp/r.html?", "C=campaign", "&M=", "&U=https%3A%2F%2Fwww.amazon.co.uk", "&H=", "&ref_=delivery_notice",
+	} {
+		if !strings.Contains(displayed, evidence) {
+			t.Fatalf("structured URL lacks %q: %q", evidence, displayed)
+		}
+	}
+	if strings.Contains(displayed, "…") || strings.Contains(displayed, "URL-truncated") || utf8.RuneCountInString(displayed) > maxPromptURLChars {
+		t.Fatalf("structured URL representation = %q", displayed)
+	}
+}
+
+func TestLongPlainTextURLIsBoundedBeforeBodySampling(t *testing.T) {
+	link := "https://plain.example/notice/" + strings.Repeat("z", 700) + "?signature=END"
+	m := New(4096)
+	m.AddHeader("Content-Type", "text/plain")
+	m.AddBody([]byte("Open " + link + " after reading the important text which follows."))
+	prompt := m.Prompt(600)
+	if strings.Contains(prompt, link) || !strings.Contains(prompt, promptURL(link)) ||
+		!strings.Contains(prompt, "important text which follows") || strings.Contains(prompt, "EXTRACTED LINKS") {
+		t.Fatalf("plain-text long URL prompt = %q", prompt)
 	}
 }
 
@@ -940,12 +1069,15 @@ func TestPlainTextLinksPreserveInvisibleFormatting(t *testing.T) {
 func TestHTMLIncludesNoscriptContent(t *testing.T) {
 	m := New(4096)
 	m.AddHeader("Content-Type", "text/html; charset=UTF-8")
-	m.AddBody([]byte(`<noscript><p>Security warning: verify your account</p><a href="https://example.test/verify">Review account</a></noscript>`))
+	m.AddBody([]byte(`<html><body><noscript><p>Security warning: verify your account</p><a href="https://example.test/verify">Review account</a></noscript></body></html>`))
 	prompt := m.Prompt(4096)
 	for _, wanted := range []string{"Security warning: verify your account", "[Review account](https://example.test/verify)"} {
 		if !strings.Contains(prompt, wanted) {
 			t.Errorf("noscript content missing %q: %s", wanted, prompt)
 		}
+	}
+	if !strings.Contains(prompt, "<visibility-uncertain>") {
+		t.Fatalf("noscript content was not marked visibility-uncertain: %s", prompt)
 	}
 }
 

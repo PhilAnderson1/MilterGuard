@@ -38,7 +38,7 @@ func (collector *imageRefCollector) Add(candidate string) {
 		return
 	}
 	characters := utf8.RuneCountInString(candidate)
-	if len(collector.refs) >= maxExtractedLinks || characters > maxExtractedLinkLength || collector.chars+characters > maxExtractedLinkChars {
+	if len(collector.refs) >= maxExtractedLinks || characters > maxExtractedReferenceLength || collector.chars+characters > maxExtractedLinkChars {
 		return
 	}
 	collector.seen[candidate] = struct{}{}
@@ -59,6 +59,115 @@ func markdownLabelText(value string) string {
 }
 
 func markdownURL(value string) string { return markdownURLReplacer.Replace(value) }
+
+// promptURL compacts a URL's LLM-facing representation without discarding its
+// structure. Validation and deduplication continue to use the complete URL.
+// Oversized path segments and query values are shortened independently so the
+// host, parameter names and useful value prefixes remain visible.
+func promptURL(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
+		return compactURLPart(value, maxPromptURLChars)
+	}
+
+	path, pathChanged := compactURLPath(parsed.EscapedPath())
+	query, queryChanged := compactURLQuery(parsed.RawQuery)
+	fragment, fragmentChanged := compactURLPartChanged(parsed.EscapedFragment(), maxPromptURLFragmentChars)
+	if !pathChanged && !queryChanged && !fragmentChanged && utf8.RuneCountInString(value) <= maxPromptURLChars {
+		return value
+	}
+
+	var b strings.Builder
+	b.WriteString(parsed.Scheme)
+	b.WriteString("://")
+	if parsed.User != nil {
+		b.WriteString("[userinfo-omitted]@")
+	}
+	b.WriteString(parsed.Host)
+	b.WriteString(path)
+	if parsed.ForceQuery || query != "" {
+		b.WriteByte('?')
+		b.WriteString(query)
+	}
+	if fragment != "" {
+		b.WriteByte('#')
+		b.WriteString(fragment)
+	}
+	return compactURLPart(b.String(), maxPromptURLChars)
+}
+
+func compactURLPath(value string) (string, bool) {
+	parts := strings.Split(value, "/")
+	changed := false
+	for i := range parts {
+		var partChanged bool
+		parts[i], partChanged = compactURLPathPart(parts[i], maxPromptURLPathChars)
+		changed = changed || partChanged
+	}
+	return strings.Join(parts, "/"), changed
+}
+
+func compactURLPathPart(value string, limit int) (string, bool) {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value, false
+	}
+	if hasLikelyFileExtension(value) {
+		return string(runes[len(runes)-limit:]), true
+	}
+	return string(runes[:limit]), true
+}
+
+func hasLikelyFileExtension(escapedName string) bool {
+	name, err := url.PathUnescape(escapedName)
+	if err != nil {
+		return false
+	}
+	dot := strings.LastIndexByte(name, '.')
+	if dot <= 0 || len(name)-dot-1 < 1 || len(name)-dot-1 > 16 {
+		return false
+	}
+	for _, c := range name[dot+1:] {
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+			return false
+		}
+	}
+	return true
+}
+
+func compactURLQuery(value string) (string, bool) {
+	if value == "" {
+		return "", false
+	}
+	parameters := strings.Split(value, "&")
+	changed := false
+	for i, parameter := range parameters {
+		key, parameterValue, found := strings.Cut(parameter, "=")
+		var keyChanged, valueChanged bool
+		key, keyChanged = compactURLPartChanged(key, maxPromptURLParameterChars)
+		if found {
+			parameterValue, valueChanged = compactURLPartChanged(parameterValue, maxPromptURLParameterChars)
+			parameters[i] = key + "=" + parameterValue
+		} else {
+			parameters[i] = key
+		}
+		changed = changed || keyChanged || valueChanged
+	}
+	return strings.Join(parameters, "&"), changed
+}
+
+func compactURLPart(value string, limit int) string {
+	compacted, _ := compactURLPartChanged(value, limit)
+	return compacted
+}
+
+func compactURLPartChanged(value string, limit int) (string, bool) {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value, false
+	}
+	return string(runes[:limit]), true
+}
 
 // extractBoundedHTMLFallback retains tokenizer text after a tree/style resource
 // limit. It never bypasses the primary limits and deliberately makes no

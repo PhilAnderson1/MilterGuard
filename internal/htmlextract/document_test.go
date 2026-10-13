@@ -71,6 +71,21 @@ func TestProductionTextResultIsCompact(t *testing.T) {
 	}
 }
 
+func TestASCIIKeywordHelpers(t *testing.T) {
+	if got := normalizeCSSKeyword(" \tBLaCK\r\n"); got != "black" {
+		t.Fatalf("normalized keyword = %q", got)
+	}
+	if got := normalizeCSSKeyword("blacK"); got != "blacK" {
+		t.Fatalf("Unicode identifier changed to %q", got)
+	}
+	if !equalASCIIFold("VaR(", "var(") || !equalASCIIFoldBytes([]byte("IMPORTANT"), "important") {
+		t.Fatal("ASCII case folding rejected an ASCII spelling")
+	}
+	if equalASCIIFold("K", "k") || equalASCIIFoldBytes([]byte("K"), "k") {
+		t.Fatal("Unicode character was accepted as an ASCII keyword")
+	}
+}
+
 func TestConcealmentReasonMaskMaterializesInStableOrder(t *testing.T) {
 	mask := reasonDisplayNone | reasonVisibilityHidden | reasonVisibilityCollapse | reasonOpacity | reasonFontSize | reasonColour | reasonEmptyClip | reasonContentVisibility
 	got := strings.Join(concealmentReasonStrings(mask), ",")
@@ -91,7 +106,7 @@ func TestConcealmentReasonsAreRetainedInPublicResult(t *testing.T) {
 	}
 }
 
-func TestAggregatedLabelRetainsFirstViewingCaseEvidence(t *testing.T) {
+func TestAggregatedLabelUnionsViewingCaseEvidence(t *testing.T) {
 	document, err := Analyze([]byte(`<style>p{display:none}@media(min-width:500px){p{display:block;opacity:0}}</style><p>T</p>`), DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
@@ -100,8 +115,17 @@ func TestAggregatedLabelRetainsFirstViewingCaseEvidence(t *testing.T) {
 	if text.Label != "concealed" {
 		t.Fatalf("aggregated label = %q", text.Label)
 	}
-	if strings.Join(text.ConcealmentReasons, ",") != "display-none" || text.EffectiveOpacity != 1 {
-		t.Fatalf("first viewing-case evidence = %+v", text)
+	if strings.Join(text.ConcealmentReasons, ",") != "display-none,opacity,colour-distance" || text.EffectiveOpacity != 0 {
+		t.Fatalf("aggregated viewing-case evidence = %+v", text)
+	}
+
+	document, err = Analyze([]byte(`<style>p{color:white;background:white}@media(min-width:500px){p{color:black;font-size:0}}</style><p>T</p>`), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = findText(t, document, "T")
+	if text.Label != "concealed" || strings.Join(text.ConcealmentReasons, ",") != "font-size,colour-distance" || text.FontSize != "0px" {
+		t.Fatalf("aggregated font-size evidence = %+v", text)
 	}
 }
 
@@ -828,6 +852,20 @@ func TestConditionsAndRecovery(t *testing.T) {
 	}
 }
 
+func TestNestedDescriptorAtRuleDeclarationsDoNotLeakIntoOuterRule(t *testing.T) {
+	for _, nested := range []string{
+		`@page{display:block}`,
+		`@font-face{display:block}`,
+	} {
+		t.Run(nested, func(t *testing.T) {
+			in := inspectHTML(t, `<style>#a{display:none;`+nested+`}</style><p id="a">T</p>`)
+			if got := findText(t, in, "T").Label; got != "concealed" {
+				t.Fatalf("label = %q, want concealed", got)
+			}
+		})
+	}
+}
+
 func TestViewingCaseLabelMergeRejectsShapeMismatch(t *testing.T) {
 	labels := []visibilityLabel{labelBit("visible")}
 	if !mergeViewingCaseLabel(labels, 0, labelBit("unknown")) {
@@ -869,10 +907,10 @@ func TestLinkedAndImportedStylesheets(t *testing.T) {
 		want       string
 		unresolved bool
 	}{
-		{"percent-encoded data link", `<link rel="stylesheet" href="data:text/css,p%7Bdisplay%3Anone%7D"><p>T</p>`, "concealed", false},
-		{"base64 data link", `<link rel="stylesheet" href="data:text/css;base64,cHtkaXNwbGF5Om5vbmV9"><p>T</p>`, "concealed", false},
-		{"data import", `<style>@import "data:text/css,p%7Bdisplay%3Anone%7D";</style><p>T</p>`, "concealed", false},
-		{"data import with screen media", `<style>@import "data:text/css,p%7Bdisplay%3Anone%7D" screen;</style><p>T</p>`, "concealed", false},
+		{"percent-encoded data link", `<link rel="stylesheet" href="data:text/css,p%7Bdisplay%3Anone%7D"><p>T</p>`, "unknown", false},
+		{"base64 data link", `<link rel="stylesheet" href="data:text/css;base64,cHtkaXNwbGF5Om5vbmV9"><p>T</p>`, "unknown", false},
+		{"data import", `<style>@import "data:text/css,p%7Bdisplay%3Anone%7D";</style><p>T</p>`, "unknown", false},
+		{"data import with screen media", `<style>@import "data:text/css,p%7Bdisplay%3Anone%7D" screen;</style><p>T</p>`, "unknown", false},
 		{"print-only data import", `<style>@import "data:text/css,p%7Bdisplay%3Anone%7D" print;</style><p>T</p>`, "visible", false},
 		{"remote link", `<link rel="stylesheet" href="https://example.test/email.css"><p>T</p>`, "visible", true},
 		{"cid import", `<style>@import url(cid:email-css);</style><p>T</p>`, "visible", true},
@@ -1200,6 +1238,38 @@ func TestCSSLimitAbandonmentPreservesResourceUsage(t *testing.T) {
 	}
 }
 
+func TestCSSSourceScanningIsChargedAndReported(t *testing.T) {
+	const cssText = `p{display:none}`
+	document, err := Analyze([]byte(`<style>`+cssText+`</style><p>T</p>`), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Usage.CSSBytes != len(cssText) {
+		t.Fatalf("CSS bytes = %d, want %d", document.Usage.CSSBytes, len(cssText))
+	}
+	if document.Usage.MatchWork < int64(len(cssText)+1) {
+		t.Fatalf("CSS source scan was not charged: %+v", document.Usage)
+	}
+}
+
+func TestMediaConditionPlanningIsCached(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	condition := `(max-width: 600px)`
+	first := s.parseMediaCondition(condition)
+	if len(first) == 0 || s.planningWork == 0 {
+		t.Fatalf("first media parse was not retained or charged: condition=%+v work=%d", first, s.planningWork)
+	}
+	charged := s.planningWork
+	second := s.parseMediaCondition(condition)
+	if len(second) == 0 || s.planningWork != charged {
+		t.Fatalf("cached media parse was charged again: before=%d after=%d", charged, s.planningWork)
+	}
+	s.parseMediaCondition(`(min-width: 601px)`)
+	if s.planningWork <= charged {
+		t.Fatalf("distinct media parse was not charged: before=%d after=%d", charged, s.planningWork)
+	}
+}
+
 func TestFailedAnalysisReturnsConsumedResourceUsage(t *testing.T) {
 	source := `<style>p{display:none}</style>` + strings.Repeat(`<table><td>`, DefaultLimits().Depth/2) + `T`
 	document, err := Analyze([]byte(source), DefaultLimits())
@@ -1226,6 +1296,41 @@ func TestCSSAbandonmentReleasesPreparedElementMetadata(t *testing.T) {
 	}
 	if document.elements != nil {
 		t.Fatalf("unusable element metadata was retained for %d elements", len(document.elements))
+	}
+}
+
+func TestAbandonedCascadeSkipsStylesheetReferences(t *testing.T) {
+	for _, incomplete := range []struct {
+		name    string
+		cascade bool
+		work    bool
+	}{
+		{name: "cascade", cascade: true},
+		{name: "work", work: true},
+	} {
+		t.Run(incomplete.name, func(t *testing.T) {
+			s := sheet{
+				limits:            DefaultLimits(),
+				cascadeIncomplete: incomplete.cascade,
+				workIncomplete:    incomplete.work,
+			}
+			node := &html.Node{Type: html.ElementNode, Data: "link", Attr: []html.Attribute{
+				{Key: "rel", Val: "stylesheet"},
+				{Key: "media", Val: "screen"},
+				{Key: "href", Val: "data:text/css,p%7Bdisplay%3Anone%7D"},
+			}}
+			if _, _, applies := s.stylesheetLink(node); applies {
+				t.Fatal("stylesheet link applied after cascade abandonment")
+			}
+			if s.planningWork != 0 {
+				t.Fatalf("stylesheet link consumed planning work: %d", s.planningWork)
+			}
+
+			s.loadStylesheetReference("https://example.invalid/style.css", "")
+			if s.unresolvedStylesheet || s.cssBytes != 0 || len(s.rules) != 0 {
+				t.Fatalf("stylesheet reference was processed after abandonment: %+v", s)
+			}
+		})
 	}
 }
 
@@ -1537,6 +1642,38 @@ func TestOverComplexSelectorBecomesUncertainBeforeMatching(t *testing.T) {
 	}
 }
 
+func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
+	sequence := 0
+	plan := planSelectorList(`u + .body .rio-asin-container-image img`, &sequence)[0]
+	plan.makeUncertain()
+	if !plan.uncertain || len(plan.execution.compounds) != 2 || len(plan.execution.combinators) != 1 || plan.execution.combinators[0] != ' ' {
+		t.Fatalf("unexpected conservative plan: %+v", plan)
+	}
+
+	ordinary := &html.Node{Type: html.ElementNode, Data: "img"}
+	container := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "rio-asin-container-image"}}}
+	product := &html.Node{Type: html.ElementNode, Data: "img", Parent: container}
+	container.FirstChild = product
+	if plan.scope.Match(ordinary) {
+		t.Fatal("conservative selector scope matched an unrelated image")
+	}
+	if !plan.scope.Match(product) {
+		t.Fatal("conservative selector scope did not retain the necessary ancestor")
+	}
+}
+
+func TestUncertainSelectorScopeDoesNotCrossFinalSiblingCombinator(t *testing.T) {
+	sequence := 0
+	plan := planSelectorList(`.product + img`, &sequence)[0]
+	plan.makeUncertain()
+	if len(plan.execution.compounds) != 1 {
+		t.Fatalf("sibling selector was unsafely narrowed: %+v", plan.execution)
+	}
+	if !plan.scope.Match(&html.Node{Type: html.ElementNode, Data: "img"}) {
+		t.Fatal("sibling selector lost its safe rightmost scope")
+	}
+}
+
 func TestConservativeSelectorScopeAlwaysHasSafeFallback(t *testing.T) {
 	node := &html.Node{Type: html.ElementNode, Data: "p"}
 	for _, prefix := range []string{"", "*", "["} {
@@ -1724,12 +1861,38 @@ func TestSelectorIndexDeduplicatesRepeatedAncestorBuckets(t *testing.T) {
 	if len(s.runtime.candidateScratch) > s.index.count {
 		t.Fatalf("candidate scratch length = %d, selector count = %d", len(s.runtime.candidateScratch), s.index.count)
 	}
-	if matches.used != 1_256 {
-		t.Fatalf("candidate work = %d, want 256 attribute scans plus 1,000 bucket entries", matches.used)
+	if matches.used != 1_384 {
+		t.Fatalf("candidate work = %d, want 128 attribute scans, 128 class scans, 128 token lookups plus 1,000 bucket entries", matches.used)
+	}
+	repeated := matchBudget{limit: s.limits.MatchWork}
+	refs, complete = s.collectCandidates(node, &repeated)
+	if !complete || len(refs) != 1_000 || repeated.used != 1_000 {
+		t.Fatalf("cached ancestor candidates = %d refs, work=%d, complete=%t", len(refs), repeated.used, complete)
 	}
 	limited := matchBudget{limit: 100}
 	if _, complete := s.collectCandidates(node, &limited); complete || !limited.exhausted {
 		t.Fatalf("limited candidate collection completed: %+v", limited)
+	}
+}
+
+func TestSelectorIndexChargesAndCachesClassTokens(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`.wanted *{display:none}`, false)
+	s.buildSelectorIndex(2, 2)
+	classes := strings.Repeat("other ", 1_000)
+	parent := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: classes}}}
+	node := &html.Node{Type: html.ElementNode, Data: "p", Parent: parent}
+
+	first := matchBudget{limit: s.limits.MatchWork}
+	refs, complete := s.collectCandidates(node, &first)
+	want := int64(1 + 1 + selectorByteWork(len(classes)) + 1_000)
+	if !complete || len(refs) != 0 || first.used != want {
+		t.Fatalf("initial class candidates = %d refs, work=%d want=%d, complete=%t", len(refs), first.used, want, complete)
+	}
+	second := matchBudget{limit: s.limits.MatchWork}
+	refs, complete = s.collectCandidates(node, &second)
+	if !complete || len(refs) != 0 || second.used != 0 {
+		t.Fatalf("cached class candidates = %d refs, work=%d, complete=%t", len(refs), second.used, complete)
 	}
 }
 

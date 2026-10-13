@@ -34,6 +34,7 @@ ai:
   model: test-model
   prompt_file: /tmp/test-prompt
   max_concurrent: 3
+  compact_prompt_urls: false
 filtering:
   reject_score: 0.8
   legitimate_low_confidence_score: 0.7
@@ -67,7 +68,7 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Authentication.Mode != AuthenticationModeInternal || cfg.Authentication.Timeout.Value() != 7*time.Second || cfg.Authentication.MaxConcurrent != 3 || cfg.Authentication.MessageStorage != "file" || cfg.Authentication.MemoryMessageLimit != 5 || cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || !reflect.DeepEqual(cfg.Filtering.AuthenticatedOnlySenderDomains, []string{"example.com"}) || cfg.Attachments.BlockExecutables || !cfg.Attachments.AddIPReputationStrike || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
+	if cfg.Authentication.Mode != AuthenticationModeInternal || cfg.Authentication.Timeout.Value() != 7*time.Second || cfg.Authentication.MaxConcurrent != 3 || cfg.Authentication.MessageStorage != "file" || cfg.Authentication.MemoryMessageLimit != 5 || cfg.AI.MaxConcurrent != 3 || cfg.AI.CompactPromptURLs || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || !reflect.DeepEqual(cfg.Filtering.AuthenticatedOnlySenderDomains, []string{"example.com"}) || cfg.Attachments.BlockExecutables || !cfg.Attachments.AddIPReputationStrike || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
@@ -425,6 +426,17 @@ func validConfig() Config {
 	return cfg
 }
 
+func TestAIModelMustBeExplicitlyConfigured(t *testing.T) {
+	if got := defaults().AI.Model; got != "" {
+		t.Fatalf("AI model default = %q, want empty", got)
+	}
+	cfg := validConfig()
+	cfg.AI.Model = ""
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "model") {
+		t.Fatalf("empty AI model error = %v", err)
+	}
+}
+
 func TestValidateIncompleteBodyAction(t *testing.T) {
 	if defaults().AI.IncompleteBodyAction != "scan" {
 		t.Fatal("incomplete body handling must default to scan")
@@ -444,8 +456,26 @@ func TestValidateIncompleteBodyAction(t *testing.T) {
 }
 
 func TestValidateMaximumHTMLParseCPU(t *testing.T) {
+	if !defaults().AI.CompactPromptURLs {
+		t.Fatal("prompt URL compaction must default to enabled")
+	}
 	if got := defaults().AI.MaxHTMLParseCPUMilliseconds; got != 250 {
 		t.Fatalf("maximum HTML parse CPU default = %d, want 250", got)
+	}
+	if got := defaults().AI.HTMLParseCPULimitAction; got != "dos-reject" {
+		t.Fatalf("HTML parse CPU action default = %q, want dos-reject", got)
+	}
+	for _, action := range []string{"fallback", "reject", "dos-reject"} {
+		cfg := validConfig()
+		cfg.AI.HTMLParseCPULimitAction = action
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid html_parse_cpu_limit_action %q rejected: %v", action, err)
+		}
+	}
+	cfg := validConfig()
+	cfg.AI.HTMLParseCPULimitAction = "accept"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "html_parse_cpu_limit_action") {
+		t.Fatalf("invalid html_parse_cpu_limit_action error = %v", err)
 	}
 	for _, milliseconds := range []int{0, 1, 1000} {
 		cfg := validConfig()
@@ -454,7 +484,7 @@ func TestValidateMaximumHTMLParseCPU(t *testing.T) {
 			t.Fatalf("valid max_html_parse_cpu_ms %d rejected: %v", milliseconds, err)
 		}
 	}
-	cfg := validConfig()
+	cfg = validConfig()
 	cfg.AI.MaxHTMLParseCPUMilliseconds = -1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_html_parse_cpu_ms") {
 		t.Fatalf("invalid max_html_parse_cpu_ms error = %v", err)
@@ -467,6 +497,14 @@ func TestValidateMaximumHTMLParseCPU(t *testing.T) {
 	cfg.AI.HTMLDoSRejectMessage = " "
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "html_dos_reject_message") {
 		t.Fatalf("blank html_dos_reject_message error = %v", err)
+	}
+	for _, action := range []string{"fallback", "reject"} {
+		cfg := validConfig()
+		cfg.AI.HTMLParseCPULimitAction = action
+		cfg.AI.HTMLDoSRejectMessage = " "
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("unused blank html_dos_reject_message rejected for %s: %v", action, err)
+		}
 	}
 }
 
@@ -785,7 +823,7 @@ func TestLoadWarnsWhenEmailCommandSenderOwnershipDependsOnPostfix(t *testing.T) 
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "milterguard.yaml")
-			content := "ai:\n  api_key: test-key\nfiltering:\n  sender_domain_allowlist: ''\nemail_commands:\n  " + test.commands + "\n"
+			content := "ai:\n  api_key: test-key\n  model: test-model\nfiltering:\n  sender_domain_allowlist: ''\nemail_commands:\n  " + test.commands + "\n"
 			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -855,9 +893,10 @@ func TestDefaultsMatchDistributedConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := defaults()
-	// Credentials must be explicitly supplied even though the sample shows the
-	// placeholder and all operational defaults are safe to omit.
+	// Credentials and the model must be explicitly supplied. The sample shows a
+	// credential placeholder and a recommended hosted model rather than defaults.
 	want.AI.APIKey = sample.AI.APIKey
+	want.AI.Model = sample.AI.Model
 	// The complete sample names a particular hosted model and includes its
 	// current prices. Omitted prices must remain zero so a different or local
 	// model is never assigned an invented cost.
