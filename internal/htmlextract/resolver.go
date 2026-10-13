@@ -288,12 +288,21 @@ func (s *sheet) collectCascade(n *html.Node, legacy, inline []declaration, media
 			matched, cached = state == 2, state != 0
 		}
 		if !cached {
-			if !matches.spend(selectorMatchCost(plan, selectorContext, matches.limit)) {
-				return cascadeWinners{}, false
-			}
 			if plan.uncertain {
+				if !matches.spend(selectorMatchCost(plan, selectorContext, matches.limit)) {
+					return cascadeWinners{}, false
+				}
 				matched = plan.scope.Match(n)
+			} else if plan.ancestorChain != nil {
+				var complete bool
+				matched, complete = s.matchAncestorChain(plan, n, selectorContext, matches)
+				if !complete {
+					return cascadeWinners{}, false
+				}
 			} else {
+				if !matches.spend(selectorMatchCost(plan, selectorContext, matches.limit)) {
+					return cascadeWinners{}, false
+				}
 				matched = plan.matcher.Match(n)
 			}
 			s.cacheMatch(plan, n, matched)

@@ -32,6 +32,7 @@ type selectorComplexity struct {
 }
 
 type compoundComplexity struct {
+	source                         string
 	base, classes, ids, attributes int64
 }
 
@@ -72,7 +73,7 @@ func (p *selectorAttributeProfile) observe(n *html.Node) {
 }
 
 func selectorCompoundComplexity(part string) compoundComplexity {
-	complexity := compoundComplexity{base: int64(len(part) + 1)}
+	complexity := compoundComplexity{source: part, base: int64(len(part) + 1)}
 	brackets := 0
 	var quote byte
 	for i := 0; i < len(part); i++ {
@@ -147,26 +148,62 @@ func selectorCompoundCost(compound compoundComplexity, profile selectorAttribute
 }
 
 type selectorPlan struct {
-	source      string
-	matcher     cascadia.Sel
-	scope       cascadia.Matcher
-	specificity cascadia.Specificity
-	complexity  selectorComplexity
-	execution   selectorComplexity
-	key         selectorKey
-	scopePrefix string
-	cost        int64
-	bound       int64
-	sequence    int
-	uncertain   bool
+	source        string
+	matcher       cascadia.Sel
+	scope         cascadia.Matcher
+	ancestorChain []cascadia.Matcher
+	specificity   cascadia.Specificity
+	complexity    selectorComplexity
+	execution     selectorComplexity
+	key           selectorKey
+	scopePrefix   string
+	cost          int64
+	bound         int64
+	sequence      int
+	uncertain     bool
 }
 
 func (p *selectorPlan) makeUncertain() {
 	p.uncertain = true
 	p.scope = compileConservativeScope(p.scopePrefix)
 	p.matcher = nil
+	p.ancestorChain = nil
 	p.specificity = cascadia.Specificity{1<<30 - 1, 1<<30 - 1, 1<<30 - 1}
 	p.execution = scopeSelectorComplexity(p.scopePrefix)
+}
+
+// compileAncestorChain prepares selectors composed solely of descendant and
+// child combinators for bounded matching. Cascadia remains authoritative for
+// each compound; evaluating the relationships ourselves avoids Cascadia's
+// recursive descendant backtracking.
+func compileAncestorChain(complexity selectorComplexity) []cascadia.Matcher {
+	if len(complexity.combinators) == 0 {
+		return nil
+	}
+	descendants := 0
+	for _, combinator := range complexity.combinators {
+		if combinator != ' ' && combinator != '>' {
+			return nil
+		}
+		if combinator == ' ' {
+			descendants++
+		}
+	}
+	// A single descendant search is linear and already covered by the ordinary
+	// execution charge. Cascadia becomes super-linear only when descendant
+	// searches are nested.
+	if descendants < 2 {
+		return nil
+	}
+	matchers := make([]cascadia.Matcher, len(complexity.compounds))
+	for i, compound := range complexity.compounds {
+		group, err := cascadia.ParseGroup(compound.source)
+		if err != nil || len(group) != 1 {
+			return nil
+		}
+		matchers[i] = group[0]
+	}
+	return matchers
 }
 
 type selectorMatchContext struct {
@@ -402,6 +439,7 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 		if err == nil && len(group) == 1 {
 			plan.matcher = group[0]
 			plan.specificity = group[0].Specificity()
+			plan.ancestorChain = compileAncestorChain(complexity)
 			return plan, true
 		}
 	}
@@ -629,6 +667,95 @@ func selectorMatchCost(plan *selectorPlan, context selectorMatchContext, limit i
 	return plan.cost + extra
 }
 
+type ancestorChainState struct {
+	matched uint64
+	seen    uint64
+}
+
+// matchAncestorChain evaluates descendant/child selector chains in bounded
+// dynamic-programming time. Cascadia's combined matcher recursively retries
+// earlier compounds for every possible ancestor and can therefore perform
+// binomial work for a chain of descendant combinators. Cached prefix states
+// make each (plan,node) pair linear in the number of compounds, and all work
+// is interruptibly charged.
+func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context selectorMatchContext, budget *matchBudget) (bool, bool) {
+	if len(plan.ancestorChain) != len(plan.complexity.compounds) || len(plan.ancestorChain) != len(plan.complexity.combinators)+1 {
+		return false, false
+	}
+	if len(s.runtime.ancestorStates) < s.index.count {
+		s.runtime.ancestorStates = make([]map[*html.Node]ancestorChainState, s.index.count)
+	}
+	states := s.runtime.ancestorStates[plan.sequence]
+	nodes := s.runtime.ancestorNodes[:0]
+	parentState := ancestorChainState{}
+	for current := n; current != nil; current = current.Parent {
+		if current.Type != html.ElementNode {
+			continue
+		}
+		if !budget.spend(1) {
+			return false, false
+		}
+		if state, cached := states[current]; cached {
+			parentState = state
+			break
+		}
+		nodes = append(nodes, current)
+	}
+	s.runtime.ancestorNodes = nodes
+	compoundCost := func(index int) int64 {
+		profile := selectorAttributeProfile{}
+		compound := plan.complexity.compounds[index]
+		if compound.classes != 0 || compound.ids != 0 || compound.attributes != 0 {
+			profile = context.path
+		}
+		return selectorCompoundCost(compound, profile, budget.limit)
+	}
+	match := func(index int, node *html.Node) (bool, bool) {
+		if !budget.spend(compoundCost(index)) {
+			return false, false
+		}
+		return plan.ancestorChain[index].Match(node), true
+	}
+	for nodeIndex := len(nodes) - 1; nodeIndex >= 0; nodeIndex-- {
+		node := nodes[nodeIndex]
+		state := ancestorChainState{}
+		matched, complete := match(0, node)
+		if !complete {
+			return false, false
+		}
+		if matched {
+			state.matched = 1
+		}
+		for combinatorIndex, combinator := range plan.complexity.combinators {
+			compoundIndex := combinatorIndex + 1
+			predecessor := uint64(1) << combinatorIndex
+			eligible := combinator == ' ' && parentState.seen&predecessor != 0 || combinator == '>' && parentState.matched&predecessor != 0
+			if !eligible {
+				continue
+			}
+			matched, complete := match(compoundIndex, node)
+			if !complete {
+				return false, false
+			}
+			if matched {
+				state.matched |= uint64(1) << compoundIndex
+			}
+		}
+		state.seen = parentState.seen | state.matched
+		parentState = state
+		if s.runtime.matchCacheEntries < maxMatchCacheEntries {
+			if states == nil {
+				states = make(map[*html.Node]ancestorChainState)
+				s.runtime.ancestorStates[plan.sequence] = states
+			}
+			states[node] = state
+			s.runtime.matchCacheEntries++
+		}
+	}
+	final := uint64(1) << (len(plan.ancestorChain) - 1)
+	return parentState.matched&final != 0, true
+}
+
 func (s *sheet) buildSelectorIndex(depth, nodes int) {
 	// Rules without any declaration understood by the extractor cannot affect
 	// presentation. Removing them also prevents no-op selectors from consuming
@@ -654,7 +781,9 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 			} else {
 				plan.bound = plannedSelectorCost(plan.complexity, selectorAttributeProfile{}, depth, nodes, s.limits.MatchWork)
 				plan.cost = selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, depth, nodes, s.limits.MatchWork)
-				if plan.bound > s.limits.MatchWork {
+				// Ancestor chains use the interruptible bounded matcher below, so
+				// their recursive Cascadia bound is no longer an admission risk.
+				if plan.ancestorChain == nil && plan.bound > s.limits.MatchWork {
 					plan.makeUncertain()
 					plan.cost = selectorExecutionCost(plan.execution, selectorAttributeProfile{}, 0, 1, s.limits.MatchWork)
 				}
@@ -681,6 +810,7 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 	}
 	s.index = index
 	s.runtime.matchCaches = nil
+	s.runtime.ancestorStates = nil
 	s.runtime.matchCacheEntries = 0
 }
 

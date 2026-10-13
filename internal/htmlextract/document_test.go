@@ -307,6 +307,28 @@ func TestNodeLimitsBeforeAndAfterTreeConstruction(t *testing.T) {
 			t.Fatalf("node limit error = %v", err)
 		}
 	})
+	t.Run("node-producing end tags", func(t *testing.T) {
+		limits := DefaultLimits()
+		limits.Nodes = 4
+		if err := preflight([]byte(strings.Repeat(`</br>`, limits.Nodes)), limits); err != nil {
+			t.Fatalf("exact token budget rejected: %v", err)
+		}
+		_, err := (processor{Limits: limits}).parseDocument([]byte(strings.Repeat(`</br>`, limits.Nodes+1)))
+		if err == nil || !strings.Contains(err.Error(), "lexical nodes") {
+			t.Fatalf("end-tag flood limit error = %v", err)
+		}
+	})
+	t.Run("balanced HTML uses the same conservative budget", func(t *testing.T) {
+		limits := DefaultLimits()
+		limits.Nodes = 6
+		usage, err := measurePreflight([]byte(`<b>x</b><i>y</i>`), limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if usage.nodes != 4 || usage.treeBuilderTokens != limits.Nodes {
+			t.Fatalf("lexical usage = %+v", usage)
+		}
+	})
 	t.Run("lexical text nodes", func(t *testing.T) {
 		limits := DefaultLimits()
 		limits.TextNodes = 2
@@ -1223,7 +1245,128 @@ func TestAttributeAwareSelectorChargesConservativeBound(t *testing.T) {
 	}
 }
 
-func TestAttributeHeavyBacktrackingStopsBeforeCascadia(t *testing.T) {
+func TestDescendantChainUsesBoundedMatcher(t *testing.T) {
+	limits := DefaultLimits()
+	s := sheet{limits: limits}
+	s.parseCSS(`zzz div div div{display:none}`, false)
+	s.buildSelectorIndex(122, 16_123)
+	if len(s.rules) != 1 || len(s.rules[0].plans) != 1 {
+		t.Fatalf("unexpected plans: %+v", s.rules)
+	}
+	plan := &s.rules[0].plans[0]
+	if plan.bound <= limits.MatchWork/2 {
+		t.Fatalf("descendant bound = %d, want a demonstrably expensive recursive bound", plan.bound)
+	}
+	if plan.uncertain || len(plan.ancestorChain) != 4 {
+		t.Fatalf("descendant selector did not receive a bounded chain: %+v", plan)
+	}
+	node := &html.Node{Type: html.ElementNode, Data: "div"}
+	for range 122 {
+		child := &html.Node{Type: html.ElementNode, Data: "div", Parent: node}
+		node.FirstChild = child
+		node = child
+	}
+	context := selectorMatchContext{depth: 122, nodes: 123}
+	budget := matchBudget{limit: limits.MatchWork}
+	matched, complete := s.matchAncestorChain(plan, node, context, &budget)
+	if !complete || matched {
+		t.Fatalf("bounded descendant result: matched=%t complete=%t", matched, complete)
+	}
+	const wantWork = 123 + 123*4 // path walk plus one "zzz" check per element
+	if budget.used != wantWork {
+		t.Fatalf("bounded descendant work = %d, want %d", budget.used, wantWork)
+	}
+	sibling := &html.Node{Type: html.ElementNode, Data: "div", Parent: node.Parent}
+	before := budget.used
+	matched, complete = s.matchAncestorChain(plan, sibling, context, &budget)
+	if !complete || matched {
+		t.Fatalf("cached sibling result: matched=%t complete=%t", matched, complete)
+	}
+	if added := budget.used - before; added != 6 { // sibling + cached parent, then one 4-unit compound check
+		t.Fatalf("cached sibling work = %d, want 6", added)
+	}
+	s.runtime.ancestorStates = nil
+	s.runtime.ancestorNodes = nil
+	s.runtime.matchCacheEntries = 0
+	limited := matchBudget{limit: wantWork - 1}
+	if _, complete := s.matchAncestorChain(plan, node, context, &limited); complete || !limited.exhausted {
+		t.Fatalf("bounded matcher ignored exhaustion: %+v", limited)
+	}
+}
+
+func TestBoundedAncestorChainsMatchCascadia(t *testing.T) {
+	root, err := html.Parse(strings.NewReader(`<main class="a"><div><p class="b"><span class="c"><em id="target">T</em></span></p><p class="x">X</p></div></main>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var elements []*html.Node
+	stack := []*html.Node{root}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if n.Type == html.ElementNode {
+			elements = append(elements, n)
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			stack = append(stack, child)
+		}
+	}
+	for _, selector := range []string{
+		`html main div`, `html > body main div`, `html main > div span em`, `.a > div .b .c`, `html div:not(.missing) p`,
+	} {
+		t.Run(selector, func(t *testing.T) {
+			sequence := 0
+			plan := planSelectorList(selector, &sequence)[0]
+			if plan.uncertain || plan.ancestorChain == nil {
+				t.Fatalf("selector did not compile as an ancestor chain: %+v", plan)
+			}
+			s := sheet{limits: DefaultLimits(), index: selectorIndex{count: 1}}
+			for _, node := range elements {
+				depth := 0
+				for parent := node.Parent; parent != nil; parent = parent.Parent {
+					if parent.Type == html.ElementNode {
+						depth++
+					}
+				}
+				budget := matchBudget{limit: s.limits.MatchWork}
+				got, complete := s.matchAncestorChain(&plan, node, selectorMatchContext{depth: depth, nodes: len(elements)}, &budget)
+				if !complete {
+					t.Fatalf("bounded match exhausted for %s", node.Data)
+				}
+				if want := plan.matcher.Match(node); got != want {
+					t.Fatalf("match(%s) = %t, Cascadia = %t", node.Data, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestDescendantChainBroomRemainsBounded(t *testing.T) {
+	const (
+		depth  = 122
+		leaves = 16_000
+	)
+	var source strings.Builder
+	source.WriteString(`<style>zzz div div div{color:red}</style>`)
+	for range depth {
+		source.WriteString(`<div>`)
+	}
+	for range leaves {
+		source.WriteString(`<div>x</div>`)
+	}
+	for range depth {
+		source.WriteString(`</div>`)
+	}
+	document, err := Analyze([]byte(source.String()), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Usage.MatchWorkExhausted || document.Usage.MatchWork > 5_000_000 {
+		t.Fatalf("descendant-chain broom used unbounded matching work: %+v", document.Usage)
+	}
+}
+
+func TestAttributeHeavyBacktrackingUsesBoundedMatcher(t *testing.T) {
 	const depth = 100
 	class := "a3 a2 " + strings.Repeat("x", 20000-len("a3 a2 "))
 	var source strings.Builder
@@ -1238,11 +1381,11 @@ func TestAttributeHeavyBacktrackingStopsBeforeCascadia(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := findText(t, document, "T").Label; got != "unknown" {
-		t.Fatalf("attribute-heavy selector result = %q, want unknown", got)
+	if got := findText(t, document, "T").Label; got != "visible" {
+		t.Fatalf("attribute-heavy selector result = %q, want visible", got)
 	}
-	if document.Usage.MatchWork > int64(document.Usage.Nodes)*elementTraversalWork+10 {
-		t.Fatalf("expensive selector reached matching: usage=%+v", document.Usage)
+	if document.Usage.MatchWorkExhausted || document.Usage.MatchWork >= DefaultLimits().MatchWork {
+		t.Fatalf("bounded selector exhausted matching work: usage=%+v", document.Usage)
 	}
 }
 

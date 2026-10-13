@@ -202,6 +202,8 @@ type sheetRuntime struct {
 	candidateScratch    []selectorRef
 	candidateMarks      []uint32
 	candidateGeneration uint32
+	ancestorNodes       []*html.Node
+	ancestorStates      []map[*html.Node]ancestorChainState
 	matchCacheEntries   int
 }
 

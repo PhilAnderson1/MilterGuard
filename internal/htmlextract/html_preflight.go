@@ -40,6 +40,7 @@ type lexicalFrame struct {
 // sequences that would produce a shallower tree; that is explicit.
 type lexicalUsage struct {
 	nodes, textNodes, attributes, depth int
+	treeBuilderTokens                   int
 }
 
 func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
@@ -63,12 +64,21 @@ func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
 		if t == html.ErrorToken {
 			return usage, nil
 		}
+		// HTML5 error recovery can turn an end tag into a node-producing start
+		// tag (notably </br>, and potentially other tags as parser behaviour
+		// evolves). Bound every token that can affect tree construction before
+		// allowing x/net/html to build the DOM. Keep the separate node count for
+		// accurate resource telemetry.
+		switch t {
+		case html.StartTagToken, html.SelfClosingTagToken, html.EndTagToken, html.TextToken, html.CommentToken, html.DoctypeToken:
+			usage.treeBuilderTokens++
+			if usage.treeBuilderTokens > l.Nodes {
+				return usage, fmt.Errorf("limit: lexical nodes > %d", l.Nodes)
+			}
+		}
 		switch t {
 		case html.StartTagToken, html.SelfClosingTagToken, html.TextToken, html.CommentToken, html.DoctypeToken:
 			usage.nodes++
-			if usage.nodes > l.Nodes {
-				return usage, fmt.Errorf("limit: lexical nodes > %d", l.Nodes)
-			}
 		}
 		if t == html.TextToken {
 			usage.textNodes++
