@@ -41,13 +41,14 @@ type visibilityDecision struct {
 }
 
 type presentationState struct {
-	none, displayKnown          bool
-	alpha                       float64
-	alphaKnown                  bool
-	clipped, clipKnown          bool
-	contentHidden, contentKnown bool
-	msoHidden, msoKnown         bool
-	layoutUncertain             bool
+	none, displayKnown           bool
+	alpha                        float64
+	alphaKnown                   bool
+	clipped, clipKnown           bool
+	contentHidden, contentKnown  bool
+	msoHidden, msoKnown          bool
+	layoutUncertain              bool
+	alternateColourSchemeReasons concealmentReason
 }
 
 func initialPresentationState() presentationState {
@@ -93,6 +94,13 @@ func decideVisibility(style *Style, state presentationState, colour *colourResul
 		// mso-hide is honored only by Word-based Outlook clients. This is
 		// client-dependent, but not viewport-dependent, so use the generic
 		// uncertainty annotation rather than the viewport-specific one.
+		decision.label = labelUnknown
+	}
+	// Light mode is the canonical colour scheme. Visible content remains
+	// visible even if dark-mode CSS could alter its presentation. Conversely,
+	// do not confidently call content invisible when a scheme-dependent rule
+	// can change the property responsible for that conclusion.
+	if decision.label == labelConcealed && decision.reasons&^state.alternateColourSchemeReasons == 0 {
 		decision.label = labelUnknown
 	}
 	return decision

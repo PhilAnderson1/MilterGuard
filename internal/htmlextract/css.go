@@ -76,8 +76,8 @@ var names = [declarationProperties]string{"display", "visibility", "content-visi
 //   - prepared holds the complete context-independent result and implies
 //     validityReady. Its duplicate token storage has been released, leaving
 //     tokensReady false and valueTokens nil.
-//   - dependenciesReady makes variableDependencies complete and implies a
-//     custom property with a retained, successfully parsed token stream.
+//   - dependenciesReady makes variableDependencies complete for a declaration
+//     containing var() with a retained, successfully parsed token stream.
 //
 // Once prepareDeclaration returns, these fields and the retained token slices
 // are immutable; cascade candidates safely retain pointers to declarations.
@@ -149,7 +149,7 @@ func prepareDeclaration(d declaration) declaration {
 		d.valueTokens, d.valueStatus = lexValue(d.value)
 		d.tokensReady = true
 	}
-	if d.custom != "" && d.tokensReady && d.valueStatus == valueResolved {
+	if d.hasVars && d.tokensReady && d.valueStatus == valueResolved {
 		d.variableDependencies = variableRefs(d.valueTokens)
 		d.dependenciesReady = true
 	}
@@ -821,9 +821,9 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			case "@media":
 				cond = parseMedia(vals)
 			case "@font-face", "@keyframes", "@-webkit-keyframes":
-				cond = mediaCondition{{never: true}}
+				cond = mediaCondition{{schemes: colourSchemeBoth, never: true}}
 			default:
-				cond = mediaCondition{{unknown: true}}
+				cond = mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
 			}
 			if conditionDepth >= s.limits.Depth {
 				s.abandonCascade()

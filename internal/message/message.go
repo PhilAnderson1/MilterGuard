@@ -98,7 +98,7 @@ type Analysis struct {
 	BodyExtractionIncomplete              bool
 	ConcealedContentRemoved               bool
 	HasConcealedContent                   bool
-	UsedConcealedTag                      bool
+	UsedInvisibleTag                      bool
 	UsedVisibilityVariesByViewportSizeTag bool
 	UsedVisibilityUncertainTag            bool
 	UsedHiddenContentStrippedTag          bool

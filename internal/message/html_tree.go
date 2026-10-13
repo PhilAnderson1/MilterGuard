@@ -28,13 +28,13 @@ const (
 )
 
 type annotationUsage struct {
-	UsedConcealedTag                      bool
+	UsedInvisibleTag                      bool
 	UsedVisibilityVariesByViewportSizeTag bool
 	UsedVisibilityUncertainTag            bool
 	UsedHiddenContentStrippedTag          bool
 }
 
-var reservedAnnotation = regexp.MustCompile(`(?is)</?\s*(?:concealed|visibility-varies-by-viewport-size|visibility-uncertain|hidden-content-stripped)\b[^>]*>`)
+var reservedAnnotation = regexp.MustCompile(`(?is)</?\s*(?:invisible|visibility-varies-by-viewport-size|visibility-uncertain|hidden-content-stripped)\b[^>]*>`)
 
 type htmlExtraction struct {
 	inspection  htmlextract.Document
@@ -135,7 +135,7 @@ func (o *annotatedOutput) String() string {
 		}
 		switch active.kind {
 		case "concealed":
-			out.WriteString("</concealed>")
+			out.WriteString("</invisible>")
 		case "client-dependent":
 			out.WriteString("</visibility-varies-by-viewport-size>")
 		case "unknown":
@@ -146,7 +146,7 @@ func (o *annotatedOutput) String() string {
 	open := func(annotation outputAnnotation) {
 		switch annotation.kind {
 		case "concealed":
-			fmt.Fprintf(&out, `<concealed reason="%s"`, annotation.reason)
+			fmt.Fprintf(&out, `<invisible reason="%s"`, annotation.reason)
 			if annotation.value != "" {
 				fmt.Fprintf(&out, ` value="%s"`, annotation.value)
 			}
@@ -648,9 +648,17 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 	// characters. Formatting characters embedded in meaningful text still follow
 	// that text's visibility state and remain available as obfuscation evidence.
 	if annotationWhitespaceOnly(text) {
-		out.WriteString(outText)
+		// Source indentation between inline elements is ordinary collapsible HTML
+		// whitespace, not a rendered line break. Preserve non-collapsible Unicode
+		// spacing and formatting evidence, while folding ASCII HTML whitespace to
+		// the single space a browser would render.
+		spacing := outText
+		if inlineFormattingGap(n) {
+			spacing = collapseHTMLFormattingWhitespace(outText)
+		}
+		out.WriteString(spacing)
 		if state.Label != "concealed" {
-			visible.WriteString(text)
+			visible.WriteString(spacing)
 		}
 		return
 	}
@@ -672,6 +680,63 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 		out.WriteString(outText)
 		visible.WriteString(text)
 	}
+}
+
+func inlineFormattingGap(n *xhtml.Node) bool {
+	return inlineRenderedNode(n.PrevSibling) && inlineRenderedNode(n.NextSibling)
+}
+
+func inlineRenderedNode(n *xhtml.Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.Type == xhtml.TextNode {
+		return !annotationWhitespaceOnly(n.Data)
+	}
+	if n.Type != xhtml.ElementNode {
+		return false
+	}
+	name := strings.ToLower(n.Data)
+	return !omittedHTMLElement(name) && !isBlockElement(name) && name != "br" && name != "hr" && !inlineStyleUsesBlockLayout(n)
+}
+
+func inlineStyleUsesBlockLayout(n *xhtml.Node) bool {
+	block := false
+	for declaration := range strings.SplitSeq(firstAttr(n, "style"), ";") {
+		property, value, found := strings.Cut(declaration, ":")
+		if !found || !strings.EqualFold(strings.TrimSpace(property), "display") {
+			continue
+		}
+		value = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(value), "!important")))
+		switch value {
+		case "block", "flow-root", "flex", "grid", "list-item", "table", "table-row", "table-cell", "table-caption":
+			block = true
+		case "inline", "inline-block", "inline-flex", "inline-grid", "contents":
+			block = false
+		}
+	}
+	return block
+}
+
+func collapseHTMLFormattingWhitespace(value string) string {
+	var out strings.Builder
+	pendingSpace := false
+	for _, r := range value {
+		switch r {
+		case ' ', '\t', '\n', '\f', '\r':
+			pendingSpace = true
+		default:
+			if pendingSpace {
+				out.WriteByte(' ')
+				pendingSpace = false
+			}
+			out.WriteRune(r)
+		}
+	}
+	if pendingSpace {
+		out.WriteByte(' ')
+	}
+	return out.String()
 }
 
 // Email preheaders commonly repeat a mixture of spaces and default-ignorable

@@ -132,6 +132,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 				}
 				f.msoKnown = f.msoKnown && mh.Known
 				f.layoutUncertain = f.layoutUncertain || resolved.layoutUncertain
+				f.alternateColourSchemeReasons |= resolved.alternateColourSchemeReasons
 				a := style[opacity]
 				if a.Known && a.Number == 0 {
 					f.alpha = 0

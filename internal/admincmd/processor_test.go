@@ -202,6 +202,12 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	if strings.Contains(response.Text, "Period:") {
 		t.Errorf("activity response contains redundant exact period:\n%s", response.Text)
 	}
+	if strings.Index(response.Text, "  HTML/CSS DoS protection: 3") < strings.Index(response.Text, "  Sender blocklist: 0") {
+		t.Errorf("HTML/CSS DoS rejection count is not last in its list:\n%s", response.Text)
+	}
+	if strings.Index(response.Text, "  HTML/CSS DoS protection (accept mode): 2") < strings.Index(response.Text, "  Trusted sender domain: 0") {
+		t.Errorf("HTML/CSS DoS accepted count is not last in its list:\n%s", response.Text)
+	}
 }
 
 func TestRejectionArchiveReadIsDeferred(t *testing.T) {
@@ -238,7 +244,7 @@ func TestRejectionDetailDisplaysVisibleBodyAndAttachesOriginal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(response.Text, "Visible notice") || strings.Contains(response.Text, "Concealed padding") || strings.Contains(response.Text, "<concealed") {
+	if !strings.Contains(response.Text, "Visible notice") || strings.Contains(response.Text, "Concealed padding") || strings.Contains(response.Text, "<invisible") {
 		t.Fatalf("rejection detail body = %q", response.Text)
 	}
 	if len(response.Attachments) != 1 || !bytes.Equal(response.Attachments[0].Contents, raw) {

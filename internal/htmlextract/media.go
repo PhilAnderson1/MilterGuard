@@ -21,6 +21,7 @@ type widthBound struct {
 }
 type mediaAlternative struct {
 	bounds         []widthBound
+	schemes        uint8
 	unknown, never bool
 }
 type mediaCondition []mediaAlternative
@@ -37,22 +38,30 @@ const (
 	mediaNo = iota
 	mediaYes
 	mediaUnknown
+	mediaYesColourScheme
+	mediaAlternateColourScheme
+)
+
+const (
+	colourSchemeLight uint8 = 1 << iota
+	colourSchemeDark
+	colourSchemeBoth = colourSchemeLight | colourSchemeDark
 )
 
 var widthFeature = regexp.MustCompile(`^\(\s*(min|max)-(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(px)?\s*\)$`)
 
 func parseMedia(src string) mediaCondition {
 	if len(src) > 4096 || strings.Count(src, ",") > 31 {
-		return mediaCondition{{unknown: true}}
+		return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
 	}
 	var result mediaCondition
 	for _, raw := range strings.Split(strings.ToLower(src), ",") {
-		a := mediaAlternative{}
+		a := mediaAlternative{schemes: colourSchemeBoth}
 		raw = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "only "))
 		// The supported subset has no functions or nested query parentheses.
 		parts := regexpAnd.Split(raw, -1)
 		if len(parts) > 16 {
-			return mediaCondition{{unknown: true}}
+			return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
 		}
 		for _, part := range parts {
 			part = strings.TrimSpace(part)
@@ -60,12 +69,10 @@ func parseMedia(src string) mediaCondition {
 			case "screen", "all":
 			case "print":
 				a.never = true
-			case "(prefers-color-scheme:light)", "(prefers-color-scheme: light)",
-				"(prefers-color-scheme:dark)", "(prefers-color-scheme: dark)":
-				// The recipient's colour-scheme preference is not known. Keep a
-				// potentially active rule in the cascade as unsupported so only
-				// content actually affected by it becomes uncertain.
-				a.unknown = true
+			case "(prefers-color-scheme:light)", "(prefers-color-scheme: light)":
+				a.schemes &= colourSchemeLight
+			case "(prefers-color-scheme:dark)", "(prefers-color-scheme: dark)":
+				a.schemes &= colourSchemeDark
 			default:
 				m := widthFeature.FindStringSubmatch(part)
 				if m == nil {
@@ -80,6 +87,9 @@ func parseMedia(src string) mediaCondition {
 				a.bounds = append(a.bounds, widthBound{m[1] == "min", v})
 			}
 		}
+		if a.schemes == 0 {
+			a.never = true
+		}
 		result = append(result, a)
 	}
 	return result
@@ -87,47 +97,74 @@ func parseMedia(src string) mediaCondition {
 
 var regexpAnd = regexp.MustCompile(`\s+and\s+`)
 
-func (c mediaCondition) state(width float64) int {
-	result := mediaNo
+func (c mediaCondition) states(width float64, fallback bool) (light, dark int) {
+	light, dark = mediaNo, mediaNo
 	for _, a := range c {
 		ok := !a.never
 		for _, b := range a.bounds {
-			if b.min && width < b.value || !b.min && width > b.value {
+			if !fallback && (b.min && width < b.value || !b.min && width > b.value) {
 				ok = false
 			}
 		}
 		if !ok {
 			continue
 		}
-		if !a.unknown {
+		unknown := a.unknown
+		if fallback && len(a.bounds) > 0 {
+			unknown = true
+		}
+		state := mediaYes
+		if unknown {
+			state = mediaUnknown
+		}
+		if a.schemes&colourSchemeLight != 0 {
+			if state == mediaYes {
+				light = mediaYes
+			} else if light != mediaYes {
+				light = mediaUnknown
+			}
+		}
+		if a.schemes&colourSchemeDark != 0 {
+			if state == mediaYes {
+				dark = mediaYes
+			} else if dark != mediaYes {
+				dark = mediaUnknown
+			}
+		}
+	}
+	return light, dark
+}
+
+func (r rule) mediaState(width float64, fallback bool) int {
+	light, dark := mediaYes, mediaYes
+	for frame := r.conditions; frame != nil; frame = frame.parent {
+		frameLight, frameDark := frame.condition.states(width, fallback)
+		light = intersectMediaState(light, frameLight)
+		dark = intersectMediaState(dark, frameDark)
+	}
+	if light == mediaUnknown {
+		return mediaUnknown
+	}
+	if light == mediaYes {
+		if dark == mediaYes {
 			return mediaYes
 		}
-		result = mediaUnknown
+		return mediaYesColourScheme
 	}
-	return result
+	if dark != mediaNo {
+		return mediaAlternateColourScheme
+	}
+	return mediaNo
 }
-func (r rule) mediaState(width float64, fallback bool) int {
-	result := mediaYes
-	for frame := r.conditions; frame != nil; frame = frame.parent {
-		c := frame.condition
-		x := c.state(width)
-		if fallback { // Only invariant, unconditional conditions can be certain.
-			variable := false
-			for _, a := range c {
-				variable = variable || len(a.bounds) > 0
-			}
-			if variable {
-				x = mediaUnknown
-			}
-		}
-		if x == mediaNo {
-			return mediaNo
-		}
-		if x == mediaUnknown {
-			result = mediaUnknown
-		}
+
+func intersectMediaState(left, right int) int {
+	if left == mediaNo || right == mediaNo {
+		return mediaNo
 	}
-	return result
+	if left == mediaUnknown || right == mediaUnknown {
+		return mediaUnknown
+	}
+	return mediaYes
 }
 
 // mediaStateWork is a conservative structural cost for one mediaState call.

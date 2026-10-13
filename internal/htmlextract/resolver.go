@@ -132,16 +132,19 @@ type mediaEvaluation struct {
 }
 
 type elementStyleResult struct {
-	style           Style
-	variables       *variableScope
-	layoutUncertain bool
-	displayDeclared bool
+	style                        Style
+	variables                    *variableScope
+	layoutUncertain              bool
+	displayDeclared              bool
+	alternateColourSchemeReasons concealmentReason
 }
 
 type cascadeWinners struct {
-	properties [properties]candidate
-	layout     [layoutProperties]layoutCandidate
-	variables  map[string]candidate
+	properties                   [properties]candidate
+	layout                       [layoutProperties]layoutCandidate
+	variables                    map[string]candidate
+	alternateColourSchemeReasons concealmentReason
+	alternateColourSchemeVars    map[string]bool
 }
 
 func (m *mediaEvaluation) evaluate(s *sheet, work *matchBudget) ([]uint8, bool) {
@@ -218,7 +221,7 @@ func (s *sheet) collectCascade(n *html.Node, legacy, inline []declaration, media
 	// Parsed declaration slices are immutable and stable for the duration of
 	// evaluation. Winners retain references plus per-use property/uncertainty
 	// metadata instead of copying and modifying complete declarations.
-	apply := func(ds []declaration, spec cascadia.Specificity, inl, uncertain bool) bool {
+	apply := func(ds []declaration, spec cascadia.Specificity, inl, uncertain, colourSchemeDependent, retain bool) bool {
 		// Reserve the complete declaration-list cost before changing the
 		// cascade. A failed reservation must not leave a partially applied
 		// style that appears trustworthy.
@@ -257,6 +260,19 @@ func (s *sheet) collectCascade(n *html.Node, legacy, inline []declaration, media
 					}
 				}
 			}
+			if colourSchemeDependent {
+				if d.custom != "" {
+					if winners.alternateColourSchemeVars == nil {
+						winners.alternateColourSchemeVars = make(map[string]bool)
+					}
+					winners.alternateColourSchemeVars[d.custom] = true
+				} else {
+					winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(d)
+				}
+			}
+			if !retain {
+				continue
+			}
 			if d.custom != "" {
 				c := candidate{d: d, property: d.prop, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
 				if winners.variables == nil {
@@ -275,7 +291,7 @@ func (s *sheet) collectCascade(n *html.Node, legacy, inline []declaration, media
 		}
 		return true
 	}
-	if !apply(legacy, cascadia.Specificity{}, false, false) {
+	if !apply(legacy, cascadia.Specificity{}, false, false, false, true) {
 		return cascadeWinners{}, false
 	}
 	mediaStates, complete := media.evaluate(s, matches)
@@ -319,18 +335,22 @@ func (s *sheet) collectCascade(n *html.Node, legacy, inline []declaration, media
 			s.cacheMatch(plan, n, matched)
 		}
 		if matched {
-			if plan.uncertain {
-				if !apply(r.decls, plan.specificity, false, true) {
+			if state == mediaAlternateColourScheme {
+				if !apply(r.decls, plan.specificity, false, false, true, false) {
+					return cascadeWinners{}, false
+				}
+			} else if plan.uncertain {
+				if !apply(r.decls, plan.specificity, false, true, state == mediaYesColourScheme, true) {
 					return cascadeWinners{}, false
 				}
 			} else {
-				if !apply(r.decls, plan.specificity, false, state == mediaUnknown) {
+				if !apply(r.decls, plan.specificity, false, state == mediaUnknown, state == mediaYesColourScheme, true) {
 					return cascadeWinners{}, false
 				}
 			}
 		}
 	}
-	if !apply(inline, cascadia.Specificity{}, true, false) {
+	if !apply(inline, cascadia.Specificity{}, true, false, false, true) {
 		return cascadeWinners{}, false
 	}
 	return winners, true
@@ -369,16 +389,24 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 			defs[n] = variableDefinition{declaration: c.d, uncertainOrigin: c.uncertainOrigin}
 		}
 	}
-	scope := buildVariables(parentVars, defs, budget)
+	scope := buildVariables(parentVars, defs, winners.alternateColourSchemeVars, budget)
 	context.vars = scope
 	for i := 0; i < properties; i++ {
 		c := winners.properties[i]
 		if c.set {
+			if declarationUsesColourSchemeVariable(c.d, scope) {
+				winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(c.d)
+			}
 			v, status := resolvedDeclaration(c.d, c.property, c.uncertainOrigin, context, false)
 			if status == valueUnsupported {
 				v.Known = false
 			}
 			st[i] = v
+		}
+	}
+	for i := range winners.layout {
+		if c := winners.layout[i]; c.set && declarationUsesColourSchemeVariable(c.d, scope) {
+			winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(c.d)
 		}
 	}
 	if st[background].Text == "currentcolor" {
@@ -387,6 +415,47 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	layoutUncertain := layoutVisibilityUncertain(&winners.layout, &st, context)
 	return elementStyleResult{
 		style: st, variables: scope, layoutUncertain: layoutUncertain,
-		displayDeclared: winners.properties[display].set,
+		displayDeclared:              winners.properties[display].set,
+		alternateColourSchemeReasons: winners.alternateColourSchemeReasons,
 	}
+}
+
+func alternateColourSchemeEffects(d *declaration) concealmentReason {
+	if d.prop == allShorthandProperty {
+		return reasonDisplayNone | reasonVisibilityHidden | reasonVisibilityCollapse |
+			reasonOpacity | reasonFontSize | reasonColour | reasonEmptyClip | reasonContentVisibility
+	}
+	switch d.prop {
+	case display:
+		return reasonDisplayNone
+	case visibility:
+		return reasonVisibilityHidden | reasonVisibilityCollapse
+	case contentVisibility:
+		return reasonContentVisibility
+	case opacity:
+		return reasonOpacity
+	case fontSize:
+		return reasonFontSize
+	case color, background, backgroundImage, filter, blend, backdropFilter,
+		backgroundBlend, maskImage, backgroundClip, textShadow, textFill, textStroke:
+		return reasonColour
+	case clip, clipPath, overflowX, overflowY, width, height, maxWidth, maxHeight,
+		left, top, right, bottom, textIndent, marginTop, marginRight, marginBottom,
+		marginLeft, zoom, transform, position:
+		return reasonEmptyClip
+	default:
+		return 0
+	}
+}
+
+func declarationUsesColourSchemeVariable(d *declaration, scope *variableScope) bool {
+	if d == nil || !d.hasVars {
+		return false
+	}
+	for _, name := range d.variableDependencies {
+		if scope.colourSchemeDependent(name) {
+			return true
+		}
+	}
+	return false
 }

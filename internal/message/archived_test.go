@@ -39,7 +39,7 @@ func TestArchivedVisibleBodyExcludesConcealedContentAndAnnotations(t *testing.T)
 	if body := msg.VisibleBody(4096); body != "Visible notice" {
 		t.Fatalf("visible archived body = %q", body)
 	}
-	if body := msg.ProcessedBody(4096); !strings.Contains(body, `<concealed reason="display:none">Concealed padding</concealed>`) {
+	if body := msg.ProcessedBody(4096); !strings.Contains(body, `<invisible reason="display:none">Concealed padding</invisible>`) {
 		t.Fatalf("annotated archived body lost concealed evidence: %q", body)
 	}
 }

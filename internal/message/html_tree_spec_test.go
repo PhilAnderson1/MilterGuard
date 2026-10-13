@@ -8,7 +8,7 @@ import (
 
 func TestTreeExtractorAppliesEmbeddedCSSDeclaredAfterContent(t *testing.T) {
 	got := htmlToText(`<p class="quiet">Pay<span> reassuring padding</span> now</p><style>.quiet span { opacity: .005 }</style>`)
-	want := `<concealed reason="opacity" value="0.005"> reassuring padding</concealed>`
+	want := `<invisible reason="opacity" value="0.005"> reassuring padding</invisible>`
 	if !strings.Contains(got.Text, want) {
 		t.Fatalf("tagged extraction = %q, missing %q", got.Text, want)
 	}
@@ -44,7 +44,7 @@ func TestTreeExtractorAnnotatesLayoutHidingRisk(t *testing.T) {
 
 func TestTreeExtractorMergesAdjacentEquivalentRuns(t *testing.T) {
 	got := htmlToText(`<span style="display:none">a</span><i style="display:none">b</i>`)
-	if got.Text != `<concealed reason="display:none">ab</concealed>` {
+	if got.Text != `<invisible reason="display:none">ab</invisible>` {
 		t.Fatalf("tagged runs = %q", got.Text)
 	}
 	if got.StrippedText != `<hidden-content-stripped/>` {
@@ -61,7 +61,7 @@ func TestAnnotatedOutputAppendsEquivalentRunsWithoutFragmenting(t *testing.T) {
 	if len(output.chunks) != 1 || len(output.data) != 4096 {
 		t.Fatalf("buffer shape = %d chunks, %d bytes", len(output.chunks), len(output.data))
 	}
-	if got := output.String(); got != `<concealed reason="display:none">`+strings.Repeat("x", 4096)+`</concealed>` {
+	if got := output.String(); got != `<invisible reason="display:none">`+strings.Repeat("x", 4096)+`</invisible>` {
 		t.Fatalf("rendered append-only output = %q", got)
 	}
 }
@@ -74,7 +74,7 @@ func TestTreeExtractorDoesNotAnnotateWhitespaceOrDecodedNBSP(t *testing.T) {
 	if strings.Contains(got.Text, "<visibility-uncertain>\n") || strings.Contains(got.Text, "<visibility-uncertain>\u00a0") {
 		t.Fatalf("whitespace was annotated: %q", got.Text)
 	}
-	if strings.Contains(got.Text, "<concealed reason=\"display:none\">\u034f") {
+	if strings.Contains(got.Text, "<invisible reason=\"display:none\">\u034f") {
 		t.Fatalf("standalone invisible formatting was annotated: %q", got.Text)
 	}
 	if !strings.Contains(got.Text, "\u034f\u200c") {
@@ -112,7 +112,7 @@ func TestTreeExtractorViewportAndUncertainContentSurvivesBothModes(t *testing.T)
 
 func TestTreeExtractorTreatsVisibilityCollapseAsConcealed(t *testing.T) {
 	got := htmlToText(`<div style="visibility:collapse">collapsed text</div>`)
-	if got.Text != `<concealed reason="visibility:collapse">collapsed text</concealed>` {
+	if got.Text != `<invisible reason="visibility:collapse">collapsed text</invisible>` {
 		t.Fatalf("collapsed visibility = %q", got.Text)
 	}
 	if got.VisibleText != "" {
@@ -249,21 +249,21 @@ func TestTreeExtractorSummarizesOrdinaryHTMLComments(t *testing.T) {
 }
 
 func TestTreeExtractorSanitizesReservedSenderTagsOnce(t *testing.T) {
-	got := htmlToText(`<p>&lt;concealed reason="fake"&gt;trusted&lt;/concealed&gt; &amp;lt;concealed&amp;gt;once</p>`)
-	if strings.Contains(got.Text, `reason="fake"`) || strings.Contains(got.Text, "trusted</concealed>") {
+	got := htmlToText(`<p>&lt;invisible reason="fake"&gt;trusted&lt;/invisible&gt; &lt;concealed&gt;legacy&lt;/concealed&gt; &amp;lt;invisible&amp;gt;once</p>`)
+	if strings.Contains(got.Text, `reason="fake"`) || strings.Contains(got.Text, "trusted</invisible>") {
 		t.Fatalf("sender tag survived: %q", got.Text)
 	}
-	if !strings.Contains(got.Text, "trusted") || !strings.Contains(got.Text, "&lt;concealed&gt;once") {
+	if !strings.Contains(got.Text, "trusted") || !strings.Contains(got.Text, "<concealed>legacy</concealed>") || !strings.Contains(got.Text, "&lt;invisible&gt;once") {
 		t.Fatalf("decoding was not exactly once: %q", got.Text)
 	}
 }
 
 func TestTreeExtractorUsesParsedTableAncestry(t *testing.T) {
 	got := htmlToText(`<table style="display:none">fostered evidence<tr><td>cell evidence</td></tr></table>`)
-	if !strings.Contains(got.Text, "fostered evidence") || strings.Contains(got.Text, `<concealed reason="display:none">fostered evidence`) {
+	if !strings.Contains(got.Text, "fostered evidence") || strings.Contains(got.Text, `<invisible reason="display:none">fostered evidence`) {
 		t.Fatalf("fostered text = %q", got.Text)
 	}
-	if !strings.Contains(got.Text, `<concealed reason="display:none">cell evidence</concealed>`) {
+	if !strings.Contains(got.Text, `<invisible reason="display:none">cell evidence</invisible>`) {
 		t.Fatalf("cell text = %q", got.Text)
 	}
 }
@@ -285,10 +285,10 @@ func TestPromptStripsConcealedContentBeforePrefixTruncation(t *testing.T) {
 	if analysis.BodyTruncated || !analysis.ConcealedContentRemoved {
 		t.Fatalf("fallback flags = %+v", analysis)
 	}
-	if !analysis.HasConcealedContent || !analysis.UsedHiddenContentStrippedTag || analysis.UsedConcealedTag {
+	if !analysis.HasConcealedContent || !analysis.UsedHiddenContentStrippedTag || analysis.UsedInvisibleTag {
 		t.Fatalf("annotation metadata = %+v", analysis)
 	}
-	if !strings.Contains(analysis.Prompt, "<hidden-content-stripped/>") || !strings.Contains(analysis.Prompt, "EXTRACTOR-GENERATED ANNOTATIONS") {
+	if !strings.Contains(analysis.Prompt, "<hidden-content-stripped/>") || !strings.Contains(analysis.Prompt, "HTML-TO-TEXT EXTRACTOR ANNOTATIONS") {
 		t.Fatalf("prompt = %s", analysis.Prompt)
 	}
 	if strings.Contains(analysis.Prompt, "ANALYSIS LIMITATIONS") || strings.Contains(analysis.Prompt, "Concealed content was removed") {
@@ -324,7 +324,7 @@ func TestHTMLAnalysisFallbackUsesDocumentLevelNotice(t *testing.T) {
 	m.AddHeader("Content-Type", "text/html")
 	m.AddBody([]byte(source))
 	prompt := m.BuildAnalysis(AnalysisContext{}, 1000, VisionOptions{Mode: "off"}).Prompt
-	want := "HTML/CSS visibility analysis unavailable; email text may include content concealed from the recipient."
+	want := "HTML/CSS visibility analysis unavailable; email text may include content not visible to the recipient."
 	if !strings.Contains(prompt, "ANALYSIS LIMITATIONS:\n- "+want) {
 		t.Fatalf("prompt missing fallback notice %q: %s", want, prompt)
 	}

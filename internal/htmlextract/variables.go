@@ -214,9 +214,11 @@ type variableValue struct {
 	status valueStatus
 }
 type variableScope struct {
-	parent     *variableScope
-	values     map[string]variableValue
-	unresolved map[string]variableDefinition
+	parent              *variableScope
+	values              map[string]variableValue
+	unresolved          map[string]variableDefinition
+	colourDependent     map[string]bool
+	hasColourDependency bool
 }
 
 type variableDefinition struct {
@@ -239,20 +241,36 @@ func (s *variableScope) get(name string, budget *expressionBudget) variableValue
 	return variableValue{status: valueInvalid}
 }
 
-func unresolvedVariableScope(parent *variableScope, defs map[string]variableDefinition) *variableScope {
-	return &variableScope{parent: parent, unresolved: defs}
+func (s *variableScope) colourSchemeDependent(name string) bool {
+	for ; s != nil; s = s.parent {
+		if dependent, ok := s.colourDependent[name]; ok {
+			return dependent
+		}
+	}
+	return false
+}
+
+func unresolvedVariableScope(parent *variableScope, defs map[string]variableDefinition, alternate map[string]bool) *variableScope {
+	dependent := make(map[string]bool, len(defs)+len(alternate))
+	for name := range defs {
+		dependent[name] = true
+	}
+	for name := range alternate {
+		dependent[name] = true
+	}
+	return &variableScope{parent: parent, unresolved: defs, colourDependent: dependent, hasColourDependency: len(dependent) > 0}
 }
 
 // A scope stores only this element's computed overrides. Parent references have
 // already been substituted, so a child's --b cannot change inherited --a:var(--b).
-func buildVariables(parent *variableScope, defs map[string]variableDefinition, budget *expressionBudget) *variableScope {
-	if len(defs) == 0 {
+func buildVariables(parent *variableScope, defs map[string]variableDefinition, alternate map[string]bool, budget *expressionBudget) *variableScope {
+	if len(defs) == 0 && len(alternate) == 0 {
 		return parent
 	}
-	if len(defs) > 1024 || !budget.charge(len(defs)) {
-		return unresolvedVariableScope(parent, defs)
+	if len(defs)+len(alternate) > 1024 || !budget.charge(len(defs)+len(alternate)) {
+		return unresolvedVariableScope(parent, defs, alternate)
 	}
-	s := &variableScope{parent: parent, values: make(map[string]variableValue)}
+	s := &variableScope{parent: parent, values: make(map[string]variableValue), colourDependent: make(map[string]bool)}
 	var ordered []string
 	for n := range defs {
 		ordered = append(ordered, n)
@@ -309,7 +327,7 @@ func buildVariables(parent *variableScope, defs map[string]variableDefinition, b
 	for _, n := range ordered {
 		visit(n, 0)
 		if budget.exhausted {
-			return unresolvedVariableScope(parent, defs)
+			return unresolvedVariableScope(parent, defs, alternate)
 		}
 	}
 	for n := range cyclic {
@@ -345,8 +363,60 @@ func buildVariables(parent *variableScope, defs map[string]variableDefinition, b
 	for _, n := range ordered {
 		resolveName(n, 0)
 		if budget.exhausted {
-			return unresolvedVariableScope(parent, defs)
+			return unresolvedVariableScope(parent, defs, alternate)
 		}
+	}
+	if len(alternate) == 0 && (parent == nil || !parent.hasColourDependency) {
+		return s
+	}
+	var dependencyState = make(map[string]uint8, len(defs))
+	var dependsOnColourScheme func(string, int) bool
+	dependsOnColourScheme = func(name string, depth int) bool {
+		if dependencyState[name] == 2 {
+			return s.colourDependent[name]
+		}
+		if alternate[name] || depth > maxExpressionDepth {
+			s.colourDependent[name] = true
+			s.hasColourDependency = true
+			return true
+		}
+		if dependencyState[name] == 1 {
+			return false
+		}
+		definition, local := defs[name]
+		if !local {
+			return parent.colourSchemeDependent(name)
+		}
+		if !budget.charge(1 + len(definition.declaration.variableDependencies)) {
+			s.colourDependent[name] = true
+			s.hasColourDependency = true
+			return true
+		}
+		dependencyState[name] = 1
+		dependent := false
+		switch definition.declaration.keyword {
+		case "inherit", "unset":
+			dependent = parent.colourSchemeDependent(name)
+		default:
+			for _, ref := range definition.declaration.variableDependencies {
+				if dependsOnColourScheme(ref, depth+1) {
+					dependent = true
+				}
+			}
+		}
+		dependencyState[name] = 2
+		s.colourDependent[name] = dependent
+		s.hasColourDependency = s.hasColourDependency || dependent
+		return dependent
+	}
+	for name := range alternate {
+		if _, local := defs[name]; !local {
+			s.colourDependent[name] = true
+			s.hasColourDependency = true
+		}
+	}
+	for _, name := range ordered {
+		dependsOnColourScheme(name, 0)
 	}
 	return s
 }

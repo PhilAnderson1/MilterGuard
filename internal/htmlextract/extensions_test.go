@@ -14,7 +14,7 @@ func TestConditionalCases(t *testing.T) {
 		{"mobile", `@media screen and (max-width:600px){p{display:none}}`, "client-dependent"},
 		{"legacy device width", `@media only screen and (max-device-width:600px),only screen and (max-width:600px){p{display:none}}`, "client-dependent"},
 		{"light colour scheme", `@media (prefers-color-scheme:light){p{display:none}}`, "unknown"},
-		{"dark colour scheme", `@media (prefers-color-scheme:dark){p{display:none}}`, "unknown"},
+		{"dark colour scheme", `@media (prefers-color-scheme:dark){p{display:none}}`, "visible"},
 		{"colour scheme can reveal", `p{display:none}@media (prefers-color-scheme:dark){p{display:block}}`, "unknown"},
 		{"colour scheme overridden", `@media (prefers-color-scheme:dark){p{display:none}}p{display:block}`, "visible"},
 		{"colour scheme scoped elsewhere", `@media (prefers-color-scheme:dark){b{display:none}}`, "visible"},
@@ -46,6 +46,29 @@ func TestConditionalCases(t *testing.T) {
 	}
 	if findText(t, in, "T").Label != "unknown" || findText(t, in, "U").Label != "visible" {
 		t.Fatal(in)
+	}
+}
+
+func TestCanonicalLightColourSchemeVisibility(t *testing.T) {
+	cases := []struct{ name, css, want string }{
+		{"visible despite dark colour", `p{color:black}@media(prefers-color-scheme:dark){p{color:white}}`, "visible"},
+		{"dark colour can reveal", `p{color:white;background:white}@media(prefers-color-scheme:dark){p{color:black}}`, "unknown"},
+		{"dark display can reveal", `p{display:none}@media(prefers-color-scheme:dark){p{display:block}}`, "unknown"},
+		{"unrelated dark colour cannot reveal display", `p{display:none}@media(prefers-color-scheme:dark){p{color:white}}`, "concealed"},
+		{"one changed property cannot reveal multiply hidden text", `p{display:none;opacity:0}@media(prefers-color-scheme:dark){p{display:block}}`, "concealed"},
+		{"dark colour variable cannot reveal display", `p{display:none;color:var(--ink,black)}@media(prefers-color-scheme:dark){:root{--ink:white}}`, "concealed"},
+		{"dark display variable can reveal", `p{display:var(--show,none)}@media(prefers-color-scheme:dark){:root{--show:block}}`, "unknown"},
+		{"inherited dark display variable can reveal", `:root{--show:none}body{--show:inherit}p{display:var(--show)}@media(prefers-color-scheme:dark){:root{--show:block}}`, "unknown"},
+		{"dark colour variable can reveal matching colour", `p{color:var(--ink,white);background:white}@media(prefers-color-scheme:dark){:root{--ink:black}}`, "unknown"},
+		{"contradictory nested schemes never apply", `p{display:none}@media(prefers-color-scheme:light){@media(prefers-color-scheme:dark){p{display:block}}}`, "concealed"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			in := inspectHTML(t, `<style>`+test.css+`</style><p>T</p>`)
+			if got := findText(t, in, "T"); got.Label != test.want {
+				t.Fatalf("label = %q, want %q", got.Label, test.want)
+			}
+		})
 	}
 }
 
@@ -512,7 +535,7 @@ func TestDeclarationValueTokensAreCached(t *testing.T) {
 	d := ds[0]
 	d.value = strings.Repeat("x", maxValueBytes+1)
 	budget := expressionBudget{remaining: 100}
-	scope := buildVariables(nil, map[string]variableDefinition{"--payload": {declaration: &d}}, &budget)
+	scope := buildVariables(nil, map[string]variableDefinition{"--payload": {declaration: &d}}, nil, &budget)
 	if got := scope.get("--payload", &budget); got.status != valueResolved || got.text != "none" {
 		t.Fatalf("cached value was not used: %+v", got)
 	}
@@ -539,7 +562,7 @@ func TestExpressionBudgetStopsCachedVariableTraversal(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	d := s.declarations("--payload", "var(--a) var(--b) var(--c)")[0]
 	budget := expressionBudget{remaining: 1}
-	scope := buildVariables(nil, map[string]variableDefinition{"--payload": {declaration: &d}}, &budget)
+	scope := buildVariables(nil, map[string]variableDefinition{"--payload": {declaration: &d}}, nil, &budget)
 	if !budget.exhausted {
 		t.Fatal("expression budget was not exhausted")
 	}
