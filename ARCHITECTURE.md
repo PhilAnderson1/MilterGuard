@@ -29,6 +29,7 @@ path.
 | `internal/ai` | Builds chat-completions requests, applies endpoint retries, and validates AI decisions. |
 | `internal/attachment` | Detects prohibited executable attachments and inspects supported archives. |
 | `internal/config` | Loads defaults, strictly decodes YAML, and validates cross-setting requirements. |
+| `internal/htmlextract` | Guards HTML/CSS parsing with preflight checks and derives bounded presentation and visibility evidence from the parsed document. |
 | `internal/mailaddr` | Provides canonical mailbox parsing and normalization shared by message processing, policy, administration, and persistence. |
 | `internal/mailauth` | Owns provider-neutral authentication evidence, the verifier boundary, trusted-header compatibility parsing, alignment, and exact-message storage. |
 | `internal/mailauth/moxverify` | Adapts Mox SPF, DKIM, and DMARC verification to bounded, provider-neutral evidence using a dedicated resolver and resource limits. |
@@ -101,10 +102,11 @@ unambiguous security decisions independent of model output.
 ## Message and authentication processing
 
 `internal/message` owns decoding and evidence extraction. It parses MIME,
-decodes transfer and header encodings, turns HTML into bounded visible text,
-preserves useful link and image references, and prepares inline images for
-vision analysis. The same archived-message parser is used by `REJECTION <id>`
-so command output reflects the current message-processing implementation.
+decodes transfer and header encodings, uses `internal/htmlextract` to render
+bounded HTML text with visibility annotations, preserves useful link and image
+references, and prepares inline images for vision analysis. The same
+archived-message parser is used by `REJECTION <id>` so command output reflects
+the current message-processing implementation.
 
 `internal/mailauth` owns the authentication provider boundary and the bounded
 evidence types shared by policy and prompt generation. The default `internal`
@@ -120,6 +122,63 @@ The alternative `trusted_headers` provider parses authentication headers once
 and uses only results whose authentication-service identifiers are trusted by
 configuration. In that mode, Postfix must remove externally supplied result
 headers before the upstream authentication filters add fresh local results.
+
+## HTML and CSS processing
+
+`internal/htmlextract.AnalyzeWithStop` retains one parsed HTML tree and derives
+presentation evidence for its text and image-like elements. It does not execute
+scripts or fetch external resources. Processing proceeds through these stages:
+
+1. Validate limits and bound input bytes. Run the tokenizer-based HTML
+   preflight in `html_preflight.go` **before** calling the `x/net/html` tree
+   builder. The preflight bounds tree-building tokens, text nodes, attributes,
+   and explicit nesting, including markup inside `noscript` and foreign
+   content. This protects the allocating tree builder and its error recovery
+   from adversarial input; checking the completed tree alone is insufficient.
+2. Build the HTML tree with scripting disabled, then traverse it with an
+   explicit stack. Recheck actual node, text, attribute, and depth limits,
+   allowing for parser-generated ancestors. Collect applicable stylesheets,
+   inline styles, legacy presentation attributes, and selector profiles while
+   distinguishing active, head, and inert content.
+3. Admit each CSS source through `sheet.admitCSS` before constructing the
+   full `tdewolff` CSS parser. Enforce a cumulative CSS byte limit and charge
+   preflight work, then use the lexer-based `css_preflight.go` checks to bound
+   individual constructs by bytes and tokens and reject unsafe unmatched
+   delimiters. These checks protect parser token accumulation and condition
+   tracking. They apply to style elements, style attributes, conditional-comment
+   styles, and decoded data-URL stylesheets, including nested imports.
+4. Prepare declarations and build a selector index, then evaluate a bounded
+   set of viewport cases. Resolve the cascade, inheritance, custom properties,
+   expressions, layout, clipping, opacity, and colours with shared matching
+   and expression-work budgets. Aggregate the cases into visible, concealed,
+   client-dependent, or unknown results, retaining concealment evidence and
+   resource usage.
+
+HTML preflight, tree collection, and presentation analysis use separate
+explicit stacks because each pass tracks different state and limits. CSS
+source limits apply across parser inputs within a document; `internal/message`
+carries the remaining extraction budgets across HTML MIME parts. Splitting
+input across style elements or message parts must not reset those budgets.
+
+Unsupported or exhausted style analysis preserves uncertainty rather than
+trusting a partial cascade. Malformed inline styles can make an element and
+its descendants uncertain; unusable global CSS invalidates the shared cascade.
+Applicable external or unsupported stylesheet references are reported through
+`UnresolvedStylesheet`. Bounded data-URL stylesheets can be analysed, but their
+effects remain client-dependent. No network stylesheet is fetched.
+
+`internal/message` renders the results as annotated text and, when concealed
+content exists, a second representation with that content removed. It also
+extracts links and image references. Only confidently visible text can suppress
+fallback vision analysis; an unresolved stylesheet removes that confidence.
+Analysis errors or cooperative stops switch extraction to a bounded lexical
+fallback, with fallback and completeness information carried into the prompt.
+
+The Milter analysis service additionally measures HTML processing CPU time and
+supplies the cooperative stop callback. The configured limit action selects
+fallback, rejection, or denial-of-service rejection, subject to operating mode.
+An in-progress library call cannot be interrupted by this callback, so CPU
+checks supplement the mandatory preflight guards rather than replacing them.
 
 ## AI analysis
 
@@ -249,6 +308,9 @@ Important trust boundaries include:
 - `netsafety` and RDAP pinned dialing prevent requests to internal services.
 - Message content, images, and links are always treated as untrusted data by
   the AI request.
+- HTML tree construction and full CSS parsing require their preflight guards;
+  subsequent traversal limits and CPU checks do not replace admission checks
+  before the libraries process adversarial input.
 - Rejected-message archive paths are constructed beneath one configured root.
 
 Changes at these boundaries should retain explicit validation and focused
