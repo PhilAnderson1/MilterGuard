@@ -140,8 +140,8 @@ func contextualDeclaration(d declaration) bool {
 }
 
 // prepareDeclaration performs the context-independent work for a declaration
-// once. Declarations are copied while cascading, so valueTokens must remain
-// immutable after this point.
+// once. Cascade candidates retain pointers to prepared declarations, so the
+// declaration and any retained valueTokens must remain immutable afterward.
 func prepareDeclaration(d declaration) declaration {
 	if d.prepared != nil {
 		return d

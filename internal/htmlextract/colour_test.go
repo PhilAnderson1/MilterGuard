@@ -34,7 +34,8 @@ func expectRGBA(t *testing.T, got *RGBA, want RGBA) {
 }
 func TestOklabIndependentValues(t *testing.T) {
 	// Independent rounded primary reference values from the XYZ->Oklab route,
-	// not generated with oklab(): see testdata/colour/REFERENCE.md.
+	// not generated with oklab(). The fuller machine-readable fixture is in
+	// testdata/colour/reference-values.json and exercised below.
 	for _, c := range []struct {
 		rgb RGBA
 		lab [3]float64

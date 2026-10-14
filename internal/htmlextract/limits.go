@@ -81,6 +81,9 @@ func (l Limits) validate() error {
 // ResourceUsage records deterministic input-derived work performed while
 // analysing one HTML document. Callers use it to carry remaining work across
 // the HTML parts of one message; limits are still enforced inside Analyze.
+// CSSLimitExceeded means the shared stylesheet cascade was abandoned after a
+// CSS resource limit or parser-recovery failure. A malformed inline style can
+// instead remain locally unresolved without setting that document-wide flag.
 type ResourceUsage struct {
 	InputBytes                   int
 	Nodes                        int
