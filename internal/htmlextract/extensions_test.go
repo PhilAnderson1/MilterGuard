@@ -131,6 +131,119 @@ func TestMediaStateWorkAndPlanningCache(t *testing.T) {
 	}
 }
 
+func TestSharedConditionFrameEvaluationMatchesIndependentRules(t *testing.T) {
+	outer := newConditionFrame(mediaCondition{
+		{bounds: []widthBound{{min: true, value: 320}}, schemes: colourSchemeLight},
+		{unknown: true, schemes: colourSchemeDark},
+	}, nil)
+	inner := newConditionFrame(mediaCondition{
+		{bounds: []widthBound{{value: 900}}, schemes: colourSchemeBoth},
+	}, outer)
+	rules := []rule{{conditions: outer}, {conditions: inner}, {conditions: inner}, {}}
+	for i := range rules {
+		rules[i].prepareMediaWork()
+	}
+
+	for _, fallback := range []bool{false, true} {
+		for _, width := range []float64{0, 320, 600, 901} {
+			states := make(map[*conditionFrame]conditionFrameState)
+			for i, r := range rules {
+				light, dark := evaluateConditionFrame(r.conditions, width, fallback, states)
+				if got, want := combinedMediaState(light, dark), independentMediaState(r.conditions, width, fallback); got != want {
+					t.Fatalf("rule %d width %g fallback %t: state=%d, want %d", i, width, fallback, got, want)
+				}
+			}
+			if len(states) != 2 {
+				t.Fatalf("width %g fallback %t: cached frames=%d, want 2", width, fallback, len(states))
+			}
+		}
+	}
+}
+
+func independentMediaState(frame *conditionFrame, width float64, fallback bool) int {
+	light, dark := mediaYes, mediaYes
+	for ; frame != nil; frame = frame.parent {
+		frameLight, frameDark := frame.condition.states(width, fallback)
+		light = intersectMediaState(light, frameLight)
+		dark = intersectMediaState(dark, frameDark)
+	}
+	return combinedMediaState(light, dark)
+}
+
+func TestStylesheetMediaAttributeSharesWrapperFrames(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseStylesheet(`p{display:block}b{display:block}@media(min-width:10px){i{display:block}em{display:block}}`, "screen", false)
+	if len(s.rules) != 4 {
+		t.Fatalf("rules=%d, want 4", len(s.rules))
+	}
+	if s.rules[0].conditions != s.rules[1].conditions {
+		t.Fatal("top-level rules did not share their media-attribute frame")
+	}
+	if s.rules[2].conditions != s.rules[3].conditions {
+		t.Fatal("nested rules did not share their media-attribute frame")
+	}
+	if s.rules[0].conditions == s.rules[2].conditions || s.rules[2].conditions.parent == nil {
+		t.Fatal("different parent chains incorrectly shared a wrapper frame")
+	}
+	for i, want := range []struct{ normal, fallback int64 }{{3, 4}, {3, 4}, {6, 8}, {6, 8}} {
+		if got := s.rules[i].mediaStateWork(false); got != want.normal {
+			t.Fatalf("rule %d cached media work=%d, want %d", i, got, want.normal)
+		}
+		if got := s.rules[i].mediaStateWork(true); got != want.fallback {
+			t.Fatalf("rule %d cached fallback media work=%d, want %d", i, got, want.fallback)
+		}
+	}
+}
+
+func TestMediaPlanningRespectsSharedMatchWorkCeiling(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MatchWork = 118
+	document, err := Analyze([]byte(`<style>@media(min-width:100px){p{color:red}}@media(min-width:200px){p{color:blue}}</style><p>T</p>`), limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Usage.MatchWork > limits.MatchWork {
+		t.Fatalf("match work = %d, exceeds limit %d", document.Usage.MatchWork, limits.MatchWork)
+	}
+	if !document.Usage.MatchWorkExhausted {
+		t.Fatalf("global media-planning exhaustion not reported: %+v", document.Usage)
+	}
+	if document.Usage.MediaCases != 1 {
+		t.Fatalf("media cases = %d, want one unresolved traversal", document.Usage.MediaCases)
+	}
+	if got := findText(t, document, "T").Label; got != "unknown" {
+		t.Fatalf("text label = %q, want unknown", got)
+	}
+}
+
+func TestMediaPlanningSubLimitKeepsGlobalWorkUsable(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MatchWork = 8
+	s := sheet{limits: limits, rules: []rule{{}, {}}}
+	widths, fallback := s.viewingCases(MaxViewingCases)
+	if !fallback || len(widths) != 1 {
+		t.Fatalf("viewing cases = %v, fallback=%t", widths, fallback)
+	}
+	if s.workIncomplete {
+		t.Fatal("media sub-limit incorrectly exhausted the global work budget")
+	}
+	if s.planningWork != limits.MatchWork/mediaPlanningWorkLimitDivisor {
+		t.Fatalf("media planning work = %d, want %d", s.planningWork, limits.MatchWork/mediaPlanningWorkLimitDivisor)
+	}
+}
+
+func TestMediaPlanningSkipsUnusableCascade(t *testing.T) {
+	limits := DefaultLimits()
+	s := sheet{limits: limits, planningWork: 17, workIncomplete: true, rules: []rule{{}}}
+	widths, fallback := s.viewingCases(MaxViewingCases)
+	if !fallback || len(widths) != 1 || widths[0] != 1024 {
+		t.Fatalf("viewing cases = %v, fallback=%t", widths, fallback)
+	}
+	if s.planningWork != 17 || s.runtime.mediaCache != nil {
+		t.Fatalf("unusable cascade performed media planning: work=%d cache=%v", s.planningWork, s.runtime.mediaCache)
+	}
+}
+
 func TestRulesShareImmutableConditionStack(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	s.parseCSS(`@media all{@media screen{p{display:none}b{display:none}i{display:none}}}`, false)
@@ -1186,6 +1299,86 @@ func TestVariableSortingChargesLogarithmicFactor(t *testing.T) {
 	scope := buildVariables(nil, defs, nil, &budget)
 	if !budget.exhausted || scope.unresolved == nil {
 		t.Fatalf("under-budget variable sort was not abandoned safely: budget=%+v scope=%+v", budget, scope)
+	}
+}
+
+func TestLiteralVariableScopeSkipsDependencyGraph(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	defs := make(map[string]candidate)
+	for _, definition := range []struct{ name, value string }{
+		{"--display", "none"},
+		{"--size", "10px"},
+		{"--empty", ""},
+	} {
+		declarations := s.declarations(definition.name, definition.value)
+		if len(declarations) != 1 {
+			t.Fatalf("%s declarations=%d, want 1", definition.name, len(declarations))
+		}
+		d := declarations[0]
+		defs[definition.name] = candidate{d: &d, set: true}
+	}
+	// Admission and literal construction each charge once per definition. The
+	// graph path would additionally require sorting and visitation work.
+	budget := expressionBudget{remaining: int64(2 * len(defs))}
+	scope := buildVariables(nil, defs, nil, &budget)
+	if budget.exhausted || budget.remaining != 0 || scope.unresolved != nil {
+		t.Fatalf("literal scope used graph work: budget=%+v scope=%+v", budget, scope)
+	}
+	for name, want := range map[string]string{"--display": "none", "--size": "10px", "--empty": ""} {
+		if got := scope.values[name]; got.status != valueResolved || got.text != want {
+			t.Errorf("%s=%+v, want resolved %q", name, got, want)
+		}
+	}
+}
+
+func TestLiteralVariableScopePreservesKeywordsAndColourDependencies(t *testing.T) {
+	parent := &variableScope{
+		values: map[string]variableValue{
+			"--inherited": {text: "none", status: valueResolved},
+			"--unset":     {text: "block", status: valueResolved},
+		},
+		colourDependent:     map[string]bool{"--inherited": true, "--unset": false, "--initial": true},
+		hasColourDependency: true,
+	}
+	s := sheet{limits: DefaultLimits()}
+	defs := make(map[string]candidate)
+	for name, value := range map[string]string{
+		"--inherited": "inherit",
+		"--unset":     "unset",
+		"--initial":   "initial",
+		"--revert":    "revert",
+		"--literal":   "10px",
+	} {
+		declarations := s.declarations(name, value)
+		d := declarations[0]
+		defs[name] = candidate{d: &d, set: true}
+	}
+	budget := expressionBudget{remaining: 1_000}
+	scope := buildVariables(parent, defs, map[string]bool{"--literal": true, "--alternate-only": true}, &budget)
+	if scope.unresolved != nil || budget.exhausted {
+		t.Fatalf("literal keyword scope unresolved: budget=%+v scope=%+v", budget, scope)
+	}
+	for name, want := range map[string]variableValue{
+		"--inherited": {text: "none", status: valueResolved},
+		"--unset":     {text: "block", status: valueResolved},
+		"--initial":   {status: valueInvalid},
+		"--revert":    {status: valueUnsupported},
+		"--literal":   {text: "10px", status: valueResolved},
+	} {
+		if got := scope.values[name]; got != want {
+			t.Errorf("%s=%+v, want %+v", name, got, want)
+		}
+	}
+	for name, want := range map[string]bool{
+		"--inherited": true, "--unset": false, "--initial": false,
+		"--revert": false, "--literal": true, "--alternate-only": true,
+	} {
+		if got := scope.colourDependent[name]; got != want {
+			t.Errorf("%s colour dependency=%t, want %t", name, got, want)
+		}
+	}
+	if !scope.hasColourDependency {
+		t.Fatal("scope did not retain colour-scheme dependency")
 	}
 }
 

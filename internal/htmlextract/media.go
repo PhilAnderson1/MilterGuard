@@ -30,8 +30,16 @@ type mediaCondition []mediaAlternative
 // scope share the complete chain instead of copying one slice header per
 // enclosing condition into every rule.
 type conditionFrame struct {
-	condition mediaCondition
-	parent    *conditionFrame
+	condition                    mediaCondition
+	parent                       *conditionFrame
+	mediaWork, fallbackMediaWork int64
+}
+
+func newConditionFrame(condition mediaCondition, parent *conditionFrame) *conditionFrame {
+	frame := &conditionFrame{condition: condition, parent: parent}
+	frame.mediaWork = conditionFrameWork(frame, false)
+	frame.fallbackMediaWork = conditionFrameWork(frame, true)
+	return frame
 }
 
 const (
@@ -136,12 +144,34 @@ func (c mediaCondition) states(width float64, fallback bool) (light, dark int) {
 }
 
 func (r rule) mediaState(width float64, fallback bool) int {
-	light, dark := mediaYes, mediaYes
-	for frame := r.conditions; frame != nil; frame = frame.parent {
-		frameLight, frameDark := frame.condition.states(width, fallback)
-		light = intersectMediaState(light, frameLight)
-		dark = intersectMediaState(dark, frameDark)
+	light, dark := evaluateConditionFrame(r.conditions, width, fallback, nil)
+	return combinedMediaState(light, dark)
+}
+
+type conditionFrameState struct {
+	light, dark int
+}
+
+// evaluateConditionFrame derives a frame from its parent. A cache shared by
+// all rules at one width evaluates every immutable frame at most once.
+func evaluateConditionFrame(frame *conditionFrame, width float64, fallback bool, cache map[*conditionFrame]conditionFrameState) (light, dark int) {
+	if frame == nil {
+		return mediaYes, mediaYes
 	}
+	if state, ok := cache[frame]; ok {
+		return state.light, state.dark
+	}
+	light, dark = evaluateConditionFrame(frame.parent, width, fallback, cache)
+	frameLight, frameDark := frame.condition.states(width, fallback)
+	light = intersectMediaState(light, frameLight)
+	dark = intersectMediaState(dark, frameDark)
+	if cache != nil {
+		cache[frame] = conditionFrameState{light: light, dark: dark}
+	}
+	return light, dark
+}
+
+func combinedMediaState(light, dark int) int {
 	if light == mediaUnknown {
 		return mediaUnknown
 	}
@@ -171,18 +201,27 @@ func intersectMediaState(left, right int) int {
 // It reflects the rule, condition, alternative and bound loops rather than a
 // fixed multiplier that can underestimate a dense comma-separated query.
 func calculatedMediaStateWork(r rule, fallback bool) int64 {
-	work := int64(1)
-	for frame := r.conditions; frame != nil; frame = frame.parent {
-		condition := frame.condition
-		work++
-		for _, alternative := range condition {
-			work += 1 + int64(len(alternative.bounds))
-		}
-		if fallback {
-			work += int64(len(condition))
-		}
+	return 1 + conditionFrameWork(r.conditions, fallback)
+}
+
+func conditionFrameWork(frame *conditionFrame, fallback bool) int64 {
+	if frame == nil {
+		return 0
 	}
-	return work
+	if fallback && frame.fallbackMediaWork != 0 {
+		return frame.fallbackMediaWork
+	}
+	if !fallback && frame.mediaWork != 0 {
+		return frame.mediaWork
+	}
+	work := int64(1)
+	for _, alternative := range frame.condition {
+		work += 1 + int64(len(alternative.bounds))
+	}
+	if fallback {
+		work += int64(len(frame.condition))
+	}
+	return work + conditionFrameWork(frame.parent, fallback)
 }
 
 func (r *rule) prepareMediaWork() {
@@ -205,19 +244,30 @@ func (r rule) mediaStateWork(fallback bool) int64 {
 // Width-independent property values make activation vectors sufficient. Exact
 // endpoints are separate from open intervals, so a one-point rule is covered.
 func (s *sheet) viewingCases(cap int) ([]float64, bool) {
+	// No media decision can make an unusable cascade trustworthy. Retain one
+	// traversal so text and elements are still extracted and labelled unknown,
+	// but do not spend more work constructing activation vectors.
+	if s.cascadeIncomplete || s.workIncomplete {
+		return []float64{1024}, true
+	}
 	var bounds []float64
 	unique := map[float64]bool{}
-	basePlanningWork := s.planningWork
+	seenFrames := map[*conditionFrame]bool{}
 	var planningWork int64
 	charge := func(cost int64) bool {
 		// Breakpoint discovery is admission-control work, so reserve at most a
-		// fixed fraction of the total selector/matching budget for it.
+		// fixed fraction of the total selector/matching budget for it. Check
+		// this phase-local allowance before the shared ceiling: reaching the
+		// former selects conservative media fallback, while reaching the latter
+		// makes all subsequent style evaluation unresolved.
 		limit := s.limits.MatchWork / mediaPlanningWorkLimitDivisor
-		if cost < 0 || planningWork > limit || cost > limit-planningWork {
+		if cost < 1 || planningWork > limit || cost > limit-planningWork {
+			return false
+		}
+		if !s.chargePlanningCost(cost) {
 			return false
 		}
 		planningWork += cost
-		s.planningWork = basePlanningWork + planningWork
 		return true
 	}
 	for _, r := range s.rules {
@@ -226,6 +276,10 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 			return []float64{1024}, true
 		}
 		for frame := r.conditions; frame != nil; frame = frame.parent {
+			if seenFrames[frame] {
+				continue
+			}
+			seenFrames[frame] = true
 			c := frame.condition
 			for _, a := range c {
 				for _, b := range a.bounds {
@@ -243,11 +297,16 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 	var candidates []float64
 	if len(bounds) == 0 {
 		states := make([]uint8, 0, len(s.rules))
+		var frameStates map[*conditionFrame]conditionFrameState
+		if len(seenFrames) > 0 {
+			frameStates = make(map[*conditionFrame]conditionFrameState, len(seenFrames))
+		}
 		for _, r := range s.rules {
 			if !charge(r.mediaStateWork(false)) {
 				return []float64{1024}, true
 			}
-			states = append(states, uint8(r.mediaState(1024, false)))
+			light, dark := evaluateConditionFrame(r.conditions, 1024, false, frameStates)
+			states = append(states, uint8(combinedMediaState(light, dark)))
 		}
 		s.runtime.mediaCache = map[mediaCacheKey][]uint8{{width: 1024}: states}
 		return []float64{1024}, false
@@ -271,13 +330,19 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 	seen := map[string]bool{}
 	var widths []float64
 	s.runtime.mediaCache = make(map[mediaCacheKey][]uint8)
+	var frameStates map[*conditionFrame]conditionFrameState
+	if len(seenFrames) > 0 {
+		frameStates = make(map[*conditionFrame]conditionFrameState, len(seenFrames))
+	}
 	for _, w := range candidates {
+		clear(frameStates)
 		states := make([]uint8, 0, len(s.rules))
 		for _, r := range s.rules {
 			if !charge(r.mediaStateWork(false)) {
 				return []float64{1024}, true
 			}
-			states = append(states, uint8(r.mediaState(w, false)))
+			light, dark := evaluateConditionFrame(r.conditions, w, false, frameStates)
+			states = append(states, uint8(combinedMediaState(light, dark)))
 		}
 		k := string(states)
 		if seen[k] {

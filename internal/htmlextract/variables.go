@@ -462,6 +462,65 @@ func unresolvedVariableScope(parent *variableScope, defs map[string]candidate, a
 	return &variableScope{parent: parent, unresolved: defs, colourDependent: dependent, hasColourDependency: len(dependent) > 0}
 }
 
+// buildLiteralVariables handles scopes whose winning custom properties cannot
+// refer to other variables. Their values form no dependency graph, so sorting,
+// cycle detection and token-by-token substitution would only reproduce the
+// already prepared literal text. The boolean reports whether this fast path
+// was applicable, including when its own bounded work was exhausted.
+func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alternate map[string]bool, budget *expressionBudget) (*variableScope, bool) {
+	for _, definition := range defs {
+		d := definition.d
+		if d == nil || !d.tokensReady || d.valueStatus != valueResolved || d.unsupported || definition.uncertainOrigin || d.hasVars || len(d.variableDependencies) != 0 {
+			return nil, false
+		}
+	}
+	if !budget.charge(len(defs)) {
+		return unresolvedVariableScope(parent, defs, alternate), true
+	}
+	s := &variableScope{parent: parent, values: make(map[string]variableValue, len(defs))}
+	for name, definition := range defs {
+		d := definition.d
+		var value variableValue
+		switch d.keyword {
+		case "inherit", "unset":
+			value = parent.get(name, budget)
+		case "initial":
+			value = variableValue{status: valueInvalid}
+		case "revert", "revert-layer":
+			value = variableValue{status: valueUnsupported}
+		default:
+			value = variableValue{text: trimCSSWhitespace(d.value), status: valueResolved}
+		}
+		s.values[name] = value
+		if budget.exhausted {
+			return unresolvedVariableScope(parent, defs, alternate), true
+		}
+	}
+
+	// With no alternate definitions and no inherited dependency, every local
+	// literal is colour-scheme independent and a nil map answers that directly.
+	if len(alternate) == 0 && (parent == nil || !parent.hasColourDependency) {
+		return s, true
+	}
+	if !budget.charge(len(defs) + len(alternate)) {
+		return unresolvedVariableScope(parent, defs, alternate), true
+	}
+	s.colourDependent = make(map[string]bool, len(defs)+len(alternate))
+	for name := range alternate {
+		s.colourDependent[name] = true
+		s.hasColourDependency = true
+	}
+	for name, definition := range defs {
+		dependent := alternate[name]
+		if !dependent && (definition.d.keyword == "inherit" || definition.d.keyword == "unset") {
+			dependent = parent.colourSchemeDependent(name, budget)
+		}
+		s.colourDependent[name] = dependent
+		s.hasColourDependency = s.hasColourDependency || dependent
+	}
+	return s, true
+}
+
 // A scope stores only this element's computed overrides. Parent references have
 // already been substituted, so a child's --b cannot change inherited --a:var(--b).
 func buildVariables(parent *variableScope, defs map[string]candidate, alternate map[string]bool, budget *expressionBudget) *variableScope {
@@ -470,6 +529,9 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	}
 	if len(defs)+len(alternate) > 1024 || !budget.charge(len(defs)+len(alternate)) {
 		return unresolvedVariableScope(parent, defs, alternate)
+	}
+	if scope, ok := buildLiteralVariables(parent, defs, alternate, budget); ok {
+		return scope
 	}
 	s := &variableScope{parent: parent, values: make(map[string]variableValue), colourDependent: make(map[string]bool)}
 	var ordered []string

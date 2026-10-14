@@ -49,10 +49,14 @@ type viewingCaseFrame struct {
 	n, next    *html.Node
 	entered    bool
 	styleIndex int
-	scope      nodeScope
+	// colourContextChanged records whether this element's paint layer changed
+	// colour composition, so leaving it invalidates the one-entry memo too.
+	colourContextChanged bool
+	scope                nodeScope
 	presentationState
 	vars         *variableScope
 	selectorPath selectorAttributeProfile
+	ancestorKeys selectorAncestorActivation
 }
 
 type colourMemo struct {
@@ -90,6 +94,28 @@ func (r *viewingCaseRunner) evaluateColour(foreground Value) colourResult {
 	return result
 }
 
+func (r *viewingCaseRunner) enterPaintLayer(n *html.Node, paint paintLayer) bool {
+	r.layers = append(r.layers, paint)
+	changed := !paint.colourNeutral()
+	if n.Namespace == "" && n.Data == "body" && n.Parent != nil && n.Parent.Namespace == "" && n.Parent.Data == "html" {
+		// Canvas propagation can mutate both the root and body layers. Treat the
+		// body boundary conservatively even when its original layer was neutral.
+		propagateHTMLBodyBackground(r.layers)
+		changed = true
+	}
+	if changed {
+		r.layerGeneration++
+	}
+	return changed
+}
+
+func (r *viewingCaseRunner) leavePaintLayer(changed bool) {
+	r.layers = r.layers[:len(r.layers)-1]
+	if changed {
+		r.layerGeneration++
+	}
+}
+
 func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 	textIndex, elementIndex := 0, 0
 	media := mediaEvaluation{width: width, fallback: fallback}
@@ -101,6 +127,11 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 	r.layers = r.layers[:0]
 	r.layerGeneration = 0
 	r.colourMemo.valid = false
+	r.styles.runtime.activeAncestors.enabled = r.styles.hasAncestorSelectorIndex()
+	if r.styles.runtime.activeAncestors.enabled {
+		r.styles.runtime.activeAncestors.reset(r.styles.index.count)
+	}
+	defer func() { r.styles.runtime.activeAncestors.enabled = false }()
 	msoRevealedDepth := 0
 	for len(r.frames) > 0 {
 		r.visited++
@@ -161,11 +192,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					}
 				}
 				f.clipKnown = f.clipKnown && known
-				r.layers = append(r.layers, layerWithClipOverride(style, inlineClipPathUncertain))
-				r.layerGeneration++
-				if n.Namespace == "" && n.Data == "body" && n.Parent != nil && n.Parent.Namespace == "" && n.Parent.Data == "html" {
-					propagateHTMLBodyBackground(r.layers)
-				}
+				f.colourContextChanged = r.enterPaintLayer(n, layerWithClipOverride(style, inlineClipPathUncertain))
 				if n.Data == "html" {
 					rootStyle = *style
 				}
@@ -249,6 +276,12 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					// definitely visible to the recipient.
 					f.layoutUncertain = true
 				}
+				if !r.matches.exhausted && !r.expressions.exhausted && hasElementChild(n) {
+					activation, complete := r.styles.activateAncestorBuckets(n, r.matches)
+					if complete {
+						f.ancestorKeys = activation
+					}
+				}
 			}
 			f.scope = nodeContentScope(n, f.scope)
 			if n.Type == html.TextNode && f.scope == scopeActive {
@@ -286,8 +319,8 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 		}
 		if f.next == nil {
 			if f.n.Type == html.ElementNode {
-				r.layers = r.layers[:len(r.layers)-1]
-				r.layerGeneration++
+				r.styles.deactivateAncestorBuckets(f.ancestorKeys)
+				r.leavePaintLayer(f.colourContextChanged)
 				r.styleStack = r.styleStack[:len(r.styleStack)-1]
 			}
 			r.frames = r.frames[:len(r.frames)-1]

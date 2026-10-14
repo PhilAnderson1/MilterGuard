@@ -38,15 +38,22 @@ func (s *sheet) mediaStates(width float64, fallback bool, work *matchBudget) ([]
 		s.runtime.mediaCache = make(map[mediaCacheKey][]uint8)
 	}
 	var cost int64
+	hasConditions := false
 	for i := range s.rules {
 		cost += s.rules[i].mediaStateWork(fallback)
+		hasConditions = hasConditions || s.rules[i].conditions != nil
 	}
 	if cost > 0 && work != nil && !work.spend(cost) {
 		return nil, false
 	}
 	states := make([]uint8, len(s.rules))
+	var frameStates map[*conditionFrame]conditionFrameState
+	if hasConditions {
+		frameStates = make(map[*conditionFrame]conditionFrameState)
+	}
 	for i := range s.rules {
-		states[i] = uint8(s.rules[i].mediaState(width, fallback))
+		light, dark := evaluateConditionFrame(s.rules[i].conditions, width, fallback, frameStates)
+		states[i] = uint8(combinedMediaState(light, dark))
 	}
 	s.runtime.mediaCache[key] = states
 	return states, true

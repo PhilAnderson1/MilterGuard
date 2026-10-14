@@ -48,6 +48,72 @@ type selectorAttributeCandidates struct {
 	direct, ancestor [][]selectorRef
 }
 
+// activeAncestorBuckets is the selector-index state for the current DFS path.
+// Candidate buckets are activated after an element is resolved, so they apply
+// to descendants but never to the element that supplied the key. Reference
+// counts keep repeated ancestor keys active until their outermost contributor
+// exits. Maintaining this state replaces an uncharged parent-chain walk; the
+// existing per-descendant bucket charge remains unchanged.
+type activeAncestorBuckets struct {
+	buckets   [][]selectorRef
+	counts    []int
+	positions []int // active position plus one; zero means inactive
+	enabled   bool
+}
+
+type selectorAncestorActivation struct {
+	tag        []selectorRef
+	attributes [][]selectorRef
+}
+
+func (a *activeAncestorBuckets) reset(selectorCount int) {
+	if len(a.counts) < selectorCount {
+		a.counts = make([]int, selectorCount)
+		a.positions = make([]int, selectorCount)
+	} else {
+		clear(a.counts)
+		clear(a.positions)
+	}
+	clear(a.buckets)
+	a.buckets = a.buckets[:0]
+}
+
+func (a *activeAncestorBuckets) add(bucket []selectorRef) {
+	if len(bucket) == 0 {
+		return
+	}
+	key := bucket[0].sequence
+	if a.counts[key] == 0 {
+		a.positions[key] = len(a.buckets) + 1
+		a.buckets = append(a.buckets, bucket)
+	}
+	a.counts[key]++
+}
+
+func (a *activeAncestorBuckets) remove(bucket []selectorRef) {
+	if len(bucket) == 0 {
+		return
+	}
+	key := bucket[0].sequence
+	if a.counts[key] == 0 {
+		return
+	}
+	a.counts[key]--
+	if a.counts[key] != 0 {
+		return
+	}
+	position := a.positions[key] - 1
+	last := len(a.buckets) - 1
+	if position != last {
+		moved := a.buckets[last]
+		a.buckets[position] = moved
+		a.positions[moved[0].sequence] = position + 1
+	}
+	a.buckets[last] = nil
+	a.buckets = a.buckets[:last]
+	a.positions[key] = 0
+}
+
 const selectorBytesPerWorkUnit = 16
 const selectorAttributesPerWorkUnit = 8
 
@@ -1059,6 +1125,57 @@ func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *matchBudget) 
 	return cached, true
 }
 
+func (s *sheet) hasAncestorSelectorIndex() bool {
+	return len(s.index.ancestorTags) != 0 || len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0
+}
+
+func hasElementChild(node *html.Node) bool {
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if child.Type == html.ElementNode {
+			return true
+		}
+	}
+	return false
+}
+
+// activateAncestorBuckets records the current element's ancestor-index keys
+// for its children. Attribute parsing is still charged once through the
+// existing bounded cache. Bucket activation itself replaces the previously
+// uncharged parent-pointer walk and does not alter the match-work contract.
+func (s *sheet) activateAncestorBuckets(node *html.Node, budget *matchBudget) (selectorAncestorActivation, bool) {
+	var activation selectorAncestorActivation
+	if !s.runtime.activeAncestors.enabled || !s.hasAncestorSelectorIndex() {
+		return activation, true
+	}
+	tag := node.Data
+	if node.Namespace != "" {
+		tag = asciiLower(tag)
+	}
+	activation.tag = s.index.ancestorTags[tag]
+	if len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
+		attributes, complete := s.attributeCandidateBuckets(node, budget)
+		if !complete {
+			return selectorAncestorActivation{}, false
+		}
+		activation.attributes = attributes.ancestor
+	}
+	s.runtime.activeAncestors.add(activation.tag)
+	for _, bucket := range activation.attributes {
+		s.runtime.activeAncestors.add(bucket)
+	}
+	return activation, true
+}
+
+func (s *sheet) deactivateAncestorBuckets(activation selectorAncestorActivation) {
+	if !s.runtime.activeAncestors.enabled {
+		return
+	}
+	s.runtime.activeAncestors.remove(activation.tag)
+	for _, bucket := range activation.attributes {
+		s.runtime.activeAncestors.remove(bucket)
+	}
+}
+
 // collectCandidates builds the union of relevant selector-index buckets. A
 // selector plan belongs to exactly one bucket, so the first reference also
 // serves as that bucket's stable identity. Marking before append prevents a
@@ -1114,7 +1231,14 @@ func (s *sheet) collectCandidates(n *html.Node, budget *matchBudget) ([]selector
 			}
 		}
 	}
-	if len(s.index.ancestorTags) != 0 || len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
+	if s.runtime.activeAncestors.enabled {
+		for _, bucket := range s.runtime.activeAncestors.buckets {
+			if !appendBucket(bucket) {
+				s.runtime.candidateScratch = refs
+				return nil, false
+			}
+		}
+	} else if s.hasAncestorSelectorIndex() {
 		for ancestor := n.Parent; ancestor != nil; ancestor = ancestor.Parent {
 			if ancestor.Type != html.ElementNode {
 				continue

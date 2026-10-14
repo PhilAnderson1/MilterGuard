@@ -174,16 +174,20 @@ func isColourFunction(name string) bool {
 func countUnsupportedColourFunctions(tokens []valueToken) int {
 	count := 0
 	for _, token := range tokens {
-		if token.kind != css.FunctionToken {
-			continue
-		}
-		name := asciiLower(cssUnescape(strings.TrimSuffix(token.raw, "(")))
-		switch name {
-		case "lab", "lch", "oklab", "oklch", "color", "color-mix", "device-cmyk", "light-dark":
+		if token.kind == css.FunctionToken && isUnsupportedColourFunction(token.raw) {
 			count++
 		}
 	}
 	return count
+}
+
+func isUnsupportedColourFunction(raw string) bool {
+	name := asciiLower(cssUnescape(strings.TrimSuffix(raw, "(")))
+	switch name {
+	case "lab", "lch", "oklab", "oklch", "color", "color-mix", "device-cmyk", "light-dark":
+		return true
+	}
+	return false
 }
 
 func backgroundImageSyntax(value string) bool {
@@ -314,6 +318,15 @@ type paintLayer struct {
 	opacityKnown, compositionKnown bool
 	enhancementKnown               bool
 	displayNone                    bool
+}
+
+// colourNeutral reports whether inserting this layer anywhere in the paint
+// stack leaves evaluateColourUncharged's result unchanged. Unknown images,
+// composition effects and enhancements are deliberately non-neutral because
+// they can turn an otherwise usable or concealed result into uncertainty.
+func (p paintLayer) colourNeutral() bool {
+	return p.backgroundKnown && p.background.A == 0 && p.imageKnown &&
+		p.opacityKnown && p.opacity == 1 && p.compositionKnown && p.enhancementKnown
 }
 
 // propagateHTMLBodyBackground applies the special HTML canvas rule. When the

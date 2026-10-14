@@ -3,10 +3,12 @@ package htmlextract
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1529,6 +1531,89 @@ func TestColourMemoRetainsPerTextWorkCharge(t *testing.T) {
 	}
 }
 
+func TestNeutralPaintLayerPreservesColourMemo(t *testing.T) {
+	style := initial()
+	neutral := paintLayer{
+		backgroundKnown: true, imageKnown: true,
+		opacity: 1, opacityKnown: true, compositionKnown: true, enhancementKnown: true,
+	}
+	sentinel := colourResult{uncertainty: "cached result"}
+	runner := viewingCaseRunner{
+		matches:         &matchBudget{limit: 100},
+		layers:          []paintLayer{neutral},
+		layerGeneration: 7,
+		colourMemo: colourMemo{
+			foreground: style[color], result: sentinel, generation: 7, valid: true,
+		},
+	}
+	node := &html.Node{Type: html.ElementNode, Data: "span"}
+	if changed := runner.enterPaintLayer(node, neutral); changed || runner.layerGeneration != 7 {
+		t.Fatalf("neutral entry changed colour context: changed=%t generation=%d", changed, runner.layerGeneration)
+	}
+	if got := runner.evaluateColour(style[color]); got != sentinel {
+		t.Fatalf("neutral layer missed retained memo: %+v", got)
+	}
+	if got, want := runner.matches.used, int64(1+len(runner.layers)); got != want {
+		t.Fatalf("memoized colour work=%d, want %d", got, want)
+	}
+	runner.leavePaintLayer(false)
+	if runner.layerGeneration != 7 || len(runner.layers) != 1 {
+		t.Fatalf("neutral exit changed context: generation=%d layers=%d", runner.layerGeneration, len(runner.layers))
+	}
+	if got := runner.evaluateColour(style[color]); got != sentinel {
+		t.Fatalf("parent memo was not retained after neutral child: %+v", got)
+	}
+}
+
+func TestColourAffectingPaintLayersInvalidateMemo(t *testing.T) {
+	neutral := paintLayer{
+		backgroundKnown: true, imageKnown: true,
+		opacity: 1, opacityKnown: true, compositionKnown: true, enhancementKnown: true,
+	}
+	tests := []struct {
+		name  string
+		layer paintLayer
+	}{
+		{name: "background", layer: func() paintLayer { p := neutral; p.background.A = 1; return p }()},
+		{name: "unknown background", layer: func() paintLayer { p := neutral; p.backgroundKnown = false; return p }()},
+		{name: "unknown image", layer: func() paintLayer { p := neutral; p.imageKnown = false; return p }()},
+		{name: "opacity", layer: func() paintLayer { p := neutral; p.opacity = .5; return p }()},
+		{name: "unknown opacity", layer: func() paintLayer { p := neutral; p.opacityKnown = false; return p }()},
+		{name: "composition", layer: func() paintLayer { p := neutral; p.compositionKnown = false; return p }()},
+		{name: "enhancement", layer: func() paintLayer { p := neutral; p.enhancementKnown = false; return p }()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := viewingCaseRunner{layers: []paintLayer{neutral}, layerGeneration: 10}
+			node := &html.Node{Type: html.ElementNode, Data: "span"}
+			if changed := runner.enterPaintLayer(node, test.layer); !changed || runner.layerGeneration != 11 {
+				t.Fatalf("entry did not invalidate context: changed=%t generation=%d", changed, runner.layerGeneration)
+			}
+			runner.leavePaintLayer(true)
+			if runner.layerGeneration != 12 {
+				t.Fatalf("exit generation=%d, want 12", runner.layerGeneration)
+			}
+		})
+	}
+}
+
+func TestBodyPaintLayerAlwaysInvalidatesColourMemo(t *testing.T) {
+	neutral := paintLayer{
+		backgroundKnown: true, imageKnown: true,
+		opacity: 1, opacityKnown: true, compositionKnown: true, enhancementKnown: true,
+	}
+	htmlNode := &html.Node{Type: html.ElementNode, Data: "html"}
+	bodyNode := &html.Node{Type: html.ElementNode, Data: "body", Parent: htmlNode}
+	runner := viewingCaseRunner{layers: []paintLayer{neutral}, layerGeneration: 20}
+	if changed := runner.enterPaintLayer(bodyNode, neutral); !changed || runner.layerGeneration != 21 {
+		t.Fatalf("body entry did not invalidate context: changed=%t generation=%d", changed, runner.layerGeneration)
+	}
+	runner.leavePaintLayer(true)
+	if runner.layerGeneration != 22 {
+		t.Fatalf("body exit generation=%d, want 22", runner.layerGeneration)
+	}
+}
+
 func TestSelectorWorkBudgetStopsBeforePartialCascadeIsTrusted(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MatchWork = 5
@@ -1655,15 +1740,29 @@ func TestAnalyzeReportsResourceUsage(t *testing.T) {
 }
 
 func TestAnalyzeReportsUnsupportedColourFunctions(t *testing.T) {
-	document, err := Analyze([]byte(`<p style="--ink:lab(50% 0 0);color:var(--ink);background:color-mix(in srgb,red,blue)">T</p>`), DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name  string
+		style string
+		want  int
+	}{
+		{name: "static fast path", style: `color:lab(50% 0 0)`, want: 1},
+		{name: "retained variable path", style: `--ink:lab(50% 0 0);color:var(--ink)`, want: 1},
+		{name: "escaped retained path", style: `color:l\61 b(50% 0 0)`, want: 1},
+		{name: "shorthand counted once", style: `background:color-mix(in srgb,red,blue)`, want: 1},
 	}
-	if got := document.Usage.UnsupportedColourFunctions; got != 2 {
-		t.Fatalf("unsupported colour functions = %d, want 2", got)
-	}
-	if label := findText(t, document, "T").Label; label != "unknown" {
-		t.Fatalf("label = %q, want unknown", label)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			document, err := Analyze([]byte(`<p style="`+test.style+`">T</p>`), DefaultLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := document.Usage.UnsupportedColourFunctions; got != test.want {
+				t.Fatalf("unsupported colour functions = %d, want %d", got, test.want)
+			}
+			if label := findText(t, document, "T").Label; label != "unknown" {
+				t.Fatalf("label = %q, want unknown", label)
+			}
+		})
 	}
 }
 
@@ -2460,6 +2559,98 @@ func TestSelectorIndexDeduplicatesRepeatedAncestorBuckets(t *testing.T) {
 	}
 }
 
+func TestActiveAncestorCandidatesMatchParentWalk(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`.wanted *{display:none}#outer *{opacity:0}div *{visibility:hidden}svg *{font-size:0}linearGradient *{color:red}.absent *{display:none}p{display:block}`, false)
+	s.buildSelectorIndex(16, 16)
+	root, err := html.Parse(strings.NewReader(`<div id="outer" class="wanted"><div class="wanted"><p></p></div><svg><linearGradient><rect></rect></linearGradient></svg></div>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := &s.runtime.activeAncestors
+	active.reset(s.index.count)
+	active.enabled = true
+	defer func() { active.enabled = false }()
+
+	refSet := func(refs []selectorRef) map[int]bool {
+		set := make(map[int]bool, len(refs))
+		for _, ref := range refs {
+			set[ref.sequence] = true
+		}
+		return set
+	}
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode {
+			active.enabled = false
+			walked, complete := s.collectCandidates(node, nil)
+			walked = append([]selectorRef(nil), walked...)
+			active.enabled = true
+			if !complete {
+				t.Fatal("parent-walk candidate collection failed")
+			}
+			indexed, complete := s.collectCandidates(node, nil)
+			indexed = append([]selectorRef(nil), indexed...)
+			if !complete || !reflect.DeepEqual(refSet(indexed), refSet(walked)) {
+				t.Fatalf("candidate mismatch for <%s>: active=%v walked=%v complete=%t", node.Data, refSet(indexed), refSet(walked), complete)
+			}
+		}
+		var activation selectorAncestorActivation
+		if node.Type == html.ElementNode && hasElementChild(node) {
+			var complete bool
+			activation, complete = s.activateAncestorBuckets(node, nil)
+			if !complete {
+				t.Fatalf("cannot activate <%s>", node.Data)
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+		if node.Type == html.ElementNode {
+			s.deactivateAncestorBuckets(activation)
+		}
+	}
+	walk(root)
+	if len(active.buckets) != 0 {
+		t.Fatalf("active ancestor buckets leaked after traversal: %d", len(active.buckets))
+	}
+}
+
+func TestActiveAncestorCandidateActivationUsesSharedBudget(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`.wanted *{display:none}`, false)
+	s.buildSelectorIndex(2, 2)
+	parent := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "wanted"}}}
+	child := &html.Node{Type: html.ElementNode, Data: "p", Parent: parent}
+	parent.FirstChild = child
+	s.runtime.activeAncestors.reset(s.index.count)
+	s.runtime.activeAncestors.enabled = true
+
+	budget := matchBudget{limit: s.limits.MatchWork}
+	activation, complete := s.activateAncestorBuckets(parent, &budget)
+	if !complete || budget.used != 3 {
+		t.Fatalf("ancestor activation budget = %+v, complete=%t", budget, complete)
+	}
+	refs, complete := s.collectCandidates(child, &budget)
+	if !complete || len(refs) != 1 || budget.used != 4 {
+		t.Fatalf("active candidates = %v, budget=%+v, complete=%t", refs, budget, complete)
+	}
+	s.deactivateAncestorBuckets(activation)
+	if len(s.runtime.activeAncestors.buckets) != 0 {
+		t.Fatal("ancestor bucket remained active")
+	}
+
+	uncached := sheet{limits: DefaultLimits()}
+	uncached.parseCSS(`.wanted *{display:none}`, false)
+	uncached.buildSelectorIndex(2, 2)
+	uncached.runtime.activeAncestors.reset(uncached.index.count)
+	uncached.runtime.activeAncestors.enabled = true
+	limited := matchBudget{limit: 2}
+	if _, complete := uncached.activateAncestorBuckets(parent, &limited); complete || !limited.exhausted || len(uncached.runtime.activeAncestors.buckets) != 0 {
+		t.Fatalf("limited activation = %+v, complete=%t, active=%d", limited, complete, len(uncached.runtime.activeAncestors.buckets))
+	}
+}
+
 func TestSelectorIndexChargesAndCachesClassTokens(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	s.parseCSS(`.wanted *{display:none}`, false)
@@ -2589,14 +2780,71 @@ func BenchmarkLargest(b *testing.B) {
 
 func BenchmarkSiblingSelectorPhases(b *testing.B) {
 	limits := DefaultLimits()
-	body := strings.Repeat(`<p></p>`, limits.Nodes-10)
-	src := []byte(`<style>q ~ p{display:none}</style>` + body)
-	sparseBody := strings.Repeat(`<div></div>`, limits.Nodes-1010) + strings.Repeat(`<p></p>`, 1000)
-	sparse := []byte(`<style>q ~ p{display:none}</style>` + sparseBody)
-	b.Run("preflight", func(b *testing.B) {
+	const (
+		stylesheet       = `<style>q ~ p{display:none}</style>`
+		fixedTokens      = 5 // style start/text/end and body start/end
+		tokensPerElement = 2 // explicit start and end tags
+		sparseParagraphs = 1000
+	)
+	elements := (limits.Nodes - fixedTokens) / tokensPerElement
+	body := strings.Repeat(`<p></p>`, elements)
+	src := []byte(stylesheet + `<body>` + body + `</body>`)
+	sparseBody := strings.Repeat(`<div></div>`, elements-sparseParagraphs) + strings.Repeat(`<p></p>`, sparseParagraphs)
+	sparse := []byte(stylesheet + `<body>` + sparseBody + `</body>`)
+	plain := []byte(`<body>` + body + `</body>`)
+	rejected := []byte(stylesheet + `<body>` + strings.Repeat(`<p></p>`, elements+1) + `</body>`)
+
+	for name, input := range map[string][]byte{"dense": src, "sparse": sparse, "plain": plain} {
+		if err := preflight(input, limits); err != nil {
+			b.Fatalf("%s workload is not admitted: %v", name, err)
+		}
+	}
+	if err := preflight(rejected, limits); err == nil || !strings.Contains(err.Error(), "limit: lexical nodes") {
+		b.Fatalf("oversized workload error = %v, want lexical-node rejection", err)
+	}
+
+	reportAnalysis := func(b *testing.B, input []byte, requireComplete bool) {
+		b.Helper()
+		b.SetBytes(int64(len(input)))
+		var usage ResourceUsage
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			document, err := Analyze(input, limits)
+			if err != nil {
+				b.Fatal(err)
+			}
+			usage = document.Usage
+		}
+		b.StopTimer()
+		b.ReportMetric(float64(usage.MatchWork), "match-work/op")
+		b.ReportMetric(float64(usage.ExpressionWork), "expression-work/op")
+		if usage.MatchWorkExhausted {
+			b.ReportMetric(1, "match-exhausted/op")
+		} else {
+			b.ReportMetric(0, "match-exhausted/op")
+		}
+		if usage.ExpressionWorkExhausted {
+			b.ReportMetric(1, "expression-exhausted/op")
+		} else {
+			b.ReportMetric(0, "expression-exhausted/op")
+		}
+		if requireComplete && (usage.MatchWorkExhausted || usage.ExpressionWorkExhausted) {
+			b.Fatalf("analysis unexpectedly exhausted work: %+v", usage)
+		}
+	}
+
+	b.Run("preflight-admitted", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			if err := preflight(src, limits); err != nil {
 				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("preflight-rejected-over-limit", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			err := preflight(rejected, limits)
+			if err == nil || !strings.Contains(err.Error(), "limit: lexical nodes") {
+				b.Fatalf("error = %v, want lexical-node rejection", err)
 			}
 		}
 	})
@@ -2608,27 +2856,146 @@ func BenchmarkSiblingSelectorPhases(b *testing.B) {
 		}
 	})
 	b.Run("full-analysis", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			if _, err := Analyze(src, limits); err != nil {
-				b.Fatal(err)
-			}
-		}
+		reportAnalysis(b, src, false)
 	})
 	b.Run("full-analysis-no-selector", func(b *testing.B) {
-		plain := []byte(body)
-		for i := 0; i < b.N; i++ {
-			if _, err := Analyze(plain, limits); err != nil {
-				b.Fatal(err)
-			}
-		}
+		reportAnalysis(b, plain, true)
 	})
 	b.Run("sparse-sibling-worst-case", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			if _, err := Analyze(sparse, limits); err != nil {
-				b.Fatal(err)
-			}
-		}
+		reportAnalysis(b, sparse, false)
 	})
+}
+
+func BenchmarkAncestorIndexedCandidates(b *testing.B) {
+	const selector = `<style>.wrapper *{display:none}</style>`
+	var deep strings.Builder
+	deep.WriteString(selector)
+	for range 500 {
+		for range 64 {
+			deep.WriteString(`<div class="wrapper">`)
+		}
+		for range 64 {
+			deep.WriteString(`</div>`)
+		}
+	}
+	var shallow strings.Builder
+	shallow.WriteString(selector)
+	for range 5_000 {
+		shallow.WriteString(`<div class="wrapper"><span></span><span></span><span></span><span></span><span></span></div>`)
+	}
+
+	for _, benchmark := range []struct {
+		name  string
+		input []byte
+	}{
+		{name: "deep-repeated-class", input: []byte(deep.String())},
+		{name: "shallow-template", input: []byte(shallow.String())},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			limits := DefaultLimits()
+			if err := preflight(benchmark.input, limits); err != nil {
+				b.Fatalf("benchmark workload is not admitted: %v", err)
+			}
+			b.SetBytes(int64(len(benchmark.input)))
+			var usage ResourceUsage
+			b.ResetTimer()
+			for range b.N {
+				document, err := Analyze(benchmark.input, limits)
+				if err != nil {
+					b.Fatal(err)
+				}
+				usage = document.Usage
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(usage.MatchWork), "match-work/op")
+			if usage.MatchWorkExhausted {
+				b.ReportMetric(1, "match-exhausted/op")
+			} else {
+				b.ReportMetric(0, "match-exhausted/op")
+			}
+		})
+	}
+}
+
+func BenchmarkNeutralSiblingColourMemo(b *testing.B) {
+	const siblings = 5_000
+	style := initial()
+	neutral := paintLayer{
+		backgroundKnown: true, imageKnown: true,
+		opacity: 1, opacityKnown: true, compositionKnown: true, enhancementKnown: true,
+	}
+	node := &html.Node{Type: html.ElementNode, Data: "span"}
+	for _, benchmark := range []struct {
+		name            string
+		forceInvalidate bool
+	}{
+		{name: "retained-neutral-context"},
+		{name: "invalidated-reference", forceInvalidate: true},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				runner := viewingCaseRunner{
+					matches: &matchBudget{limit: 1_000_000},
+					layers:  []paintLayer{neutral},
+				}
+				for range siblings {
+					changed := runner.enterPaintLayer(node, neutral)
+					if benchmark.forceInvalidate {
+						runner.layerGeneration++
+					}
+					result := runner.evaluateColour(style[color])
+					runner.leavePaintLayer(changed)
+					if benchmark.forceInvalidate {
+						runner.layerGeneration++
+					}
+					if !result.known {
+						b.Fatal(result.uncertainty)
+					}
+				}
+				if !benchmark.forceInvalidate && runner.layerGeneration != 0 {
+					b.Fatalf("neutral siblings changed colour generation to %d", runner.layerGeneration)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkLiteralVariableScope(b *testing.B) {
+	const definitions = 64
+	s := sheet{limits: DefaultLimits()}
+	literal := make(map[string]candidate, definitions)
+	graphReference := make(map[string]candidate, definitions)
+	for i := range definitions {
+		name := fmt.Sprintf("--value-%d", i)
+		declarations := s.declarations(name, fmt.Sprintf("%dpx", i))
+		d := declarations[0]
+		literal[name] = candidate{d: &d, set: true}
+		graphDeclaration := d
+		// Force the former graph machinery for an otherwise identical literal
+		// token stream, providing an in-process performance reference.
+		graphDeclaration.hasVars = true
+		graphDeclaration.dependenciesReady = true
+		graphReference[name] = candidate{d: &graphDeclaration, set: true}
+	}
+	for _, benchmark := range []struct {
+		name string
+		defs map[string]candidate
+	}{
+		{name: "literal-fast-path", defs: literal},
+		{name: "dependency-graph-reference", defs: graphReference},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				budget := expressionBudget{remaining: 1_000_000}
+				scope := buildVariables(nil, benchmark.defs, nil, &budget)
+				if budget.exhausted || len(scope.values) != definitions {
+					b.Fatalf("scope construction failed: budget=%+v values=%d", budget, len(scope.values))
+				}
+			}
+		})
+	}
 }
 
 func BenchmarkDeepMediaRuleStorage(b *testing.B) {
@@ -2650,6 +3017,35 @@ func BenchmarkDeepMediaRuleStorage(b *testing.B) {
 	for range b.N {
 		if _, err := Analyze(input, limits); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkSharedMediaConditionEvaluation(b *testing.B) {
+	var conditions *conditionFrame
+	for _, condition := range []mediaCondition{
+		{{bounds: []widthBound{{min: true, value: 320}}, schemes: colourSchemeBoth}},
+		{{bounds: []widthBound{{value: 768}}, schemes: colourSchemeBoth}},
+		{{bounds: []widthBound{{min: true, value: 480}}, schemes: colourSchemeBoth}},
+		{{bounds: []widthBound{{value: 1200}}, schemes: colourSchemeBoth}},
+	} {
+		conditions = newConditionFrame(condition, conditions)
+	}
+	base := sheet{limits: DefaultLimits(), rules: make([]rule, 5_000)}
+	for i := range base.rules {
+		base.rules[i].conditions = conditions
+		base.rules[i].prepareMediaWork()
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		s := base
+		s.runtime = sheetRuntime{}
+		s.planningWork = 0
+		widths, fallback := s.viewingCases(MaxViewingCases)
+		if fallback || len(widths) == 0 {
+			b.Fatalf("shared-media workload fell back: widths=%v fallback=%t", widths, fallback)
 		}
 	}
 }

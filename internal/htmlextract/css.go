@@ -225,6 +225,7 @@ type sheetRuntime struct {
 	candidateGeneration uint32
 	ancestorNodes       []*html.Node
 	ancestorStates      []map[*html.Node]ancestorChainState
+	activeAncestors     activeAncestorBuckets
 	variableScratch     map[string]candidate
 	matchCacheUnits     int
 }
@@ -306,6 +307,13 @@ func (s *sheet) chargePlanningTokens(tokens []css.Token) bool {
 
 func (s *sheet) chargePlanningBytes(bytes int) bool {
 	cost := int64(bytes) + 1
+	return s.chargePlanningCost(cost)
+}
+
+// chargePlanningCost reserves work from the shared style-analysis ceiling.
+// Callers with a narrower phase budget must check that budget first so a
+// phase-local fallback does not incorrectly mark all style work incomplete.
+func (s *sheet) chargePlanningCost(cost int64) bool {
 	if cost < 1 || s.planningWork > s.limits.MatchWork || cost > s.limits.MatchWork-s.planningWork {
 		s.workIncomplete = true
 		return false
@@ -458,6 +466,7 @@ type parsedDeclarationValue struct {
 	important             bool
 	unsafeIdentifier      bool
 	unsafeWithoutFunction bool
+	unsupportedColours    int
 }
 
 // cssTokensNeedRetention reports whether later declaration processing needs a
@@ -529,6 +538,12 @@ func parseUnretainedCSSTokens(ts []css.Token, fallback string) parsedDeclaration
 			}
 		}
 	}
+	unsupportedColours := 0
+	for _, token := range ts[start:end] {
+		if token.TokenType == css.FunctionToken && isUnsupportedColourFunction(string(token.Data)) {
+			unsupportedColours++
+		}
+	}
 
 	startByte := 0
 	for i := 0; i < start; i++ {
@@ -553,7 +568,7 @@ func parseUnretainedCSSTokens(ts []css.Token, fallback string) parsedDeclaration
 		}
 		text = out.String()
 	}
-	return parsedDeclarationValue{text: text, status: valueResolved, important: important}
+	return parsedDeclarationValue{text: text, status: valueResolved, important: important, unsupportedColours: unsupportedColours}
 }
 
 // parseDeclarationTokens preserves CSS token boundaries while decoding the
@@ -563,7 +578,7 @@ func parseUnretainedCSSTokens(ts []css.Token, fallback string) parsedDeclaration
 // string trimming.
 func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string) parsedDeclarationValue {
 	if status != valueResolved {
-		return parsedDeclarationValue{text: trimCSSWhitespace(fallback), tokens: ts, status: status}
+		return parsedDeclarationValue{text: trimCSSWhitespace(fallback), tokens: ts, status: status, unsupportedColours: countUnsupportedColourFunctions(ts)}
 	}
 	start, end := 0, len(ts)
 	for start < end && (ts[start].kind == css.WhitespaceToken || ts[start].kind == css.CommentToken) {
@@ -628,6 +643,7 @@ func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string
 		important:             important,
 		unsafeIdentifier:      unsafe,
 		unsafeWithoutFunction: unsafe && !hasFunction,
+		unsupportedColours:    countUnsupportedColourFunctions(preparedTokens),
 	}
 }
 
@@ -722,7 +738,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	value := parsed.text
 	imp := parsed.important
 	custom := strings.HasPrefix(prop, "--")
-	s.unsupportedColours += countUnsupportedColourFunctions(parsed.tokens)
+	s.unsupportedColours += parsed.unsupportedColours
 	if custom && (parsed.status == valueInvalid || (parsed.status == valueResolved && !validVariableFunctions(parsed.tokens))) {
 		return nil
 	}
@@ -1015,7 +1031,7 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 				s.abandonCascade()
 				return cssParseResult{declarations: out}
 			}
-			conditions = &conditionFrame{condition: cond, parent: conditions}
+			conditions = newConditionFrame(cond, conditions)
 			enclosingRules = append(enclosingRules, enclosingRule)
 			parentNested := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
 			nestedGroups = append(nestedGroups, cssNestingGroup(string(data)) && (enclosingRule >= 0 || parentNested))
@@ -1179,8 +1195,15 @@ func (s *sheet) attachMediaCondition(firstRule int, media string) {
 		return
 	}
 	condition := s.parseMediaCondition(media)
+	frames := make(map[*conditionFrame]*conditionFrame)
 	for i := firstRule; i < len(s.rules); i++ {
-		s.rules[i].conditions = &conditionFrame{condition: condition, parent: s.rules[i].conditions}
+		parent := s.rules[i].conditions
+		frame := frames[parent]
+		if frame == nil {
+			frame = newConditionFrame(condition, parent)
+			frames[parent] = frame
+		}
+		s.rules[i].conditions = frame
 		s.rules[i].prepareMediaWork()
 	}
 }
