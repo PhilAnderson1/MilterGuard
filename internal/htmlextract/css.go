@@ -63,6 +63,10 @@ const (
 	// while applying the cascade; eagerly materialising every property permits
 	// severe memory amplification from a small stylesheet.
 	allShorthandProperty = declarationProperties
+	// animationProperty is a cascade-only sentinel. Animation is not rendered;
+	// its winning declaration is retained solely to prevent a time-varying
+	// subtree from receiving a static visibility conclusion.
+	animationProperty = allShorthandProperty + 1
 )
 
 var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "overflow-x", "overflow-y", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "letter-spacing", "word-spacing", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
@@ -99,6 +103,7 @@ type declaration struct {
 	unsupported          bool
 	custom               string
 	shorthand            bool
+	animationShorthand   bool
 	variableDependencies []string
 	dependenciesReady    bool
 }
@@ -227,6 +232,7 @@ type sheet struct {
 	cssBytes             int
 	mediaConditions      map[string]mediaCondition
 	importDepth          int
+	hasKeyframes         bool
 	unresolvedStylesheet bool
 	runtime              sheetRuntime
 }
@@ -236,26 +242,34 @@ type sheet struct {
 // CSS is counted across style elements and style attributes so splitting a
 // payload into many individually acceptable inputs cannot bypass the document
 // limit.
-func (s *sheet) admitCSS(text string, inline bool) bool {
+func (s *sheet) admitCSS(text string, inline bool) (admitted, malformed bool) {
 	if s.cascadeIncomplete || s.workIncomplete {
-		return false
+		return false, false
 	}
 	if len(text) > s.limits.CSSBytes || s.cssBytes > s.limits.CSSBytes-len(text) {
 		s.abandonCascade()
-		return false
+		return false, false
 	}
 	// Account for the complete lexer/preflight pass before doing it. Selector
 	// and declaration processing below is charged separately because it is an
 	// additional pass over those token ranges.
 	if !s.chargePlanningBytes(len(text)) {
-		return false
+		return false, false
 	}
-	if !boundedCSSConstructs(text, inline, s.limits.CSSConstructBytes, s.limits.CSSConstructTokens) {
+	preflight := inspectCSSConstructs(text, inline, s.limits.CSSConstructBytes, s.limits.CSSConstructTokens)
+	if preflight == cssPreflightLimitExceeded {
 		s.abandonCascade()
-		return false
+		return false, false
 	}
 	s.cssBytes += len(text)
-	return true
+	if preflight == cssPreflightUnsafeDelimiter && inline {
+		return false, true
+	}
+	if preflight == cssPreflightUnsafeDelimiter {
+		s.abandonCascade()
+		return false, true
+	}
+	return true, false
 }
 
 func (s *sheet) chargePlanningWork(value string) bool {
@@ -597,6 +611,10 @@ func normalizeDeclarationProperty(prop string) string {
 		// non-zero or unresolved width makes the existing stroke-effect slot
 		// uncertain, including when a separate stroke colour is also present.
 		return "-webkit-text-stroke"
+	case "-webkit-animation":
+		return "animation"
+	case "-webkit-animation-name":
+		return "animation-name"
 	default:
 		return prop
 	}
@@ -616,7 +634,7 @@ func relevantNormalizedDeclarationProperty(prop string) bool {
 		}
 	}
 	switch prop {
-	case "margin", "overflow", "background", "mask", "font", "all":
+	case "margin", "overflow", "background", "mask", "font", "all", "animation", "animation-name":
 		return true
 	default:
 		return false
@@ -646,6 +664,16 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	s.order++
 	if custom {
 		return []declaration{prepared(declaration{prop: -1, custom: prop, value: value, important: imp, order: s.order})}
+	}
+	if prop == "animation" || prop == "animation-name" {
+		// Keep the animation shorthand and longhand in one cascade slot. Values
+		// are interpreted only as active/inactive after variable substitution;
+		// keyframe declarations themselves remain outside the presentation
+		// cascade.
+		return []declaration{prepared(declaration{
+			prop: animationProperty, value: value, important: imp, order: s.order,
+			shorthand: true, animationShorthand: prop == "animation",
+		})}
 	}
 	if prop == "margin" {
 		values, ok, uncertain := marginShorthandValues(value)
@@ -800,12 +828,34 @@ func marginShorthandValues(value string) ([4]string, bool, bool) {
 // parseCSS consumes the syntax library's recoverable stream. Unknown
 // conditions and selectors retain uncertainty only for declarations they can
 // affect; print blocks are skipped.
+type cssParseResult struct {
+	declarations []declaration
+	incomplete   bool
+}
+
+// parseCSS preserves the compact declaration-only interface used by internal
+// callers that do not need localized inline-error handling. A stylesheet parse
+// error invalidates the shared cascade; callers parsing a style attribute use
+// parseInlineCSS so the uncertainty can remain local to that element.
 func (s *sheet) parseCSS(text string, inline bool) []declaration {
+	result := s.parseCSSResult(text, inline)
+	if result.incomplete && !inline {
+		s.abandonCascade()
+	}
+	return result.declarations
+}
+
+func (s *sheet) parseInlineCSS(text string) cssParseResult {
+	return s.parseCSSResult(text, true)
+}
+
+func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 	if !inline {
 		s.invalidateMediaCache()
 	}
-	if !s.admitCSS(text, inline) {
-		return nil
+	admitted, malformed := s.admitCSS(text, inline)
+	if !admitted {
+		return cssParseResult{incomplete: malformed}
 	}
 	parserText := parserCompatibleCSS(text)
 	parserCompatibilityApplied := parserText != text
@@ -821,16 +871,24 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 	var out []declaration
 	for {
 		if s.cascadeIncomplete || s.workIncomplete {
-			return out
+			return cssParseResult{declarations: out}
 		}
-		g, _, data := p.Next()
+		g, tokenType, data := p.Next()
 		values := p.Values()
 		switch g {
 		case css.ErrorGrammar:
 			if p.HasParseError() {
+				// tdewolff's declaration recovery decrements its nesting level for
+				// an unmatched ')' or ']'. The level then remains negative, so the
+				// recovery routine can consume later declarations or the rest of
+				// the sheet. Other reported parse errors recover at the normal CSS
+				// boundary and remain safe to skip.
+				if tokenType == css.RightParenthesisToken || tokenType == css.RightBracketToken {
+					return cssParseResult{declarations: out, incomplete: true}
+				}
 				continue
 			}
-			return out
+			return cssParseResult{declarations: out}
 		case css.BeginAtRuleGrammar:
 			importsAllowed = false
 			// Descriptor declarations inside @page, @font-face and similar
@@ -839,21 +897,24 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			// they cannot override declarations on that outer selector.
 			current = -1
 			if !s.chargePlanningTokens(values) {
-				return out
+				return cssParseResult{declarations: out}
 			}
 			vals := tokenString(values)
 			var cond mediaCondition
 			switch asciiLower(string(data)) {
 			case "@media":
 				cond = s.parseMediaCondition(vals)
-			case "@font-face", "@keyframes", "@-webkit-keyframes":
+			case "@font-face":
+				cond = mediaCondition{{schemes: colourSchemeBoth, never: true}}
+			case "@keyframes", "@-webkit-keyframes":
+				s.hasKeyframes = true
 				cond = mediaCondition{{schemes: colourSchemeBoth, never: true}}
 			default:
 				cond = mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
 			}
 			if conditionDepth >= s.limits.Depth {
 				s.abandonCascade()
-				return out
+				return cssParseResult{declarations: out}
 			}
 			conditions = &conditionFrame{condition: cond, parent: conditions}
 			conditionDepth++
@@ -868,7 +929,7 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			current = -1
 		case css.AtRuleGrammar:
 			if !s.chargePlanningTokens(values) {
-				return out
+				return cssParseResult{declarations: out}
 			}
 			name := asciiLower(string(data))
 			if name == "@import" {
@@ -895,10 +956,10 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			selector := tokenString(values)
 			if len(selector) > s.limits.SelectorBytes {
 				s.abandonCascade()
-				return out
+				return cssParseResult{declarations: out}
 			}
 			if !s.chargePlanningWork(selector) {
-				return out
+				return cssParseResult{declarations: out}
 			}
 			plans := planSelectorList(selector, &s.planCount)
 			if len(plans) == 0 {
@@ -918,7 +979,7 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			s.rulesSeen++
 			if s.selectors > s.limits.Selectors || len(s.rules) >= s.limits.Rules {
 				s.abandonCascade()
-				return out
+				return cssParseResult{declarations: out}
 			}
 			r := rule{plans: plans, conditions: conditions}
 			r.prepareMediaWork()
@@ -931,7 +992,7 @@ func (s *sheet) parseCSS(text string, inline bool) []declaration {
 			// with an escaped whitespace character. Preserve the raw token data
 			// so it cannot be mistaken for insignificant surrounding space.
 			if !s.chargePlanningTokens(values) {
-				return out
+				return cssParseResult{declarations: out}
 			}
 			prop := normalizeDeclarationProperty(string(data))
 			applicable := (inline && conditions == nil) || (!inline && current >= 0)

@@ -55,7 +55,7 @@ func TestCanonicalLightColourSchemeVisibility(t *testing.T) {
 		{"dark colour can reveal", `p{color:white;background:white}@media(prefers-color-scheme:dark){p{color:black}}`, "unknown"},
 		{"dark display can reveal", `p{display:none}@media(prefers-color-scheme:dark){p{display:block}}`, "unknown"},
 		{"unrelated dark colour cannot reveal display", `p{display:none}@media(prefers-color-scheme:dark){p{color:white}}`, "concealed"},
-		{"one changed property cannot reveal multiply hidden text", `p{display:none;opacity:0}@media(prefers-color-scheme:dark){p{display:block}}`, "concealed"},
+		{"one changed property can reveal multiply hidden text in opacity-ignoring clients", `p{display:none;opacity:0}@media(prefers-color-scheme:dark){p{display:block}}`, "unknown"},
 		{"dark colour variable cannot reveal display", `p{display:none;color:var(--ink,black)}@media(prefers-color-scheme:dark){:root{--ink:white}}`, "concealed"},
 		{"dark display variable can reveal", `p{display:var(--show,none)}@media(prefers-color-scheme:dark){:root{--show:block}}`, "unknown"},
 		{"inherited dark display variable can reveal", `:root{--show:none}body{--show:inherit}p{display:var(--show)}@media(prefers-color-scheme:dark){:root{--show:block}}`, "unknown"},
@@ -176,11 +176,11 @@ func TestMediaCasesShareSelectorWorkBudget(t *testing.T) {
 
 func TestEmptyClipping(t *testing.T) {
 	cases := []struct{ style, want string }{
-		{`clip-path:circle(0px)`, "concealed"},
-		{`clip-path:inset(50%)`, "concealed"},
+		{`clip-path:circle(0px)`, "unknown"},
+		{`clip-path:inset(50%)`, "unknown"},
 		{`clip-path:circle(1px)`, "unknown"},
 		{`clip-path:circle(0px);clip-path:none`, "visible"},
-		{`clip-path:circle(0px)!important;clip-path:none`, "concealed"},
+		{`clip-path:circle(0px)!important;clip-path:none`, "unknown"},
 		{`clip:rect(0px,0px,0px,0px);position:absolute`, "concealed"},
 		{`clip:rect(0px,0px,0px,0px);position:fixed`, "concealed"},
 		{`clip:rect(0px,0px,0px,0px)`, "visible"},
@@ -197,7 +197,7 @@ func TestEmptyClipping(t *testing.T) {
 		})
 	}
 	in := inspectHTML(t, `<style>@media(max-width:500px){p{clip-path:circle(0px)}}</style><p>T</p>`)
-	if findText(t, in, "T").Label != "client-dependent" {
+	if findText(t, in, "T").Label != "unknown" {
 		t.Fatal(in)
 	}
 }
@@ -207,13 +207,13 @@ func TestDisplayContentsHasNoClippableBox(t *testing.T) {
 	style[display] = Value{Text: "contents", Known: true}
 	style[clipPath] = Value{Text: "circle(0px)", Number: 1, Known: true}
 	node := &xhtml.Node{Type: xhtml.ElementNode, Data: "div"}
-	empty, known, inlineUncertain := emptyClip(&style, node, true)
-	if empty || !known || inlineUncertain {
-		t.Fatalf("display:contents clipping = empty:%t known:%t inline-uncertain:%t", empty, known, inlineUncertain)
+	empty, known, inlineUncertain, clientDependent := emptyClip(&style, node, true)
+	if empty || !known || inlineUncertain || clientDependent {
+		t.Fatalf("display:contents clipping = empty:%t known:%t inline-uncertain:%t client-dependent:%t", empty, known, inlineUncertain, clientDependent)
 	}
 
 	foreign := &xhtml.Node{Type: xhtml.ElementNode, Data: "g", Namespace: "svg"}
-	if _, foreignKnown, _ := emptyClip(&style, foreign, true); foreignKnown {
+	if _, foreignKnown, _, _ := emptyClip(&style, foreign, true); foreignKnown {
 		t.Fatal("foreign-namespace clipping was treated as known")
 	}
 }
@@ -227,15 +227,39 @@ func TestClipPathApplicabilityToInlineBoxes(t *testing.T) {
 		{"default inline span", `<span style="clip-path:circle(0)">T</span>`, "unknown"},
 		{"declared inline block element", `<div style="display:inline;clip-path:circle(0)">T</div>`, "unknown"},
 		{"inline without clip path", `<span>T</span>`, "visible"},
-		{"declared block span", `<span style="display:block;clip-path:circle(0)">T</span>`, "concealed"},
-		{"default block element", `<div style="clip-path:circle(0)">T</div>`, "concealed"},
-		{"positioned inline element", `<span style="position:absolute;clip-path:circle(0)">T</span>`, "concealed"},
+		{"declared block span", `<span style="display:block;clip-path:circle(0)">T</span>`, "unknown"},
+		{"default block element", `<div style="clip-path:circle(0)">T</div>`, "unknown"},
+		{"positioned inline element", `<span style="position:absolute;clip-path:circle(0)">T</span>`, "unknown"},
 		{"legacy clip remains independent of overflow", `<span style="position:absolute;clip:rect(0,0,0,0)">T</span>`, "concealed"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			in := inspectHTML(t, test.src)
 			if got := findText(t, in, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestClientDivergentConcealmentIsUncertain(t *testing.T) {
+	cases := []struct {
+		name, source, want string
+	}{
+		{"opacity", `<span style="opacity:0">T</span>`, "unknown"},
+		{"content visibility", `<div style="content-visibility:hidden">T</div>`, "unknown"},
+		{"clip path", `<div style="clip-path:circle(0)">T</div>`, "unknown"},
+		{"hidden attribute", `<div hidden>T</div>`, "unknown"},
+		{"hidden until found", `<div hidden="until-found">T</div>`, "unknown"},
+		{"author reveals hidden attribute", `<div hidden style="display:block">T</div>`, "visible"},
+		{"display remains authoritative", `<div style="opacity:0;display:none">T</div>`, "concealed"},
+		{"visibility remains authoritative", `<div style="clip-path:circle(0);visibility:hidden">T</div>`, "concealed"},
+		{"legacy clip remains authoritative", `<div style="position:absolute;clip-path:circle(0);clip:rect(0,0,0,0)">T</div>`, "concealed"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, test.source)
+			if got := findText(t, document, "T").Label; got != test.want {
 				t.Fatalf("label = %q, want %q", got, test.want)
 			}
 		})
@@ -265,6 +289,118 @@ func TestMSOHideIsClientDependent(t *testing.T) {
 				t.Fatalf("label = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestActiveCSSAnimationsMakePresentationUncertain(t *testing.T) {
+	cases := []struct {
+		name, source, want string
+	}{
+		{
+			"animation can reveal hidden text",
+			`<style>@keyframes reveal{to{visibility:visible}}</style><p style="visibility:hidden;animation:reveal 0s forwards">T</p>`,
+			"unknown",
+		},
+		{
+			"animation can hide visible text",
+			`<style>@keyframes hide{to{visibility:hidden}}</style><p style="animation:hide 0s forwards">T</p>`,
+			"unknown",
+		},
+		{
+			"animation uncertainty propagates to descendants",
+			`<style>@keyframes hide{to{font-size:0}}</style><div style="animation-name:hide"><p>T</p></div>`,
+			"unknown",
+		},
+		{
+			"webkit animation aliases",
+			`<style>@-webkit-keyframes reveal{to{visibility:visible}}</style><p style="visibility:hidden;-webkit-animation:reveal 0s forwards">T</p>`,
+			"unknown",
+		},
+		{
+			"variable animation name",
+			`<style>@keyframes reveal{to{visibility:visible}}</style><p style="--name:reveal;visibility:hidden;animation-name:var(--name)">T</p>`,
+			"unknown",
+		},
+		{
+			"explicit shorthand none",
+			`<style>@keyframes reveal{to{visibility:visible}}</style><p style="visibility:hidden;animation:none">T</p>`,
+			"concealed",
+		},
+		{
+			"explicit longhand none list",
+			`<style>@keyframes reveal{to{visibility:visible}}</style><p style="visibility:hidden;animation-name:none, none">T</p>`,
+			"concealed",
+		},
+		{
+			"later none wins cascade",
+			`<style>@keyframes reveal{to{visibility:visible}}</style><p style="visibility:hidden;animation:reveal 1s;animation:none">T</p>`,
+			"concealed",
+		},
+		{
+			"undefined animation cannot run",
+			`<p style="visibility:hidden;animation:missing 0s forwards">T</p>`,
+			"concealed",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, test.source)
+			if got := findText(t, document, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestMalformedCSSDelimiterCannotDesynchroniseAtRuleState(t *testing.T) {
+	for _, test := range []struct {
+		name, css string
+	}{
+		{"audit stray bracket", `@media print{#x]{a:b}} #b{display:none}`},
+		{"stray parenthesis", `@media print{#x){a:b}} #b{display:none}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			document, err := Analyze([]byte(`<style>`+test.css+`</style><p id="b">T</p>`), DefaultLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := findText(t, document, "T").Label; got != "unknown" {
+				t.Fatalf("label = %q, want unknown", got)
+			}
+			if !document.Usage.CSSLimitExceeded {
+				t.Fatal("malformed stylesheet did not abandon confident cascade analysis")
+			}
+		})
+	}
+}
+
+func TestMalformedInlineDelimiterUncertaintyRemainsLocal(t *testing.T) {
+	document, err := Analyze([]byte(`<p style="visibility:hidden;color:red]">T</p><b>U</b>`), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findText(t, document, "T").Label; got != "unknown" {
+		t.Fatalf("malformed inline element label = %q, want unknown", got)
+	}
+	if got := findText(t, document, "U").Label; got != "visible" {
+		t.Fatalf("unrelated element label = %q, want visible", got)
+	}
+	if document.Usage.CSSLimitExceeded {
+		t.Fatal("local inline syntax error abandoned the shared stylesheet cascade")
+	}
+}
+
+func TestCSSDelimiterPreflightAcceptsBalancedComponents(t *testing.T) {
+	limits := DefaultLimits()
+	for _, source := range []string{
+		`[data-x="("]{color:rgb(1 2 3 / .5)}`,
+		`@media (width >= 1px){p:not([data-x]){display:none}}`,
+		`p{--x:{a:[b(c)]};color:var(--x, red)}`,
+		`p{--x:red;color:var(--x,[unused)])}`,
+	} {
+		if outcome := inspectCSSConstructs(source, false, limits.CSSConstructBytes, limits.CSSConstructTokens); outcome != cssPreflightAccepted {
+			t.Errorf("valid CSS rejected with outcome %d: %s", outcome, source)
+		}
 	}
 }
 
@@ -445,6 +581,139 @@ func TestNoscriptVisibilityIsClientDependent(t *testing.T) {
 	}
 }
 
+func TestNoscriptStylesheetIsClientDependent(t *testing.T) {
+	cases := []struct {
+		name, source string
+	}{
+		{
+			"body stylesheet reveals hidden text",
+			`<noscript><style>#target{visibility:visible!important}</style></noscript><p id="target" style="visibility:hidden">T</p>`,
+		},
+		{
+			"body stylesheet hides visible text",
+			`<noscript><style>#target{display:none}</style></noscript><p id="target">T</p>`,
+		},
+		{
+			"head stylesheet hides visible text",
+			`<html><head><noscript><style>#target{display:none}</style></noscript></head><body><p id="target">T</p></body></html>`,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, test.source)
+			if got := findText(t, document, "T").Label; got != "unknown" {
+				t.Fatalf("label = %q, want unknown", got)
+			}
+		})
+	}
+}
+
+func TestMalformedStylesheetDeclarationMakesCascadeUncertain(t *testing.T) {
+	cases := []struct {
+		name string
+		css  string
+	}{
+		{
+			name: "later hiding declaration may be swallowed",
+			css:  `#target{color:blue];display:none}`,
+		},
+		{
+			name: "later revealing declaration may be swallowed",
+			css:  `#target{display:none;color:blue];display:block}`,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, `<style>`+test.css+`</style><p id="target">T</p>`)
+			if got := findText(t, document, "T").Label; got != "unknown" {
+				t.Fatalf("label = %q, want unknown", got)
+			}
+		})
+	}
+}
+
+func TestMalformedInlineDeclarationUncertaintyIsLocal(t *testing.T) {
+	cases := []struct {
+		name  string
+		style string
+	}{
+		{
+			name:  "later hiding declaration may be swallowed",
+			style: `color:blue];display:none`,
+		},
+		{
+			name:  "later revealing declaration may be swallowed",
+			style: `display:none;color:blue];display:block`,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, `<div style="`+test.style+`"><span>T</span></div><p>U</p>`)
+			if got := findText(t, document, "T").Label; got != "unknown" {
+				t.Fatalf("affected descendant label = %q, want unknown", got)
+			}
+			if got := findText(t, document, "U").Label; got != "visible" {
+				t.Fatalf("unrelated sibling label = %q, want visible", got)
+			}
+		})
+	}
+}
+
+func TestCSSCommentsPreserveSelectorTokenBoundaries(t *testing.T) {
+	cases := []struct {
+		name, source, want string
+	}{
+		{
+			"comment does not concatenate class and type",
+			`<style>.a/**/p{display:none}</style><p class="ap">T</p>`,
+			"visible",
+		},
+		{
+			"comment separates descendant selector components",
+			`<style>.a/**/p{display:none}</style><div class="a"><p>T</p></div>`,
+			"concealed",
+		},
+		{
+			"comment does not concatenate type names",
+			`<style>di/**/v p{display:none}</style><div><p>T</p></div>`,
+			"visible",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, test.source)
+			if got := findText(t, document, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestHexEscapeTerminatorIsNotASelectorCombinator(t *testing.T) {
+	cases := []struct {
+		name, source, want string
+	}{
+		{
+			"synthetic planner chain must not match",
+			`<style>\64 iv p{display:none}</style><d><iv><p>T</p></iv></d>`,
+			"visible",
+		},
+		{
+			"decoded browser selector must match",
+			`<style>\64 iv p{display:none}</style><div><p>T</p></div>`,
+			"concealed",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, test.source)
+			if got := findText(t, document, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestMSOConditionalStylesheetIsUncertain(t *testing.T) {
 	cases := []struct {
 		name, source, want string
@@ -465,6 +734,37 @@ func TestMSOConditionalStylesheetIsUncertain(t *testing.T) {
 				t.Fatalf("label = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestMSODownlevelRevealedContentIsClientDependent(t *testing.T) {
+	document := inspectHTML(t, `<!--[if !mso]><!--><style>#target{display:none}</style><p>Conditional</p><!--<![endif]--><p id="target">Styled target</p><p>Ordinary</p>`)
+	for text, want := range map[string]string{
+		"Conditional":   "unknown",
+		"Styled target": "unknown",
+		"Ordinary":      "visible",
+	} {
+		if got := findText(t, document, text).Label; got != want {
+			t.Errorf("%s label = %q, want %q", text, got, want)
+		}
+	}
+}
+
+func TestMSOConditionalStyleRetainsOnlyConsumedAttributes(t *testing.T) {
+	var style xhtml.Node
+	retainConditionalStyleAttribute(&style, []byte("data-unused"), []byte(strings.Repeat("x", 1024)))
+	retainConditionalStyleAttribute(&style, []byte("type"), []byte("text/plain"))
+	retainConditionalStyleAttribute(&style, []byte("type"), []byte("text/css"))
+	retainConditionalStyleAttribute(&style, []byte("media"), []byte("screen"))
+	retainConditionalStyleAttribute(&style, []byte("title"), []byte("unused"))
+	if len(style.Attr) != 2 {
+		t.Fatalf("retained attributes = %+v, want only type and media", style.Attr)
+	}
+	if got := attr(&style, "type"); got != "text/plain" {
+		t.Fatalf("retained type = %q, want first value", got)
+	}
+	if got := attr(&style, "media"); got != "screen" {
+		t.Fatalf("retained media = %q", got)
 	}
 }
 
@@ -781,6 +1081,7 @@ func TestArithmetic(t *testing.T) {
 	}{
 		{`font-size:calc(10px - 10px)`, 0, true},
 		{`font-size:calc(1pt * 3)`, 4, true},
+		{`font-size:calc(.05pc)`, .8, true},
 		{`font-size:calc(25% + .25em)`, 8, true},
 		{`font-size:calc(1rem / 8)`, 2, true},
 		{`font-size:max(1px,min(2px,3px))`, 2, true},
@@ -816,6 +1117,18 @@ func TestArithmetic(t *testing.T) {
 	in := inspectHTML(t, `<p style="--n:10px;font-size:calc(var(--n) - 10px)">T</p>`)
 	if findText(t, in, "T").Label != "concealed" {
 		t.Fatal(in)
+	}
+}
+
+func TestAbsoluteLengthUnitsDetectTinyText(t *testing.T) {
+	for _, size := range []string{".05pc", ".02cm", ".2mm", ".01in", "1q", "calc(.05pc)"} {
+		t.Run(size, func(t *testing.T) {
+			document := inspectHTML(t, `<p style="font-size:`+size+`">T</p>`)
+			text := findText(t, document, "T")
+			if text.Label != "concealed" || strings.Join(text.ConcealmentReasons, ",") != "font-size" {
+				t.Fatalf("font-size %s = %+v, want concealed by font-size", size, text)
+			}
+		})
 	}
 }
 

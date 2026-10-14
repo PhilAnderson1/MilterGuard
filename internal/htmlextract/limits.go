@@ -22,6 +22,10 @@ type Limits struct {
 // MaxViewingCases is the hard ceiling for conditional evaluations per document.
 const MaxViewingCases = 16
 
+// Selector cost functions use MatchWork+1 as a saturated over-budget value.
+// Keep that sentinel representable for every accepted caller-supplied limit.
+const maxMatchWork = int64(1<<63 - 2)
+
 func DefaultLimits() Limits {
 	return Limits{InputBytes: 8 << 20, Nodes: 100000, TextNodes: 50000, Attributes: 50000, Depth: 128, Rules: 10000, Selectors: 20000, SelectorBytes: 2048, CSSBytes: 512 << 10, CSSConstructBytes: maxValueBytes, CSSConstructTokens: maxValueTokens, MatchWork: 10000000, MediaCases: MaxViewingCases, ExpressionWork: 1000000}
 }
@@ -67,6 +71,9 @@ func (l Limits) validate() error {
 		if limit.value <= 0 {
 			return fmt.Errorf("invalid limit: %s must be positive", limit.name)
 		}
+	}
+	if l.MatchWork > maxMatchWork {
+		return fmt.Errorf("invalid limit: MatchWork must be at most %d", maxMatchWork)
 	}
 	return nil
 }

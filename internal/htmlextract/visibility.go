@@ -48,6 +48,8 @@ type presentationState struct {
 	contentHidden, contentKnown  bool
 	msoHidden, msoKnown          bool
 	layoutUncertain              bool
+	animationUncertain           bool
+	clientDependentReasons       concealmentReason
 	alternateColourSchemeReasons concealmentReason
 }
 
@@ -109,7 +111,14 @@ func decideVisibility(style *Style, state presentationState, colour *colourResul
 	// visible even if dark-mode CSS could alter its presentation. Conversely,
 	// do not confidently call content invisible when a scheme-dependent rule
 	// can change the property responsible for that conclusion.
-	if decision.label == labelConcealed && decision.reasons&^state.alternateColourSchemeReasons == 0 {
+	// Some concealment mechanisms are ignored by prominent email clients, and
+	// colour-scheme rules can independently reveal content. A confident result
+	// requires at least one reason unaffected by either source of divergence.
+	uncertainReasons := state.clientDependentReasons | state.alternateColourSchemeReasons
+	if decision.label == labelConcealed && decision.reasons&^uncertainReasons == 0 {
+		decision.label = labelUnknown
+	}
+	if state.animationUncertain {
 		decision.label = labelUnknown
 	}
 	return decision

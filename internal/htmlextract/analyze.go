@@ -101,6 +101,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 	r.layers = r.layers[:0]
 	r.layerGeneration = 0
 	r.colourMemo.valid = false
+	msoRevealedDepth := 0
 	for len(r.frames) > 0 {
 		r.visited++
 		if r.visited&255 == 0 && r.shouldStop != nil && r.shouldStop() {
@@ -111,6 +112,16 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 		if !f.entered {
 			f.entered = true
 			f.next = n.FirstChild
+			if n.Type == html.CommentNode && (f.scope == scopeActive || f.scope == scopeHead) {
+				switch msoDownlevelRevealedMarker(n.Data) {
+				case msoRevealedStart:
+					msoRevealedDepth++
+				case msoRevealedEnd:
+					if msoRevealedDepth > 0 {
+						msoRevealedDepth--
+					}
+				}
+			}
 			if n.Type == html.ElementNode {
 				var prepared elementPreparation
 				if len(r.document.elements) != 0 {
@@ -125,13 +136,30 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					depth: len(r.frames) - 1, nodes: r.document.nodeCount,
 				}
 				parentStyle := &r.styleStack[f.styleIndex]
-				resolved := r.styles.elementStyle(n, parentStyle, &rootStyle, f.vars, prepared.legacy, prepared.inline, &media, selectorContext, r.matches, r.expressions)
+				var resolved elementStyleResult
+				if prepared.inlineIncomplete {
+					// A malformed style attribute can affect this element and its
+					// descendants, but cannot alter the cascade elsewhere in the
+					// document. Keep that uncertainty local instead of abandoning all
+					// stylesheet analysis.
+					resolved = elementStyleResult{style: unresolvedStyle(), variables: f.vars}
+				} else {
+					resolved = r.styles.elementStyle(n, parentStyle, &rootStyle, f.vars, prepared.legacy, prepared.inline, &media, selectorContext, r.matches, r.expressions)
+				}
 				r.styleStack = append(r.styleStack, resolved.style)
 				f.styleIndex = len(r.styleStack) - 1
 				style := &r.styleStack[f.styleIndex]
 				f.vars = resolved.variables
-				empty, known, inlineClipPathUncertain := emptyClip(style, n, resolved.displayDeclared)
+				empty, known, inlineClipPathUncertain, clientDependentClip := emptyClip(style, n, resolved.displayDeclared)
+				wasClipped := f.clipped
 				f.clipped = f.clipped || empty
+				if empty {
+					if clientDependentClip && !wasClipped {
+						f.clientDependentReasons |= reasonEmptyClip
+					} else if !clientDependentClip {
+						f.clientDependentReasons &^= reasonEmptyClip
+					}
+				}
 				f.clipKnown = f.clipKnown && known
 				r.layers = append(r.layers, layerWithClipOverride(style, inlineClipPathUncertain))
 				r.layerGeneration++
@@ -148,6 +176,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 				cv := style[contentVisibility]
 				if cv.Known && cv.Text == "hidden" {
 					f.contentHidden = true
+					f.clientDependentReasons |= reasonContentVisibility
 				}
 				f.contentKnown = f.contentKnown && cv.Known
 				mh := style[msoHide]
@@ -156,6 +185,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 				}
 				f.msoKnown = f.msoKnown && mh.Known
 				f.layoutUncertain = f.layoutUncertain || resolved.layoutUncertain
+				f.animationUncertain = f.animationUncertain || resolved.animationActive
 				f.alternateColourSchemeReasons |= resolved.alternateColourSchemeReasons
 				a := style[opacity]
 				if a.Known && a.Number == 0 {
@@ -165,8 +195,20 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					f.alpha *= a.Number
 					f.alphaKnown = f.alphaKnown && a.Known
 				}
+				if f.alphaKnown && f.alpha <= .01+1e-14 {
+					// The colour evaluator applies group opacity before measuring
+					// contrast, so opacity can also manufacture a colour-distance
+					// concealment reason. Word-based Outlook ignores opacity; mark
+					// both conclusions as client-dependent so the derived colour
+					// result cannot accidentally make the decision authoritative.
+					f.clientDependentReasons |= reasonOpacity | reasonColour
+				}
 				if f.scope == scopeActive && (n.Data == "img" || n.Data == "input") {
 					elementState := f.presentationState
+					if msoRevealedDepth > 0 {
+						// Word-based Outlook excludes downlevel-revealed regions.
+						elementState.layoutUncertain = true
+					}
 					if resolved.elementGeometryConcealed {
 						elementState.clipped = true
 					}
@@ -203,7 +245,14 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 			if n.Type == html.TextNode && f.scope == scopeActive {
 				style := &r.styleStack[f.styleIndex]
 				colour := r.evaluateColour(style[color])
-				decision := decideVisibility(style, f.presentationState, &colour)
+				textState := f.presentationState
+				if msoRevealedDepth > 0 {
+					// Content readable in ordinary clients but excluded by Outlook
+					// cannot be called definitely visible. Independently concealed
+					// content remains concealed in every client.
+					textState.layoutUncertain = true
+				}
+				decision := decideVisibility(style, textState, &colour)
 				if first {
 					r.results.textLabels = append(r.results.textLabels, decision.label)
 					r.results.textReasons = append(r.results.textReasons, decision.reasons)

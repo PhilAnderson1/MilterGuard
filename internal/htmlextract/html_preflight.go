@@ -41,6 +41,7 @@ type lexicalFrame struct {
 type lexicalUsage struct {
 	nodes, textNodes, attributes, depth int
 	treeBuilderTokens                   int
+	nestedTables                        int
 }
 
 func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
@@ -51,9 +52,14 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 	z := html.NewTokenizer(bytes.NewReader(b))
 	var stack []lexicalFrame
 	open := make(map[string]int)
+	var usage lexicalUsage
+	openTables := 0
 	popTo := func(keep int) {
 		for i := len(stack) - 1; i >= keep; i-- {
 			name := stack[i].name
+			if name == "table" && !stack[i].foreign {
+				openTables--
+			}
 			if open[name] == 1 {
 				delete(open, name)
 			} else {
@@ -62,7 +68,6 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 		}
 		stack = stack[:keep]
 	}
-	var usage lexicalUsage
 	for {
 		t := z.Next()
 		if t == html.ErrorToken {
@@ -135,6 +140,15 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 			parentForeign = false
 		}
 		foreign := parentForeign || n == "svg" || n == "math"
+		// The tokenizer assumes noscript and raw-text-named elements contain
+		// uninterpreted text unless its parser supplies insertion-mode context.
+		// Our DOM parse disables scripting, so noscript contains markup. The
+		// HTML tree builder likewise disables raw-text tokenization for elements
+		// it pushes in SVG or MathML namespaces. Mirror both decisions here so
+		// markup in those regions is charged before the allocating DOM parse.
+		if n == "noscript" || foreign {
+			z.NextIsNotRawText()
+		}
 		if t == html.SelfClosingTagToken && foreign {
 			// The self-closing flag is honored in foreign content.
 			continue
@@ -147,6 +161,12 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 			foreign:      foreign,
 			htmlChildren: foreign && (n == "foreignobject" || n == "desc" || n == "title"),
 		})
+		if n == "table" && !foreign {
+			openTables++
+			if openTables > usage.nestedTables {
+				usage.nestedTables = openTables
+			}
+		}
 		open[n]++
 		if len(stack) > usage.depth {
 			usage.depth = len(stack)

@@ -1,6 +1,8 @@
 package htmlextract
 
 import (
+	"strings"
+
 	"github.com/andybalholm/cascadia"
 	"golang.org/x/net/html"
 )
@@ -15,9 +17,10 @@ const declarationApplyWeight int64 = 16
 // operations; use a power-of-two conservative weight.
 const elementTraversalWork int64 = 128
 
-// Go maps have substantial per-entry overhead. Bound cached selector results
-// independently of the CPU-work budget so one message has a predictable
-// memory ceiling. Matching continues normally after the cache is full.
+// Go maps and retained bucket slices have substantial per-entry overhead.
+// Bound all selector-evaluation caches independently of the CPU-work budget so
+// one message has a predictable memory ceiling. Matching continues normally
+// after the cache is full.
 const maxMatchCacheEntries = 100_000
 
 type mediaCacheKey struct {
@@ -136,6 +139,7 @@ type elementStyleResult struct {
 	elementGeometryConcealed     bool
 	displayDeclared              bool
 	alternateColourSchemeReasons concealmentReason
+	animationActive              bool
 }
 
 type cascadeWinners struct {
@@ -144,6 +148,7 @@ type cascadeWinners struct {
 	variables                    map[string]candidate
 	alternateColourSchemeReasons concealmentReason
 	alternateColourSchemeVars    map[string]bool
+	animation                    candidate
 }
 
 func (m *mediaEvaluation) evaluate(s *sheet, work *matchBudget) ([]uint8, bool) {
@@ -235,6 +240,12 @@ func (s *sheet) collectCascade(n *html.Node, legacy, inline []declaration, media
 		}
 		applyProperty := func(d *declaration, property int) {
 			c := candidate{d: d, property: property, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
+			if property == animationProperty {
+				if c.beats(winners.animation) {
+					winners.animation = c
+				}
+				return
+			}
 			if property >= properties {
 				index := property - properties
 				if c.beats(winners.layout[index]) {
@@ -427,11 +438,55 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 		st[background] = st[color]
 	}
 	layoutUncertain, elementGeometryConcealed := layoutVisibility(&winners.layout, &st, context, n)
+	animationActive := s.hasKeyframes && potentiallyActiveAnimation(winners.animation, context)
 	return elementStyleResult{
 		style: st, variables: scope, layoutUncertain: layoutUncertain, elementGeometryConcealed: elementGeometryConcealed,
 		displayDeclared:              winners.properties[display].set,
 		alternateColourSchemeReasons: winners.alternateColourSchemeReasons,
+		animationActive:              animationActive,
 	}
+}
+
+// potentiallyActiveAnimation deliberately does not simulate timelines or
+// keyframes. It recognizes only declarations that certainly select no
+// animation; every other winning value can make the static presentation an
+// unreliable description of what the recipient sees.
+func potentiallyActiveAnimation(c candidate, context evaluationContext) bool {
+	if !c.set {
+		return false
+	}
+	if c.uncertainOrigin {
+		return true
+	}
+	value := c.d.value
+	if c.d.hasVars {
+		resolved := substitute(c.d, context.vars, context.budget)
+		if resolved.status == valueInvalid {
+			return false
+		}
+		if resolved.status != valueResolved {
+			return true
+		}
+		value = resolved.text
+	}
+	value = normalizeCSSKeyword(value)
+	switch value {
+	case "none", "initial", "unset":
+		return false
+	}
+	if !c.d.animationShorthand {
+		parts := strings.Split(value, ",")
+		if len(parts) > 1 {
+			allNone := true
+			for _, part := range parts {
+				allNone = allNone && normalizeCSSKeyword(part) == "none"
+			}
+			if allNone {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func alternateColourSchemeEffects(d *declaration) concealmentReason {

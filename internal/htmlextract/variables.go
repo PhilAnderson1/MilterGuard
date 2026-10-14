@@ -137,15 +137,19 @@ func advanceDelimiters(stack []css.TokenType, kind css.TokenType) ([]css.TokenTy
 	return stack[:len(stack)-1], true
 }
 
-// parserCompatibleCSS works around a parser recovery divergence for a closing
-// parenthesis inside a nested [] or {} component block. CSS Syntax keeps that
-// parenthesis in the inner block, but the declaration parser otherwise treats
-// it as closing the surrounding function and drops the declaration. Escaping
-// only that mismatched delimiter preserves its character value while allowing
-// the parser to expose the declaration to our component-value evaluator.
-// Ordinary CSS takes the allocation-free fast path.
+// parserCompatibleCSS preserves CSS token boundaries that the syntax parser
+// otherwise loses and works around a recovery divergence for a closing
+// parenthesis inside a nested [] or {} component block. Comments separate
+// selector tokens, but the parser drops them before exposing the selector;
+// replacing lexer-recognized comments with whitespace prevents adjacent token
+// text from being joined into a different selector. Escaping only a mismatched
+// nested delimiter preserves its character value while allowing the parser to
+// expose the declaration to our component-value evaluator. Ordinary CSS takes
+// the allocation-free fast path.
 func parserCompatibleCSS(text string) string {
-	if !containsFold(text, "var(") || !strings.Contains(text, ")") || (!strings.Contains(text, "[") && !strings.Contains(text, "{")) {
+	hasComments := strings.Contains(text, "/*")
+	needsDelimiterCompatibility := containsFold(text, "var(") && strings.Contains(text, ")") && (strings.Contains(text, "[") || strings.Contains(text, "{"))
+	if !hasComments && !needsDelimiterCompatibility {
 		return text
 	}
 	l := css.NewLexer(parse.NewInputString(text))
@@ -161,6 +165,16 @@ func parserCompatibleCSS(text string) string {
 				return text
 			}
 			break
+		}
+		if kind == css.CommentToken {
+			if !changed {
+				b.Grow(len(text) + 1)
+				b.WriteString(text[:offset])
+				changed = true
+			}
+			b.WriteByte(' ')
+			offset += len(raw)
+			continue
 		}
 		if kind == css.RightParenthesisToken && len(stack) > 0 && stack[len(stack)-1] != kind && parenthesisBlocks > 0 {
 			if !changed {

@@ -61,7 +61,7 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 			styleNode = html.Node{Type: html.ElementNode, Data: "style"}
 			for hasAttributes {
 				key, value, more := z.TagAttr()
-				styleNode.Attr = append(styleNode.Attr, html.Attribute{Key: string(key), Val: string(value)})
+				retainConditionalStyleAttribute(&styleNode, key, value)
 				hasAttributes = more
 			}
 			inStyle = true
@@ -85,6 +85,20 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 	}
 }
 
+// retainConditionalStyleAttribute bounds retained state while tokenizing the
+// HTML fragment inside an MSO conditional comment. Only these attributes can
+// affect stylesheet processing; retaining arbitrary attributes would let one
+// comment allocate a large synthetic html.Node outside the document's normal
+// attribute accounting. Keep the first occurrence, matching x/net/html's tree
+// builder treatment of duplicate HTML attributes.
+func retainConditionalStyleAttribute(style *html.Node, key, value []byte) {
+	name := string(key)
+	if (name != "type" && name != "media") || hasAttr(style, name) {
+		return
+	}
+	style.Attr = append(style.Attr, html.Attribute{Key: name, Val: string(value)})
+}
+
 func msoConditionalFragment(data string) (string, bool) {
 	trimmed := strings.TrimSpace(data)
 	if len(trimmed) < len("[if ]>") || !hasASCIIFoldPrefix(trimmed, "[if ") {
@@ -99,6 +113,40 @@ func msoConditionalFragment(data string) (string, bool) {
 		return "", false
 	}
 	return trimmed[start+2 : end], true
+}
+
+type msoRevealedMarker int8
+
+const (
+	msoRevealedNone msoRevealedMarker = iota
+	msoRevealedStart
+	msoRevealedEnd
+)
+
+// msoDownlevelRevealedMarker recognizes the paired comments used to expose
+// markup to ordinary HTML clients while excluding it from Word-based Outlook:
+//
+// <!--[if !mso]><!--> ... <!--<![endif]-->
+//
+// x/net/html preserves these as separate comment nodes, although tree
+// construction may move the intervening head/body elements. Tracking them in
+// document order therefore works across those parser insertions.
+func msoDownlevelRevealedMarker(data string) msoRevealedMarker {
+	trimmed := strings.TrimSpace(data)
+	if equalASCIIFold(trimmed, "<![endif]") {
+		return msoRevealedEnd
+	}
+	if !hasASCIIFoldPrefix(trimmed, "[if ") {
+		return msoRevealedNone
+	}
+	end := strings.Index(trimmed, "]>")
+	if end < 0 || !equalASCIIFold(strings.TrimSpace(trimmed[len("[if "):end]), "!mso") {
+		return msoRevealedNone
+	}
+	if strings.HasPrefix(strings.TrimSpace(trimmed[end+2:]), "<!") {
+		return msoRevealedStart
+	}
+	return msoRevealedNone
 }
 
 func hasASCIIFoldPrefix(value, prefix string) bool {

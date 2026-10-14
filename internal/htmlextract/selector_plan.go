@@ -486,7 +486,14 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 		if err == nil && len(group) == 1 {
 			plan.matcher = group[0]
 			plan.specificity = group[0].Specificity()
-			plan.ancestorChain = compileAncestorChain(complexity)
+			// The lightweight structural planner does not decode hexadecimal CSS
+			// escapes. In particular, the optional whitespace terminating an
+			// escape is not a descendant combinator. Leave escaped selectors to
+			// Cascadia's authoritative matcher rather than compiling a potentially
+			// different ancestor chain.
+			if !strings.Contains(branch, `\`) {
+				plan.ancestorChain = compileAncestorChain(complexity)
+			}
 			return plan, true
 		}
 	}
@@ -931,9 +938,22 @@ func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *matchBudget) 
 		}
 	}
 	if s.runtime.attributeCandidates == nil {
-		s.runtime.attributeCandidates = make(map[*html.Node]selectorAttributeCandidates)
+		// Account for both the map record and every retained bucket slice header.
+		// When the shared cache is full, return the computed buckets for this
+		// match without retaining them; callers continue matching normally.
+		entries := 1 + len(cached.direct) + len(cached.ancestor)
+		if entries <= maxMatchCacheEntries-s.runtime.matchCacheEntries {
+			s.runtime.attributeCandidates = make(map[*html.Node]selectorAttributeCandidates)
+			s.runtime.attributeCandidates[node] = cached
+			s.runtime.matchCacheEntries += entries
+		}
+		return cached, true
 	}
-	s.runtime.attributeCandidates[node] = cached
+	entries := 1 + len(cached.direct) + len(cached.ancestor)
+	if entries <= maxMatchCacheEntries-s.runtime.matchCacheEntries {
+		s.runtime.attributeCandidates[node] = cached
+		s.runtime.matchCacheEntries += entries
+	}
 	return cached, true
 }
 

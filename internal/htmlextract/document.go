@@ -119,14 +119,15 @@ type parsedDocument struct {
 }
 
 type elementPreparation struct {
-	inline, legacy []declaration
-	selector       selectorAttributeProfile
+	inline, legacy   []declaration
+	inlineIncomplete bool
+	selector         selectorAttributeProfile
 }
 
-// The HTML5 tree builder can insert structural ancestors absent from a source
-// fragment, notably html/body and table wrappers such as tbody. Author-owned
-// lexical nesting remains bounded by Limits.Depth before parsing; this small
-// margin prevents those generated nodes from rejecting a boundary document.
+// The HTML5 tree builder can insert a small fixed set of structural ancestors
+// absent from a source fragment, notably html/body. Table wrappers such as
+// tbody are not included here: preflight counts nested tables so their
+// cumulative generated depth can be allowed separately.
 const impliedTreeDepthMargin = 4
 
 func (p selectorAttributeProfile) empty() bool {
@@ -162,10 +163,16 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		n, next *html.Node
 		depth   int
 		scope   nodeScope
-		entered bool
+		// Styles declared below noscript are client-dependent: some email
+		// sanitizers discard the container while others retain its fallback
+		// content. Keep parsing the rules, but do not let them establish a
+		// certain presentation result.
+		uncertainStylesheetOrigin bool
+		entered                   bool
 	}
 	stack := make([]entry, 1, max(1, document.lexical.depth+1))
 	stack[0] = entry{n: root}
+	msoRevealedDepth := 0
 	for len(stack) > 0 {
 		e := &stack[len(stack)-1]
 		if e.entered {
@@ -175,7 +182,10 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			}
 			child := e.next
 			e.next = child.NextSibling
-			stack = append(stack, entry{n: child, depth: e.depth + 1, scope: e.scope})
+			stack = append(stack, entry{
+				n: child, depth: e.depth + 1, scope: e.scope,
+				uncertainStylesheetOrigin: e.uncertainStylesheetOrigin,
+			})
 			continue
 		}
 		e.entered = true
@@ -183,8 +193,13 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		n := e.n
 		// Use subtraction after the greater-than check rather than adding the
 		// margin to a caller-provided limit, which could overflow int.
-		if e.depth > p.Limits.Depth && e.depth-p.Limits.Depth > impliedTreeDepthMargin {
-			return document, fmt.Errorf("limit: tree depth > %d", p.Limits.Depth)
+		if e.depth > p.Limits.Depth {
+			excess := e.depth - p.Limits.Depth
+			// Use subtraction in two stages so even a caller-provided maximum
+			// integer limit cannot overflow while adding parser allowances.
+			if excess > impliedTreeDepthMargin && excess-impliedTreeDepthMargin > document.lexical.nestedTables {
+				return document, fmt.Errorf("limit: tree depth > %d", p.Limits.Depth)
+			}
 		}
 		if e.depth > document.treeDepth {
 			document.treeDepth = e.depth
@@ -203,6 +218,14 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			}
 		}
 		if n.Type == html.CommentNode && (e.scope == scopeActive || e.scope == scopeHead) {
+			switch msoDownlevelRevealedMarker(n.Data) {
+			case msoRevealedStart:
+				msoRevealedDepth++
+			case msoRevealedEnd:
+				if msoRevealedDepth > 0 {
+					msoRevealedDepth--
+				}
+			}
 			document.styles.parseMSOConditionalStyles(n.Data)
 		}
 		if n.Type == html.ElementNode {
@@ -226,21 +249,26 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 					if !complete {
 						styles.abandonCascade()
 					} else {
-						styles.parseStylesheet(css, attr(n, "media"), n.Namespace != "")
+						styles.parseStylesheet(css, attr(n, "media"), n.Namespace != "" || e.uncertainStylesheetOrigin || msoRevealedDepth > 0)
 					}
 				}
 			}
 			if value := attr(n, "style"); value != "" {
-				prepared.inline = document.styles.parseCSS(value, true)
+				result := document.styles.parseInlineCSS(value)
+				prepared.inline = result.declarations
+				prepared.inlineIncomplete = result.incomplete
 			}
 			if !document.styles.cascadeIncomplete && !document.styles.workIncomplete {
 				prepared.legacy = prepareDeclarations(legacyDeclarations(n))
 			}
-			if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || !prepared.selector.empty() {
+			if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || prepared.inlineIncomplete || !prepared.selector.empty() {
 				document.elements[n] = prepared
 			}
 			if e.scope == scopeActive && (n.Data == "img" || n.Data == "input") {
 				document.extractableElementCount++
+			}
+			if n.Namespace == "" && n.Data == "noscript" {
+				e.uncertainStylesheetOrigin = true
 			}
 		}
 		e.scope = nodeContentScope(n, e.scope)

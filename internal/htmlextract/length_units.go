@@ -40,10 +40,10 @@ var lengthUnits = [...]lengthUnit{
 	{suffix: "ric", kind: lengthUnitContextual},
 	{suffix: "rex", kind: lengthUnitContextual},
 	{suffix: "rch", kind: lengthUnitContextual},
-	{suffix: "pc", kind: lengthUnitContextual},
-	{suffix: "cm", kind: lengthUnitContextual},
-	{suffix: "mm", kind: lengthUnitContextual},
-	{suffix: "in", kind: lengthUnitContextual},
+	{suffix: "pc", kind: lengthUnitAbsolute, scale: 16},
+	{suffix: "cm", kind: lengthUnitAbsolute, scale: 96.0 / 2.54},
+	{suffix: "mm", kind: lengthUnitAbsolute, scale: 96.0 / 25.4},
+	{suffix: "in", kind: lengthUnitAbsolute, scale: 96},
 	{suffix: "ex", kind: lengthUnitContextual},
 	{suffix: "ch", kind: lengthUnitContextual},
 	{suffix: "lh", kind: lengthUnitContextual},
@@ -53,7 +53,7 @@ var lengthUnits = [...]lengthUnit{
 	{suffix: "vh", kind: lengthUnitContextual},
 	{suffix: "vi", kind: lengthUnitContextual},
 	{suffix: "vb", kind: lengthUnitContextual},
-	{suffix: "q", kind: lengthUnitContextual},
+	{suffix: "q", kind: lengthUnitAbsolute, scale: 96.0 / 101.6},
 }
 
 func splitLength(value string) (numberText string, unit lengthUnit, found bool) {

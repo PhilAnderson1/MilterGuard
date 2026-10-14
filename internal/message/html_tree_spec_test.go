@@ -8,12 +8,12 @@ import (
 
 func TestTreeExtractorAppliesEmbeddedCSSDeclaredAfterContent(t *testing.T) {
 	got := htmlToText(`<p class="quiet">Pay<span> reassuring padding</span> now</p><style>.quiet span { opacity: .005 }</style>`)
-	want := `<invisible reason="opacity" value="0.005"> reassuring padding</invisible>`
+	want := `<visibility-uncertain> reassuring padding</visibility-uncertain>`
 	if !strings.Contains(got.Text, want) {
 		t.Fatalf("tagged extraction = %q, missing %q", got.Text, want)
 	}
-	if !got.HasConcealedContent || got.StrippedText == "" || !strings.Contains(got.StrippedText, "<hidden-content-stripped/>") {
-		t.Fatalf("concealment modes = %+v", got)
+	if got.HasConcealedContent || got.ConfidentVisibleChars != len("Paynow") {
+		t.Fatalf("uncertain opacity modes = %+v", got)
 	}
 }
 

@@ -23,15 +23,32 @@ const (
 	cssValue
 )
 
-// boundedCSSConstructs tokenizes without retaining tokens and rejects any
-// construct that the full parser could otherwise accumulate without bound.
-// It deliberately mirrors only CSS structural boundaries; the full parser
-// remains authoritative for syntax and recovery.
+type cssPreflightOutcome uint8
+
+const (
+	cssPreflightAccepted cssPreflightOutcome = iota
+	cssPreflightLimitExceeded
+	cssPreflightUnsafeDelimiter
+)
+
+// boundedCSSConstructs retains the compact boolean interface used by limit
+// tests. Production callers use inspectCSSConstructs so malformed delimiters
+// can be distinguished from ordinary size exhaustion.
 func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int) bool {
+	return inspectCSSConstructs(source, inline, byteLimit, tokenLimit) == cssPreflightAccepted
+}
+
+// inspectCSSConstructs tokenizes without retaining tokens and rejects any
+// construct that the full parser could otherwise accumulate without bound. It
+// also rejects unmatched ')' and ']' at construct level: tdewolff can otherwise pop
+// parser state without reporting the corresponding at-rule boundary, causing
+// our condition stack to diverge from its stream.
+func inspectCSSConstructs(source string, inline bool, byteLimit, tokenLimit int) cssPreflightOutcome {
 	// Every CSS token consumes at least one source byte. If the whole input is
 	// within both limits, no contained construct can exceed either one.
 	if len(source) <= byteLimit && len(source) <= tokenLimit {
-		return true
+		// Small inputs still require delimiter validation; malformed closers are
+		// a parser-state issue rather than an accumulation issue.
 	}
 	lexer := css.NewLexer(parse.NewInputString(source))
 	initialContext := cssRuleList
@@ -40,7 +57,7 @@ func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 	}
 	contexts := []cssPreflightContext{initialContext}
 	phase := cssConstructStart
-	componentDepth := 0
+	var componentClosers []css.TokenType
 	constructBytes, constructTokens := 0, 0
 	var atRule string
 	customProperty := false
@@ -59,7 +76,7 @@ func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 			contexts = contexts[:len(contexts)-1]
 		}
 		phase = cssConstructStart
-		componentDepth = 0
+		componentClosers = componentClosers[:0]
 		atRule = ""
 		customProperty = false
 		reset()
@@ -71,7 +88,7 @@ func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 			// Malformed CSS remains the full parser's concern. EOF and lexer
 			// errors are safe here because the source and the unfinished
 			// construct have already been bounded.
-			return true
+			return cssPreflightAccepted
 		}
 		// The full parser drops comments and collapses whitespace before it
 		// appends tokens to a construct. Mirror that here so harmless padding
@@ -88,17 +105,29 @@ func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 			accounted = []byte{' '}
 		}
 		if !withinLimit(accounted) {
-			return false
+			return cssPreflightLimitExceeded
 		}
 
-		if componentDepth > 0 {
+		if len(componentClosers) > 0 {
 			switch token {
-			case css.LeftParenthesisToken, css.LeftBracketToken, css.LeftBraceToken, css.FunctionToken:
-				componentDepth++
+			case css.LeftParenthesisToken, css.FunctionToken:
+				componentClosers = append(componentClosers, css.RightParenthesisToken)
+			case css.LeftBracketToken:
+				componentClosers = append(componentClosers, css.RightBracketToken)
+			case css.LeftBraceToken:
+				componentClosers = append(componentClosers, css.RightBraceToken)
 			case css.RightParenthesisToken, css.RightBracketToken, css.RightBraceToken:
-				componentDepth--
+				if componentClosers[len(componentClosers)-1] == token {
+					componentClosers = componentClosers[:len(componentClosers)-1]
+				}
+				// A mismatched closer is an ordinary component-value token under
+				// CSS recovery rules. It does not close the currently open block;
+				// this is important for valid unused var() fallbacks such as [x)].
 			}
 			continue
+		}
+		if token == css.RightParenthesisToken || token == css.RightBracketToken {
+			return cssPreflightUnsafeDelimiter
 		}
 
 		context := contexts[len(contexts)-1]
@@ -119,12 +148,23 @@ func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 					phase = cssProperty
 					customProperty = token == css.CustomPropertyNameToken
 				}
+				// The first token belongs to the newly selected phase too. In
+				// particular, an attribute selector commonly begins a rule with
+				// '[', so retain its closer before reading the next token.
+				switch token {
+				case css.LeftParenthesisToken, css.FunctionToken:
+					componentClosers = append(componentClosers, css.RightParenthesisToken)
+				case css.LeftBracketToken:
+					componentClosers = append(componentClosers, css.RightBracketToken)
+				}
 			}
 
 		case cssPrelude:
 			switch token {
-			case css.LeftParenthesisToken, css.LeftBracketToken, css.FunctionToken:
-				componentDepth = 1
+			case css.LeftParenthesisToken, css.FunctionToken:
+				componentClosers = append(componentClosers, css.RightParenthesisToken)
+			case css.LeftBracketToken:
+				componentClosers = append(componentClosers, css.RightBracketToken)
 			case css.LeftBraceToken:
 				contexts = append(contexts, atRuleContext(atRule))
 				phase = cssConstructStart
@@ -143,8 +183,12 @@ func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 			case css.ColonToken:
 				phase = cssValue
 				reset() // Only the value is retained by the full parser.
-			case css.LeftParenthesisToken, css.LeftBracketToken, css.LeftBraceToken, css.FunctionToken:
-				componentDepth = 1
+			case css.LeftParenthesisToken, css.FunctionToken:
+				componentClosers = append(componentClosers, css.RightParenthesisToken)
+			case css.LeftBracketToken:
+				componentClosers = append(componentClosers, css.RightBracketToken)
+			case css.LeftBraceToken:
+				componentClosers = append(componentClosers, css.RightBraceToken)
 			case css.SemicolonToken:
 				phase = cssConstructStart
 				customProperty = false
@@ -155,8 +199,12 @@ func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 
 		case cssValue:
 			switch token {
-			case css.LeftParenthesisToken, css.LeftBracketToken, css.LeftBraceToken, css.FunctionToken:
-				componentDepth = 1
+			case css.LeftParenthesisToken, css.FunctionToken:
+				componentClosers = append(componentClosers, css.RightParenthesisToken)
+			case css.LeftBracketToken:
+				componentClosers = append(componentClosers, css.RightBracketToken)
+			case css.LeftBraceToken:
+				componentClosers = append(componentClosers, css.RightBraceToken)
 			case css.SemicolonToken:
 				phase = cssConstructStart
 				customProperty = false

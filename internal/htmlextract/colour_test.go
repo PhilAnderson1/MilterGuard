@@ -255,7 +255,7 @@ func TestBackgroundLayersAndResets(t *testing.T) {
 		{"reset colour to transparent", `<div style="background:white"><p style="background:red;background:none;color:white">T</p></div>`, true, true},
 		{"reset image", `<p style="background-image:url(https://invalid.example/x);background:white;color:white">T</p>`, true, true},
 		{"reset by unset", `<div style="background:white"><p style="background:red;background-image:url(x);background:unset;color:white">T</p></div>`, true, true},
-		{"stray close invalid", `<p style="background:black;background:) white;color:black">T</p>`, true, true},
+		{"stray close invalid", `<p style="background:black;background:) white;color:black">T</p>`, false, false},
 		{"colour alone keeps image", `<p style="background:url(x) white;background-color:white;color:white">T</p>`, false, false},
 		{"image then fallback colour", `<p style="background:url(x) red;color:red">T</p>`, false, false},
 		{"fallback colour then image", `<p style="background:red url(x);color:red">T</p>`, false, false},
@@ -379,7 +379,11 @@ func TestCompositionUncertaintyAndIndependentReasons(t *testing.T) {
 		for _, independent := range []string{"display:none", "visibility:hidden", "font-size:0", "opacity:0"} {
 			// A later opacity:0 legitimately resolves an earlier opacity var().
 			v = colourText(t, `<p style="background-image:url(x);color:white;`+property+`;`+independent+`">T</p>`)
-			if v.Label != "concealed" || v.inspection.colour.Concealed {
+			want := "concealed"
+			if independent == "opacity:0" {
+				want = "unknown"
+			}
+			if v.Label != want || v.inspection.colour.Concealed {
 				t.Fatal(property, independent, v)
 			}
 		}

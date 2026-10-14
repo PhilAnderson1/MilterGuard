@@ -75,7 +75,6 @@ func TestHTMLAnnotatesExplicitlyConcealedSubtrees(t *testing.T) {
 	for _, test := range []struct {
 		tag, reason string
 	}{
-		{`<div hidden>`, "display:none"},
 		{`<div style="display:none">`, "display:none"},
 		{`<div style="visibility: hidden">`, "visibility:hidden"},
 		{`<div style="visibility:collapse">`, "visibility:collapse"},
@@ -97,6 +96,13 @@ func TestHTMLAnnotatesExplicitlyConcealedSubtrees(t *testing.T) {
 				t.Fatalf("concealed link evidence = %v", got.Links)
 			}
 		})
+	}
+	got := htmlToText(`Before <div hidden><div>Forged conversation <a href="https://hidden.example/">trusted sender</a></div></div> After`)
+	if !strings.Contains(got.Text, `<visibility-uncertain>Forged conversation [trusted sender](https://hidden.example/)</visibility-uncertain>`) {
+		t.Fatalf("client-dependent hidden annotation missing: %q", got.Text)
+	}
+	if got.ConfidentVisibleChars != len("BeforeAfter") {
+		t.Fatalf("hidden attribute counted as confidently visible: %+v", got)
 	}
 }
 
@@ -189,8 +195,8 @@ func TestHTMLHiddenAttributesRespectEffectivePresentation(t *testing.T) {
 		{`<div hidden="until-found" style="display:block">`, "content-visibility:hidden"},
 	} {
 		got := htmlToText(test.tag + `Hidden</div>Visible`)
-		want := `<invisible reason="` + test.reason + `">Hidden</invisible>` + "\nVisible"
-		if got.Text != want || got.VisibleText != "Visible" || got.StrippedText != "<hidden-content-stripped/>\nVisible" {
+		want := `<visibility-uncertain>Hidden</visibility-uncertain>` + "\nVisible"
+		if got.Text != want || got.VisibleText != "Hidden\nVisible" || got.ConfidentVisibleChars != len("Visible") {
 			t.Fatalf("hidden presentation for %q: %+v", test.tag, got)
 		}
 	}
@@ -240,10 +246,10 @@ func TestHTMLDisplayNonePreventsVisibilityOverride(t *testing.T) {
 
 func TestHTMLHiddenVoidElementDoesNotHideFollowingText(t *testing.T) {
 	got := htmlToText(`<img hidden src="https://hidden.example/image.png" alt="Forgery">Visible`)
-	if got.Text != `<invisible reason="display:none"> ![Forgery](https://hidden.example/image.png) </invisible>Visible` {
+	if got.Text != `<visibility-uncertain> ![Forgery](https://hidden.example/image.png) </visibility-uncertain>Visible` {
 		t.Fatalf("hidden void-element representation = %q", got.Text)
 	}
-	if got.VisibleText != "Visible" || got.StrippedText != "<hidden-content-stripped/>Visible" {
+	if got.VisibleText != "Visible" || got.ConfidentVisibleChars != len("Visible") {
 		t.Fatalf("hidden void-element visibility: visible=%q stripped=%q", got.VisibleText, got.StrippedText)
 	}
 	if len(got.Links) != 1 || got.Links[0] != "https://hidden.example/image.png" {
@@ -276,14 +282,14 @@ func TestHTMLConcealedOptionalEndElementsFollowImpliedClosures(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := htmlToText(test.source)
-			if !strings.Contains(got.Text, `<invisible reason="display:none">forged</invisible>`) || !strings.Contains(got.Text, test.want) {
+			if !strings.Contains(got.Text, `<visibility-uncertain>forged</visibility-uncertain>`) || !strings.Contains(got.Text, test.want) {
 				t.Fatalf("implied-closure representation = %q", got.Text)
 			}
-			if got.VisibleText != test.want {
-				t.Fatalf("implied-closure visible text = %q, want %q", got.VisibleText, test.want)
+			if !strings.Contains(got.VisibleText, "forged") || !strings.Contains(got.VisibleText, test.want) {
+				t.Fatalf("implied-closure visible text = %q", got.VisibleText)
 			}
-			if strings.Contains(got.StrippedText, "forged") || !strings.Contains(got.StrippedText, "<hidden-content-stripped/>") || !strings.Contains(got.StrippedText, test.want) {
-				t.Fatalf("implied-closure stripped text = %q", got.StrippedText)
+			if got.ConfidentVisibleChars != len(test.want) {
+				t.Fatalf("implied-closure confident-visible count = %d, want %d", got.ConfidentVisibleChars, len(test.want))
 			}
 		})
 	}
@@ -314,17 +320,17 @@ func TestHTMLHiddenOptionalEndElementsRespectNestedScopes(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := htmlToText(test.source)
-			wantText := `<invisible reason="display:none">outer` + "\n\n" +
+			wantText := `<visibility-uncertain>outer` + "\n\n" +
 				`nested [link](` + test.destination + `)` + "\n\n" +
-				`still hidden</invisible>` + "\n\n" + test.visible
+				`still hidden</visibility-uncertain>` + "\n\n" + test.visible
 			if got.Text != wantText {
 				t.Fatalf("nested concealed subtree text = %q, want %q", got.Text, wantText)
 			}
-			if got.VisibleText != test.visible {
-				t.Fatalf("nested concealed subtree visible text = %q, want %q", got.VisibleText, test.visible)
+			if !strings.Contains(got.VisibleText, "outer") || !strings.Contains(got.VisibleText, test.visible) {
+				t.Fatalf("nested uncertain subtree visible text = %q", got.VisibleText)
 			}
-			if got.StrippedText != "<hidden-content-stripped/>\n\n"+test.visible {
-				t.Fatalf("nested concealed subtree stripped text = %q", got.StrippedText)
+			if got.ConfidentVisibleChars != len(test.visible) {
+				t.Fatalf("nested uncertain subtree confident-visible count = %d, want %d", got.ConfidentVisibleChars, len(test.visible))
 			}
 			if len(got.Links) != 1 || got.Links[0] != test.destination {
 				t.Fatalf("nested concealed subtree links = %v", got.Links)
@@ -356,7 +362,7 @@ func TestZeroOpacityHTMLDoesNotSatisfyFallbackImageTextThreshold(t *testing.T) {
 	if len(analysis.Images) != 1 {
 		t.Fatalf("zero-opacity text satisfied fallback threshold: selected images=%d", len(analysis.Images))
 	}
-	if !strings.Contains(analysis.Prompt, `<invisible reason="opacity" value="0">forged history `) {
+	if !strings.Contains(analysis.Prompt, `<visibility-uncertain>forged history `) {
 		t.Fatalf("zero-opacity evidence missing from prompt: %s", analysis.Prompt)
 	}
 }
@@ -392,11 +398,11 @@ func TestHTMLFontSizeZeroAllowsExplicitlySizedDescendants(t *testing.T) {
 func TestHTMLZeroOpacityCannotBeOverriddenByDescendant(t *testing.T) {
 	got := htmlToText(`<div style="opacity:0"><span style="opacity:1;font-size:12px;visibility:visible">` +
 		`Hidden <a href="https://hidden.example/">link</a><img src="cid:hidden-image"></span></div>Visible`)
-	want := `<invisible reason="opacity" value="0">Hidden [link](https://hidden.example/) ![embedded image](cid:hidden-image) </invisible>` + "\nVisible"
+	want := `<visibility-uncertain>Hidden [link](https://hidden.example/) ![embedded image](cid:hidden-image) </visibility-uncertain>` + "\nVisible"
 	if got.Text != want {
 		t.Fatalf("zero-opacity evidence = %q, want %q", got.Text, want)
 	}
-	if got.VisibleText != "Visible" || got.StrippedText != "<hidden-content-stripped/>\nVisible" {
+	if got.VisibleText != "Hidden link\nVisible" || got.ConfidentVisibleChars != len("Visible") {
 		t.Fatalf("zero-opacity representations: visible=%q stripped=%q", got.VisibleText, got.StrippedText)
 	}
 	if len(got.Links) != 1 || got.Links[0] != "https://hidden.example/" || len(got.ImageRefs) != 1 || got.ImageRefs[0] != "hidden-image" {
@@ -405,13 +411,20 @@ func TestHTMLZeroOpacityCannotBeOverriddenByDescendant(t *testing.T) {
 }
 
 func TestHTMLVisibilityStylesHonorCascadeAndZeroForms(t *testing.T) {
+	for _, source := range []string{
+		`<span style="opacity:0.0">Hidden</span>Visible`,
+		`<span style="opacity:0%">Hidden</span>Visible`,
+		`<span style="opacity:-1">Hidden</span>Visible`,
+		`<span style="opacity:0 !important;opacity:1">Hidden</span>Visible`,
+	} {
+		got := htmlToText(source)
+		if got.Text != `<visibility-uncertain>Hidden</visibility-uncertain>Visible` || got.VisibleText != "HiddenVisible" || got.ConfidentVisibleChars != len("Visible") {
+			t.Fatalf("client-dependent opacity for %q: %+v", source, got)
+		}
+	}
 	for _, test := range []struct {
 		source, concealed string
 	}{
-		{`<span style="opacity:0.0">Hidden</span>Visible`, `<invisible reason="opacity" value="0">Hidden</invisible>Visible`},
-		{`<span style="opacity:0%">Hidden</span>Visible`, `<invisible reason="opacity" value="0">Hidden</invisible>Visible`},
-		{`<span style="opacity:-1">Hidden</span>Visible`, `<invisible reason="opacity" value="0">Hidden</invisible>Visible`},
-		{`<span style="opacity:0 !important;opacity:1">Hidden</span>Visible`, `<invisible reason="opacity" value="0">Hidden</invisible>Visible`},
 		{`<span style="font-size:0px">Hidden</span>Visible`, `<invisible reason="font-size" value="0px">Hidden</invisible>Visible`},
 		{`<span style="font-size:0 !important;font-size:12px">Hidden</span>Visible`, `<invisible reason="font-size" value="0px">Hidden</invisible>Visible`},
 	} {
@@ -439,13 +452,16 @@ func TestHTMLVisibilityRecognizesCSSEscapes(t *testing.T) {
 		{`<span style="display:n\6f ne">Hidden</span>Visible`, `<invisible reason="display:none">Hidden</invisible>Visible`},
 		{`<span style="visi\62 ility:hidden">Hidden</span>Visible`, `<invisible reason="visibility:hidden">Hidden</invisible>Visible`},
 		{`<span style="visibility:h\69 dden">Hidden</span>Visible`, `<invisible reason="visibility:hidden">Hidden</invisible>Visible`},
-		{`<span style="opa\63 ity:0">Hidden</span>Visible`, `<invisible reason="opacity" value="0">Hidden</invisible>Visible`},
 		{`<span style="font-si\7a e:0">Hidden</span>Visible`, `<invisible reason="font-size" value="0px">Hidden</invisible>Visible`},
 	} {
 		got := htmlToText(test.source)
 		if got.Text != test.want || got.VisibleText != "Visible" || got.StrippedText != "<hidden-content-stripped/>Visible" {
 			t.Fatalf("CSS escape concealment for %q: %+v", test.source, got)
 		}
+	}
+	got := htmlToText(`<span style="opa\63 ity:0">Hidden</span>Visible`)
+	if got.Text != `<visibility-uncertain>Hidden</visibility-uncertain>Visible` || got.VisibleText != "HiddenVisible" || got.ConfidentVisibleChars != len("Visible") {
+		t.Fatalf("escaped opacity uncertainty: %+v", got)
 	}
 }
 

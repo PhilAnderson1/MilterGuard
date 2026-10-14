@@ -3,6 +3,7 @@ package htmlextract
 import (
 	"bytes"
 	"context"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,10 +113,10 @@ func TestAggregatedLabelUnionsViewingCaseEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := findText(t, document, "T")
-	if text.Label != "concealed" {
+	if text.Label != "unknown" {
 		t.Fatalf("aggregated label = %q", text.Label)
 	}
-	if strings.Join(text.ConcealmentReasons, ",") != "display-none,opacity,colour-distance" || text.EffectiveOpacity != 0 {
+	if len(text.ConcealmentReasons) != 0 || text.EffectiveOpacity != 0 {
 		t.Fatalf("aggregated viewing-case evidence = %+v", text)
 	}
 
@@ -164,6 +165,20 @@ func TestAnalyzeValidatesLimitsWithoutPanicking(t *testing.T) {
 				t.Fatalf("validation error = %v", err)
 			}
 		})
+	}
+}
+
+func TestMatchWorkMaximumKeepsOverBudgetSentinelRepresentable(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MatchWork = maxMatchWork
+	if _, err := Analyze([]byte(`<style>div ~ b ~ div{visibility:hidden}</style><div>T</div>`), limits); err != nil {
+		t.Fatalf("maximum safe MatchWork rejected: %v", err)
+	}
+
+	limits.MatchWork++
+	_, err := Analyze([]byte(`<style>div ~ b ~ div{visibility:hidden}</style><div>T</div>`), limits)
+	if err == nil || !strings.Contains(err.Error(), "invalid limit: MatchWork") {
+		t.Fatalf("overflowing MatchWork validation error = %v", err)
 	}
 }
 
@@ -318,6 +333,16 @@ func TestTreeDepthAllowsParserImpliedAncestors(t *testing.T) {
 	}
 	if document.Usage.Depth <= limits.Depth || document.Usage.Depth > limits.Depth+impliedTreeDepthMargin {
 		t.Fatalf("boundary table depth = %d, want parser margin above %d", document.Usage.Depth, limits.Depth)
+	}
+
+	nestedTables := 33
+	nestedTableSource := strings.Repeat(`<table><tr><td>`, nestedTables) + `T`
+	document, err = Analyze([]byte(nestedTableSource), limits)
+	if err != nil {
+		t.Fatalf("nested tables within lexical depth rejected: %v", err)
+	}
+	if document.Usage.Depth <= limits.Depth+impliedTreeDepthMargin || document.Usage.Depth > limits.Depth+impliedTreeDepthMargin+nestedTables {
+		t.Fatalf("nested-table tree depth = %d, want dynamic allowance above %d", document.Usage.Depth, limits.Depth+impliedTreeDepthMargin)
 	}
 
 	if _, err = Analyze([]byte(strings.Repeat(`<div>`, limits.Depth+1)), limits); err == nil || !strings.Contains(err.Error(), "lexical depth") {
@@ -476,6 +501,34 @@ func TestPreflightSelfClosingTagDepth(t *testing.T) {
 	})
 }
 
+func TestPreflightMirrorsTreeBuilderRawTextOverrides(t *testing.T) {
+	for _, test := range []struct {
+		name, source string
+	}{
+		{
+			name:   "noscript with scripting disabled",
+			source: `<noscript><b a="1" b="2" c="3">text</b></noscript>`,
+		},
+		{
+			name:   "raw-text-named SVG element",
+			source: `<svg><title><b a="1" b="2" c="3">text</b></title></svg>`,
+		},
+		{
+			name:   "raw-text-named MathML element",
+			source: `<math><style><b a="1" b="2" c="3">text</b></style></math>`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			limits := DefaultLimits()
+			limits.Attributes = 2
+			err := preflight([]byte(test.source), limits)
+			if err == nil || !strings.Contains(err.Error(), "lexical attributes") {
+				t.Fatalf("preflight limit error = %v", err)
+			}
+		})
+	}
+}
+
 func TestPreflightEndTagIndexTracksEveryStackPop(t *testing.T) {
 	limits := DefaultLimits()
 	limits.Depth = 4
@@ -588,13 +641,16 @@ func TestInlineDeclarationsDecodeCSSIdentifierEscapes(t *testing.T) {
 		`display:n\6f ne`,
 		`visi\62 ility:hidden`,
 		`visibility:h\69 dden`,
-		`opa\63 ity:0`,
 		`font-si\7a e:0`,
 	} {
 		in := inspectHTML(t, `<span style="`+style+`">T</span>`)
 		if got := findText(t, in, "T").Label; got != "concealed" {
 			t.Errorf("style %q label = %q, want concealed", style, got)
 		}
+	}
+	in := inspectHTML(t, `<span style="opa\63 ity:0">T</span>`)
+	if got := findText(t, in, "T").Label; got != "unknown" {
+		t.Errorf("escaped opacity label = %q, want unknown", got)
 	}
 }
 
@@ -694,9 +750,9 @@ func TestInheritance(t *testing.T) {
 		{"display unknown ancestor", `<div style="display:var(--d)"><p style="display:block">T</p></div>`, "visible"},
 		{"visibility inherited", `<div style="visibility:hidden"><p>T</p></div>`, "concealed"},
 		{"visibility restored", `<div style="visibility:hidden"><p style="visibility:visible">T</p></div>`, "visible"},
-		{"opacity product", `<div style="opacity:10%"><p style="opacity:.1">T</p></div>`, "concealed"},
+		{"opacity product", `<div style="opacity:10%"><p style="opacity:.1">T</p></div>`, "unknown"},
 		{"opacity not inherited", `<div style="opacity:.2"><p>T</p></div>`, "visible"},
-		{"opacity zero proof", `<div style="opacity:var(--o)"><p style="opacity:0">T</p></div>`, "concealed"},
+		{"opacity zero proof", `<div style="opacity:var(--o)"><p style="opacity:0">T</p></div>`, "unknown"},
 		{"font parent", `<div style="font-size:20px"><p style="font-size:10%">T</p></div>`, "concealed"},
 		{"font rem root", `<html style="font-size:20px"><body><p style="font-size:.1rem">T</p></body></html>`, "concealed"},
 		{"font root rem", `<html style="font-size:.125rem"><body>T</body></html>`, "concealed"},
@@ -705,9 +761,9 @@ func TestInheritance(t *testing.T) {
 		{"font initial", `<div style="font-size:0"><p style="font-size:initial">T</p></div>`, "visible"},
 		{"font unset", `<div style="font-size:0"><p style="font-size:unset">T</p></div>`, "concealed"},
 		{"display unset", `<div style="display:none"><p style="display:unset">T</p></div>`, "concealed"},
-		{"hidden until found with box", `<div hidden="until-found" style="display:block">T</div>`, "concealed"},
+		{"hidden until found with box", `<div hidden="until-found" style="display:block">T</div>`, "unknown"},
 		{"hidden until found author override", `<div hidden="until-found" style="content-visibility:visible">T</div>`, "visible"},
-		{"opacity inherit", `<div style="opacity:.1"><p style="opacity:inherit">T</p></div>`, "concealed"},
+		{"opacity inherit", `<div style="opacity:.1"><p style="opacity:inherit">T</p></div>`, "unknown"},
 		{"ex unsupported", `<p style="font-size:2ex">T</p>`, "unknown"},
 		{"ch unsupported", `<p style="font-size:2ch">T</p>`, "unknown"},
 		{"lh unsupported", `<p style="font-size:2lh">T</p>`, "unknown"},
@@ -740,9 +796,9 @@ func TestNumbersAndColours(t *testing.T) {
 	for _, c := range []struct {
 		v    string
 		want float64
-	}{{"0", 0}, {"2px", 2}, {"1.5pt", 2}, {".125em", 2}, {"12.5%", 2}, {".125rem", 2}} {
+	}{{"0", 0}, {"2px", 2}, {"1.5pt", 2}, {".125pc", 2}, {".0529166666666667cm", 2}, {".529166666666667mm", 2}, {".0208333333333333in", 2}, {"2.11666666666667q", 2}, {".125em", 2}, {"12.5%", 2}, {".125rem", 2}} {
 		v, st := resolve(fontSize, c.v, initialPtr(), initialPtr())
-		if st != valueResolved || v.Number != c.want {
+		if st != valueResolved || math.Abs(v.Number-c.want) > 1e-12 {
 			t.Fatal(c, v, st)
 		}
 	}
@@ -832,13 +888,17 @@ func TestGoOnlyNumbersDoNotConcealText(t *testing.T) {
 		})
 	}
 
-	for _, property := range []string{`font-size:+0`, `opacity:+0`} {
+	for _, property := range []string{`font-size:+0`} {
 		t.Run(property, func(t *testing.T) {
 			document := inspectHTML(t, `<p style="`+property+`">T</p>`)
 			if got := findText(t, document, "T").Label; got != "concealed" {
 				t.Fatalf("label = %q, want concealed", got)
 			}
 		})
+	}
+	document := inspectHTML(t, `<p style="opacity:+0">T</p>`)
+	if got := findText(t, document, "T").Label; got != "unknown" {
+		t.Fatalf("opacity:+0 label = %q, want unknown", got)
 	}
 }
 func TestConditionsAndRecovery(t *testing.T) {
@@ -1184,6 +1244,7 @@ func TestPreparedDeclarationReleasesUnneededTokens(t *testing.T) {
 func TestRelevantDeclarationPropertyClassification(t *testing.T) {
 	relevant := []string{
 		"display", "DISPLAY", `d\69splay`, "margin", "background", "font", "all",
+		"animation", "animation-name", "-webkit-animation", "-webkit-animation-name",
 		"-webkit-mask", "-webkit-transform", "-ms-transform", "-webkit-text-stroke-width", "--custom",
 	}
 	for _, property := range relevant {
@@ -1191,7 +1252,7 @@ func TestRelevantDeclarationPropertyClassification(t *testing.T) {
 			t.Errorf("relevantDeclarationProperty(%q) = false", property)
 		}
 	}
-	for _, property := range []string{"border", "padding", "animation", "-vendor-display", ""} {
+	for _, property := range []string{"border", "padding", "-vendor-display", ""} {
 		if relevantDeclarationProperty(property) {
 			t.Errorf("relevantDeclarationProperty(%q) = true", property)
 		}
@@ -1271,10 +1332,12 @@ func TestMediaConditionPlanningIsCached(t *testing.T) {
 }
 
 func TestFailedAnalysisReturnsConsumedResourceUsage(t *testing.T) {
-	source := `<style>p{display:none}</style>` + strings.Repeat(`<table><td>`, DefaultLimits().Depth/2) + `T`
-	document, err := Analyze([]byte(source), DefaultLimits())
-	if err == nil || !strings.Contains(err.Error(), "tree depth") {
-		t.Fatalf("Analyze error = %v, want tree-depth rejection", err)
+	source := `<style>p{display:none}</style><p>T`
+	limits := DefaultLimits()
+	limits.Nodes = 7 // Preflight sees five tokens; the DOM adds structural nodes.
+	document, err := Analyze([]byte(source), limits)
+	if err == nil || !strings.Contains(err.Error(), "tree nodes") {
+		t.Fatalf("Analyze error = %v, want post-parse tree-node rejection", err)
 	}
 	if document.Root != nil || len(document.Text) != 0 || len(document.Elements) != 0 {
 		t.Fatalf("failed analysis exposed partial document content: %+v", document)
@@ -1812,6 +1875,37 @@ func TestMatchCacheStopsAtDocumentLimit(t *testing.T) {
 	}
 	if _, ok := cache[second]; ok {
 		t.Fatal("entry beyond the ceiling was cached")
+	}
+}
+
+func TestAttributeCandidateCacheSharesDocumentLimit(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(`.one{display:none}.two{display:none}`, false)
+	s.buildSelectorIndex(1, 2)
+	s.runtime.matchCacheEntries = maxMatchCacheEntries - 3
+	budget := matchBudget{limit: s.limits.MatchWork}
+	first := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: "one two"}}}
+	candidates, complete := s.attributeCandidateBuckets(first, &budget)
+	if !complete || len(candidates.direct) != 2 {
+		t.Fatalf("attribute candidates = %+v, complete=%t", candidates, complete)
+	}
+	if s.runtime.matchCacheEntries != maxMatchCacheEntries {
+		t.Fatalf("cache entries = %d, want ceiling", s.runtime.matchCacheEntries)
+	}
+	if _, ok := s.runtime.attributeCandidates[first]; !ok {
+		t.Fatal("attribute candidates below the ceiling were not cached")
+	}
+
+	second := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: "one"}}}
+	candidates, complete = s.attributeCandidateBuckets(second, &budget)
+	if !complete || len(candidates.direct) != 1 {
+		t.Fatalf("uncached attribute candidates = %+v, complete=%t", candidates, complete)
+	}
+	if s.runtime.matchCacheEntries != maxMatchCacheEntries {
+		t.Fatalf("cache exceeded ceiling: %d", s.runtime.matchCacheEntries)
+	}
+	if _, ok := s.runtime.attributeCandidates[second]; ok {
+		t.Fatal("attribute candidates beyond the ceiling were cached")
 	}
 }
 
