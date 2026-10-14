@@ -23,7 +23,7 @@ func (p *Processor) rejectionDetail(entry stores.Rejection) Response {
 			processedBody = "Saved message is attached, but its body could not be processed."
 			archived, parseErr := message.ParseArchived(archivedMessage.Contents, p.maxMessageSize)
 			if parseErr == nil {
-				processedBody = archived.ProcessedBody(MaxRejectionBodyRunes)
+				processedBody = archived.VisibleBody(MaxRejectionBodyRunes)
 				if strings.TrimSpace(processedBody) == "" {
 					processedBody = "No readable message text was found."
 				}

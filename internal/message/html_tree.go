@@ -1,0 +1,1129 @@
+package message
+
+import (
+	"fmt"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
+	xhtml "golang.org/x/net/html"
+)
+
+type HTMLExtractionMode uint8
+
+const (
+	TagHidden HTMLExtractionMode = iota
+	StripHidden
+)
+
+const (
+	maxConditionalFragmentBytes = 64 << 10
+	maxConditionalFragmentNodes = 8192
+	maxConditionalFragmentDepth = 128
+	maxConditionalOutputWork    = 128 << 10
+)
+
+type annotationUsage struct {
+	UsedInvisibleTag                      bool
+	UsedVisibilityVariesByViewportSizeTag bool
+	UsedVisibilityUncertainTag            bool
+	UsedHiddenContentStrippedTag          bool
+}
+
+var reservedAnnotation = regexp.MustCompile(`(?is)</?\s*(?:invisible|visibility-varies-by-viewport-size|visibility-uncertain|hidden-content-stripped)\b[^>]*>`)
+
+type htmlExtraction struct {
+	inspection  htmlextract.Document
+	states      map[*xhtml.Node]*htmlextract.Text
+	elements    map[*xhtml.Node]*htmlextract.Element
+	base        *url.URL
+	baseSeen    bool
+	links       linkCollector
+	images      imageRefCollector
+	anchorDepth int
+	compactURLs bool
+}
+
+type outputAnnotation struct {
+	kind, reason, value string
+}
+
+type outputChunk struct {
+	start, end int
+	annotation outputAnnotation
+}
+
+// annotatedOutput delays annotation markup until the rendered content is
+// complete. This lets equal effective visibility states flow across element
+// boundaries, layout whitespace, and generated Markdown such as links.
+type annotatedOutput struct {
+	data   []byte
+	chunks []outputChunk
+}
+
+func (o *annotatedOutput) WriteString(value string) { o.write(outputAnnotation{}, value) }
+func (o *annotatedOutput) WriteByte(value byte) error {
+	start := len(o.data)
+	o.data = append(o.data, value)
+	o.extendChunk(outputAnnotation{}, start)
+	return nil
+}
+
+func (o *annotatedOutput) write(annotation outputAnnotation, value string) {
+	if value == "" {
+		return
+	}
+	start := len(o.data)
+	o.data = append(o.data, value...)
+	o.extendChunk(annotation, start)
+}
+
+func (o *annotatedOutput) writeBytes(annotation outputAnnotation, value []byte) {
+	if len(value) == 0 {
+		return
+	}
+	start := len(o.data)
+	o.data = append(o.data, value...)
+	o.extendChunk(annotation, start)
+}
+
+func (o *annotatedOutput) extendChunk(annotation outputAnnotation, start int) {
+	if len(o.chunks) > 0 && o.chunks[len(o.chunks)-1].annotation == annotation {
+		o.chunks[len(o.chunks)-1].end = len(o.data)
+		return
+	}
+	o.chunks = append(o.chunks, outputChunk{start: start, end: len(o.data), annotation: annotation})
+}
+
+func (o *annotatedOutput) chunkBytes(chunk outputChunk) []byte {
+	return o.data[chunk.start:chunk.end]
+}
+
+func (o *annotatedOutput) plainText() string {
+	return string(o.data)
+}
+
+func (o *annotatedOutput) uniformAnnotation() (outputAnnotation, bool) {
+	var found outputAnnotation
+	haveContent := false
+	for _, chunk := range o.chunks {
+		if annotationWhitespaceOnlyBytes(o.chunkBytes(chunk)) {
+			continue
+		}
+		if !haveContent {
+			found = chunk.annotation
+			haveContent = true
+			continue
+		}
+		if chunk.annotation != found {
+			return outputAnnotation{}, false
+		}
+	}
+	return found, haveContent
+}
+
+func (o *annotatedOutput) String() string {
+	var out, pending strings.Builder
+	var active outputAnnotation
+	haveActive := false
+	closeActive := func() {
+		if !haveActive {
+			return
+		}
+		switch active.kind {
+		case "concealed":
+			out.WriteString("</invisible>")
+		case "client-dependent":
+			out.WriteString("</visibility-varies-by-viewport-size>")
+		case "unknown":
+			out.WriteString("</visibility-uncertain>")
+		}
+		haveActive = false
+	}
+	open := func(annotation outputAnnotation) {
+		switch annotation.kind {
+		case "concealed":
+			fmt.Fprintf(&out, `<invisible reason="%s"`, annotation.reason)
+			if annotation.value != "" {
+				fmt.Fprintf(&out, ` value="%s"`, annotation.value)
+			}
+			out.WriteByte('>')
+		case "client-dependent":
+			out.WriteString("<visibility-varies-by-viewport-size>")
+		case "unknown":
+			out.WriteString("<visibility-uncertain>")
+		case "stripped":
+			out.WriteString("<hidden-content-stripped/>")
+		}
+	}
+	lastWasStripped := false
+	for _, chunk := range o.chunks {
+		value := o.chunkBytes(chunk)
+		if annotationWhitespaceOnlyBytes(value) {
+			pending.Write(value)
+			continue
+		}
+		if chunk.annotation.kind == "stripped" {
+			closeActive()
+			out.WriteString(pending.String())
+			pending.Reset()
+			if !lastWasStripped {
+				open(chunk.annotation)
+			}
+			lastWasStripped = true
+			continue
+		}
+		lastWasStripped = false
+		if chunk.annotation.kind == "" {
+			closeActive()
+			out.WriteString(pending.String())
+			pending.Reset()
+			out.Write(value)
+			continue
+		}
+		if !haveActive || active != chunk.annotation {
+			closeActive()
+			out.WriteString(pending.String())
+			pending.Reset()
+			open(chunk.annotation)
+			active = chunk.annotation
+			haveActive = true
+		} else {
+			out.WriteString(pending.String())
+			pending.Reset()
+		}
+		out.Write(value)
+	}
+	closeActive()
+	out.WriteString(pending.String())
+	return out.String()
+}
+
+func htmlToText(source string) extractedContent {
+	return htmlToTextWithBudget(source, newExtractionBudget())
+}
+
+func htmlToTextWithBudget(source string, budget *extractionBudget) extractedContent {
+	budget.htmlParts++
+	if budget.useFallback() {
+		content := extractBoundedHTMLFallback(source, budget.compactURLs)
+		content.HTMLCPULimitExceeded = true
+		return content
+	}
+	limits, ok := budget.htmlLimits(len(source))
+	if !ok {
+		content := extractBoundedHTMLFallback(source, budget.compactURLs)
+		content.ExtractionIncomplete = true
+		return content
+	}
+	return extractTreeHTMLWithLimits(source, limits, budget)
+}
+
+func extractTreeHTML(source string) extractedContent {
+	return htmlToText(source)
+}
+
+func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget *extractionBudget) extractedContent {
+	inspection, err := htmlextract.AnalyzeWithStop([]byte(source), limits, budget.shouldFallback)
+	budget.consumeHTML(inspection.Usage)
+	if htmlextract.IsStopped(err) || budget.useFallback() {
+		content := extractBoundedHTMLFallback(source, budget.compactURLs)
+		content.HTMLCPULimitExceeded = true
+		return content
+	}
+	if err != nil {
+		// A bounded lexical fallback retains evidence when tree/style processing
+		// cannot complete. It is explicitly reported as incomplete extraction.
+		return extractBoundedHTMLFallback(source, budget.compactURLs)
+	}
+	e := htmlExtraction{
+		inspection:  inspection,
+		states:      make(map[*xhtml.Node]*htmlextract.Text, len(inspection.Text)),
+		elements:    make(map[*xhtml.Node]*htmlextract.Element, len(inspection.Elements)),
+		compactURLs: budget.compactURLs,
+		links:       linkCollector{compactURLs: budget.compactURLs},
+	}
+	for i := range inspection.Text {
+		state := &inspection.Text[i]
+		e.states[state.Node] = state
+	}
+	for i := range inspection.Elements {
+		state := &inspection.Elements[i]
+		e.elements[state.Node] = state
+	}
+	e.findBase(inspection.Root)
+	comments := collectHTMLCommentStats(inspection.Root)
+	tagged := e.render(TagHidden)
+	stripped := ""
+	if tagged.hasConcealed {
+		stripped = e.render(StripHidden).text
+	}
+	confidentChars := confidentVisibleCharacters(inspection.Text)
+	if inspection.UnresolvedStylesheet {
+		// An unevaluated stylesheet can alter any element in this HTML part, so
+		// none of its text is sufficiently certain to suppress image analysis.
+		confidentChars = 0
+	}
+	return extractedContent{
+		Text: tagged.text, VisibleText: tagged.visible, ConfidentVisibleChars: confidentChars, StrippedText: stripped,
+		Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
+		HTMLComments: comments, CSSIncomplete: inspection.UnresolvedStylesheet,
+	}
+}
+
+// confidentVisibleCharacters is deliberately separate from VisibleText.
+// VisibleText is a useful human-facing estimate and retains uncertain content;
+// only text positively classified as visible may suppress fallback image
+// analysis. Generated link destinations and image descriptions are not DOM
+// text nodes and therefore cannot inflate this count.
+func confidentVisibleCharacters(states []htmlextract.Text) int {
+	count := 0
+	for _, state := range states {
+		if state.Label != "visible" || state.Node == nil {
+			continue
+		}
+		value := compactFormattingPadding(sanitizeSenderText(state.Node.Data))
+		if value == "" || annotationWhitespaceOnly(value) {
+			continue
+		}
+		count += confidentTextCharacters(value)
+	}
+	return count
+}
+
+func confidentTextCharacters(value string) int {
+	value = normalizeHTMLText(compactFormattingPadding(sanitizeSenderText(value)))
+	if value == "" || annotationWhitespaceOnly(value) {
+		return 0
+	}
+	return utf8.RuneCountInString(value)
+}
+
+type htmlCommentStats struct {
+	Characters  int
+	WithinWords int
+}
+
+func (s *htmlCommentStats) add(other htmlCommentStats) {
+	s.Characters += other.Characters
+	s.WithinWords += other.WithinWords
+}
+
+func collectHTMLCommentStats(root *xhtml.Node) htmlCommentStats {
+	var stats htmlCommentStats
+	var walk func(*xhtml.Node)
+	walk = func(node *xhtml.Node) {
+		if node == nil {
+			return
+		}
+		if node.Type == xhtml.CommentNode && !conditionalHTMLComment(node.Data) {
+			stats.Characters += utf8.RuneCountInString(node.Data)
+			if commentBetweenWordFragments(node) {
+				stats.WithinWords++
+			}
+			return
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(root)
+	return stats
+}
+
+func conditionalHTMLComment(value string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "[if ")
+}
+
+func commentBetweenWordFragments(comment *xhtml.Node) bool {
+	if comment.PrevSibling == nil || comment.NextSibling == nil || comment.PrevSibling.Type != xhtml.TextNode || comment.NextSibling.Type != xhtml.TextNode {
+		return false
+	}
+	left, _ := utf8.DecodeLastRuneInString(comment.PrevSibling.Data)
+	right, _ := utf8.DecodeRuneInString(comment.NextSibling.Data)
+	return (unicode.IsLetter(left) || unicode.IsNumber(left)) && (unicode.IsLetter(right) || unicode.IsNumber(right))
+}
+
+type renderedHTML struct {
+	text, visible string
+	hasConcealed  bool
+}
+
+func (e *htmlExtraction) render(mode HTMLExtractionMode) renderedHTML {
+	var body annotatedOutput
+	var visible strings.Builder
+	e.walk(e.inspection.Root, mode, &body, &visible)
+	text := normalizeHTMLText(body.String())
+	visibleText := normalizeHTMLText(visible.String())
+	return renderedHTML{text: text, visible: visibleText, hasConcealed: e.hasConcealed()}
+}
+
+func (e *htmlExtraction) hasConcealed() bool {
+	for _, state := range e.inspection.Text {
+		if state.Label == "concealed" && state.Node != nil && strings.TrimSpace(state.Node.Data) != "" {
+			return true
+		}
+	}
+	for _, state := range e.inspection.Elements {
+		if state.Label == "concealed" && state.Node != nil {
+			name := strings.ToLower(state.Node.Data)
+			if name == "img" || name == "input" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {
+	if n == nil {
+		return
+	}
+	if n.Type == xhtml.TextNode {
+		e.writeText(n, mode, out, visible)
+		return
+	}
+	if n.Type == xhtml.CommentNode {
+		e.writeConditionalComment(n.Data, out, visible)
+		return
+	}
+	if n.Type != xhtml.ElementNode && n.Type != xhtml.DocumentNode {
+		return
+	}
+	name := strings.ToLower(n.Data)
+	if omittedHTMLElement(name) {
+		return
+	}
+	if name == "img" {
+		e.writeImage(n, mode, out, visible)
+		return
+	}
+	if name == "input" {
+		typ := strings.ToLower(strings.TrimSpace(firstAttr(n, "type")))
+		if typ == "submit" || typ == "button" || typ == "reset" {
+			label := sanitizeSenderText(firstAttr(n, "value"))
+			e.writeElementContent(n, label, mode, out, visible)
+		}
+		return
+	}
+	if isBlockElement(name) || name == "br" || name == "hr" {
+		out.WriteByte('\n')
+		visible.WriteByte('\n')
+	}
+	if name == "blockquote" {
+		marker := "[quoted content begins]\n"
+		if e.anchorDepth > 0 {
+			marker = `\[quoted content begins\] `
+		}
+		out.WriteString(marker)
+		visible.WriteString("[quoted content begins]\n")
+	}
+	if name == "a" {
+		var label annotatedOutput
+		var visibleLabel strings.Builder
+		e.anchorDepth++
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			e.walk(child, mode, &label, &visibleLabel)
+		}
+		e.anchorDepth--
+		destination, ok := e.destination(firstAttr(n, "href"))
+		if ok {
+			destination = e.links.AddDestination(destination)
+			plain := strings.TrimSpace(label.plainText())
+			if plain == "" {
+				plain = "link"
+			}
+			rendered := "[" + plain + "](" + markdownURL(destination) + ")"
+			if annotation, uniform := label.uniformAnnotation(); uniform {
+				out.write(annotation, rendered)
+			} else {
+				// Preserve distinct child annotations when a label crosses a real
+				// visibility boundary.
+				out.WriteByte('[')
+				out.WriteString(strings.TrimSpace(label.String()))
+				out.WriteString("](")
+				out.WriteString(markdownURL(destination))
+				out.WriteByte(')')
+			}
+		} else {
+			for _, chunk := range label.chunks {
+				out.writeBytes(chunk.annotation, label.chunkBytes(chunk))
+			}
+		}
+		visible.WriteString(visibleLabel.String())
+		return
+	}
+	for child := n.FirstChild; child != nil; child = child.NextSibling {
+		e.walk(child, mode, out, visible)
+	}
+	if name == "blockquote" {
+		marker := "\n[quoted content ends]"
+		if e.anchorDepth > 0 {
+			marker = ` \[quoted content ends\]`
+		}
+		out.WriteString(marker)
+		visible.WriteString("\n[quoted content ends]")
+	}
+	if isBlockElement(name) {
+		out.WriteByte('\n')
+		visible.WriteByte('\n')
+	}
+}
+
+func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {
+	if content == "" {
+		return
+	}
+	promptContent := rewritePlainTextURLs(content, e.compactURLs, &e.links)
+	state := e.elements[n]
+	if state == nil {
+		out.WriteString(promptContent)
+		visible.WriteString(content)
+		return
+	}
+	switch state.Label {
+	case "concealed":
+		if mode == StripHidden {
+			out.write(outputAnnotation{kind: "stripped"}, promptContent)
+			return
+		}
+		reason, value := elementConcealmentReason(state)
+		out.write(outputAnnotation{kind: "concealed", reason: reason, value: value}, promptContent)
+	case "client-dependent":
+		out.write(outputAnnotation{kind: "client-dependent"}, promptContent)
+		visible.WriteString(content)
+	case "unknown":
+		out.write(outputAnnotation{kind: "unknown"}, promptContent)
+		visible.WriteString(content)
+	default:
+		out.WriteString(promptContent)
+		visible.WriteString(content)
+	}
+}
+
+func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutput, visible *strings.Builder) {
+	trimmed := strings.TrimSpace(data)
+	if !conditionalHTMLComment(trimmed) {
+		return
+	}
+	start := strings.Index(trimmed, "]>")
+	end := lastIndexASCIIFold(trimmed, "<![endif]")
+	if start < 0 || end <= start+2 {
+		return
+	}
+	raw := trimmed[start+2 : end]
+	if len(raw) > maxConditionalFragmentBytes {
+		return
+	}
+	fragment, err := xhtml.ParseFragment(strings.NewReader(raw), nil)
+	if err != nil {
+		return
+	}
+	var content strings.Builder
+	walk := conditionalWalk{links: linkCollector{compactURLs: e.compactURLs}}
+	for _, node := range fragment {
+		if !e.walkConditionalNode(node, &content, &walk, 0) {
+			return
+		}
+	}
+	value := normalizeHTMLText(content.String())
+	if value == "" || annotationWhitespaceOnly(value) {
+		return
+	}
+	for _, destination := range walk.links.links {
+		e.links.AddDestination(destination)
+	}
+	out.write(outputAnnotation{kind: "unknown"}, value)
+	visible.WriteString(value)
+}
+
+// lastIndexASCIIFold finds an ASCII syntax marker without transforming the
+// input. Unicode case conversion can change a string's byte length, making an
+// index obtained from the converted copy unsafe for slicing the original.
+func lastIndexASCIIFold(value, marker string) int {
+	if marker == "" {
+		return len(value)
+	}
+	for start := len(value) - len(marker); start >= 0; start-- {
+		matched := true
+		for i := range marker {
+			left, right := value[start+i], marker[i]
+			if left >= 'A' && left <= 'Z' {
+				left += 'a' - 'A'
+			}
+			if right >= 'A' && right <= 'Z' {
+				right += 'a' - 'A'
+			}
+			if left != right {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return start
+		}
+	}
+	return -1
+}
+
+type conditionalWalk struct {
+	nodes       int
+	outputWork  int
+	links       linkCollector
+	anchorDepth int
+}
+
+func (w *conditionalWalk) enter(depth int) bool {
+	if depth > maxConditionalFragmentDepth || w.nodes >= maxConditionalFragmentNodes {
+		return false
+	}
+	w.nodes++
+	return true
+}
+
+func (w *conditionalWalk) writeString(out *strings.Builder, value string) bool {
+	if len(value) > maxConditionalOutputWork-w.outputWork {
+		return false
+	}
+	w.outputWork += len(value)
+	out.WriteString(value)
+	return true
+}
+
+func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *strings.Builder, walk *conditionalWalk, depth int) bool {
+	if !walk.enter(depth) {
+		return false
+	}
+	if n.Type == xhtml.TextNode {
+		value := sanitizeSenderText(n.Data)
+		if walk.anchorDepth > 0 {
+			value = rewritePlainTextURLs(value, e.compactURLs, nil)
+		} else {
+			value = rewritePlainTextURLs(value, e.compactURLs, &walk.links)
+		}
+		return walk.writeString(out, value)
+	}
+	if n.Type != xhtml.ElementNode && n.Type != xhtml.DocumentNode {
+		return true
+	}
+	name := strings.ToLower(n.Data)
+	// Outlook conditionals can contain Office configuration XML alongside
+	// alternate message markup. It is presentation code, not recipient-facing
+	// fallback content.
+	if omittedHTMLElement(name) || name == "xml" || strings.HasPrefix(name, "o:") {
+		return true
+	}
+	if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, "a") {
+		var label strings.Builder
+		walk.anchorDepth++
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			if !e.walkConditionalNode(child, &label, walk, depth+1) {
+				walk.anchorDepth--
+				return false
+			}
+		}
+		walk.anchorDepth--
+		if destination, ok := e.destination(firstAttr(n, "href")); ok {
+			destination = walk.links.AddDestination(destination)
+			rendered := fmt.Sprintf("[%s](%s)", markdownLabelText(strings.TrimSpace(label.String())), markdownURL(destination))
+			if !walk.writeString(out, rendered) {
+				return false
+			}
+		} else {
+			if !walk.writeString(out, label.String()) {
+				return false
+			}
+		}
+		return true
+	}
+	if isBlockElement(name) || strings.EqualFold(n.Data, "br") {
+		if !walk.writeString(out, "\n") {
+			return false
+		}
+	}
+	for child := n.FirstChild; child != nil; child = child.NextSibling {
+		if !e.walkConditionalNode(child, out, walk, depth+1) {
+			return false
+		}
+	}
+	if isBlockElement(name) {
+		if !walk.writeString(out, "\n") {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {
+	text := compactFormattingPadding(sanitizeSenderText(n.Data))
+	if text == "" {
+		return
+	}
+	state := e.states[n]
+	if state == nil {
+		return // source in head/style/script/title/template or another inert scope
+	}
+	var outText string
+	if e.anchorDepth > 0 {
+		// Text resembling a URL inside an anchor label is sender-visible text,
+		// not an independently validated destination.
+		outText = rewritePlainTextURLs(text, e.compactURLs, nil)
+		outText = markdownLabelText(outText)
+	} else {
+		outText = rewritePlainTextURLs(text, e.compactURLs, &e.links)
+	}
+	// Presentation annotations around whitespace add noise without carrying a
+	// visibility claim about message content. This includes decoded HTML space
+	// entities such as &nbsp; (U+00A0) and standalone runs of invisible formatting
+	// characters. Formatting characters embedded in meaningful text still follow
+	// that text's visibility state and remain available as obfuscation evidence.
+	if annotationWhitespaceOnly(text) {
+		// Source indentation between inline elements is ordinary collapsible HTML
+		// whitespace, not a rendered line break. Preserve non-collapsible Unicode
+		// spacing and formatting evidence, while folding ASCII HTML whitespace to
+		// the single space a browser would render.
+		spacing := outText
+		if inlineFormattingGap(n) {
+			spacing = collapseHTMLFormattingWhitespace(outText)
+		}
+		out.WriteString(spacing)
+		if state.Label != "concealed" {
+			visible.WriteString(spacing)
+		}
+		return
+	}
+	switch state.Label {
+	case "concealed":
+		if mode == StripHidden {
+			out.write(outputAnnotation{kind: "stripped"}, outText)
+			return
+		}
+		reason, value := concealmentReason(state)
+		out.write(outputAnnotation{kind: "concealed", reason: reason, value: value}, outText)
+	case "client-dependent":
+		out.write(outputAnnotation{kind: "client-dependent"}, outText)
+		visible.WriteString(text)
+	case "unknown":
+		out.write(outputAnnotation{kind: "unknown"}, outText)
+		visible.WriteString(text)
+	default:
+		out.WriteString(outText)
+		visible.WriteString(text)
+	}
+}
+
+func inlineFormattingGap(n *xhtml.Node) bool {
+	return inlineRenderedNode(n.PrevSibling) && inlineRenderedNode(n.NextSibling)
+}
+
+func inlineRenderedNode(n *xhtml.Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.Type == xhtml.TextNode {
+		return !annotationWhitespaceOnly(n.Data)
+	}
+	if n.Type != xhtml.ElementNode {
+		return false
+	}
+	name := strings.ToLower(n.Data)
+	return !omittedHTMLElement(name) && !isBlockElement(name) && name != "br" && name != "hr" && !inlineStyleUsesBlockLayout(n)
+}
+
+func inlineStyleUsesBlockLayout(n *xhtml.Node) bool {
+	block := false
+	for declaration := range strings.SplitSeq(firstAttr(n, "style"), ";") {
+		property, value, found := strings.Cut(declaration, ":")
+		if !found || !strings.EqualFold(strings.TrimSpace(property), "display") {
+			continue
+		}
+		value = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(value), "!important")))
+		switch value {
+		case "block", "flow-root", "flex", "grid", "list-item", "table", "table-row", "table-cell", "table-caption":
+			block = true
+		case "inline", "inline-block", "inline-flex", "inline-grid", "contents":
+			block = false
+		}
+	}
+	return block
+}
+
+func collapseHTMLFormattingWhitespace(value string) string {
+	var out strings.Builder
+	pendingSpace := false
+	for _, r := range value {
+		switch r {
+		case ' ', '\t', '\n', '\f', '\r':
+			pendingSpace = true
+		default:
+			if pendingSpace {
+				out.WriteByte(' ')
+				pendingSpace = false
+			}
+			out.WriteRune(r)
+		}
+	}
+	if pendingSpace {
+		out.WriteByte(' ')
+	}
+	return out.String()
+}
+
+// Email preheaders commonly repeat a mixture of spaces and default-ignorable
+// Unicode characters hundreds of times to occupy inbox-preview width. Preserve
+// a small sample as evidence, but do not let formatting-only padding dominate
+// the LLM input. Ordinary whitespace and short obfuscation runs are unchanged.
+func compactFormattingPadding(value string) string {
+	const threshold, retained = 32, 8
+	runLength := 0
+	hasFormat := false
+	needsCompaction := false
+	for _, r := range value {
+		if !preheaderPaddingRune(r) {
+			runLength = 0
+			hasFormat = false
+			continue
+		}
+		runLength++
+		hasFormat = hasFormat || !unicode.IsSpace(r)
+		if runLength >= threshold && hasFormat {
+			needsCompaction = true
+			break
+		}
+	}
+	if !needsCompaction {
+		return value
+	}
+	runes := []rune(value)
+	var out strings.Builder
+	for start := 0; start < len(runes); {
+		end := start
+		hasFormat := false
+		for end < len(runes) && preheaderPaddingRune(runes[end]) {
+			hasFormat = hasFormat || !unicode.IsSpace(runes[end])
+			end++
+		}
+		if end == start {
+			out.WriteRune(runes[start])
+			start++
+			continue
+		}
+		keep := end - start
+		if hasFormat && keep >= threshold {
+			keep = retained
+		}
+		for _, r := range runes[start : start+keep] {
+			out.WriteRune(r)
+		}
+		start = end
+	}
+	return out.String()
+}
+
+func preheaderPaddingRune(r rune) bool {
+	if unicode.IsSpace(r) {
+		return true
+	}
+	switch r {
+	case '\u00ad', '\u034f', '\u061c', '\u180e', '\u200b', '\u200c', '\u200d', '\u200e', '\u200f', '\u2060', '\ufeff':
+		return true
+	}
+	return false
+}
+
+func annotationWhitespaceOnly(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if !preheaderPaddingRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func annotationWhitespaceOnlyBytes(value []byte) bool {
+	if len(value) == 0 {
+		return false
+	}
+	for len(value) > 0 {
+		r, size := utf8.DecodeRune(value)
+		if !preheaderPaddingRune(r) {
+			return false
+		}
+		value = value[size:]
+	}
+	return true
+}
+
+func concealmentReason(state *htmlextract.Text) (string, string) {
+	for _, reason := range state.ConcealmentReasons {
+		switch reason {
+		case "display-none":
+			return "display:none", ""
+		case "visibility-hidden":
+			return "visibility:hidden", ""
+		case "visibility-collapse":
+			return "visibility:collapse", ""
+		case "content-visibility-hidden":
+			return "content-visibility:hidden", ""
+		case "opacity":
+			return "opacity", strconv.FormatFloat(state.EffectiveOpacity, 'g', 6, 64)
+		case "font-size":
+			return "font-size", state.FontSize
+		case "colour-distance":
+			return "color-match", ""
+		case "empty-clip":
+			return "empty-clip", ""
+		}
+	}
+	return "display:none", ""
+}
+
+func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {
+	if explicitTrackingPixel(n) {
+		return
+	}
+	raw := strings.TrimSpace(firstAttr(n, "src"))
+	alt := sanitizeSenderText(firstAttr(n, "alt"))
+	alt = rewritePlainTextURLs(alt, e.compactURLs, nil)
+	var rendered string
+	if strings.HasPrefix(strings.ToLower(raw), "cid:") {
+		id := normalizeContentID(raw[4:])
+		if id == "" {
+			return
+		}
+		if alt == "" {
+			alt = "embedded image"
+		}
+		rendered = fmt.Sprintf(" ![%s](cid:%s) ", markdownLabelText(alt), markdownURL(id))
+		e.images.Add(id)
+	} else if destination, ok := e.destination(raw); ok && (strings.HasPrefix(destination, "http://") || strings.HasPrefix(destination, "https://")) {
+		if alt == "" {
+			alt = "image"
+		}
+		destination = e.links.AddDestination(destination)
+		rendered = fmt.Sprintf(" ![%s](%s) ", markdownLabelText(alt), markdownURL(destination))
+	}
+	if rendered == "" {
+		return
+	}
+	state := e.elements[n]
+	if state == nil {
+		out.WriteString(rendered)
+		return
+	}
+	switch state.Label {
+	case "concealed":
+		if mode == StripHidden {
+			out.write(outputAnnotation{kind: "stripped"}, rendered)
+			return
+		}
+		reason, value := elementConcealmentReason(state)
+		out.write(outputAnnotation{kind: "concealed", reason: reason, value: value}, rendered)
+	case "client-dependent":
+		out.write(outputAnnotation{kind: "client-dependent"}, rendered)
+	case "unknown":
+		out.write(outputAnnotation{kind: "unknown"}, rendered)
+	default:
+		out.WriteString(rendered)
+	}
+}
+
+func explicitTrackingPixel(n *xhtml.Node) bool {
+	if strings.TrimSpace(firstAttr(n, "alt")) != "" {
+		return false
+	}
+	unit := func(name string) bool {
+		value, present := attrPresent(n, name)
+		if !present {
+			return false
+		}
+		value = strings.TrimSpace(strings.TrimSuffix(strings.ToLower(value), "px"))
+		n, err := strconv.ParseFloat(value, 64)
+		return err == nil && n > 0 && n <= 1
+	}
+	return unit("width") && unit("height")
+}
+
+func elementConcealmentReason(state *htmlextract.Element) (string, string) {
+	for _, reason := range state.ConcealmentReasons {
+		switch reason {
+		case "display-none":
+			return "display:none", ""
+		case "visibility-hidden":
+			return "visibility:hidden", ""
+		case "visibility-collapse":
+			return "visibility:collapse", ""
+		case "content-visibility-hidden":
+			return "content-visibility:hidden", ""
+		case "opacity":
+			return "opacity", strconv.FormatFloat(state.EffectiveOpacity, 'g', 6, 64)
+		case "empty-clip":
+			return "empty-clip", ""
+		}
+	}
+	return "display:none", ""
+}
+
+func (e *htmlExtraction) findBase(n *xhtml.Node) {
+	if n == nil || e.baseSeen {
+		return
+	}
+	if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, "template") {
+		return
+	}
+	if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, "base") {
+		raw, present := attrPresent(n, "href")
+		if present {
+			e.baseSeen = true
+			if parsed, err := url.Parse(strings.TrimSpace(raw)); err == nil && parsed.IsAbs() && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+				e.base = parsed
+			}
+			return // first base href wins even when unusable
+		}
+	}
+	for child := n.FirstChild; child != nil; child = child.NextSibling {
+		e.findBase(child)
+	}
+}
+
+func (e *htmlExtraction) destination(raw string) (string, bool) {
+	raw = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r == '\t' || r == '\x00' {
+			return -1
+		}
+		return r
+	}, raw))
+	var encoded strings.Builder
+	authorityEnd := 0
+	if scheme := strings.Index(raw, "://"); scheme >= 0 {
+		authorityEnd = len(raw)
+		if rest := strings.IndexAny(raw[scheme+3:], "/?#"); rest >= 0 {
+			authorityEnd = scheme + 3 + rest
+		}
+	}
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c < 0x20 || c == 0x7f {
+			if authorityEnd > 0 && i < authorityEnd {
+				return "", false
+			}
+			fmt.Fprintf(&encoded, "%%%02X", c)
+		} else {
+			encoded.WriteByte(c)
+		}
+	}
+	raw = encoded.String()
+	if raw == "" {
+		return "", false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", false
+	}
+	if parsed.IsAbs() {
+		scheme := strings.ToLower(parsed.Scheme)
+		if scheme != "http" && scheme != "https" && scheme != "mailto" && scheme != "tel" {
+			return "", false
+		}
+		if (scheme == "http" || scheme == "https") && parsed.Hostname() == "" {
+			return "", false
+		}
+		return parsed.String(), true
+	}
+	if e.base != nil {
+		return e.base.ResolveReference(parsed).String(), true
+	}
+	return raw, true
+}
+
+func firstAttr(n *xhtml.Node, key string) string { value, _ := attrPresent(n, key); return value }
+func attrPresent(n *xhtml.Node, key string) (string, bool) {
+	for _, a := range n.Attr {
+		if strings.EqualFold(a.Key, key) {
+			return a.Val, true
+		}
+	}
+	return "", false
+}
+
+func omittedHTMLElement(name string) bool {
+	switch name {
+	case "head", "style", "script", "title", "template", "iframe", "object":
+		return true
+	}
+	return false
+}
+
+func isBlockElement(name string) bool {
+	switch name {
+	case "address", "article", "aside", "blockquote", "div", "dl", "dt", "dd", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "thead", "tfoot", "tr", "td", "th", "ul":
+		return true
+	}
+	return false
+}
+
+func sanitizeSenderText(value string) string {
+	if !strings.Contains(value, "<") {
+		return value
+	}
+	return reservedAnnotation.ReplaceAllString(value, "")
+}
+
+func normalizeHTMLText(value string) string {
+	value = strings.ToValidUTF8(value, "�")
+	var b strings.Builder
+	b.Grow(len(value))
+	space, newlines := false, 0
+	for _, r := range value {
+		switch r {
+		case ' ', '\t', '\f':
+			space = true
+		case '\r', '\n':
+			space = false
+			if b.Len() > 0 && newlines < 2 {
+				b.WriteByte('\n')
+				newlines++
+			}
+		default:
+			if space && b.Len() > 0 && newlines == 0 {
+				b.WriteByte(' ')
+			}
+			space, newlines = false, 0
+			if r < utf8.RuneSelf {
+				b.WriteByte(byte(r))
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return strings.Trim(b.String(), " \t\r\n\f")
+}
+
+func (collector *linkCollector) AddDestination(candidate string) string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return ""
+	}
+	candidate = promptURL(candidate, collector.compactURLs)
+	if collector.seen == nil {
+		collector.seen = make(map[string]struct{})
+	}
+	if _, exists := collector.seen[candidate]; exists {
+		return candidate
+	}
+	characters := utf8.RuneCountInString(candidate)
+	if len(collector.links) >= maxExtractedLinks || collector.chars+characters > maxExtractedLinkChars {
+		return candidate
+	}
+	collector.seen[candidate] = struct{}{}
+	collector.links = append(collector.links, candidate)
+	collector.chars += characters
+	return candidate
+}

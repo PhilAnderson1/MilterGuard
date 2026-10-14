@@ -133,7 +133,11 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 		err = ss.writeAcceptedResultHeaders(&result)
 	}
 	if err == nil {
-		err = ss.writePolicyResponse(result.selected, ss.deps.filtering.RejectMessage)
+		rejectMessage := ss.deps.filtering.RejectMessage
+		if result.rejectMessage != "" {
+			rejectMessage = result.rejectMessage
+		}
+		err = ss.writePolicyResponse(result.selected, rejectMessage)
 	}
 	ss.deps.analysis.logOutcome(ctx, ss.message, result, ss.deps.mode, ss.deps.logging.IncludeSubject, err == nil, err)
 	ss.deps.activity.recordScan(ctx, result, err)

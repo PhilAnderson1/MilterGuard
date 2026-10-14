@@ -91,8 +91,27 @@ type Image struct {
 }
 
 type Analysis struct {
-	Prompt string
-	Images []Image
+	Prompt                                string
+	Images                                []Image
+	HasHTML                               bool
+	BodyTruncated                         bool
+	BodyExtractionIncomplete              bool
+	ConcealedContentRemoved               bool
+	HasConcealedContent                   bool
+	UsedInvisibleTag                      bool
+	UsedVisibilityVariesByViewportSizeTag bool
+	UsedVisibilityUncertainTag            bool
+	UsedHiddenContentStrippedTag          bool
+	HTMLCPULimitExceeded                  bool
+}
+
+// HTMLProcessingControl lets the caller switch HTML parts to the bounded
+// lexical fallback when an external resource budget has expired. The callback
+// is sampled only at safe extraction boundaries and must be inexpensive.
+type HTMLProcessingControl struct {
+	ShouldFallback       func() bool
+	ForceFallback        bool
+	DisableURLCompaction bool
 }
 
 const (

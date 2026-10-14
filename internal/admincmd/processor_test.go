@@ -1,6 +1,7 @@
 package admincmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io/fs"
@@ -172,7 +173,8 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	repository := &activityRepositoryStub{
 		summary: stores.ActivitySummary{
 			ScanTotal: 30, ScanRejections: 20, ScanAccepted: 10, AIEvaluationsFailed: 1,
-			IPRejections: 2, CorrespondentAccepts: 1, TokenCost: .0197,
+			IPRejections: 2, CorrespondentAccepts: 1, HTMLLimitRejections: 4, HTMLLimitAccepted: 1,
+			HTMLDoSRejections: 3, HTMLDoSAccepted: 2, TokenCost: .0197,
 		},
 		status: stores.ServiceStatus{StartedAt: now.Add(-time.Hour), Mode: stores.ServiceModeAccept}, found: true,
 	}
@@ -187,9 +189,9 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	for _, want := range []string{
 		"MilterGuard is running in accept mode", "This period also contains rejections recorded in enforce mode",
 		"Activity: past week", "Retention: 365 days",
-		"Service uptime: 1 hour", "Total rejected: 22", "  AI classification: 20", "  IP reputation: 2",
+		"Service uptime: 1 hour", "Total rejected: 29", "  AI classification: 20", "  HTML processing CPU limit: 4", "  HTML/CSS DoS protection: 3", "  IP reputation: 2",
 		"  Attachment policy: 0", "  Protected sender-domain policy: 0",
-		"Total accepted: 11", "  AI classification: 10", "  Correspondent whitelist: 1", "  Trusted sender domain: 0",
+		"Total accepted: 14", "  AI classification: 10", "  HTML processing CPU limit (accept mode): 1", "  HTML/CSS DoS protection (accept mode): 2", "  Correspondent whitelist: 1", "  Trusted sender domain: 0",
 		"Total AI scans: 30", "AI evaluations failed: 1",
 		"Token costs are estimates based on endpoint-reported usage and configured prices.",
 		"Total token cost: USD 0.0197", "Average cost per message scanned: USD 0.000657",
@@ -200,6 +202,12 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	}
 	if strings.Contains(response.Text, "Period:") {
 		t.Errorf("activity response contains redundant exact period:\n%s", response.Text)
+	}
+	if strings.Index(response.Text, "  HTML/CSS DoS protection: 3") < strings.Index(response.Text, "  Sender blocklist: 0") {
+		t.Errorf("HTML/CSS DoS rejection count is not last in its list:\n%s", response.Text)
+	}
+	if strings.Index(response.Text, "  HTML/CSS DoS protection (accept mode): 2") < strings.Index(response.Text, "  Trusted sender domain: 0") {
+		t.Errorf("HTML/CSS DoS accepted count is not last in its list:\n%s", response.Text)
 	}
 }
 
@@ -222,6 +230,26 @@ func TestRejectionArchiveReadIsDeferred(t *testing.T) {
 	response := deferred()
 	if source.reads != 1 || !strings.Contains(response.Text, "Body text") || len(response.Attachments) != 1 || response.Attachments[0].SourcePath != "/archive/2026/09/20/7.eml" {
 		t.Fatalf("response=%#v reads=%d", response, source.reads)
+	}
+}
+
+func TestRejectionDetailDisplaysVisibleBodyAndAttachesOriginal(t *testing.T) {
+	entry := stores.Rejection{ID: 7, Sender: "sender@example.net", Recipients: []string{"user@example.com"}, RejectedAt: time.Now()}
+	repository := &rejectionRepositoryStub{entry: entry}
+	raw := []byte("From: sender@example.net\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n" +
+		`<p>Visible notice</p><div style="display:none">Concealed padding</div>`)
+	source := &messageSourceStub{contents: raw}
+	p := New(Dependencies{Rejections: repository, MessageSource: source, MaxMessageSize: 1 << 20})
+
+	response, err := p.ExecuteLine(context.Background(), "REJECTION 7", Actor{DefaultRecipient: "user@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.Text, "Visible notice") || strings.Contains(response.Text, "Concealed padding") || strings.Contains(response.Text, "<invisible") {
+		t.Fatalf("rejection detail body = %q", response.Text)
+	}
+	if len(response.Attachments) != 1 || !bytes.Equal(response.Attachments[0].Contents, raw) {
+		t.Fatalf("rejection detail attachments = %#v", response.Attachments)
 	}
 }
 

@@ -18,11 +18,15 @@ import (
 	lib "modernc.org/sqlite/lib"
 )
 
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 6
 
 var (
 	//go:embed schema/schema.sql
 	currentSchema string
+	//go:embed schema/migrate_4_to_5.sql
+	migrateSchema4To5 string
+	//go:embed schema/migrate_5_to_6.sql
+	migrateSchema5To6 string
 
 	ErrIncompatibleDatabase = errors.New("incompatible SQLite database format")
 )
@@ -149,6 +153,24 @@ func (s *Store) prepareSchema(ctx context.Context) error {
 			}
 			if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", CurrentSchemaVersion)); err != nil {
 				return fmt.Errorf("set SQLite schema version %d: %w", CurrentSchemaVersion, err)
+			}
+			return nil
+		}
+		if version == 4 {
+			if _, err := tx.ExecContext(ctx, migrateSchema4To5); err != nil {
+				return fmt.Errorf("migrate SQLite schema from version 4 to 5: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 5"); err != nil {
+				return fmt.Errorf("set SQLite schema version 5: %w", err)
+			}
+			version = 5
+		}
+		if version == 5 {
+			if _, err := tx.ExecContext(ctx, migrateSchema5To6); err != nil {
+				return fmt.Errorf("migrate SQLite schema from version 5 to 6: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 6"); err != nil {
+				return fmt.Errorf("set SQLite schema version 6: %w", err)
 			}
 			return nil
 		}

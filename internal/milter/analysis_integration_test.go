@@ -10,6 +10,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 	"io"
 	"log/slog"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +24,207 @@ type recordingAnalyzer struct {
 type failingAnalyzer struct{}
 
 type usageFailingAnalyzer struct{ usage ai.Usage }
+
+func TestIncompleteBodyRejectSkipsAIAndRespectsMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode     string
+		selected action
+	}{{"enforce", actionReject}, {"accept", actionAccept}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+			service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
+				Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 8,
+				IncompleteBodyAction: "reject", VisionMode: "off",
+			}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			msg := message.New(1024)
+			msg.AddHeader("Content-Type", "text/plain")
+			msg.AddBody([]byte(strings.Repeat("evidence ", 20)))
+			result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, tc.mode, .9, "accept", false)
+			if result.proposed != actionReject || result.selected != tc.selected || analyzer.calls.Load() != 0 {
+				t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
+			}
+		})
+	}
+}
+
+func TestHTMLCPUProtectionSkipsAIAndRespectsMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode     string
+		selected action
+	}{{"enforce", actionReject}, {"accept", actionAccept}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			const rejectMessage = "HTML CPU limit exceeded"
+			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+			readings := []time.Duration{time.Second, 2*time.Second + time.Millisecond, 2*time.Second + time.Millisecond}
+			reading := 0
+			service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
+				Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
+				MaxHTMLParseCPUMilliseconds: 1000, HTMLParseCPULimitAction: "dos-reject", HTMLDoSRejectMessage: rejectMessage, VisionMode: "off",
+			}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			service.threadCPUTime = func() (time.Duration, bool) {
+				value := readings[reading]
+				reading++
+				return value, true
+			}
+			msg := message.New(1024)
+			msg.AddHeader("Content-Type", "text/html")
+			msg.AddBody([]byte("<p>ordinary message</p>"))
+			result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, tc.mode, .9, "accept", false)
+			if result.proposed != actionReject || result.selected != tc.selected ||
+				result.classification != ai.ClassificationUnwanted || !result.htmlCPUExceeded ||
+				result.htmlCPUTime != time.Second+time.Millisecond || result.rejectMessage != rejectMessage ||
+				analyzer.calls.Load() != 0 {
+				t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
+			}
+		})
+	}
+}
+
+func TestHTMLCPULimitFallbackContinuesAIWithBoundedExtraction(t *testing.T) {
+	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 1)}
+	readings := []time.Duration{time.Second, 2 * time.Second, 2 * time.Second}
+	reading := 0
+	service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
+		Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 4096,
+		MaxHTMLParseCPUMilliseconds: 250, HTMLParseCPULimitAction: "fallback", VisionMode: "off",
+	}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service.threadCPUTime = func() (time.Duration, bool) {
+		value := readings[min(reading, len(readings)-1)]
+		reading++
+		return value, true
+	}
+	msg := message.New(4096)
+	msg.AddHeader("Content-Type", "text/html")
+	msg.AddBody([]byte(`<p style="display:none">hidden</p><p>ordinary message</p>`))
+	result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
+	if result.selected != actionAccept || !result.htmlCPUExceeded || result.htmlCPUAction != "fallback" {
+		t.Fatalf("result=%+v", result)
+	}
+	input := <-analyzer.inputs
+	if !strings.Contains(input.Text, "HTML/CSS visibility analysis unavailable") || strings.Contains(input.Text, `<invisible`) {
+		t.Fatalf("fallback AI input = %q", input.Text)
+	}
+}
+
+func TestHTMLCPULimitRejectIsNotDoSActivity(t *testing.T) {
+	repository := &recordingActivity{}
+	service := &activityService{repository: repository}
+	service.recordScan(context.Background(), evaluationResult{
+		selected: actionReject, htmlCPUExceeded: true, htmlCPUAction: "reject",
+	}, nil)
+	if len(repository.events) != 1 || repository.events[0].EventType != stores.ActivityEventHTMLLimit {
+		t.Fatalf("activity events = %+v", repository.events)
+	}
+}
+
+func TestHTMLCPULimitRejectSkipsAIWithoutDoSMessage(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: ai.ClassificationLegitimate, Score: 1}}
+	readings := []time.Duration{time.Second, 2 * time.Second, 2 * time.Second}
+	reading := 0
+	service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
+		Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
+		MaxHTMLParseCPUMilliseconds: 250, HTMLParseCPULimitAction: "reject",
+		HTMLDoSRejectMessage: "must not be used", VisionMode: "off",
+	}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service.threadCPUTime = func() (time.Duration, bool) {
+		value := readings[min(reading, len(readings)-1)]
+		reading++
+		return value, true
+	}
+	msg := message.New(1024)
+	msg.AddHeader("Content-Type", "text/html")
+	msg.AddBody([]byte("<p>ordinary message</p>"))
+	result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
+	if result.selected != actionReject || result.htmlCPUAction != "reject" || !result.htmlCPUExceeded ||
+		result.classification != "" || result.rejectMessage != "" || analyzer.calls.Load() != 0 {
+		t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
+	}
+}
+
+func TestHTMLCPULimitRejectDoesNotAddIPReputationStrike(t *testing.T) {
+	repository := &recordingIPReputationRepository{}
+	policy := &messagePolicyService{
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)), rejectionHistory: &recordingRejectionHistory{},
+		ipReputation: &ipReputationStore{repository: repository, enabledFeature: true},
+	}
+	policy.applyPostDecisionUpdates(context.Background(), messageContext{
+		message: message.New(1024), peerIP: netip.MustParseAddr("192.0.2.10"),
+	}, evaluationResult{
+		selected: actionReject, htmlCPUExceeded: true, htmlCPUAction: "reject",
+	}, inboundEvidence{}, .9)
+	if got := repository.rejections.Load(); got != 0 {
+		t.Fatalf("IP reputation strikes = %d, want 0", got)
+	}
+}
+
+func TestHTMLCPUProtectionDoesNotRejectPlainText(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+	reading := 0
+	service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
+		Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
+		MaxHTMLParseCPUMilliseconds: 1, VisionMode: "off",
+	}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service.threadCPUTime = func() (time.Duration, bool) {
+		reading++
+		return time.Duration(reading) * time.Second, true
+	}
+	msg := message.New(1024)
+	msg.AddHeader("Content-Type", "text/plain")
+	msg.AddBody([]byte("ordinary message"))
+	result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
+	if result.selected != actionAccept || result.htmlCPUExceeded || analyzer.calls.Load() != 1 {
+		t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
+	}
+}
+
+func TestHTMLCPUProtectionCanBeDisabled(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+	service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
+		Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
+		MaxHTMLParseCPUMilliseconds: 0, VisionMode: "off",
+	}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service.threadCPUTime = func() (time.Duration, bool) {
+		panic("disabled CPU protection read the thread clock")
+	}
+	msg := message.New(1024)
+	msg.AddHeader("Content-Type", "text/html")
+	msg.AddBody([]byte("<p>ordinary message</p>"))
+	result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
+	if result.selected != actionAccept || result.htmlCPUExceeded || analyzer.calls.Load() != 1 {
+		t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
+	}
+}
+
+func TestHTMLCPUProtectionRecordsDistinctActivity(t *testing.T) {
+	repository := &recordingActivity{}
+	service := &activityService{repository: repository}
+	service.recordScan(context.Background(), evaluationResult{
+		selected: actionReject, htmlCPUExceeded: true, htmlCPUAction: "dos-reject",
+	}, nil)
+	if len(repository.events) != 1 || repository.events[0].EventType != stores.ActivityEventHTMLDoS ||
+		repository.events[0].Outcome != stores.ActivityOutcomeRejected {
+		t.Fatalf("activity events = %+v", repository.events)
+	}
+}
+
+func TestHTMLCPUProtectionAppearsInRejectionHistory(t *testing.T) {
+	history := &recordingRejectionHistory{}
+	policy := &messagePolicyService{
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)), rejectionHistory: history,
+	}
+	msg := message.New(1024)
+	msg.AddHeader("Subject", "resource exhaustion")
+	policy.applyPostDecisionUpdates(context.Background(), messageContext{
+		message: msg, authenticated: true, envelopeRecipients: []string{"recipient@example.com"},
+	}, evaluationResult{
+		selected: actionReject, classification: ai.ClassificationUnwanted,
+		reasons: []string{"HTML processing exceeded the configured CPU-time limit"}, htmlCPUExceeded: true, htmlCPUAction: "dos-reject",
+	}, inboundEvidence{}, .9)
+	if len(history.inputs) != 1 || len(history.inputs[0].Reasons) != 1 ||
+		history.inputs[0].Reasons[0] != "HTML processing exceeded the configured CPU-time limit" {
+		t.Fatalf("rejection history inputs = %+v", history.inputs)
+	}
+}
 
 func (a *recordingAnalyzer) Analyze(_ context.Context, input ai.Input) (ai.Analysis, error) {
 	a.inputs <- input

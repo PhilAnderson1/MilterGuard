@@ -120,7 +120,8 @@ func TestVisionFallbackIgnoresGeneratedLinkAndImageEvidenceForTextThreshold(t *t
 		Mode: "fallback", MinTextChars: 20, MaxImages: 2,
 		MaxBytes: 1 << 20, MaxPixels: 100,
 	})
-	if !strings.Contains(analysis.Prompt, longDestination) || !strings.Contains(analysis.Prompt, "![Long generated image description](cid:notice)") {
+	if !strings.Contains(analysis.Prompt, promptURL(longDestination, true)) || strings.Contains(analysis.Prompt, longDestination) ||
+		!strings.Contains(analysis.Prompt, "![Long generated image description](cid:notice)") {
 		t.Fatalf("link or image evidence missing from prompt: %s", analysis.Prompt)
 	}
 	if len(analysis.Images) != 1 {
@@ -231,6 +232,29 @@ func TestVisionFallbackSkipsImageWhenTextIsMeaningful(t *testing.T) {
 	})
 	if len(analysis.Images) != 0 {
 		t.Fatal("fallback mode selected an image despite sufficient visible text")
+	}
+}
+
+func TestVisionFallbackUsesOnlyConfidentVisibleCharacterCount(t *testing.T) {
+	decoded, err := base64.StdEncoding.DecodeString(onePixelPNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := extractedContent{
+		VisibleText: strings.Repeat("apparently visible text ", 20),
+		ImageRefs:   []string{"notice"},
+		Images:      []extractedImage{{ContentID: "notice", Data: decoded}},
+	}
+	options := VisionOptions{
+		Mode: "fallback", MinTextChars: 20, MaxImages: 1,
+		MaxBytes: 1 << 20, MaxPixels: 100,
+	}
+	if images := selectVisionImages(content, options); len(images) != 1 {
+		t.Fatalf("uncertain visible-text estimate suppressed image analysis: selected %d images", len(images))
+	}
+	content.ConfidentVisibleChars = 200
+	if images := selectVisionImages(content, options); len(images) != 0 {
+		t.Fatalf("confident visible text did not suppress fallback image analysis: selected %d images", len(images))
 	}
 }
 

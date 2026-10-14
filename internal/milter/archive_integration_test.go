@@ -73,13 +73,17 @@ func TestRejectionCommandRetrievesProcessedArchivedMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := body
-	for _, want := range []string{"Archived subject", "test reason", `[account](https://example.net/account)`} {
+	for _, want := range []string{"Archived subject", "test reason", "Visible email body text:\nReview account"} {
 		if !strings.Contains(result.Text, want) {
 			t.Errorf("retrieved message missing %q: %s", want, result.Text)
 		}
 	}
+	if strings.Contains(result.Text, "https://example.net/account") {
+		t.Fatalf("recipient-visible body included link metadata: %s", result.Text)
+	}
 	if len(result.Attachments) != 1 || result.Attachments[0].Filename != fmt.Sprintf("rejection-%d.eml", entries[0].ID) ||
-		result.Attachments[0].MediaType != "application/octet-stream" || !bytes.Contains(result.Attachments[0].Contents, []byte("Review")) {
+		result.Attachments[0].MediaType != "application/octet-stream" || !bytes.Contains(result.Attachments[0].Contents, []byte("Review")) ||
+		!bytes.Contains(result.Attachments[0].Contents, []byte("https://example.net/account")) {
 		t.Fatalf("retrieved attachment = %#v", result.Attachments)
 	}
 	archivePath := filepath.Join(root, entries[0].RejectedAt.UTC().Format("2006"), entries[0].RejectedAt.UTC().Format("01"), entries[0].RejectedAt.UTC().Format("02"), fmt.Sprintf("%d.eml", entries[0].ID))

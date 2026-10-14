@@ -152,6 +152,18 @@ func validateAI(c AIConfig) error {
 	if c.Timeout.Value() <= 0 || c.MaxConcurrent < 1 || c.MaxBodyChars < 1 {
 		return fmt.Errorf("invalid ai timeout, max_concurrent, or max_body_chars")
 	}
+	if c.MaxHTMLParseCPUMilliseconds < 0 || int64(c.MaxHTMLParseCPUMilliseconds) > int64(math.MaxInt64/time.Millisecond) {
+		return fmt.Errorf("ai.max_html_parse_cpu_ms must be a nonnegative duration in milliseconds")
+	}
+	if c.HTMLParseCPULimitAction != "fallback" && c.HTMLParseCPULimitAction != "reject" && c.HTMLParseCPULimitAction != "dos-reject" {
+		return fmt.Errorf("ai.html_parse_cpu_limit_action must be fallback, reject, or dos-reject")
+	}
+	if c.HTMLParseCPULimitAction == "dos-reject" && strings.TrimSpace(c.HTMLDoSRejectMessage) == "" {
+		return fmt.Errorf("ai.html_dos_reject_message must not be empty")
+	}
+	if c.IncompleteBodyAction != "scan" && c.IncompleteBodyAction != "reject" {
+		return fmt.Errorf("ai incomplete_body_action must be scan or reject")
+	}
 	if c.Retries < 0 || c.Retries > 10 {
 		return fmt.Errorf("ai.retries must be between 0 and 10")
 	}

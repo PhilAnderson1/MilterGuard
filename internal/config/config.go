@@ -134,26 +134,31 @@ type AuthenticationConfig struct {
 	MemoryMessageLimit int      `yaml:"memory_message_limit"`
 }
 type AIConfig struct {
-	Endpoint                   string   `yaml:"endpoint"`
-	EndpointType               string   `yaml:"endpoint_type"`
-	APIKey                     string   `yaml:"api_key"`
-	APIKeyEnv                  string   `yaml:"api_key_env"`
-	Model                      string   `yaml:"model"`
-	DisableThinking            bool     `yaml:"disable_thinking"`
-	PromptFile                 string   `yaml:"prompt_file"`
-	Timeout                    Duration `yaml:"timeout"`
-	Retries                    int      `yaml:"retries"`
-	MaxConcurrent              int      `yaml:"max_concurrent"`
-	MaxBodyChars               int      `yaml:"max_body_chars"`
-	VisionMode                 string   `yaml:"vision_mode"`
-	VisionMinTextChars         int      `yaml:"vision_min_text_chars"`
-	MaxImages                  int      `yaml:"max_images"`
-	MaxImageBytes              int64    `yaml:"max_image_bytes"`
-	MaxImagePixels             int64    `yaml:"max_image_pixels"`
-	SiteURL                    string   `yaml:"site_url"`
-	AppName                    string   `yaml:"app_name"`
-	InputCostPerMillionTokens  float64  `yaml:"input_cost_per_million_tokens"`
-	OutputCostPerMillionTokens float64  `yaml:"output_cost_per_million_tokens"`
+	Endpoint                    string   `yaml:"endpoint"`
+	EndpointType                string   `yaml:"endpoint_type"`
+	APIKey                      string   `yaml:"api_key"`
+	APIKeyEnv                   string   `yaml:"api_key_env"`
+	Model                       string   `yaml:"model"`
+	DisableThinking             bool     `yaml:"disable_thinking"`
+	PromptFile                  string   `yaml:"prompt_file"`
+	Timeout                     Duration `yaml:"timeout"`
+	Retries                     int      `yaml:"retries"`
+	MaxConcurrent               int      `yaml:"max_concurrent"`
+	MaxBodyChars                int      `yaml:"max_body_chars"`
+	CompactPromptURLs           bool     `yaml:"compact_prompt_urls"`
+	MaxHTMLParseCPUMilliseconds int      `yaml:"max_html_parse_cpu_ms"`
+	HTMLParseCPULimitAction     string   `yaml:"html_parse_cpu_limit_action"`
+	HTMLDoSRejectMessage        string   `yaml:"html_dos_reject_message"`
+	IncompleteBodyAction        string   `yaml:"incomplete_body_action"`
+	VisionMode                  string   `yaml:"vision_mode"`
+	VisionMinTextChars          int      `yaml:"vision_min_text_chars"`
+	MaxImages                   int      `yaml:"max_images"`
+	MaxImageBytes               int64    `yaml:"max_image_bytes"`
+	MaxImagePixels              int64    `yaml:"max_image_pixels"`
+	SiteURL                     string   `yaml:"site_url"`
+	AppName                     string   `yaml:"app_name"`
+	InputCostPerMillionTokens   float64  `yaml:"input_cost_per_million_tokens"`
+	OutputCostPerMillionTokens  float64  `yaml:"output_cost_per_million_tokens"`
 }
 type FilteringConfig struct {
 	RejectScore                                float64  `yaml:"reject_score"`
@@ -262,9 +267,11 @@ func defaults() Config {
 		},
 		AI: AIConfig{
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
-			Model: "qwen/qwen3.6-35b-a3b", DisableThinking: true,
-			PromptFile: "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
-			Retries: 2, MaxConcurrent: 8, MaxBodyChars: 50000,
+			DisableThinking: true,
+			PromptFile:      "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
+			Retries: 2, MaxConcurrent: 8, MaxBodyChars: 50000, CompactPromptURLs: true, MaxHTMLParseCPUMilliseconds: 250,
+			HTMLParseCPULimitAction: "dos-reject",
+			HTMLDoSRejectMessage:    "Message rejected due to suspected HTML/CSS denial-of-service attack", IncompleteBodyAction: "scan",
 			VisionMode: "fallback", VisionMinTextChars: 500,
 			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000,
 			SiteURL: "https://github.com/PhilAnderson1/MilterGuard", AppName: "MilterGuard",

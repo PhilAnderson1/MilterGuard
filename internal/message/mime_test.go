@@ -2,8 +2,11 @@ package message
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 )
 
 func TestPromptDecodesMultipart(t *testing.T) {
@@ -180,6 +183,21 @@ func TestMIMEExtractionDecodesDeclaredBodyCharset(t *testing.T) {
 	}
 }
 
+func TestUTF8CharsetDecodingPreservesValidTextAndHandlesMalformedInput(t *testing.T) {
+	valid := []byte("café")
+	for _, label := range []string{"utf-8", "UTF8", "unicode-1-1-utf-8"} {
+		if got := decodeCharset(label, valid); got != string(valid) {
+			t.Errorf("decodeCharset(%q) = %q, want %q", label, got, valid)
+		}
+	}
+	if got := decodeCharset("utf-8", []byte{'a', 0xff, 'b'}); got != "a�b" {
+		t.Fatalf("malformed UTF-8 = %q, want replacement character", got)
+	}
+	if got := decodeHTMLCharset("utf-8", append([]byte("\xef\xbb\xbf"), valid...)); got != string(valid) {
+		t.Fatalf("BOM-prefixed HTML UTF-8 = %q, want %q", got, valid)
+	}
+}
+
 func TestHTMLCharsetSniffingWithoutUsableMIMECharset(t *testing.T) {
 	for _, contentType := range []string{"text/html", "text/html; charset=unknown-charset"} {
 		t.Run(contentType, func(t *testing.T) {
@@ -308,6 +326,116 @@ func TestMIMEExtractionRetainsContentBeyondTwoMiB(t *testing.T) {
 			t.Fatal("multipart MIME content was truncated before its tail")
 		}
 	})
+}
+
+func TestMIMEPartLimitAppliesAcrossMessage(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i < maxMIMEParts; i++ {
+		fmt.Fprintf(&body, "--x\r\nContent-Type: text/plain\r\n\r\npart-%d\r\n", i)
+	}
+	body.WriteString("--x\r\nContent-Type: text/plain\r\n\r\ntail-beyond-part-limit\r\n--x--\r\n")
+	content := extractMIME(`multipart/mixed; boundary="x"`, "", "", []byte(body.String()), 0)
+	if !content.MIMEIncomplete {
+		t.Fatal("MIME part limit was not reported")
+	}
+	if strings.Contains(content.Text, "tail-beyond-part-limit") {
+		t.Fatal("content beyond MIME part limit was processed")
+	}
+}
+
+func TestHTMLPartLimitAppliesAcrossAlternatives(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i <= maxHTMLParts; i++ {
+		fmt.Fprintf(&body, "--x\r\nContent-Type: text/html\r\n\r\n<p>alternative-%d</p>\r\n", i)
+	}
+	body.WriteString("--x--\r\n")
+	content := extractMIME(`multipart/alternative; boundary="x"`, "", "", []byte(body.String()), 0)
+	if !content.ExtractionIncomplete || !content.HTMLFallbackUsed {
+		t.Fatalf("HTML part limit was not reported: %+v", content)
+	}
+	if !strings.Contains(content.Text, fmt.Sprintf("alternative-%d", maxHTMLParts)) {
+		t.Fatalf("selected bounded fallback missing: %q", content.Text)
+	}
+}
+
+func TestHTMLWorkBudgetIsSharedAcrossParts(t *testing.T) {
+	budget := newExtractionBudget()
+	budget.matchWorkRemaining = 1
+	first := htmlToTextWithBudget(`<p>first</p>`, budget)
+	if first.HTMLFallbackUsed {
+		t.Fatal("first HTML part unexpectedly used lexical fallback")
+	}
+	if budget.matchWorkRemaining != 0 {
+		t.Fatalf("remaining match work = %d, want 0", budget.matchWorkRemaining)
+	}
+	second := htmlToTextWithBudget(`<p>second</p>`, budget)
+	if !second.HTMLFallbackUsed || !second.ExtractionIncomplete || second.VisibleText != "" {
+		t.Fatalf("second HTML part did not use incomplete visibility-neutral fallback: %+v", second)
+	}
+}
+
+func TestFailedHTMLPartConsumesSharedWorkBudget(t *testing.T) {
+	budget := newExtractionBudget()
+	before := budget.matchWorkRemaining
+	source := `<style>p{display:none}</style>` + strings.Repeat(`<table><td>`, htmlextract.DefaultLimits().Depth/2) + `fallback evidence`
+	failed := htmlToTextWithBudget(source, budget)
+	if !failed.HTMLFallbackUsed || !strings.Contains(failed.Text, "fallback evidence") {
+		t.Fatalf("failed HTML analysis did not retain fallback evidence: %+v", failed)
+	}
+	if budget.matchWorkRemaining >= before {
+		t.Fatalf("failed HTML part consumed no shared work: before=%d after=%d", before, budget.matchWorkRemaining)
+	}
+	afterFailure := budget.matchWorkRemaining
+	second := htmlToTextWithBudget(`<p>second</p>`, budget)
+	if second.HTMLFallbackUsed || budget.matchWorkRemaining >= afterFailure {
+		t.Fatalf("subsequent part did not inherit reduced budget: content=%+v before=%d after=%d", second, afterFailure, budget.matchWorkRemaining)
+	}
+}
+
+func TestHTMLByteBudgetIsSharedAcrossParts(t *testing.T) {
+	budget := newExtractionBudget()
+	firstSource := `<p>first</p>`
+	budget.htmlBytesRemaining = len(firstSource)
+	first := htmlToTextWithBudget(firstSource, budget)
+	if first.HTMLFallbackUsed {
+		t.Fatal("HTML at the byte limit unexpectedly used lexical fallback")
+	}
+	second := htmlToTextWithBudget(`<p>second</p>`, budget)
+	if !second.HTMLFallbackUsed || !second.ExtractionIncomplete {
+		t.Fatalf("cumulative HTML byte limit was not enforced: %+v", second)
+	}
+}
+
+func TestHTMLAdditiveLimitsAreSharedAcrossParts(t *testing.T) {
+	budget := newExtractionBudget()
+	usage := htmlextract.ResourceUsage{
+		Nodes: 11, TextNodes: 7, Attributes: 5, CSSBytes: 13, Rules: 3, Selectors: 4,
+	}
+	budget.consumeHTML(usage)
+	limits, ok := budget.htmlLimits(len(`<p>T</p>`))
+	if !ok {
+		t.Fatal("remaining additive budget was rejected")
+	}
+	defaults := htmlextract.DefaultLimits()
+	if limits.Nodes != defaults.Nodes-usage.Nodes || limits.TextNodes != defaults.TextNodes-usage.TextNodes ||
+		limits.Attributes != defaults.Attributes-usage.Attributes || limits.CSSBytes != defaults.CSSBytes-usage.CSSBytes ||
+		limits.Rules != defaults.Rules-usage.Rules || limits.Selectors != defaults.Selectors-usage.Selectors {
+		t.Fatalf("additive limits were not propagated: %+v", limits)
+	}
+}
+
+func TestHTMLCSSByteBudgetIsSharedAcrossParts(t *testing.T) {
+	const cssText = `p{display:none}`
+	budget := newExtractionBudget()
+	budget.cssBytesRemaining = len(cssText)
+	first := htmlToTextWithBudget(`<style>`+cssText+`</style><p>first</p>`, budget)
+	if first.HTMLFallbackUsed || budget.cssBytesRemaining != 0 {
+		t.Fatalf("first HTML part did not consume exact CSS budget: content=%+v remaining=%d", first, budget.cssBytesRemaining)
+	}
+	second := htmlToTextWithBudget(`<p>second</p>`, budget)
+	if !second.HTMLFallbackUsed || !second.ExtractionIncomplete {
+		t.Fatalf("exhausted cumulative CSS budget was not enforced: %+v", second)
+	}
 }
 
 func TestMultipartAlternativePrefersHTML(t *testing.T) {

@@ -114,6 +114,8 @@ const (
 	ActivityEventAttachmentRejection            ActivityEventType = 5
 	ActivityEventProtectedSenderDomainRejection ActivityEventType = 6
 	ActivityEventSenderBlocklist                ActivityEventType = 7
+	ActivityEventHTMLDoS                        ActivityEventType = 8
+	ActivityEventHTMLLimit                      ActivityEventType = 9
 )
 
 type ActivityOutcome uint8
@@ -153,6 +155,10 @@ type ActivitySummary struct {
 	ProtectedSenderDomainRejections  int64
 	SenderBlocklistRejections        int64
 	SenderBlocklistRecipientRemovals int64
+	HTMLDoSRejections                int64
+	HTMLDoSAccepted                  int64
+	HTMLLimitRejections              int64
+	HTMLLimitAccepted                int64
 	TokenCost                        float64
 }
 

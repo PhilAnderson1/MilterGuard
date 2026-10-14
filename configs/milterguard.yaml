@@ -92,7 +92,7 @@ ai:
 
   # Model identifier accepted by the endpoint. OpenRouter commonly uses
   # provider/model names; llama.cpp may use its configured model name or path.
-  model: qwen/qwen3.6-35b-a3b
+  model: qwen/qwen3.6-35b-a3b:exacto
 
   # Estimated USD prices per million input and output tokens. The example prices
   # below are for the sample model on OpenRouter; update them for your selected
@@ -120,6 +120,31 @@ ai:
   # Maximum number of message-text characters supplied to the AI; positive
   # integer. This is separate from milter.max_message_size, which is in bytes.
   max_body_chars: 50000
+
+  # Shorten unusually long URL components in the AI prompt while preserving
+  # domains, parameter names, and the complete URL internally.
+  compact_prompt_urls: true
+
+  # Maximum CPU time, in milliseconds, for converting an HTML message into the
+  # analysis prompt. CPU time excludes time waiting to be scheduled. Set to 0
+  # to disable the limit.
+  max_html_parse_cpu_ms: 250
+
+  # Action when the HTML CPU limit is reached: fallback continues with bounded
+  # text extraction and AI analysis; reject rejects without treating the event
+  # as an attack or changing IP reputation; dos-reject rejects and applies the
+  # normal HTML/CSS DoS reputation blocking and escalation. The default is
+  # dos-reject.
+  html_parse_cpu_limit_action: dos-reject
+
+  # Text returned with SMTP status 550 5.7.1 for dos-reject. Keep this on one
+  # line; NUL and newline characters are removed.
+  html_dos_reject_message: Message rejected due to suspected HTML/CSS denial-of-service attack
+
+  # Handling when extraction limits or final prefix truncation omit body text.
+  # scan submits the retained prefix with a limitation notice; reject records a
+  # rejection decision (enforced only while mode is enforce).
+  incomplete_body_action: scan
 
   # Image analysis detects scams concealed in images to evade text-based filtering.
   # Modes: off, fallback, or always. fallback analyses inline images only when

@@ -1,0 +1,228 @@
+package htmlextract
+
+import (
+	"encoding/base64"
+	"mime"
+	"net/url"
+	"strings"
+
+	"github.com/tdewolff/parse/v2/css"
+	"golang.org/x/net/html"
+)
+
+const maxImportDepth = 8
+
+func cssTypeAttributeApplies(n *html.Node) bool {
+	typ := strings.TrimSpace(attr(n, "type"))
+	if typ == "" {
+		return true
+	}
+	mediaType, _, err := mime.ParseMediaType(typ)
+	return err == nil && equalASCIIFold(mediaType, "text/css")
+}
+
+func (s *sheet) stylesheetLink(n *html.Node) (href, media string, applies bool) {
+	if s.cascadeIncomplete || s.workIncomplete {
+		return "", "", false
+	}
+	if n.Namespace != "" || n.Data != "link" || hasAttr(n, "disabled") {
+		return "", "", false
+	}
+	relations := strings.Fields(asciiLower(attr(n, "rel")))
+	stylesheet, alternate := false, false
+	for _, relation := range relations {
+		stylesheet = stylesheet || relation == "stylesheet"
+		alternate = alternate || relation == "alternate"
+	}
+	if !stylesheet || alternate {
+		return "", "", false
+	}
+	if !cssTypeAttributeApplies(n) {
+		return "", "", false
+	}
+	media = attr(n, "media")
+	if !s.mediaCanApply(media) {
+		return "", "", false
+	}
+	href = strings.TrimSpace(attr(n, "href"))
+	return href, media, href != ""
+}
+
+func (s *sheet) parseMediaCondition(value string) mediaCondition {
+	if condition, ok := s.mediaConditions[value]; ok {
+		return condition
+	}
+	if !s.chargePlanningWork(value) {
+		return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
+	}
+	condition := parseMedia(value)
+	if s.mediaConditions == nil {
+		s.mediaConditions = make(map[string]mediaCondition)
+	}
+	s.mediaConditions[value] = condition
+	return condition
+}
+
+func (s *sheet) mediaCanApply(value string) bool {
+	if trimCSSWhitespace(value) == "" {
+		return true
+	}
+	for _, alternative := range s.parseMediaCondition(value) {
+		if !alternative.never {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *sheet) loadStylesheetReference(href, media string) {
+	// Once stylesheet analysis is unusable, decoding another data URL can only
+	// consume CPU and transient memory; the resulting rules would be discarded.
+	// Keep this guard at the shared boundary so it covers both link elements and
+	// nested @import rules.
+	if s.cascadeIncomplete || s.workIncomplete {
+		return
+	}
+	remaining := s.limits.CSSBytes - s.cssBytes
+	if remaining < 0 {
+		remaining = 0
+	}
+	data, isData, valid := decodeCSSDataURL(href, remaining)
+	if !isData {
+		s.unresolvedStylesheet = true
+		return
+	}
+	if !valid {
+		s.unresolvedStylesheet = true
+		return
+	}
+	s.parseImportedStylesheet(string(data), media)
+}
+
+func (s *sheet) parseImportedStylesheet(text, media string) {
+	if s.importDepth >= maxImportDepth {
+		s.unresolvedStylesheet = true
+		return
+	}
+	s.importDepth++
+	firstRule := len(s.rules)
+	s.parseCSS(text, false)
+	s.importDepth--
+	// Email clients disagree on whether data-URL stylesheets are applicable.
+	// Retain their possible cascade effects, but do not let them establish a
+	// definite visibility result. This also marks rules from nested imports
+	// parsed during this call.
+	s.markRulesUncertain(firstRule)
+	s.attachMediaCondition(firstRule, media)
+}
+
+func (s *sheet) parseImport(values []css.Token) {
+	href, media, ok, unsupported := importReference(values)
+	if !ok {
+		return
+	}
+	if unsupported {
+		s.unresolvedStylesheet = true
+		return
+	}
+	if !s.mediaCanApply(media) {
+		return
+	}
+	s.loadStylesheetReference(href, media)
+}
+
+func importReference(values []css.Token) (href, media string, ok, unsupported bool) {
+	start := 0
+	for start < len(values) && (values[start].TokenType == css.WhitespaceToken || values[start].TokenType == css.CommentToken) {
+		start++
+	}
+	if start == len(values) {
+		return "", "", false, false
+	}
+	href, ok = cssURL(values[start])
+	if !ok {
+		return "", "", false, false
+	}
+	start++
+	for start < len(values) && (values[start].TokenType == css.WhitespaceToken || values[start].TokenType == css.CommentToken) {
+		start++
+	}
+	if start < len(values) {
+		first := normalizeCSSKeyword(string(values[start].Data))
+		if first == "layer" || strings.HasPrefix(first, "layer(") || strings.HasPrefix(first, "supports(") {
+			// Cascade layers and supports() need semantics the extractor does not
+			// model. Do not apply the imported sheet unconditionally.
+			return href, "", true, true
+		}
+		media = tokenString(values[start:])
+	}
+	return href, media, true, false
+}
+
+func cssURL(token css.Token) (string, bool) {
+	raw := trimCSSWhitespace(string(token.Data))
+	switch token.TokenType {
+	case css.StringToken:
+		return unquoteCSSURL(raw)
+	case css.URLToken:
+		open := strings.IndexByte(raw, '(')
+		if open < 0 {
+			return "", false
+		}
+		raw = trimCSSWhitespace(raw[open+1:])
+		if strings.HasSuffix(raw, ")") {
+			raw = trimCSSWhitespace(raw[:len(raw)-1])
+		}
+		return unquoteCSSURL(raw)
+	default:
+		return "", false
+	}
+}
+
+func unquoteCSSURL(value string) (string, bool) {
+	if len(value) >= 1 && (value[0] == '\'' || value[0] == '"') {
+		quote := value[0]
+		value = value[1:]
+		if len(value) > 0 && value[len(value)-1] == quote {
+			value = value[:len(value)-1]
+		}
+	}
+	value = cssUnescape(value)
+	return value, value != ""
+}
+
+func decodeCSSDataURL(reference string, maxBytes int) ([]byte, bool, bool) {
+	if !hasASCIIFoldPrefix(reference, "data:") {
+		return nil, false, false
+	}
+	comma := strings.IndexByte(reference, ',')
+	if comma < 5 {
+		return nil, true, false
+	}
+	metadata := reference[5:comma]
+	base64Encoded := false
+	if fields := strings.Split(metadata, ";"); len(fields) > 1 && equalASCIIFold(strings.TrimSpace(fields[len(fields)-1]), "base64") {
+		base64Encoded = true
+		metadata = strings.Join(fields[:len(fields)-1], ";")
+	}
+	mediaType, params, err := mime.ParseMediaType(metadata)
+	if err != nil || !equalASCIIFold(mediaType, "text/css") {
+		return nil, true, false
+	}
+	if charset := asciiLower(strings.TrimSpace(params["charset"])); charset != "" && charset != "utf-8" && charset != "us-ascii" {
+		return nil, true, false
+	}
+	payload := reference[comma+1:]
+	if base64Encoded {
+		if base64.StdEncoding.DecodedLen(len(payload)) > maxBytes {
+			return nil, true, false
+		}
+		decoded, err := base64.StdEncoding.DecodeString(payload)
+		return decoded, true, err == nil && len(decoded) <= maxBytes
+	}
+	if len(payload) > maxBytes*3 {
+		return nil, true, false
+	}
+	decoded, err := url.PathUnescape(payload)
+	return []byte(decoded), true, err == nil && len(decoded) <= maxBytes
+}
