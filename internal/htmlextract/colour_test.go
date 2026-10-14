@@ -92,7 +92,21 @@ func TestColourThreshold(t *testing.T) {
 	near(t, *outside.inspection.colour.Distance, .00595183731, 2e-9)
 }
 
-func TestBasicNamedColourAliases(t *testing.T) {
+func TestNamedColours(t *testing.T) {
+	if got := len(named); got != 148 {
+		t.Fatalf("named colour count = %d, want 148", got)
+	}
+	for name := range named {
+		if _, status := readColour(name); status != valueResolved {
+			t.Errorf("named colour %q status = %d, want resolved", name, status)
+		}
+	}
+	for name := range unsupportedColourNames {
+		if _, status := readColour(name); status != valueUnsupported {
+			t.Errorf("system colour %q status = %d, want unsupported", name, status)
+		}
+	}
+
 	for _, test := range []struct {
 		alias, canonical string
 	}{
@@ -173,6 +187,13 @@ func TestModernRGBAndHSLColours(t *testing.T) {
 		{`hsla(120,100%,25%,.5)`, RGBA{0, .5, 0, .5}},
 		{`hsl(.5turn 100 50)`, RGBA{0, 1, 1, 1}},
 		{`hsl(-120deg 100% 50%)`, RGBA{0, 0, 1, 1}},
+		{`rgb(none 0 0 / none)`, RGBA{0, 0, 0, 0}},
+		{`hsl(none none none / none)`, RGBA{0, 0, 0, 0}},
+		{`hwb(0 0% 0%)`, RGBA{1, 0, 0, 1}},
+		{`hwb(120deg 0% 0% / 50%)`, RGBA{0, 1, 0, .5}},
+		{`hwb(0 20% 30%)`, RGBA{.7, .2, .2, 1}},
+		{`hwb(240 60% 60%)`, RGBA{.5, .5, .5, 1}},
+		{`hwb(none none none / none)`, RGBA{1, 0, 0, 0}},
 		{`rgba(1e400,-1e400,1e-4000,1e400)`, RGBA{1, 0, 0, 1}},
 		{`hsl(0 1e400% 1e400% / -1e400)`, RGBA{1, 1, 1, 0}},
 	}
@@ -192,20 +213,33 @@ func TestModernRGBAndHSLColours(t *testing.T) {
 	for _, value := range []string{
 		`rgb(0, 0%, 0)`,
 		`rgb(0, 0, 0 / .5)`,
+		`rgb(none, 0, 0)`,
+		`rgba(0, 0, 0, none)`,
 		`hsl(0, 100, 50%)`,
+		`hsl(none, 100%, 50%)`,
 		`rgb(0 0 / 1)`,
+		`hwb(0, 0%, 0%)`,
+		`hwb(0 0 0)`,
 	} {
 		if _, status := readColour(value); status != valueInvalid {
 			t.Errorf("%q status = %d, want invalid", value, status)
 		}
 	}
-	for _, value := range []string{`rgb(none 0 0)`, `rgb(from red r g b)`, `lab(50% 0 0)`} {
+	for _, value := range []string{`rgb(from red r g b)`, `lab(50% 0 0)`} {
 		if _, status := readColour(value); status != valueUnsupported {
 			t.Errorf("%q status = %d, want unresolved", value, status)
 		}
 	}
 
 	v := colourText(t, `<p style="background:rgb(255 255 255);color:hsl(0 0% 100%)">T</p>`)
+	if !v.inspection.colour.Known || v.Label != "concealed" {
+		t.Fatal(v)
+	}
+	v = colourText(t, `<p style="background:white;color:hwb(0 100% 0%)">T</p>`)
+	if !v.inspection.colour.Known || v.Label != "concealed" {
+		t.Fatal(v)
+	}
+	v = colourText(t, `<p style="background:black;color:rgb(none none none)">T</p>`)
 	if !v.inspection.colour.Known || v.Label != "concealed" {
 		t.Fatal(v)
 	}
@@ -336,7 +370,7 @@ func TestBackgroundFallbackColour(t *testing.T) {
 		{`linear-gradient(red,blue) #fff`, "#fff", 1, true},
 		{`url(x),rgb(1 2 3)`, "rgb(1 2 3)", 1, true},
 		{`url(x) center/cover no-repeat`, "transparent", 1, true},
-		{`url(x) aliceblue`, "aliceblue", 2, true},
+		{`url(x) aliceblue`, "aliceblue", 1, true},
 		{`red,url(x)`, "", 0, false},
 		{`url(x) red blue`, "", 0, false},
 	}

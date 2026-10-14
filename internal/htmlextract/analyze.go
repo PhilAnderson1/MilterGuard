@@ -184,7 +184,16 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					f.msoHidden = true
 				}
 				f.msoKnown = f.msoKnown && mh.Known
+				if f.clipsDescendantsX && resolved.offsetWithinClippedAncestorX ||
+					f.clipsDescendantsY && resolved.offsetWithinClippedAncestorY {
+					// Relative and positioned descendants can be shifted wholly outside
+					// an ancestor's clipping box even when the standalone offset is below
+					// the coarse off-screen threshold.
+					f.layoutUncertain = true
+				}
 				f.layoutUncertain = f.layoutUncertain || resolved.layoutUncertain
+				f.clipsDescendantsX = f.clipsDescendantsX || resolved.clipsDescendantsX
+				f.clipsDescendantsY = f.clipsDescendantsY || resolved.clipsDescendantsY
 				f.animationUncertain = f.animationUncertain || resolved.animationActive
 				f.alternateColourSchemeReasons |= resolved.alternateColourSchemeReasons
 				a := style[opacity]
@@ -370,6 +379,17 @@ func (p processor) process(input []byte) (Document, error) {
 			break
 		}
 	}
+	if s.unsupportedNesting {
+		// Nested selectors can target descendants, siblings, or ancestors of
+		// their parent match. Until those relative selectors are implemented,
+		// no element in the document is provably outside their reach.
+		for i := range results.textLabels {
+			results.textLabels[i] |= labelUnknown
+		}
+		for i := range results.elementLabels {
+			results.elementLabels[i] |= labelUnknown
+		}
+	}
 	for i, bits := range results.textLabels {
 		label := aggregateLabel(bits)
 		results.text[i].Label = label
@@ -392,16 +412,17 @@ func (p processor) process(input []byte) (Document, error) {
 func parsedResourceUsage(inputBytes int, document *parsedDocument) ResourceUsage {
 	s := &document.styles
 	return ResourceUsage{
-		InputBytes: inputBytes,
-		Nodes:      max(document.nodeCount, document.lexical.nodes),
-		TextNodes:  max(document.textCount, document.lexical.textNodes),
-		Attributes: max(document.attributeCount, document.lexical.attributes),
-		Depth:      max(document.treeDepth, document.lexical.depth),
-		CSSDepth:   s.conditionDepth,
-		Rules:      s.rulesSeen,
-		Selectors:  s.selectors,
-		CSSBytes:   s.cssBytes,
-		MatchWork:  s.planningWork,
+		InputBytes:                 inputBytes,
+		Nodes:                      max(document.nodeCount, document.lexical.nodes),
+		TextNodes:                  max(document.textCount, document.lexical.textNodes),
+		Attributes:                 max(document.attributeCount, document.lexical.attributes),
+		Depth:                      max(document.treeDepth, document.lexical.depth),
+		CSSDepth:                   s.conditionDepth,
+		Rules:                      s.rulesSeen,
+		Selectors:                  s.selectors,
+		CSSBytes:                   s.cssBytes,
+		MatchWork:                  s.planningWork,
+		UnsupportedColourFunctions: s.unsupportedColours,
 
 		CSSLimitExceeded:   s.cascadeIncomplete,
 		MatchWorkExhausted: s.workIncomplete,
@@ -416,6 +437,7 @@ func recordEvaluationUsage(usage *ResourceUsage, matches *matchBudget, expressio
 		usage.ExpressionWork = expressionLimit
 	}
 	usage.ExpressionWorkExhausted = expressions.exhausted
+	usage.ExpressionDepthLimitExceeded = expressions.depthLimitExceeded
 }
 
 func mergeViewingCaseLabel(labels []visibilityLabel, index int, bit visibilityLabel) bool {

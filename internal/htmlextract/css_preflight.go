@@ -44,12 +44,6 @@ func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 // parser state without reporting the corresponding at-rule boundary, causing
 // our condition stack to diverge from its stream.
 func inspectCSSConstructs(source string, inline bool, byteLimit, tokenLimit int) cssPreflightOutcome {
-	// Every CSS token consumes at least one source byte. If the whole input is
-	// within both limits, no contained construct can exceed either one.
-	if len(source) <= byteLimit && len(source) <= tokenLimit {
-		// Small inputs still require delimiter validation; malformed closers are
-		// a parser-state issue rather than an accumulation issue.
-	}
 	lexer := css.NewLexer(parse.NewInputString(source))
 	initialContext := cssRuleList
 	if inline {

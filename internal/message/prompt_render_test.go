@@ -93,7 +93,7 @@ func TestPromptReportsUnresolvedLinkedStylesheetOnce(t *testing.T) {
 	}
 
 	prompt := m.Prompt(10_000)
-	want := "Linked or imported CSS was not evaluated; email text may include content not visible to the recipient."
+	want := "CSS could not be fully evaluated; email text may include content not visible to the recipient."
 	if got := strings.Count(prompt, want); got != 1 {
 		t.Fatalf("stylesheet limitation count = %d, want 1:\n%s", got, prompt)
 	}
@@ -102,6 +102,42 @@ func TestPromptReportsUnresolvedLinkedStylesheetOnce(t *testing.T) {
 	}
 	if strings.Contains(prompt, "<visibility-uncertain>") {
 		t.Fatalf("global stylesheet uncertainty produced per-node annotations:\n%s", prompt)
+	}
+}
+
+func TestPromptReportsUnsupportedCSSNesting(t *testing.T) {
+	m := New(10_000)
+	m.AddHeader("Content-Type", "text/html; charset=utf-8")
+	m.AddBody([]byte(`<style>div{& + p{display:none}}</style><div>Parent</div><p>Potentially hidden</p>`))
+
+	content := m.processedContent()
+	if !content.CSSIncomplete || content.ConfidentVisibleChars != 0 {
+		t.Fatalf("unsupported nesting state = %+v", content)
+	}
+	if !strings.Contains(content.Text, `<visibility-uncertain>`) {
+		t.Fatalf("nested CSS did not make affected analysis uncertain: %q", content.Text)
+	}
+	want := "CSS could not be fully evaluated; email text may include content not visible to the recipient."
+	if prompt := m.Prompt(10_000); strings.Count(prompt, want) != 1 {
+		t.Fatalf("prompt did not report unsupported CSS once:\n%s", prompt)
+	}
+}
+
+func TestPromptReportsCSSParserLimitAbandonment(t *testing.T) {
+	m := New(10_000)
+	m.AddHeader("Content-Type", "text/html; charset=utf-8")
+	m.AddBody([]byte(`<style>@media screen){}</style><p>Message text</p>`))
+
+	content := m.processedContent()
+	if !content.CSSIncomplete || content.ConfidentVisibleChars != 0 {
+		t.Fatalf("abandoned cascade was not surfaced: %+v", content)
+	}
+	if content.ExtractionIncomplete || content.HTMLFallbackUsed {
+		t.Fatalf("CSS abandonment was misreported as HTML extraction failure: %+v", content)
+	}
+	want := "CSS could not be fully evaluated; email text may include content not visible to the recipient."
+	if prompt := m.Prompt(10_000); strings.Count(prompt, want) != 1 {
+		t.Fatalf("prompt did not report CSS abandonment once:\n%s", prompt)
 	}
 }
 

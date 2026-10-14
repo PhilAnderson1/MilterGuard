@@ -77,7 +77,7 @@ func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars
 			b.WriteString("- HTML/CSS visibility analysis unavailable; email text may include content not visible to the recipient.\n")
 		}
 		if content.CSSIncomplete {
-			b.WriteString("- Linked or imported CSS was not evaluated; email text may include content not visible to the recipient.\n")
+			b.WriteString("- CSS could not be fully evaluated; email text may include content not visible to the recipient.\n")
 		}
 	}
 	body, bodyTruncated, concealedRemoved := selectProcessedBody(content, maxChars)

@@ -34,6 +34,7 @@ const (
 	textStroke
 	clip
 	clipPath
+	lineHeight
 	properties
 )
 
@@ -69,7 +70,7 @@ const (
 	animationProperty = allShorthandProperty + 1
 )
 
-var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "overflow-x", "overflow-y", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "letter-spacing", "word-spacing", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
+var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "line-height", "overflow-x", "overflow-y", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "letter-spacing", "word-spacing", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
 
 // A declaration progresses through these preparation states:
 //
@@ -104,6 +105,7 @@ type declaration struct {
 	custom               string
 	shorthand            bool
 	animationShorthand   bool
+	animation            *animationValue
 	variableDependencies []string
 	dependenciesReady    bool
 }
@@ -160,6 +162,15 @@ func prepareDeclaration(d declaration) declaration {
 		d.variableDependencies = variableRefs(d.valueTokens)
 		d.dependenciesReady = true
 	}
+	if d.prop == animationProperty && d.custom == "" {
+		// Cache context-independent name parsing, including escaped identifiers
+		// that the conservative hasVars fast path initially treated as dynamic.
+		if !d.hasVars || (d.tokensReady && !tokensHaveVariables(d.valueTokens)) {
+			value := parseAnimationValue(d.value, d.animationShorthand)
+			d.animation = &value
+		}
+		return d
+	}
 	if d.custom == "" && !d.hasVars && !d.shorthand && !contextualDeclaration(d) {
 		prepared := preparedDeclaration{}
 		if d.unsupported || len(d.value) > maxValueBytes {
@@ -215,7 +226,7 @@ type sheetRuntime struct {
 	ancestorNodes       []*html.Node
 	ancestorStates      []map[*html.Node]ancestorChainState
 	variableScratch     map[string]candidate
-	matchCacheEntries   int
+	matchCacheUnits     int
 }
 
 type sheet struct {
@@ -232,8 +243,10 @@ type sheet struct {
 	cssBytes             int
 	mediaConditions      map[string]mediaCondition
 	importDepth          int
-	hasKeyframes         bool
+	keyframeNames        map[string]struct{}
 	unresolvedStylesheet bool
+	unsupportedNesting   bool
+	unsupportedColours   int
 	runtime              sheetRuntime
 }
 
@@ -258,6 +271,13 @@ func (s *sheet) admitCSS(text string, inline bool) (admitted, malformed bool) {
 	}
 	preflight := inspectCSSConstructs(text, inline, s.limits.CSSConstructBytes, s.limits.CSSConstructTokens)
 	if preflight == cssPreflightLimitExceeded {
+		if inline {
+			// A style attribute cannot affect elements outside its subtree. Count
+			// the input against the shared document budget, but keep the resulting
+			// uncertainty local to the element instead of discarding stylesheets.
+			s.cssBytes += len(text)
+			return false, true
+		}
 		s.abandonCascade()
 		return false, false
 	}
@@ -297,9 +317,60 @@ func (s *sheet) chargePlanningBytes(bytes int) bool {
 func (s *sheet) abandonCascade() {
 	s.cascadeIncomplete = true
 	s.rules = nil
+	s.keyframeNames = nil
 	s.planCount = 0
 	s.index = selectorIndex{}
 	s.runtime = sheetRuntime{}
+}
+
+func (s *sheet) noteUnsupportedNesting() {
+	s.unsupportedNesting = true
+	s.unresolvedStylesheet = true
+}
+
+// hasTopLevelCSSBlock distinguishes a nested rule recovered as a declaration
+// from braces inside a function or other component value. Custom properties
+// are handled separately because arbitrary brace blocks are valid in them.
+func hasTopLevelCSSBlock(tokens []css.Token) bool {
+	depth := 0
+	havePrelude := false
+	for _, token := range tokens {
+		switch token.TokenType {
+		case css.WhitespaceToken, css.CommentToken:
+			continue
+		case css.FunctionToken, css.LeftParenthesisToken, css.LeftBracketToken:
+			if depth == 0 {
+				havePrelude = true
+			}
+			depth++
+		case css.RightParenthesisToken, css.RightBracketToken:
+			if depth > 0 {
+				depth--
+			}
+		case css.LeftBraceToken:
+			if depth == 0 {
+				return havePrelude
+			}
+			depth++
+		case css.RightBraceToken:
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 {
+				havePrelude = true
+			}
+		}
+	}
+	return false
+}
+
+func cssNestingGroup(name string) bool {
+	switch asciiLower(name) {
+	case "@media", "@supports", "@container", "@layer", "@scope", "@starting-style":
+		return true
+	}
+	return false
 }
 
 func (s *sheet) invalidateMediaCache() {
@@ -651,6 +722,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	value := parsed.text
 	imp := parsed.important
 	custom := strings.HasPrefix(prop, "--")
+	s.unsupportedColours += countUnsupportedColourFunctions(parsed.tokens)
 	if custom && (parsed.status == valueInvalid || (parsed.status == valueResolved && !validVariableFunctions(parsed.tokens))) {
 		return nil
 	}
@@ -817,6 +889,11 @@ func marginShorthandValues(value string) ([4]string, bool, bool) {
 		copy(out[:], fields)
 	}
 	for i, component := range out {
+		// CSS keywords and unit identifiers are ASCII case-insensitive. Normalize
+		// before this shorthand-specific validation, which runs earlier than the
+		// ordinary declaration resolver's normalization.
+		component = normalizeCSSKeyword(component)
+		out[i] = component
 		property := [...]int{marginTop, marginRight, marginBottom, marginLeft}[i]
 		if _, status := resolveLayoutProperty(property, component); status == valueInvalid {
 			return [4]string{}, false, false
@@ -857,11 +934,15 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 	if !admitted {
 		return cssParseResult{incomplete: malformed}
 	}
-	parserText := parserCompatibleCSS(text)
-	parserCompatibilityApplied := parserText != text
-	p := css.NewParser(parse.NewInputString(parserText), inline)
+	compatibility := parserCompatibleCSS(text)
+	p := css.NewParser(parse.NewInputString(compatibility.text), inline)
 	var conditions *conditionFrame
+	// Each at-rule temporarily suspends its enclosing qualified rule. Keep
+	// this separate from conditions, which are retained by parsed rules.
+	var enclosingRules []int
+	var nestedGroups []bool
 	conditionDepth := 0
+	rulesetDepth := 0
 	defaultNamespace := false
 	current := -1
 	// CSS permits @import only before ordinary rules and block at-rules. The
@@ -869,15 +950,29 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 	// every assignment below corresponds to syntax that does.
 	importsAllowed := !inline
 	var out []declaration
+	grammarEnd := 0
 	for {
 		if s.cascadeIncomplete || s.workIncomplete {
 			return cssParseResult{declarations: out}
 		}
+		grammarStart := grammarEnd
 		g, tokenType, data := p.Next()
+		grammarEnd = p.Offset()
 		values := p.Values()
 		switch g {
 		case css.ErrorGrammar:
 			if p.HasParseError() {
+				insideNestedGroup := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
+				if !inline && rulesetDepth > 0 && (hasTopLevelCSSBlock(values) || (current < 0 && insideNestedGroup)) {
+					s.noteUnsupportedNesting()
+				}
+				// Recovery inside an inline at-rule can consume its closing brace
+				// without emitting EndAtRuleGrammar. Subsequent declarations would
+				// then look nested and be silently discarded. The block boundary
+				// is no longer reliable: preserve local uncertainty instead.
+				if inline && conditions != nil {
+					return cssParseResult{declarations: out, incomplete: true}
+				}
 				// tdewolff's declaration recovery decrements its nesting level for
 				// an unmatched ')' or ']'. The level then remains negative, so the
 				// recovery routine can consume later declarations or the rest of
@@ -894,7 +989,9 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			// Descriptor declarations inside @page, @font-face and similar
 			// blocks never belong to an enclosing qualified rule. Clear the
 			// active rule before tdewolff emits the block's declarations so
-			// they cannot override declarations on that outer selector.
+			// they cannot override declarations on that outer selector. Restore
+			// the enclosing rule only when this at-rule's block ends.
+			enclosingRule := current
 			current = -1
 			if !s.chargePlanningTokens(values) {
 				return cssParseResult{declarations: out}
@@ -907,7 +1004,9 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			case "@font-face":
 				cond = mediaCondition{{schemes: colourSchemeBoth, never: true}}
 			case "@keyframes", "@-webkit-keyframes":
-				s.hasKeyframes = true
+				if !inline {
+					s.recordKeyframeName(values)
+				}
 				cond = mediaCondition{{schemes: colourSchemeBoth, never: true}}
 			default:
 				cond = mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
@@ -917,16 +1016,22 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 				return cssParseResult{declarations: out}
 			}
 			conditions = &conditionFrame{condition: cond, parent: conditions}
+			enclosingRules = append(enclosingRules, enclosingRule)
+			parentNested := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
+			nestedGroups = append(nestedGroups, cssNestingGroup(string(data)) && (enclosingRule >= 0 || parentNested))
 			conditionDepth++
 			if conditionDepth > s.conditionDepth {
 				s.conditionDepth = conditionDepth
 			}
 		case css.EndAtRuleGrammar:
+			current = -1
 			if conditions != nil {
 				conditions = conditions.parent
 				conditionDepth--
+				current = enclosingRules[len(enclosingRules)-1]
+				enclosingRules = enclosingRules[:len(enclosingRules)-1]
+				nestedGroups = nestedGroups[:len(nestedGroups)-1]
 			}
-			current = -1
 		case css.AtRuleGrammar:
 			if !s.chargePlanningTokens(values) {
 				return cssParseResult{declarations: out}
@@ -946,6 +1051,10 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			}
 		case css.BeginRulesetGrammar:
 			importsAllowed = false
+			if !inline && len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1] {
+				s.noteUnsupportedNesting()
+			}
+			rulesetDepth++
 			current = -1
 			if inline {
 				// Rulesets are not valid members of a style attribute. In
@@ -987,6 +1096,9 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			current = len(s.rules) - 1
 		case css.EndRulesetGrammar:
 			current = -1
+			if rulesetDepth > 0 {
+				rulesetDepth--
+			}
 		case css.DeclarationGrammar, css.CustomPropertyGrammar:
 			// Unlike selectors and media queries, declaration values can end
 			// with an escaped whitespace character. Preserve the raw token data
@@ -995,17 +1107,27 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 				return cssParseResult{declarations: out}
 			}
 			prop := normalizeDeclarationProperty(string(data))
+			insideNestedGroup := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
+			if !inline && rulesetDepth > 0 && g != css.CustomPropertyGrammar && (hasTopLevelCSSBlock(values) || (current < 0 && insideNestedGroup)) {
+				s.noteUnsupportedNesting()
+				continue
+			}
 			applicable := (inline && conditions == nil) || (!inline && current >= 0)
 			if !applicable || !relevantNormalizedDeclarationProperty(prop) {
 				continue
 			}
 			vals := rawTokenString(values)
 			var declarations []declaration
-			if parserCompatibilityApplied && strings.Contains(vals, `\)`) {
-				// Restore the original component token before our evaluator sees
-				// it. The escape exists only to prevent the declaration parser
-				// from closing the surrounding function prematurely.
-				vals = strings.ReplaceAll(vals, `\)`, `)`)
+			vals, compatibilityRestored, compatibilitySafe := compatibility.restoreDeclarationValue(vals, grammarStart, grammarEnd)
+			if !compatibilitySafe {
+				// Parser output could not be aligned with the rewritten source.
+				// Retain the declaration as uncertain rather than evaluating bytes
+				// that may differ from the author's value.
+				valueTokens, _ := lexValue(vals)
+				declarations = s.declarationsFromTokens(prop, valueTokens, valueUnsupported, vals)
+			} else if compatibilityRestored {
+				// Re-tokenize after restoring only the delimiters inserted by the
+				// compatibility pass. Author-written escapes remain untouched.
 				valueTokens, valueStatus := lexValue(vals)
 				declarations = s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)
 			} else if g == css.CustomPropertyGrammar {

@@ -82,19 +82,21 @@ func (l Limits) validate() error {
 // analysing one HTML document. Callers use it to carry remaining work across
 // the HTML parts of one message; limits are still enforced inside Analyze.
 type ResourceUsage struct {
-	InputBytes              int
-	Nodes                   int
-	TextNodes               int
-	Attributes              int
-	Depth                   int
-	CSSDepth                int
-	Rules                   int
-	Selectors               int
-	CSSBytes                int
-	MediaCases              int
-	MatchWork               int64
-	ExpressionWork          int64
-	CSSLimitExceeded        bool
-	MatchWorkExhausted      bool
-	ExpressionWorkExhausted bool
+	InputBytes                   int
+	Nodes                        int
+	TextNodes                    int
+	Attributes                   int
+	Depth                        int
+	CSSDepth                     int
+	Rules                        int
+	Selectors                    int
+	CSSBytes                     int
+	MediaCases                   int
+	MatchWork                    int64
+	ExpressionWork               int64
+	CSSLimitExceeded             bool
+	MatchWorkExhausted           bool
+	ExpressionWorkExhausted      bool
+	ExpressionDepthLimitExceeded bool
+	UnsupportedColourFunctions   int
 }

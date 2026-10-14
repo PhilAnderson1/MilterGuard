@@ -1,8 +1,6 @@
 package htmlextract
 
 import (
-	"strings"
-
 	"github.com/andybalholm/cascadia"
 	"golang.org/x/net/html"
 )
@@ -11,17 +9,20 @@ import (
 // candidate storage; weight it above a simple selector-index lookup.
 const declarationApplyWeight int64 = 16
 
-// Every element/viewing-case traversal copies and resolves a fixed-size Style,
-// candidate arrays and frame state even when no stylesheet selector is
-// relevant. Benchmarks put that fixed work at roughly 100 simple selector
-// operations; use a power-of-two conservative weight.
+// Full resolution constructs cascade candidates and resolves presentation and
+// layout. Elements with no candidate selectors or local declarations need only
+// defaults and inheritance; charge that smaller path separately. Selector
+// discovery/matching and declaration application retain their own charges.
 const elementTraversalWork int64 = 128
+const elementInheritanceWork int64 = 48
 
-// Go maps and retained bucket slices have substantial per-entry overhead.
-// Bound all selector-evaluation caches independently of the CPU-work budget so
-// one message has a predictable memory ceiling. Matching continues normally
-// after the cache is full.
-const maxMatchCacheEntries = 100_000
+// Cache units are weighted retained records, not bytes: a match or ancestor
+// result costs one unit, while an attribute result also charges each retained
+// selector-bucket slice header. Go map buckets and allocator overhead vary by
+// release and entry mix, so 100,000 units represent several to low tens of MiB,
+// plus selector-count-bounded outer tables. Matching continues without caching
+// after the shared per-document limit is full.
+const maxMatchCacheUnits = 100_000
 
 type mediaCacheKey struct {
 	width    float64
@@ -74,7 +75,7 @@ func unresolvedStyle() Style {
 }
 
 func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
-	if !s.runtime.cacheMatches || s.runtime.matchCacheEntries >= maxMatchCacheEntries {
+	if !s.runtime.cacheMatches || s.runtime.matchCacheUnits >= maxMatchCacheUnits {
 		return
 	}
 	if s.runtime.matchCaches == nil {
@@ -89,7 +90,7 @@ func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
 	if matched {
 		cache[n] = 2
 	}
-	s.runtime.matchCacheEntries++
+	s.runtime.matchCacheUnits++
 }
 
 type candidate struct {
@@ -122,6 +123,28 @@ type evaluationContext struct {
 	parent, root *Style
 	vars         *variableScope
 	budget       *expressionBudget
+	variableMemo *declarationScopeMemo
+}
+
+type declarationScopeMemo struct {
+	declaration                 *declaration
+	scope                       *variableScope
+	substitution                variableValue
+	substitutionReady           bool
+	colourSchemeDependent       bool
+	colourSchemeDependencyReady bool
+}
+
+func (m *declarationScopeMemo) selectKey(d *declaration, scope *variableScope) {
+	if m.declaration == d && m.scope == scope {
+		return
+	}
+	m.declaration = d
+	m.scope = scope
+	m.substitution = variableValue{}
+	m.substitutionReady = false
+	m.colourSchemeDependent = false
+	m.colourSchemeDependencyReady = false
 }
 
 type mediaEvaluation struct {
@@ -137,6 +160,10 @@ type elementStyleResult struct {
 	variables                    *variableScope
 	layoutUncertain              bool
 	elementGeometryConcealed     bool
+	clipsDescendantsX            bool
+	clipsDescendantsY            bool
+	offsetWithinClippedAncestorX bool
+	offsetWithinClippedAncestorY bool
 	displayDeclared              bool
 	alternateColourSchemeReasons concealmentReason
 	animationActive              bool
@@ -167,7 +194,7 @@ func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, con
 		return d.prepared.value, d.prepared.status
 	}
 	hadVar := d.hasVars
-	v := substitute(d, context.vars, context.budget)
+	v := context.substitute(d)
 	if v.status == valueInvalid {
 		return resolve(property, "unset", context.parent, context.root)
 	}
@@ -217,10 +244,24 @@ func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, con
 	return out, status
 }
 
+func (c evaluationContext) substitute(d *declaration) variableValue {
+	if !d.hasVars || c.variableMemo == nil {
+		return substitute(d, c.vars, c.budget)
+	}
+	memo := c.variableMemo
+	memo.selectKey(d, c.vars)
+	if memo.substitutionReady {
+		return memo.substitution
+	}
+	memo.substitution = substitute(d, c.vars, c.budget)
+	memo.substitutionReady = true
+	return memo.substitution
+}
+
 // collectCascade identifies the declarations that win the CSS cascade for one
 // element. It reserves each declaration list's complete cost before mutating
 // the result so an exhausted work budget can never expose partial winners.
-func (s *sheet) collectCascade(n *html.Node, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, matches *matchBudget, context evaluationContext) (cascadeWinners, bool) {
+func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, matches *matchBudget, context evaluationContext) (cascadeWinners, bool) {
 	var winners cascadeWinners
 	// Parsed declaration slices are immutable and stable for the duration of
 	// evaluation. Winners retain references plus per-use property/uncertainty
@@ -313,10 +354,6 @@ func (s *sheet) collectCascade(n *html.Node, legacy, inline []declaration, media
 	if !complete {
 		return cascadeWinners{}, false
 	}
-	refs, complete := s.collectCandidates(n, matches)
-	if !complete {
-		return cascadeWinners{}, false
-	}
 	for _, ref := range refs {
 		r := &s.rules[ref.rule]
 		plan := &r.plans[ref.branch]
@@ -389,7 +426,7 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	if budget.exhausted {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
-	if !matches.spend(elementTraversalWork) {
+	if !matches.spend(elementInheritanceWork) {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
 	st := initial()
@@ -398,8 +435,23 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 			st[i] = parent[i]
 		}
 	}
-	context := evaluationContext{parent: parent, root: root, vars: parentVars, budget: budget}
-	winners, complete := s.collectCascade(n, legacy, inline, media, selectorContext, matches, context)
+	refs, complete := s.collectCandidates(n, matches)
+	if !complete {
+		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
+	}
+	if len(refs) == 0 && len(legacy) == 0 && len(inline) == 0 {
+		// No declarations can affect this element. Preserve inherited computed
+		// values (including uncertainty) and the variable scope without building
+		// cascade winners or resolving layout/animations. Ancestor presentation
+		// effects are carried separately by viewingCaseFrame.
+		return elementStyleResult{style: st, variables: parentVars}
+	}
+	if !matches.spend(elementTraversalWork - elementInheritanceWork) {
+		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
+	}
+	variableMemo := declarationScopeMemo{}
+	context := evaluationContext{parent: parent, root: root, vars: parentVars, budget: budget, variableMemo: &variableMemo}
+	winners, complete := s.collectCascade(n, refs, legacy, inline, media, selectorContext, matches, context)
 	if !complete {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
@@ -419,7 +471,7 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	for i := 0; i < properties; i++ {
 		c := winners.properties[i]
 		if c.set {
-			if declarationUsesColourSchemeVariable(c.d, scope) {
+			if declarationUsesColourSchemeVariable(c.d, scope, budget, context.variableMemo) {
 				winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(c.d)
 			}
 			v, status := resolvedDeclaration(c.d, c.property, c.uncertainOrigin, context, false)
@@ -430,63 +482,23 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 		}
 	}
 	for i := range winners.layout {
-		if c := winners.layout[i]; c.set && declarationUsesColourSchemeVariable(c.d, scope) {
+		if c := winners.layout[i]; c.set && declarationUsesColourSchemeVariable(c.d, scope, budget, context.variableMemo) {
 			winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(c.d)
 		}
 	}
 	if st[background].Text == "currentcolor" {
 		st[background] = st[color]
 	}
-	layoutUncertain, elementGeometryConcealed := layoutVisibility(&winners.layout, &st, context, n)
-	animationActive := s.hasKeyframes && potentiallyActiveAnimation(winners.animation, context)
+	layout := layoutVisibility(&winners.layout, &st, context, n)
+	animationActive := s.potentiallyActiveAnimation(winners.animation, context, matches)
 	return elementStyleResult{
-		style: st, variables: scope, layoutUncertain: layoutUncertain, elementGeometryConcealed: elementGeometryConcealed,
+		style: st, variables: scope, layoutUncertain: layout.uncertain, elementGeometryConcealed: layout.elementConcealed,
+		clipsDescendantsX: layout.clipsX, clipsDescendantsY: layout.clipsY,
+		offsetWithinClippedAncestorX: layout.offsetX, offsetWithinClippedAncestorY: layout.offsetY,
 		displayDeclared:              winners.properties[display].set,
 		alternateColourSchemeReasons: winners.alternateColourSchemeReasons,
 		animationActive:              animationActive,
 	}
-}
-
-// potentiallyActiveAnimation deliberately does not simulate timelines or
-// keyframes. It recognizes only declarations that certainly select no
-// animation; every other winning value can make the static presentation an
-// unreliable description of what the recipient sees.
-func potentiallyActiveAnimation(c candidate, context evaluationContext) bool {
-	if !c.set {
-		return false
-	}
-	if c.uncertainOrigin {
-		return true
-	}
-	value := c.d.value
-	if c.d.hasVars {
-		resolved := substitute(c.d, context.vars, context.budget)
-		if resolved.status == valueInvalid {
-			return false
-		}
-		if resolved.status != valueResolved {
-			return true
-		}
-		value = resolved.text
-	}
-	value = normalizeCSSKeyword(value)
-	switch value {
-	case "none", "initial", "unset":
-		return false
-	}
-	if !c.d.animationShorthand {
-		parts := strings.Split(value, ",")
-		if len(parts) > 1 {
-			allNone := true
-			for _, part := range parts {
-				allNone = allNone && normalizeCSSKeyword(part) == "none"
-			}
-			if allNone {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func alternateColourSchemeEffects(d *declaration) concealmentReason {
@@ -509,7 +521,7 @@ func alternateColourSchemeEffects(d *declaration) concealmentReason {
 		backgroundBlend, maskImage, backgroundClip, textShadow, textFill, textStroke:
 		return reasonColour
 	case clip, clipPath, overflowX, overflowY, width, height, maxWidth, maxHeight,
-		left, top, right, bottom, textIndent, letterSpacing, wordSpacing,
+		left, top, right, bottom, textIndent, letterSpacing, wordSpacing, lineHeight,
 		marginTop, marginRight, marginBottom,
 		marginLeft, zoom, transform, position:
 		return reasonEmptyClip
@@ -518,14 +530,26 @@ func alternateColourSchemeEffects(d *declaration) concealmentReason {
 	}
 }
 
-func declarationUsesColourSchemeVariable(d *declaration, scope *variableScope) bool {
+func declarationUsesColourSchemeVariable(d *declaration, scope *variableScope, budget *expressionBudget, memo *declarationScopeMemo) bool {
 	if d == nil || !d.hasVars {
 		return false
 	}
-	for _, name := range d.variableDependencies {
-		if scope.colourSchemeDependent(name) {
-			return true
+	if memo != nil {
+		memo.selectKey(d, scope)
+		if memo.colourSchemeDependencyReady {
+			return memo.colourSchemeDependent
 		}
 	}
-	return false
+	dependent := false
+	for _, name := range d.variableDependencies {
+		if scope.colourSchemeDependent(name, budget) {
+			dependent = true
+			break
+		}
+	}
+	if memo != nil {
+		memo.colourSchemeDependent = dependent
+		memo.colourSchemeDependencyReady = true
+	}
+	return dependent
 }

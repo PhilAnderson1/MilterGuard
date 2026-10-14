@@ -374,21 +374,21 @@ func TestHTMLWorkBudgetIsSharedAcrossParts(t *testing.T) {
 	}
 }
 
-func TestFailedHTMLPartConsumesSharedWorkBudget(t *testing.T) {
+func TestDeepHTMLPartConsumesSharedWorkBudget(t *testing.T) {
 	budget := newExtractionBudget()
 	before := budget.matchWorkRemaining
 	source := `<style>p{display:none}</style>` + strings.Repeat(`<table><td>`, htmlextract.DefaultLimits().Depth/2) + `fallback evidence`
-	failed := htmlToTextWithBudget(source, budget)
-	if !failed.HTMLFallbackUsed || !strings.Contains(failed.Text, "fallback evidence") {
-		t.Fatalf("failed HTML analysis did not retain fallback evidence: %+v", failed)
+	deep := htmlToTextWithBudget(source, budget)
+	if deep.HTMLFallbackUsed || !strings.Contains(deep.Text, "fallback evidence") {
+		t.Fatalf("bounded implied table wrappers did not complete analysis: %+v", deep)
 	}
 	if budget.matchWorkRemaining >= before {
-		t.Fatalf("failed HTML part consumed no shared work: before=%d after=%d", before, budget.matchWorkRemaining)
+		t.Fatalf("deep HTML part consumed no shared work: before=%d after=%d", before, budget.matchWorkRemaining)
 	}
-	afterFailure := budget.matchWorkRemaining
+	afterDeepPart := budget.matchWorkRemaining
 	second := htmlToTextWithBudget(`<p>second</p>`, budget)
-	if second.HTMLFallbackUsed || budget.matchWorkRemaining >= afterFailure {
-		t.Fatalf("subsequent part did not inherit reduced budget: content=%+v before=%d after=%d", second, afterFailure, budget.matchWorkRemaining)
+	if second.HTMLFallbackUsed || budget.matchWorkRemaining >= afterDeepPart {
+		t.Fatalf("subsequent part did not inherit reduced budget: content=%+v before=%d after=%d", second, afterDeepPart, budget.matchWorkRemaining)
 	}
 }
 

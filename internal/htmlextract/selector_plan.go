@@ -159,19 +159,21 @@ func selectorCompoundCost(compound compoundComplexity, profile selectorAttribute
 }
 
 type selectorPlan struct {
-	source        string
-	matcher       cascadia.Sel
-	scope         cascadia.Matcher
-	ancestorChain []cascadia.Matcher
-	specificity   cascadia.Specificity
-	complexity    selectorComplexity
-	execution     selectorComplexity
-	key           selectorKey
-	scopePrefix   string
-	cost          int64
-	bound         int64
-	sequence      int
-	uncertain     bool
+	source          string
+	matcher         cascadia.Sel
+	scope           cascadia.Matcher
+	ancestorChain   []cascadia.Matcher
+	specificity     cascadia.Specificity
+	complexity      selectorComplexity
+	execution       selectorComplexity
+	key             selectorKey
+	scopePrefix     string
+	cost            int64
+	bound           int64
+	sequence        int
+	uncertain       bool
+	generatedPseudo bool
+	foreignCaseType bool
 }
 
 func (p *selectorPlan) makeUncertain() {
@@ -182,6 +184,33 @@ func (p *selectorPlan) makeUncertain() {
 	p.ancestorChain = nil
 	p.specificity = cascadia.Specificity{1<<30 - 1, 1<<30 - 1, 1<<30 - 1}
 	p.execution = execution
+}
+
+func (p *selectorPlan) makeForeignCaseUncertain() {
+	p.uncertain = true
+	p.matcher = nil
+	p.ancestorChain = nil
+	p.specificity = cascadia.Specificity{1<<30 - 1, 1<<30 - 1, 1<<30 - 1}
+	// A mixed-case SVG type in an ancestor cannot be evaluated by Cascadia.
+	// Retain only the rightmost compound so the rule cannot be missed. When the
+	// target itself is a canonical mixed-case SVG type, match that local name
+	// with HTML/foreign namespace case rules instead of Cascadia's lowercase
+	// type matcher.
+	p.execution = scopeSelectorComplexity(p.scopePrefix)
+	if name, ok := canonicalSVGTypeSelector(p.scopePrefix); ok {
+		lower := asciiLower(name)
+		p.scope = cascadia.Selector(func(n *html.Node) bool {
+			if n.Type != html.ElementNode {
+				return false
+			}
+			if n.Namespace == "" {
+				return n.Data == lower
+			}
+			return n.Data == name
+		})
+		return
+	}
+	p.scope = compileConservativeScope(p.scopePrefix)
 }
 
 // conservativeScope retains only conditions that are necessary for the full
@@ -332,6 +361,7 @@ func planSelectorList(source string, nextSequence *int) []selectorPlan {
 
 func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 	supported, inactive := true, false
+	generatedPseudo := false
 	brackets, parens, combinators := 0, 0, 0
 	compoundStart, rightmostStart := 0, 0
 	var quote byte
@@ -405,6 +435,13 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 				nameEnd++
 			}
 			name := asciiLower(branch[nameStart:nameEnd])
+			if (name == "before" || name == "after") && nameEnd == len(branch) {
+				// Both the modern ::before/::after spelling and the legacy
+				// single-colon spelling are valid. Restrict this marker to a
+				// terminal pseudo-element; escaped colons and pseudos nested in a
+				// functional selector never reach this branch.
+				generatedPseudo = i == 0 || branch[i-1] != ':' || i == 1 || branch[i-2] != ':'
+			}
 			switch name {
 			case "hover", "focus", "focus-visible", "focus-within", "active", "visited":
 				inactive = true
@@ -480,12 +517,23 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 			}
 		}
 	}
-	plan := selectorPlan{source: branch, sequence: sequence, complexity: complexity, execution: complexity, key: key, scopePrefix: prefix}
+	foreignCaseType := false
+	for _, compoundPrefix := range compoundPrefixes {
+		if _, ok := canonicalSVGTypeSelector(compoundPrefix); ok {
+			foreignCaseType = true
+			break
+		}
+	}
+	plan := selectorPlan{source: branch, sequence: sequence, complexity: complexity, execution: complexity, key: key, scopePrefix: prefix, generatedPseudo: generatedPseudo, foreignCaseType: foreignCaseType}
 	if supported {
 		group, err := cascadia.ParseGroup(branch)
 		if err == nil && len(group) == 1 {
 			plan.matcher = group[0]
 			plan.specificity = group[0].Specificity()
+			if foreignCaseType {
+				plan.makeForeignCaseUncertain()
+				return plan, true
+			}
 			// The lightweight structural planner does not decode hexadecimal CSS
 			// escapes. In particular, the optional whitespace terminating an
 			// escape is not a descendant combinator. Leave escaped selectors to
@@ -499,6 +547,33 @@ func planSelectorBranch(branch string, sequence int) (selectorPlan, bool) {
 	}
 	plan.makeUncertain()
 	return plan, true
+}
+
+var canonicalSVGTagNames = map[string]struct{}{
+	"altGlyph": {}, "altGlyphDef": {}, "altGlyphItem": {},
+	"animateColor": {}, "animateMotion": {}, "animateTransform": {},
+	"clipPath": {}, "feBlend": {}, "feColorMatrix": {},
+	"feComponentTransfer": {}, "feComposite": {}, "feConvolveMatrix": {},
+	"feDiffuseLighting": {}, "feDisplacementMap": {}, "feDistantLight": {},
+	"feFlood": {}, "feFuncA": {}, "feFuncB": {}, "feFuncG": {}, "feFuncR": {},
+	"feGaussianBlur": {}, "feImage": {}, "feMerge": {}, "feMergeNode": {},
+	"feMorphology": {}, "feOffset": {}, "fePointLight": {},
+	"feSpecularLighting": {}, "feSpotLight": {}, "feTile": {}, "feTurbulence": {},
+	"foreignObject": {}, "glyphRef": {}, "linearGradient": {},
+	"radialGradient": {}, "textPath": {},
+}
+
+func canonicalSVGTypeSelector(prefix string) (string, bool) {
+	if prefix == "" || prefix[0] == '.' || prefix[0] == '#' || prefix[0] == '*' || strings.Contains(prefix, "|") {
+		return "", false
+	}
+	end := strings.IndexAny(prefix, ".#")
+	if end < 0 {
+		end = len(prefix)
+	}
+	name := prefix[:end]
+	_, ok := canonicalSVGTagNames[name]
+	return name, ok
 }
 
 func scopeSelectorComplexity(prefix string) selectorComplexity {
@@ -797,13 +872,13 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 		}
 		state.seen = parentState.seen | state.matched
 		parentState = state
-		if s.runtime.matchCacheEntries < maxMatchCacheEntries {
+		if s.runtime.matchCacheUnits < maxMatchCacheUnits {
 			if states == nil {
 				states = make(map[*html.Node]ancestorChainState)
 				s.runtime.ancestorStates[plan.sequence] = states
 			}
 			states[node] = state
-			s.runtime.matchCacheEntries++
+			s.runtime.matchCacheUnits++
 		}
 	}
 	final := uint64(1) << (len(plan.ancestorChain) - 1)
@@ -817,7 +892,7 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 	original := s.rules
 	kept := original[:0]
 	for _, rule := range original {
-		if len(rule.decls) != 0 {
+		if len(rule.decls) != 0 && ruleHasEffectiveSelectorPlan(&rule) {
 			kept = append(kept, rule)
 		}
 	}
@@ -830,6 +905,9 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 	for ruleIndex := range s.rules {
 		for branchIndex := range s.rules[ruleIndex].plans {
 			plan := &s.rules[ruleIndex].plans[branchIndex]
+			if harmlessGeneratedPseudoPlan(plan, s.rules[ruleIndex].decls) {
+				continue
+			}
 			if plan.uncertain {
 				plan.cost = selectorExecutionCost(plan.execution, selectorAttributeProfile{}, depth, nodes, s.limits.MatchWork)
 			} else {
@@ -866,7 +944,31 @@ func (s *sheet) buildSelectorIndex(depth, nodes int) {
 	s.runtime.matchCaches = nil
 	s.runtime.ancestorStates = nil
 	s.runtime.attributeCandidates = nil
-	s.runtime.matchCacheEntries = 0
+	s.runtime.matchCacheUnits = 0
+}
+
+// A generated pseudo-element has no existing text of its own. A rule whose
+// only retained effect is display:none therefore cannot alter the visibility
+// of text in the source document. Keep every other generated-pseudo rule
+// uncertain: ::before and ::after can create painted boxes and overlay source
+// text, and another relevant declaration may override display within the rule.
+func harmlessGeneratedPseudoPlan(plan *selectorPlan, decls []declaration) bool {
+	if !plan.generatedPseudo || len(decls) != 1 {
+		return false
+	}
+	d := &decls[0]
+	return d.prop == display && d.custom == "" && !d.shorthand && !d.unsupported &&
+		d.prepared != nil && d.prepared.status == valueResolved &&
+		d.prepared.value.Known && d.prepared.value.Text == "none"
+}
+
+func ruleHasEffectiveSelectorPlan(rule *rule) bool {
+	for i := range rule.plans {
+		if !harmlessGeneratedPseudoPlan(&rule.plans[i], rule.decls) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *matchBudget) (selectorAttributeCandidates, bool) {
@@ -941,18 +1043,18 @@ func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *matchBudget) 
 		// Account for both the map record and every retained bucket slice header.
 		// When the shared cache is full, return the computed buckets for this
 		// match without retaining them; callers continue matching normally.
-		entries := 1 + len(cached.direct) + len(cached.ancestor)
-		if entries <= maxMatchCacheEntries-s.runtime.matchCacheEntries {
+		units := 1 + len(cached.direct) + len(cached.ancestor)
+		if units <= maxMatchCacheUnits-s.runtime.matchCacheUnits {
 			s.runtime.attributeCandidates = make(map[*html.Node]selectorAttributeCandidates)
 			s.runtime.attributeCandidates[node] = cached
-			s.runtime.matchCacheEntries += entries
+			s.runtime.matchCacheUnits += units
 		}
 		return cached, true
 	}
-	entries := 1 + len(cached.direct) + len(cached.ancestor)
-	if entries <= maxMatchCacheEntries-s.runtime.matchCacheEntries {
+	units := 1 + len(cached.direct) + len(cached.ancestor)
+	if units <= maxMatchCacheUnits-s.runtime.matchCacheUnits {
 		s.runtime.attributeCandidates[node] = cached
-		s.runtime.matchCacheEntries += entries
+		s.runtime.matchCacheUnits += units
 	}
 	return cached, true
 }
@@ -991,7 +1093,11 @@ func (s *sheet) collectCandidates(n *html.Node, budget *matchBudget) ([]selector
 		}
 		return true
 	}
-	if !appendBucket(s.index.universal) || !appendBucket(s.index.tags[n.Data]) {
+	tag := n.Data
+	if n.Namespace != "" {
+		tag = asciiLower(tag)
+	}
+	if !appendBucket(s.index.universal) || !appendBucket(s.index.tags[tag]) {
 		s.runtime.candidateScratch = refs
 		return nil, false
 	}
@@ -1013,7 +1119,11 @@ func (s *sheet) collectCandidates(n *html.Node, budget *matchBudget) ([]selector
 			if ancestor.Type != html.ElementNode {
 				continue
 			}
-			if !appendBucket(s.index.ancestorTags[ancestor.Data]) {
+			ancestorTag := ancestor.Data
+			if ancestor.Namespace != "" {
+				ancestorTag = asciiLower(ancestorTag)
+			}
+			if !appendBucket(s.index.ancestorTags[ancestorTag]) {
 				s.runtime.candidateScratch = refs
 				return nil, false
 			}

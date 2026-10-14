@@ -16,6 +16,7 @@ type mathParser struct {
 	at, depth, prop int
 	status          valueStatus
 	parent, root    *Style
+	budget          *expressionBudget
 }
 
 func isMath(s string) bool {
@@ -53,7 +54,7 @@ func evalMathTokens(prop int, src string, ts []valueToken, parent, root *Style, 
 			}
 		}
 	}
-	p := mathParser{ts: significant(ts), status: valueResolved, prop: prop, parent: parent, root: root}
+	p := mathParser{ts: significant(ts), status: valueResolved, prop: prop, parent: parent, root: root, budget: budget}
 	q := p.expr(0)
 	if p.at != len(p.ts) && p.status == valueResolved {
 		p.status = valueInvalid
@@ -135,6 +136,7 @@ func (p *mathParser) atom() quantity {
 		return quantity{}
 	}
 	if p.depth >= maxExpressionDepth {
+		p.budget.rejectDepth()
 		p.status = valueUnsupported
 		return quantity{}
 	}

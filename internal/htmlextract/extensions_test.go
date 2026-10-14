@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tdewolff/parse/v2/css"
 	xhtml "golang.org/x/net/html"
 )
 
@@ -456,7 +457,9 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 		{"extreme positive margin", `margin-left:100000px`, "unknown"},
 		{"extreme relative margin", `margin-top:-100vh`, "unknown"},
 		{"extreme margin shorthand", `margin:0 0 0 -9999px`, "unknown"},
+		{"uppercase unit in extreme margin shorthand", `margin:0 0 0 -9999PX`, "unknown"},
 		{"unresolved margin shorthand", `margin:var(--possibly-extreme)`, "unknown"},
+		{"zero line height with vertical clipping", `overflow:hidden;line-height:0`, "unknown"},
 		{"zero zoom", `zoom:0`, "unknown"},
 		{"tiny zoom", `zoom:.001`, "unknown"},
 		{"tiny percentage zoom", `zoom:1%`, "unknown"},
@@ -489,6 +492,7 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 		{"ordinary positive margin", `margin-left:999px`, "visible"},
 		{"overridden margin", `margin-left:-9999px;margin-left:0`, "visible"},
 		{"shorthand overrides margin", `margin-left:-9999px;margin:0`, "visible"},
+		{"uppercase auto shorthand overrides margin", `margin-left:-9999px;margin:AUTO`, "visible"},
 		{"ordinary zoom", `zoom:1`, "visible"},
 		{"normal zoom", `zoom:normal`, "visible"},
 		{"overridden zoom", `zoom:0;zoom:100%`, "visible"},
@@ -516,6 +520,47 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 	if got := findText(t, in, "T").Label; got != "unknown" {
 		t.Fatalf("variable layout label = %q, want unknown", got)
 	}
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{
+			"relative vertical offset under vertical clipping",
+			`<div style="overflow:hidden;height:14px"><div style="position:relative;top:60px">T</div></div>`,
+			"unknown",
+		},
+		{
+			"relative horizontal offset under clipping",
+			`<div style="overflow:hidden;width:14px"><div style="position:relative;left:60px">T</div></div>`,
+			"unknown",
+		},
+		{
+			"relative offset without clipping",
+			`<div><div style="position:relative;top:60px">T</div></div>`,
+			"visible",
+		},
+		{
+			"inherited zero line height with clipping",
+			`<div style="line-height:0"><div style="overflow:hidden">T</div></div>`,
+			"unknown",
+		},
+		{
+			"legacy table-cell height with clipping",
+			`<table><tr><td height="1" style="overflow:hidden">T</td></tr></table>`,
+			"unknown",
+		},
+		{
+			"author height overrides legacy table-cell height",
+			`<table><tr><td height="1" style="overflow:hidden;height:auto">T</td></tr></table>`,
+			"visible",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			in := inspectHTML(t, test.source)
+			if got := findText(t, in, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
 }
 
 func TestElementPaintAndGeometryVisibility(t *testing.T) {
@@ -531,6 +576,8 @@ func TestElementPaintAndGeometryVisibility(t *testing.T) {
 		{"one-pixel CSS height", `<img style="height:1px">`, "concealed", "empty-clip"},
 		{"percentage zero width", `<img style="width:0%">`, "concealed", "empty-clip"},
 		{"ordinary CSS size", `<img style="width:2px;height:2px">`, "visible", ""},
+		{"legacy one-pixel width", `<img width="1">`, "concealed", "empty-clip"},
+		{"author width overrides legacy image width", `<img width="1" style="width:2px">`, "visible", ""},
 		{"hidden input", `<input type="hidden">`, "concealed", "display-none"},
 		{"ordinary input", `<input type="text">`, "visible", ""},
 	}
@@ -1014,6 +1061,38 @@ func TestExpressionBudgetStopsCachedVariableTraversal(t *testing.T) {
 	}
 }
 
+func TestVariableSubstitutionChargesLiteralBytesBeforeCopying(t *testing.T) {
+	source := `var(--x) "` + strings.Repeat("x", 1_024) + `"`
+	tokens, status := lexValue(source)
+	if status != valueResolved {
+		t.Fatalf("fixture status = %d, want resolved", status)
+	}
+	literalBytes := 0
+	for i := 0; i < len(tokens); i++ {
+		token := tokens[i]
+		if token.kind == css.FunctionToken && equalASCIIFold(token.raw, "var(") {
+			i = closing(tokens, i)
+			continue
+		}
+		literalBytes += len(token.raw)
+	}
+	// substituteTokens also charges token traversal and the substituted value.
+	wantWork := len(tokens) + len("none") + literalBytes
+	lookup := func(string) variableValue {
+		return variableValue{text: "none", status: valueResolved}
+	}
+
+	budget := expressionBudget{remaining: int64(wantWork - 1)}
+	if got := substituteTokens(tokens, lookup, &budget, 0); got.status != valueUnsupported || !budget.exhausted {
+		t.Fatalf("under-budget substitution = %+v, budget=%+v", got, budget)
+	}
+
+	budget = expressionBudget{remaining: int64(wantWork)}
+	if got := substituteTokens(tokens, lookup, &budget, 0); got.status != valueResolved || budget.exhausted || budget.remaining != 0 {
+		t.Fatalf("exact-budget substitution = %+v, budget=%+v", got, budget)
+	}
+}
+
 func TestMathLexingChargesSourceBytesFirst(t *testing.T) {
 	source := "calc(1px + 2px)"
 	budget := expressionBudget{remaining: int64(len(source) - 1)}
@@ -1070,6 +1149,96 @@ func TestVariableScopeLookupChargesEachFrame(t *testing.T) {
 	}
 	if !budget.exhausted {
 		t.Fatal("under-budget scope traversal did not exhaust expression work")
+	}
+}
+
+func TestColourSchemeDependencyLookupChargesEachFrame(t *testing.T) {
+	root := &variableScope{colourDependent: map[string]bool{}}
+	middle := &variableScope{parent: root}
+	leaf := &variableScope{parent: middle}
+
+	budget := expressionBudget{remaining: 3}
+	if leaf.colourSchemeDependent("--missing", &budget) {
+		t.Fatal("missing variable was reported colour-scheme dependent")
+	}
+	if budget.remaining != 0 || budget.exhausted {
+		t.Fatalf("three-frame dependency lookup budget = %+v, want exactly consumed", budget)
+	}
+
+	budget = expressionBudget{remaining: 2}
+	if !leaf.colourSchemeDependent("--missing", &budget) {
+		t.Fatal("under-budget lookup did not preserve dependency uncertainty")
+	}
+	if !budget.exhausted {
+		t.Fatal("under-budget dependency lookup did not exhaust expression work")
+	}
+}
+
+func TestVariableSortingChargesLogarithmicFactor(t *testing.T) {
+	for n, want := range map[int]int{0: 0, 1: 0, 2: 2, 3: 6, 4: 8, 5: 15, 1024: 10240} {
+		if got := variableSortWork(n); got != want {
+			t.Errorf("variableSortWork(%d) = %d, want %d", n, got, want)
+		}
+	}
+
+	defs := map[string]candidate{"--a": {}, "--b": {}}
+	budget := expressionBudget{remaining: int64(len(defs) + variableSortWork(len(defs)) - 1)}
+	scope := buildVariables(nil, defs, nil, &budget)
+	if !budget.exhausted || scope.unresolved == nil {
+		t.Fatalf("under-budget variable sort was not abandoned safely: budget=%+v scope=%+v", budget, scope)
+	}
+}
+
+func TestDeclarationScopeMemoReusesVariableWork(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	declarations := s.declarations("display", "var(--x)")
+	if len(declarations) != 1 {
+		t.Fatalf("declarations = %d, want 1", len(declarations))
+	}
+	d := &declarations[0]
+	scope := &variableScope{
+		values:          map[string]variableValue{"--x": {text: "none", status: valueResolved}},
+		colourDependent: map[string]bool{"--x": false},
+	}
+	budget := expressionBudget{remaining: 100}
+	memo := declarationScopeMemo{}
+	context := evaluationContext{parent: initialPtr(), root: initialPtr(), vars: scope, budget: &budget, variableMemo: &memo}
+
+	value, status := resolvedDeclaration(d, display, false, context, false)
+	if status != valueResolved || value.Text != "none" {
+		t.Fatalf("display resolution = %+v, %d", value, status)
+	}
+	afterFirst := budget.remaining
+	opacityValue, status := resolvedDeclaration(d, opacity, false, context, false)
+	if status != valueResolved || !opacityValue.Known || opacityValue.Number != 1 {
+		t.Fatalf("property-specific resolution = %+v, %d; want initial opacity", opacityValue, status)
+	}
+	if budget.remaining != afterFirst {
+		t.Fatalf("cached substitution consumed work: before=%d after=%d", afterFirst, budget.remaining)
+	}
+
+	if declarationUsesColourSchemeVariable(d, scope, &budget, &memo) {
+		t.Fatal("ordinary variable was reported colour-scheme dependent")
+	}
+	afterDependency := budget.remaining
+	if declarationUsesColourSchemeVariable(d, scope, &budget, &memo) {
+		t.Fatal("cached ordinary variable was reported colour-scheme dependent")
+	}
+	if budget.remaining != afterDependency {
+		t.Fatalf("cached dependency lookup consumed work: before=%d after=%d", afterDependency, budget.remaining)
+	}
+
+	other := &variableScope{
+		values:          map[string]variableValue{"--x": {text: "block", status: valueResolved}},
+		colourDependent: map[string]bool{"--x": true},
+	}
+	context.vars = other
+	value, status = resolvedDeclaration(d, display, false, context, false)
+	if status != valueResolved || value.Text != "block" || budget.remaining >= afterDependency {
+		t.Fatalf("new-scope resolution = %+v, %d, budget=%+v", value, status, budget)
+	}
+	if !declarationUsesColourSchemeVariable(d, other, &budget, &memo) {
+		t.Fatal("new-scope colour dependency was hidden by memo")
 	}
 }
 

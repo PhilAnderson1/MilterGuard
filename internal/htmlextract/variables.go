@@ -3,6 +3,7 @@ package htmlextract
 import (
 	"errors"
 	"io"
+	"math/bits"
 	"sort"
 	"strings"
 
@@ -19,8 +20,13 @@ type valueToken struct {
 	raw  string
 }
 type expressionBudget struct {
-	remaining int64
-	exhausted bool
+	remaining          int64
+	exhausted          bool
+	depthLimitExceeded bool
+}
+
+func (b *expressionBudget) rejectDepth() {
+	b.depthLimitExceeded = true
 }
 
 func (b *expressionBudget) charge(n int) bool {
@@ -146,15 +152,21 @@ func advanceDelimiters(stack []css.TokenType, kind css.TokenType) ([]css.TokenTy
 // nested delimiter preserves its character value while allowing the parser to
 // expose the declaration to our component-value evaluator. Ordinary CSS takes
 // the allocation-free fast path.
-func parserCompatibleCSS(text string) string {
+type cssParserCompatibility struct {
+	text                            string
+	insertedRightParenthesisEscapes []int
+}
+
+func parserCompatibleCSS(text string) cssParserCompatibility {
 	hasComments := strings.Contains(text, "/*")
 	needsDelimiterCompatibility := containsFold(text, "var(") && strings.Contains(text, ")") && (strings.Contains(text, "[") || strings.Contains(text, "{"))
 	if !hasComments && !needsDelimiterCompatibility {
-		return text
+		return cssParserCompatibility{text: text}
 	}
 	l := css.NewLexer(parse.NewInputString(text))
 	var stack []css.TokenType
 	var b strings.Builder
+	var insertedRightParenthesisEscapes []int
 	changed := false
 	parenthesisBlocks := 0
 	offset := 0
@@ -162,7 +174,7 @@ func parserCompatibleCSS(text string) string {
 		kind, raw := l.Next()
 		if kind == css.ErrorToken {
 			if !errors.Is(l.Err(), io.EOF) {
-				return text
+				return cssParserCompatibility{text: text}
 			}
 			break
 		}
@@ -183,6 +195,7 @@ func parserCompatibleCSS(text string) string {
 				changed = true
 			}
 			if changed {
+				insertedRightParenthesisEscapes = append(insertedRightParenthesisEscapes, b.Len())
 				b.WriteByte('\\')
 			}
 		}
@@ -200,9 +213,84 @@ func parserCompatibleCSS(text string) string {
 		}
 	}
 	if !changed {
-		return text
+		return cssParserCompatibility{text: text}
 	}
-	return b.String()
+	return cssParserCompatibility{text: b.String(), insertedRightParenthesisEscapes: insertedRightParenthesisEscapes}
+}
+
+// restoreDeclarationValue removes only escapes inserted by
+// parserCompatibleCSS. Author-written escapes can occur in strings, URLs and
+// custom properties and must remain byte-for-byte intact. Parser offsets bound
+// the source grammar; occurrence order maps that span to rawTokenString's value
+// without requiring the parser to expose individual token offsets.
+func (c cssParserCompatibility) restoreDeclarationValue(value string, grammarStart, grammarEnd int) (string, bool, bool) {
+	if len(c.insertedRightParenthesisEscapes) == 0 {
+		return value, false, true
+	}
+	if grammarStart < 0 || grammarEnd > len(c.text) || grammarStart >= grammarEnd {
+		return value, false, false
+	}
+	span := c.text[grammarStart:grammarEnd]
+	colon := strings.IndexByte(span, ':')
+	if colon < 0 {
+		return value, false, false
+	}
+	valueStart := grammarStart + colon + 1
+	first := sort.SearchInts(c.insertedRightParenthesisEscapes, valueStart)
+	last := sort.SearchInts(c.insertedRightParenthesisEscapes, grammarEnd)
+	if first == last {
+		return value, false, true
+	}
+	inserted := c.insertedRightParenthesisEscapes[first:last]
+	flags := make([]bool, 0, strings.Count(c.text[valueStart:grammarEnd], `\)`))
+	insertedIndex, insertedSeen := 0, 0
+	for offset := valueStart; offset+1 < grammarEnd; {
+		relative := strings.Index(c.text[offset:grammarEnd], `\)`)
+		if relative < 0 {
+			break
+		}
+		offset += relative
+		for insertedIndex < len(inserted) && inserted[insertedIndex] < offset {
+			insertedIndex++
+		}
+		wasInserted := insertedIndex < len(inserted) && inserted[insertedIndex] == offset
+		flags = append(flags, wasInserted)
+		if wasInserted {
+			insertedIndex++
+			insertedSeen++
+		}
+		offset += 2
+	}
+	if insertedSeen != len(inserted) || len(flags) == 0 {
+		return value, false, false
+	}
+
+	var restored strings.Builder
+	restored.Grow(len(value))
+	valueOffset, occurrence := 0, 0
+	for valueOffset < len(value) {
+		relative := strings.Index(value[valueOffset:], `\)`)
+		if relative < 0 {
+			break
+		}
+		relative += valueOffset
+		if occurrence >= len(flags) {
+			return value, false, false
+		}
+		restored.WriteString(value[valueOffset:relative])
+		if flags[occurrence] {
+			restored.WriteByte(')')
+		} else {
+			restored.WriteString(`\)`)
+		}
+		occurrence++
+		valueOffset = relative + 2
+	}
+	if occurrence != len(flags) {
+		return value, false, false
+	}
+	restored.WriteString(value[valueOffset:])
+	return restored.String(), true, true
 }
 
 func closing(ts []valueToken, start int) int {
@@ -349,8 +437,13 @@ func (s *variableScope) get(name string, budget *expressionBudget) variableValue
 	return variableValue{status: valueInvalid}
 }
 
-func (s *variableScope) colourSchemeDependent(name string) bool {
+func (s *variableScope) colourSchemeDependent(name string, budget *expressionBudget) bool {
 	for ; s != nil; s = s.parent {
+		if !budget.charge(1) {
+			// Exhaustion cannot prove that no inherited definition is
+			// colour-scheme dependent, so preserve the uncertainty.
+			return true
+		}
 		if dependent, ok := s.colourDependent[name]; ok {
 			return dependent
 		}
@@ -383,6 +476,9 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	for n := range defs {
 		ordered = append(ordered, n)
 	}
+	if !budget.charge(variableSortWork(len(ordered))) {
+		return unresolvedVariableScope(parent, defs, alternate)
+	}
 	sort.Strings(ordered)
 	tokens := map[string][]valueToken{}
 	cyclic := map[string]bool{}
@@ -413,7 +509,12 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 			}
 			return
 		}
-		if depth > maxExpressionDepth || !budget.charge(1+len(tokens[n])) {
+		if depth > maxExpressionDepth {
+			budget.rejectDepth()
+			s.values[n] = variableValue{status: valueUnsupported}
+			return
+		}
+		if !budget.charge(1 + len(tokens[n])) {
 			s.values[n] = variableValue{status: valueUnsupported}
 			return
 		}
@@ -452,6 +553,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		}
 		d := definition.d
 		if depth > maxExpressionDepth {
+			budget.rejectDepth()
 			return variableValue{status: valueUnsupported}
 		}
 		var v variableValue
@@ -484,6 +586,9 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 			return s.colourDependent[name]
 		}
 		if alternate[name] || depth > maxExpressionDepth {
+			if depth > maxExpressionDepth {
+				budget.rejectDepth()
+			}
 			s.colourDependent[name] = true
 			s.hasColourDependency = true
 			return true
@@ -493,7 +598,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		}
 		definition, local := defs[name]
 		if !local {
-			return parent.colourSchemeDependent(name)
+			return parent.colourSchemeDependent(name, budget)
 		}
 		if !budget.charge(1 + len(definition.d.variableDependencies)) {
 			s.colourDependent[name] = true
@@ -504,7 +609,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		dependent := false
 		switch definition.d.keyword {
 		case "inherit", "unset":
-			dependent = parent.colourSchemeDependent(name)
+			dependent = parent.colourSchemeDependent(name, budget)
 		default:
 			for _, ref := range definition.d.variableDependencies {
 				if dependsOnColourScheme(ref, depth+1) {
@@ -528,6 +633,13 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	}
 	return s
 }
+
+func variableSortWork(n int) int {
+	if n < 2 {
+		return 0
+	}
+	return n * bits.Len(uint(n-1))
+}
 func substitute(d *declaration, vars *variableScope, budget *expressionBudget) variableValue {
 	if !d.hasVars {
 		return variableValue{d.value, valueResolved}
@@ -540,13 +652,23 @@ func substitute(d *declaration, vars *variableScope, budget *expressionBudget) v
 	}, budget, 0)
 }
 func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget *expressionBudget, depth int) variableValue {
-	if depth > maxExpressionDepth || !budget.charge(len(ts)) {
+	if depth > maxExpressionDepth {
+		budget.rejectDepth()
+		return variableValue{status: valueUnsupported}
+	}
+	if !budget.charge(len(ts)) {
 		return variableValue{status: valueUnsupported}
 	}
 	var out strings.Builder
 	for i := 0; i < len(ts); i++ {
 		t := ts[i]
 		if t.kind != css.FunctionToken || !equalASCIIFold(t.raw, "var(") {
+			// Token count bounds structural work, but a single token can contain
+			// almost maxValueBytes. Charge the bytes before copying them so large
+			// strings and identifiers cannot consume unmetered expression work.
+			if !budget.charge(len(t.raw)) {
+				return variableValue{status: valueUnsupported}
+			}
 			out.WriteString(t.raw)
 		} else {
 			end := closing(ts, i)

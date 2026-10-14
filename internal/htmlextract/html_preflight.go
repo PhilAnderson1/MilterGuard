@@ -31,21 +31,172 @@ type lexicalFrame struct {
 	name         string
 	foreign      bool
 	htmlChildren bool
+	// Foreign-content recovery can leave the lexical and allocating stacks
+	// different. Such a frame cannot justify a later implicit closure.
+	uncertain        bool
+	formatting       *preflightFormatting
+	formattingMarker *preflightFormattingScope
 }
 
 // measurePreflight bounds explicit lexical nesting before the HTML5 tree builder
 // (which itself can do expensive recovery). The builder can insert implied
 // ancestors, so parseDocument separately enforces the limit on final tree
-// depth. This conservative lexical stack can also reject malformed optional-tag
-// sequences that would produce a shallower tree; that is explicit.
+// depth. Recognised implicit closures keep ordinary optional-end-tag sequences
+// shallow. Ambiguous recovery remains conservative rather than removing the
+// depth guard before the allocating parser runs.
 type lexicalUsage struct {
 	nodes, textNodes, attributes, depth int
 	treeBuilderTokens                   int
 	nestedTables                        int
+	projectedNodes, projectedAttributes int
+}
+
+// implicitCloseIndex identifies a suffix that a new HTML start tag certainly
+// closes. This is deliberately narrower than a second HTML tree builder: never
+// search through foreign content or an insertion/scope boundary whose recovery
+// we do not model. In particular, matching names alone must not flatten nested
+// lists, tables, templates, or formatting-element reconstruction.
+func implicitCloseIndex(stack []lexicalFrame, name string) int {
+	if len(stack) == 0 {
+		return -1
+	}
+	top := stack[len(stack)-1]
+	if top.foreign || top.uncertain {
+		return -1
+	}
+	switch name {
+	case "option", "optgroup":
+		// The tree builder closes a current option even outside a select. An
+		// optgroup closes a preceding group only in a select's implied-end-tag
+		// sequence; do not flatten genuinely nested optgroups outside selects.
+		keep := len(stack)
+		if top.name == "option" {
+			keep--
+		}
+		if name == "optgroup" && keep > 0 && !stack[keep-1].uncertain && stack[keep-1].name == "optgroup" &&
+			keep > 1 && !stack[keep-2].foreign && !stack[keep-2].uncertain && stack[keep-2].name == "select" {
+			keep--
+		}
+		if keep < len(stack) {
+			return keep
+		}
+	case "a":
+		// Adjacent anchors are safe to close. Adoption-agency recovery through
+		// intervening elements can retain/reconstruct descendants, so leave
+		// those more complicated cases conservatively nested.
+		if top.name == "a" {
+			return len(stack) - 1
+		}
+	case "li", "dd", "dt":
+		for i := len(stack) - 1; i >= 0; i-- {
+			f := stack[i]
+			if f.foreign || f.uncertain {
+				break
+			}
+			if f.name == name || (name != "li" && (f.name == "dd" || f.name == "dt")) {
+				return i
+			}
+			// Only cross known non-special phrasing elements and the three
+			// special elements explicitly exempted by the tree builder. Unknown
+			// tags remain barriers so dependency changes cannot weaken admission.
+			if f.name != "address" && f.name != "div" && f.name != "p" && !preflightPhrasing(f.name) {
+				break
+			}
+		}
+	case "td", "th", "tr", "tbody", "thead", "tfoot":
+		// Locate the nearest explicit table first. Never close a cell or row
+		// belonging to an outer table, or cross a template/foreign boundary.
+		table := -1
+		for i := len(stack) - 1; i >= 0; i-- {
+			f := stack[i]
+			if f.foreign || f.uncertain || f.name == "template" || f.name == "select" {
+				break
+			}
+			if f.name == "table" {
+				table = i
+				break
+			}
+		}
+		if table >= 0 {
+			keep := -1
+			for i := len(stack) - 1; i > table; i-- {
+				switch stack[i].name {
+				case "td", "th":
+					keep = i
+				case "tr":
+					if name != "td" && name != "th" {
+						keep = i
+					}
+				case "tbody", "thead", "tfoot":
+					if name == "tbody" || name == "thead" || name == "tfoot" {
+						keep = i
+					}
+				}
+			}
+			return keep
+		}
+	}
+	if closesParagraph(name) {
+		for i := len(stack) - 1; i >= 0; i-- {
+			f := stack[i]
+			if f.foreign || f.uncertain {
+				break
+			}
+			if f.name == "p" {
+				return i
+			}
+			// These are button-scope boundaries in the HTML tree builder.
+			switch f.name {
+			case "applet", "caption", "html", "table", "td", "th", "marquee", "object", "template", "select", "button":
+				return -1
+			}
+		}
+	}
+	return -1
+}
+
+func preflightPhrasing(name string) bool {
+	switch name {
+	case "a", "abbr", "b", "bdi", "bdo", "big", "cite", "code", "del", "dfn", "em", "font", "i", "ins", "kbd", "mark", "q", "s", "samp", "small", "span", "strike", "strong", "sub", "sup", "time", "tt", "u", "var":
+		return true
+	}
+	return false
+}
+
+func closesParagraph(name string) bool {
+	// table is intentionally absent: whether it closes p depends on quirks
+	// mode. form likewise depends on whether another form is already open.
+	switch name {
+	case "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl", "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "main", "menu", "nav", "ol", "p", "search", "section", "summary", "ul", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "listing", "li", "dd", "dt", "plaintext", "hr", "xmp":
+		return true
+	}
+	return false
 }
 
 func measurePreflight(b []byte, l Limits) (lexicalUsage, error) {
 	return measurePreflightWithStop(b, l, nil)
+}
+
+// PreflightWithStop guards a subsequent HTML tree-builder call without building
+// a tree or resolving CSS. Callers must still check actual tree limits after
+// parsing; recovery projections deliberately overestimate ambiguous input.
+func PreflightWithStop(input []byte, limits Limits, shouldStop func() bool) error {
+	if err := limits.validate(); err != nil {
+		return err
+	}
+	if len(input) > limits.InputBytes {
+		return fmt.Errorf("limit: input bytes > %d", limits.InputBytes)
+	}
+	if shouldStop != nil && shouldStop() {
+		return errStopped
+	}
+	if _, err := measurePreflightWithStop(input, limits, shouldStop); err != nil {
+		return err
+	}
+	if shouldStop != nil && shouldStop() {
+		return errStopped
+	}
+	return nil
 }
 
 func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexicalUsage, error) {
@@ -53,9 +204,16 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 	var stack []lexicalFrame
 	open := make(map[string]int)
 	var usage lexicalUsage
+	allocations := allocationPreflight{limits: l, usage: &usage}
 	openTables := 0
-	popTo := func(keep int) {
+	popTo := func(keep int, name string, explicit bool) {
+		allocations.notePop(stack, keep, name, explicit)
+		clearScope := allocations.canClearScope(stack, keep, name, explicit)
 		for i := len(stack) - 1; i >= keep; i-- {
+			allocations.orphan(stack[i].formatting)
+			if clearScope != nil && stack[i].formattingMarker == clearScope {
+				allocations.popScope()
+			}
 			name := stack[i].name
 			if name == "table" && !stack[i].foreign {
 				openTables--
@@ -99,29 +257,62 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 			}
 		}
 		if t != html.StartTagToken && t != html.SelfClosingTagToken && t != html.EndTagToken {
+			if err := allocations.add(1, 0); err != nil {
+				return usage, err
+			}
+			if t == html.TextToken {
+				if err := allocations.reconstruct(); err != nil {
+					return usage, err
+				}
+			}
 			continue
 		}
 		raw, more := z.TagName()
 		n := string(raw)
+		allocations.uncertainInsertionMode(n)
+		attributes := 0
 		if t == html.StartTagToken || t == html.SelfClosingTagToken {
 			for more {
 				_, _, more = z.TagAttr()
 				usage.attributes++
+				attributes++
+				if usage.attributes&255 == 0 && shouldStop != nil && shouldStop() {
+					return usage, errStopped
+				}
 				if usage.attributes > l.Attributes {
 					return usage, fmt.Errorf("limit: lexical attributes > %d", l.Attributes)
 				}
 			}
+			if err := allocations.add(1, attributes); err != nil {
+				return usage, err
+			}
 		}
 		if t == html.EndTagToken {
+			// Recovery can reprocess an end tag as a start tag (notably br/p),
+			// or flush pending table text and reconstruct formatting entries.
+			if err := allocations.reconstruct(); err != nil {
+				return usage, err
+			}
+			if n == "br" || (n == "p" && implicitCloseIndex(stack, "p") < 0) {
+				if err := allocations.add(1, 0); err != nil {
+					return usage, err
+				}
+			}
+			if formattingTag(n) {
+				if err := allocations.endFormatting(n, stack); err != nil {
+					return usage, err
+				}
+			}
 			// Unmatched end tags are common in malformed input and cannot
 			// affect this stack. Avoid searching the full bounded depth for
 			// every such token in an adversarial end-tag flood.
 			if open[n] == 0 {
+				allocations.uncertain = true
 				continue
 			}
 			for i := len(stack) - 1; i >= 0; i-- {
 				if stack[i].name == n {
-					popTo(i)
+					popTo(i, n, true)
 					break
 				}
 			}
@@ -129,17 +320,39 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 		}
 
 		parentForeign := len(stack) > 0 && stack[len(stack)-1].foreign && !stack[len(stack)-1].htmlChildren
+		foreignBreakoutToken := false
 		if parentForeign && foreignBreakout(n) {
+			allocations.uncertain = true
 			// The HTML tree builder pops ordinary foreign elements and
 			// reprocesses this token in HTML mode.
 			keep := len(stack)
 			for keep > 0 && stack[keep-1].foreign && !stack[keep-1].htmlChildren {
 				keep--
 			}
-			popTo(keep)
+			popTo(keep, "", false)
+			// Do not let a later optional tag close a lexical ancestor that
+			// foreign-content recovery may already have closed or reparented.
+			for i := range stack {
+				stack[i].uncertain = true
+				allocations.orphan(stack[i].formatting)
+			}
 			parentForeign = false
+			foreignBreakoutToken = true
 		}
 		foreign := parentForeign || n == "svg" || n == "math"
+		if n == "a" || n == "nobr" {
+			if err := allocations.endFormatting(n, stack); err != nil {
+				return usage, err
+			}
+		}
+		// Foreign integration points have additional namespace-sensitive rules.
+		// A lexical breakout alone is not sufficient evidence that an earlier
+		// HTML paragraph is in scope; retain conservative depth for that token.
+		if !foreign && !foreignBreakoutToken {
+			if keep := implicitCloseIndex(stack, n); keep >= 0 {
+				popTo(keep, n, false)
+			}
+		}
 		// The tokenizer assumes noscript and raw-text-named elements contain
 		// uninterpreted text unless its parser supplies insertion-mode context.
 		// Our DOM parse disables scripting, so noscript contains markup. The
@@ -149,18 +362,51 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 		if n == "noscript" || foreign {
 			z.NextIsNotRawText()
 		}
+		if err := allocations.add(impliedTableNodes(n, stack), 0); err != nil {
+			return usage, err
+		}
+		if err := allocations.reconstruct(); err != nil {
+			return usage, err
+		}
 		if t == html.SelfClosingTagToken && foreign {
+			if formattingTag(n) {
+				// A namespace-model disagreement at an integration point can make
+				// this an HTML tag whose self-closing flag the parser ignores.
+				entry, err := allocations.startFormatting(n, attributes)
+				if err != nil {
+					return usage, err
+				}
+				allocations.orphan(entry)
+			}
 			// The self-closing flag is honored in foreign content.
 			continue
 		}
 		if !foreign && void(n) {
 			continue
 		}
-		stack = append(stack, lexicalFrame{
+		frame := lexicalFrame{
 			name:         n,
 			foreign:      foreign,
 			htmlChildren: foreign && (n == "foreignobject" || n == "desc" || n == "title"),
-		})
+		}
+		// Track possible HTML formatting in foreign content too. Integration
+		// and recovery can disagree with the conservative lexical namespace;
+		// a false foreign classification must not omit clone reservations.
+		if formattingTag(n) {
+			var err error
+			frame.formatting, err = allocations.startFormatting(n, attributes)
+			if err != nil {
+				return usage, err
+			}
+		}
+		if !foreign && formattingScopeMarker(n, stack) {
+			var err error
+			frame.formattingMarker, err = allocations.pushScope()
+			if err != nil {
+				return usage, err
+			}
+		}
+		stack = append(stack, frame)
 		if n == "table" && !foreign {
 			openTables++
 			if openTables > usage.nestedTables {

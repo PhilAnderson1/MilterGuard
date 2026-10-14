@@ -19,11 +19,16 @@ const extremeNegativeSpacingPixels = 8
 // hiding patterns without attempting layout. These combinations are evidence
 // that visibility depends on geometry, not proof that the subtree is hidden.
 func layoutVisibilityUncertain(wins *[layoutProperties]layoutCandidate, style *Style, context evaluationContext) bool {
-	uncertain, _ := layoutVisibility(wins, style, context, nil)
-	return uncertain
+	return layoutVisibility(wins, style, context, nil).uncertain
 }
 
-func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, context evaluationContext, node *html.Node) (bool, bool) {
+type layoutVisibilityResult struct {
+	uncertain, elementConcealed bool
+	clipsX, clipsY              bool
+	offsetX, offsetY            bool
+}
+
+func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, context evaluationContext, node *html.Node) layoutVisibilityResult {
 	// Resolve only declarations that can complete a hiding pattern. Width is
 	// extremely common in email, but is irrelevant unless overflow clips it;
 	// likewise offsets are irrelevant on a statically positioned element.
@@ -31,6 +36,13 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 	overflowYResult := resolveLayoutCandidate(&wins[overflowY-properties], context)
 	clipX := overflowClips(overflowXResult)
 	clipY := overflowClips(overflowYResult)
+	clipsX := overflowDefinitelyClips(overflowXResult)
+	clipsY := overflowDefinitelyClips(overflowYResult)
+	if style[display].Known && style[display].Text == "contents" {
+		// A display:contents element has no principal box to establish an
+		// overflow clipping boundary.
+		clipX, clipY, clipsX, clipsY = false, false, false, false
+	}
 	isImage := node != nil && node.Namespace == "" && node.Data == "img"
 	var widthResult, heightResult, maxWidthResult, maxHeightResult layoutResult
 	if clipX || wins[overflowX-properties].uncertainOrigin || isImage {
@@ -69,10 +81,20 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 			(isImage && (tinyWidth && wins[width-properties].uncertainOrigin || tinyHeight && wins[height-properties].uncertainOrigin))
 
 	positioned := style[position].Known && (style[position].Text == "absolute" || style[position].Text == "fixed")
+	positionedWithinClip := style[position].Known &&
+		(style[position].Text == "relative" || style[position].Text == "absolute" ||
+			style[position].Text == "fixed" || style[position].Text == "sticky")
+	offsetProperties := [...]int{left, top, right, bottom}
+	var offsetResults [4]layoutResult
+	if positionedWithinClip {
+		for i, property := range offsetProperties {
+			offsetResults[i] = resolveLayoutCandidate(&wins[property-properties], context)
+		}
+	}
 	extremeOffset := false
 	if positioned {
-		for _, property := range [...]int{left, top, right, bottom} {
-			extremeOffset = extremeOffset || extremeOffsetMagnitude(resolveLayoutCandidate(&wins[property-properties], context))
+		for _, result := range offsetResults {
+			extremeOffset = extremeOffset || extremeOffsetMagnitude(result)
 		}
 	}
 	if positioned {
@@ -84,6 +106,8 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 	extremeIndent := extremeOffsetMagnitude(resolveLayoutCandidate(&wins[textIndent-properties], context))
 	extremeSpacing := extremeNegativeSpacing(resolveLayoutCandidate(&wins[letterSpacing-properties], context)) ||
 		extremeNegativeSpacing(resolveLayoutCandidate(&wins[wordSpacing-properties], context))
+	zeroLineHeight := clipY && style[lineHeight].Text != "normal" &&
+		(!style[lineHeight].Known || style[lineHeight].Number == 0)
 	extremeMargin := false
 	for _, property := range [...]int{marginTop, marginRight, marginBottom, marginLeft} {
 		extremeMargin = extremeMargin || extremeOrUnresolvedMargin(resolveLayoutCandidate(&wins[property-properties], context))
@@ -93,11 +117,16 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 		wins[letterSpacing-properties].uncertainOrigin || wins[wordSpacing-properties].uncertainOrigin ||
 		wins[zoom-properties].uncertainOrigin
 	tinyZoom := nearZeroZoom(resolveLayoutCandidate(&wins[zoom-properties], context))
+	offsetX := positionedWithinClip && (nonzeroOffset(offsetResults[0]) || nonzeroOffset(offsetResults[2]))
+	offsetY := positionedWithinClip && (nonzeroOffset(offsetResults[1]) || nonzeroOffset(offsetResults[3]))
 	if context.budget.exhausted {
-		return true, false
+		return layoutVisibilityResult{uncertain: true}
 	}
-	uncertain := uncertainOrigin || zeroBox || positioned && extremeOffset || extremeIndent || extremeSpacing || extremeMargin || tinyZoom
-	return uncertain, elementConcealed
+	uncertain := uncertainOrigin || zeroBox || zeroLineHeight || positioned && extremeOffset || extremeIndent || extremeSpacing || extremeMargin || tinyZoom
+	return layoutVisibilityResult{
+		uncertain: uncertain, elementConcealed: elementConcealed,
+		clipsX: clipsX, clipsY: clipsY, offsetX: offsetX, offsetY: offsetY,
+	}
 }
 
 func tinyImageDimension(result layoutResult) bool {
@@ -137,6 +166,21 @@ func overflowClips(result layoutResult) bool {
 		return true
 	}
 	return result.value.Text == "hidden" || result.value.Text == "clip"
+}
+
+func overflowDefinitelyClips(result layoutResult) bool {
+	return result.set && result.status == valueResolved && result.value.Known &&
+		(result.value.Text == "hidden" || result.value.Text == "clip")
+}
+
+func nonzeroOffset(result layoutResult) bool {
+	if !result.set || result.status == valueInvalid || result.value.Text == "auto" {
+		return false
+	}
+	if result.status != valueResolved || !result.value.Known {
+		return true
+	}
+	return result.value.Number != 0
 }
 
 func zeroLayoutCandidate(result layoutResult) bool {

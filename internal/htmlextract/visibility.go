@@ -48,6 +48,8 @@ type presentationState struct {
 	contentHidden, contentKnown  bool
 	msoHidden, msoKnown          bool
 	layoutUncertain              bool
+	clipsDescendantsX            bool
+	clipsDescendantsY            bool
 	animationUncertain           bool
 	clientDependentReasons       concealmentReason
 	alternateColourSchemeReasons concealmentReason

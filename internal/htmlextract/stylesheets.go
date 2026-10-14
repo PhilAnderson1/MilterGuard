@@ -200,10 +200,17 @@ func decodeCSSDataURL(reference string, maxBytes int) ([]byte, bool, bool) {
 		return nil, true, false
 	}
 	metadata := reference[5:comma]
+	// The payload is bounded separately by the remaining stylesheet budget.
+	// Bound metadata before mime.ParseMediaType can allocate a parameter map
+	// proportional to an otherwise multi-megabyte href value.
+	if len(metadata) > maxValueBytes {
+		return nil, true, false
+	}
 	base64Encoded := false
-	if fields := strings.Split(metadata, ";"); len(fields) > 1 && equalASCIIFold(strings.TrimSpace(fields[len(fields)-1]), "base64") {
+	if separator := strings.LastIndexByte(metadata, ';'); separator >= 0 &&
+		equalASCIIFold(strings.TrimSpace(metadata[separator+1:]), "base64") {
 		base64Encoded = true
-		metadata = strings.Join(fields[:len(fields)-1], ";")
+		metadata = metadata[:separator]
 	}
 	mediaType, params, err := mime.ParseMediaType(metadata)
 	if err != nil || !equalASCIIFold(mediaType, "text/css") {

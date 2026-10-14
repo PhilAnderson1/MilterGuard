@@ -133,8 +133,17 @@ scripts or fetch external resources. Processing proceeds through these stages:
    preflight in `html_preflight.go` **before** calling the `x/net/html` tree
    builder. The preflight bounds tree-building tokens, text nodes, attributes,
    and explicit nesting, including markup inside `noscript` and foreign
-   content. This protects the allocating tree builder and its error recovery
-   from adversarial input; checking the completed tree alone is insufficient.
+   content. Scoped implicit closures keep supported optional-end-tag sequences
+   shallow; ambiguous recovery and foreign-content boundaries retain
+   conservative depth accounting. `html_allocations.go` also budgets implied
+   table wrappers, formatting reconstruction, and adoption-agency copies,
+   including copied attributes, before tree construction. Its bounded state
+   deliberately overestimates ambiguous recovery, so malformed input may be
+   rejected before reaching the exact final-tree limits. Check cancellation
+   during the scan and again before starting the tree builder. This protects
+   the allocating tree builder
+   and its error recovery from adversarial input; checking the completed tree
+   alone is insufficient.
 2. Build the HTML tree with scripting disabled, then traverse it with an
    explicit stack. Recheck actual node, text, attribute, and depth limits,
    allowing for parser-generated ancestors. Collect applicable stylesheets,
@@ -152,7 +161,10 @@ scripts or fetch external resources. Processing proceeds through these stages:
    expressions, layout, clipping, opacity, and colours with shared matching
    and expression-work budgets. Aggregate the cases into visible, concealed,
    client-dependent, or unknown results, retaining concealment evidence and
-   resource usage.
+   resource usage. Layout uncertainty includes zero line boxes clipped by
+   overflow, positioned descendants of clipped ancestors, and applicable
+   legacy email width/height presentation hints; it does not attempt full box
+   layout.
 
 HTML preflight, tree collection, and presentation analysis use separate
 explicit stacks because each pass tracks different state and limits. CSS
@@ -160,12 +172,40 @@ source limits apply across parser inputs within a document; `internal/message`
 carries the remaining extraction budgets across HTML MIME parts. Splitting
 input across style elements or message parts must not reset those budgets.
 
+Elements with no indexed selector candidates or local declarations take an
+inheritance-only path that preserves computed inherited values and variables.
+This path has a smaller fixed work charge and skips cascade and layout
+resolution. Candidate discovery remains budgeted even when no selector can
+apply; elements requiring resolution retain the full fixed charge.
+
+Selector-evaluation caches share a 100,000-unit per-document retention limit.
+These are weighted logical units rather than bytes: simple match records cost
+one unit, while cached attribute candidates also charge retained bucket slice
+headers. Depending on the cache mix and Go runtime map overhead, the limit
+represents several to low tens of MiB, plus outer tables bounded by the selector
+limit. Evaluation continues without retaining new cache records after the limit.
+
 Unsupported or exhausted style analysis preserves uncertainty rather than
 trusting a partial cascade. Malformed inline styles can make an element and
 its descendants uncertain; unusable global CSS invalidates the shared cascade.
 Applicable external or unsupported stylesheet references are reported through
 `UnresolvedStylesheet`. Bounded data-URL stylesheets can be analysed, but their
 effects remain client-dependent. No network stylesheet is fetched.
+CSS parser-limit, selector-work, and expression-work exhaustion are propagated
+to `internal/message` as incomplete CSS analysis. They remove visible-text
+confidence and produce an explicit limitation in the analysis prompt.
+
+CSS nesting is detected but relative nested selectors are not resolved. Since
+nested selectors can reach descendants, siblings, or ancestors of the parent
+match, a stylesheet containing effective nesting makes document presentation
+labels uncertain and sets `UnresolvedStylesheet`. Empty or non-grouping nested
+at-rules do not create that signal.
+
+Animation analysis matches case-sensitive names against parsed keyframe
+definitions instead of treating any keyframes block as globally active. Static
+name parsing is cached; variable resolution and name lookups remain budgeted.
+Potentially active or unresolved animations retain presentation uncertainty;
+the extractor does not simulate timelines.
 
 `internal/message` renders the results as annotated text and, when concealed
 content exists, a second representation with that content removed. It also
@@ -173,6 +213,12 @@ extracts links and image references. Only confidently visible text can suppress
 fallback vision analysis; an unresolved stylesheet removes that confidence.
 Analysis errors or cooperative stops switch extraction to a bounded lexical
 fallback, with fallback and completeness information carried into the prompt.
+Conditional Outlook comment fragments receive the same HTML preflight before
+their separate tree parse, with scripting disabled and smaller fragment limits.
+If fragment parsing or extraction exceeds a limit, a fixed omission marker and
+`ExtractionIncomplete` disclose the gap; partial fragment text and links are
+discarded. The marker is excluded from recipient-visible text and confidence
+counts.
 
 The Milter analysis service additionally measures HTML processing CPU time and
 supplies the cooperative stop callback. The configured limit action selects

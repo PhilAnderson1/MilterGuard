@@ -147,6 +147,9 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	if err != nil {
 		return document, err
 	}
+	if p.stopped() {
+		return document, errStopped
+	}
 	// Email extraction does not execute scripts; parse noscript fallback content
 	// in the corresponding HTML5 tree-construction mode.
 	root, err := html.ParseWithOptions(bytes.NewReader(input), html.ParseOptionEnableScripting(false))
@@ -195,10 +198,15 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		// margin to a caller-provided limit, which could overflow int.
 		if e.depth > p.Limits.Depth {
 			excess := e.depth - p.Limits.Depth
-			// Use subtraction in two stages so even a caller-provided maximum
-			// integer limit cannot overflow while adding parser allowances.
-			if excess > impliedTreeDepthMargin && excess-impliedTreeDepthMargin > document.lexical.nestedTables {
-				return document, fmt.Errorf("limit: tree depth > %d", p.Limits.Depth)
+			// A cell directly below a table makes the tree builder insert both
+			// tbody and tr. Charge the two possible implied levels separately so
+			// even caller-provided maximum integer limits cannot overflow while
+			// adding parser allowances.
+			if excess > impliedTreeDepthMargin {
+				excess -= impliedTreeDepthMargin
+				if excess > document.lexical.nestedTables && excess-document.lexical.nestedTables > document.lexical.nestedTables {
+					return document, fmt.Errorf("limit: tree depth > %d", p.Limits.Depth)
+				}
 			}
 		}
 		if e.depth > document.treeDepth {

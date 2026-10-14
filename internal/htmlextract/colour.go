@@ -171,9 +171,47 @@ func isColourFunction(name string) bool {
 	return false
 }
 
+func countUnsupportedColourFunctions(tokens []valueToken) int {
+	count := 0
+	for _, token := range tokens {
+		if token.kind != css.FunctionToken {
+			continue
+		}
+		name := asciiLower(cssUnescape(strings.TrimSuffix(token.raw, "(")))
+		switch name {
+		case "lab", "lch", "oklab", "oklch", "color", "color-mix", "device-cmyk", "light-dark":
+			count++
+		}
+	}
+	return count
+}
+
 func backgroundImageSyntax(value string) bool {
 	value = asciiLower(value)
 	return strings.Contains(value, "url(") || strings.Contains(value, "gradient(") || strings.Contains(value, "image-set(") || strings.Contains(value, "cross-fade(")
+}
+
+func legacyDimension(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if len(value) > maxValueBytes {
+		return "", false
+	}
+	percentage := strings.HasSuffix(value, "%")
+	if percentage {
+		value = strings.TrimSuffix(value, "%")
+	}
+	if value == "" {
+		return "", false
+	}
+	for i := range value {
+		if value[i] < '0' || value[i] > '9' {
+			return "", false
+		}
+	}
+	if percentage {
+		return value + "%", true
+	}
+	return value + "px", true
 }
 
 // Presentational hints precede all author rules, with specificity zero. Full
@@ -213,6 +251,20 @@ func legacyDeclarations(n *html.Node) []declaration {
 	}
 	if n.Data == "font" {
 		add(color, attr(n, "color"))
+	}
+	addDimension := func(prop int, name string) {
+		if value, ok := legacyDimension(attr(n, name)); ok {
+			result = append(result, declaration{prop: prop, value: value, order: -1})
+		}
+	}
+	// These obsolete attributes remain common in table-based email and are
+	// interpreted as low-priority presentational hints. Retaining them lets the
+	// layout checks recognize small clipping boxes while author CSS can still
+	// override them through the ordinary cascade.
+	switch n.Data {
+	case "table", "td", "th", "img":
+		addDimension(width, "width")
+		addDimension(height, "height")
 	}
 	// Legacy tiled background images remain unknown; author CSS can override.
 	switch n.Data {

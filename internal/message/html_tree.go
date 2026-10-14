@@ -25,6 +25,7 @@ const (
 	maxConditionalFragmentNodes = 8192
 	maxConditionalFragmentDepth = 128
 	maxConditionalOutputWork    = 128 << 10
+	conditionalOmissionMarker   = "[conditional Outlook content omitted: processing limit]"
 )
 
 type annotationUsage struct {
@@ -37,15 +38,17 @@ type annotationUsage struct {
 var reservedAnnotation = regexp.MustCompile(`(?is)</?\s*(?:invisible|visibility-varies-by-viewport-size|visibility-uncertain|hidden-content-stripped)\b[^>]*>`)
 
 type htmlExtraction struct {
-	inspection  htmlextract.Document
-	states      map[*xhtml.Node]*htmlextract.Text
-	elements    map[*xhtml.Node]*htmlextract.Element
-	base        *url.URL
-	baseSeen    bool
-	links       linkCollector
-	images      imageRefCollector
-	anchorDepth int
-	compactURLs bool
+	inspection           htmlextract.Document
+	states               map[*xhtml.Node]*htmlextract.Text
+	elements             map[*xhtml.Node]*htmlextract.Element
+	base                 *url.URL
+	baseSeen             bool
+	links                linkCollector
+	images               imageRefCollector
+	anchorDepth          int
+	compactURLs          bool
+	shouldStop           func() bool
+	extractionIncomplete bool
 }
 
 type outputAnnotation struct {
@@ -238,7 +241,9 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 	if err != nil {
 		// A bounded lexical fallback retains evidence when tree/style processing
 		// cannot complete. It is explicitly reported as incomplete extraction.
-		return extractBoundedHTMLFallback(source, budget.compactURLs)
+		content := extractBoundedHTMLFallback(source, budget.compactURLs)
+		content.ExtractionIncomplete = true
+		return content
 	}
 	e := htmlExtraction{
 		inspection:  inspection,
@@ -246,6 +251,7 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		elements:    make(map[*xhtml.Node]*htmlextract.Element, len(inspection.Elements)),
 		compactURLs: budget.compactURLs,
 		links:       linkCollector{compactURLs: budget.compactURLs},
+		shouldStop:  budget.useFallback,
 	}
 	for i := range inspection.Text {
 		state := &inspection.Text[i]
@@ -263,15 +269,20 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		stripped = e.render(StripHidden).text
 	}
 	confidentChars := confidentVisibleCharacters(inspection.Text)
-	if inspection.UnresolvedStylesheet {
-		// An unevaluated stylesheet can alter any element in this HTML part, so
-		// none of its text is sufficiently certain to suppress image analysis.
+	cssIncomplete := inspection.UnresolvedStylesheet || inspection.Usage.CSSLimitExceeded ||
+		inspection.Usage.MatchWorkExhausted || inspection.Usage.ExpressionWorkExhausted
+	if cssIncomplete {
+		// Unevaluated or resource-limited CSS can alter any element in this
+		// HTML part, so none of its text is sufficiently certain to suppress
+		// image analysis.
 		confidentChars = 0
 	}
 	return extractedContent{
 		Text: tagged.text, VisibleText: tagged.visible, ConfidentVisibleChars: confidentChars, StrippedText: stripped,
 		Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
-		HTMLComments: comments, CSSIncomplete: inspection.UnresolvedStylesheet,
+		HTMLComments: comments, CSSIncomplete: cssIncomplete,
+		ExtractionIncomplete: e.extractionIncomplete,
+		HTMLCPULimitExceeded: budget.cpuLimitExceeded,
 	}
 }
 
@@ -517,16 +528,28 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 	}
 	raw := trimmed[start+2 : end]
 	if len(raw) > maxConditionalFragmentBytes {
+		e.omitConditionalComment(out)
 		return
 	}
-	fragment, err := xhtml.ParseFragment(strings.NewReader(raw), nil)
-	if err != nil {
+	limits := htmlextract.DefaultLimits()
+	limits.InputBytes = maxConditionalFragmentBytes
+	limits.Nodes = maxConditionalFragmentNodes
+	limits.TextNodes = maxConditionalFragmentNodes
+	limits.Depth = maxConditionalFragmentDepth
+	if err := htmlextract.PreflightWithStop([]byte(raw), limits, e.shouldStop); err != nil {
+		e.omitConditionalComment(out)
+		return
+	}
+	fragment, err := xhtml.ParseFragmentWithOptions(strings.NewReader(raw), nil, xhtml.ParseOptionEnableScripting(false))
+	if err != nil || (e.shouldStop != nil && e.shouldStop()) {
+		e.omitConditionalComment(out)
 		return
 	}
 	var content strings.Builder
 	walk := conditionalWalk{links: linkCollector{compactURLs: e.compactURLs}}
 	for _, node := range fragment {
 		if !e.walkConditionalNode(node, &content, &walk, 0) {
+			e.omitConditionalComment(out)
 			return
 		}
 	}
@@ -539,6 +562,11 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 	}
 	out.write(outputAnnotation{kind: "unknown"}, value)
 	visible.WriteString(value)
+}
+
+func (e *htmlExtraction) omitConditionalComment(out *annotatedOutput) {
+	e.extractionIncomplete = true
+	out.WriteString("\n" + conditionalOmissionMarker + "\n")
 }
 
 // lastIndexASCIIFold finds an ASCII syntax marker without transforming the
