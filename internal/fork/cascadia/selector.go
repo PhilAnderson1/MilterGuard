@@ -230,9 +230,13 @@ type classSelector struct {
 
 // Matches elements by class attribute.
 func (t classSelector) Match(n *html.Node) bool {
-	return matchAttribute(n, "class", func(s string) bool {
+	return t.matchResource(n, nil)
+}
+
+func (t classSelector) matchResource(n *html.Node, guard *MatchControl) bool {
+	return matchAttributeResource(n, "class", func(s string) bool {
 		return matchInclude(t.class, s, false)
-	})
+	}, guard)
 }
 
 func (c classSelector) Specificity() Specificity {
@@ -249,9 +253,13 @@ type idSelector struct {
 
 // Matches elements by id attribute.
 func (t idSelector) Match(n *html.Node) bool {
-	return matchAttribute(n, "id", func(s string) bool {
+	return t.matchResource(n, nil)
+}
+
+func (t idSelector) matchResource(n *html.Node, guard *MatchControl) bool {
+	return matchAttributeResource(n, "id", func(s string) bool {
 		return s == t.id
-	})
+	}, guard)
 }
 
 func (c idSelector) Specificity() Specificity {
@@ -270,26 +278,30 @@ type attrSelector struct {
 
 // Matches elements by attribute value.
 func (t attrSelector) Match(n *html.Node) bool {
+	return t.matchResource(n, nil)
+}
+
+func (t attrSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	switch t.operation {
 	case "":
-		return matchAttribute(n, t.key, func(string) bool { return true })
+		return matchAttributeResource(n, t.key, func(string) bool { return true }, guard)
 	case "=":
-		return matchAttribute(n, t.key, func(s string) bool { return matchInsensitiveValue(s, t.val, t.insensitive) })
+		return matchAttributeResource(n, t.key, func(s string) bool { return matchInsensitiveValue(s, t.val, t.insensitive) }, guard)
 	case "!=":
-		return attributeNotEqualMatch(t.key, t.val, n, t.insensitive)
+		return attributeNotEqualMatchResource(t.key, t.val, n, t.insensitive, guard)
 	case "~=":
 		// matches elements where the attribute named key is a whitespace-separated list that includes val.
-		return matchAttribute(n, t.key, func(s string) bool { return matchInclude(t.val, s, t.insensitive) })
+		return matchAttributeResource(n, t.key, func(s string) bool { return matchIncludeResource(t.val, s, t.insensitive, guard) }, guard)
 	case "|=":
-		return attributeDashMatch(t.key, t.val, n, t.insensitive)
+		return attributeDashMatchResource(t.key, t.val, n, t.insensitive, guard)
 	case "^=":
-		return attributePrefixMatch(t.key, t.val, n, t.insensitive)
+		return attributePrefixMatchResource(t.key, t.val, n, t.insensitive, guard)
 	case "$=":
-		return attributeSuffixMatch(t.key, t.val, n, t.insensitive)
+		return attributeSuffixMatchResource(t.key, t.val, n, t.insensitive, guard)
 	case "*=":
-		return attributeSubstringMatch(t.key, t.val, n, t.insensitive)
+		return attributeSubstringMatchResource(t.key, t.val, n, t.insensitive, guard)
 	case "#=":
-		return attributeRegexMatch(t.key, t.regexp, n)
+		return attributeRegexMatchResource(t.key, t.regexp, n, guard)
 	default:
 		panic(fmt.Sprintf("unsuported operation : %s", t.operation))
 	}
@@ -308,10 +320,17 @@ func matchInsensitiveValue(userAttr string, realAttr string, ignoreCase bool) bo
 
 // matches elements where the attribute named key satisifes the function f.
 func matchAttribute(n *html.Node, key string, f func(string) bool) bool {
+	return matchAttributeResource(n, key, f, nil)
+}
+
+func matchAttributeResource(n *html.Node, key string, f func(string) bool, guard *MatchControl) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
 	for _, a := range n.Attr {
+		if guard.step() {
+			return false
+		}
 		if a.Key == key && f(a.Val) {
 			return true
 		}
@@ -322,10 +341,17 @@ func matchAttribute(n *html.Node, key string, f func(string) bool) bool {
 // attributeNotEqualMatch matches elements where
 // the attribute named key does not have the value val.
 func attributeNotEqualMatch(key, val string, n *html.Node, ignoreCase bool) bool {
+	return attributeNotEqualMatchResource(key, val, n, ignoreCase, nil)
+}
+
+func attributeNotEqualMatchResource(key, val string, n *html.Node, ignoreCase bool, guard *MatchControl) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
 	for _, a := range n.Attr {
+		if guard.step() {
+			return false
+		}
 		if a.Key == key && matchInsensitiveValue(a.Val, val, ignoreCase) {
 			return false
 		}
@@ -335,7 +361,14 @@ func attributeNotEqualMatch(key, val string, n *html.Node, ignoreCase bool) bool
 
 // returns true if s is a whitespace-separated list that includes val.
 func matchInclude(val string, s string, ignoreCase bool) bool {
+	return matchIncludeResource(val, s, ignoreCase, nil)
+}
+
+func matchIncludeResource(val string, s string, ignoreCase bool, guard *MatchControl) bool {
 	for s != "" {
+		if guard.step() {
+			return false
+		}
 		i := strings.IndexAny(s, " \t\r\n\f")
 		if i == -1 {
 			return matchInsensitiveValue(s, val, ignoreCase)
@@ -348,9 +381,13 @@ func matchInclude(val string, s string, ignoreCase bool) bool {
 	return false
 }
 
-//  matches elements where the attribute named key equals val or starts with val plus a hyphen.
+// matches elements where the attribute named key equals val or starts with val plus a hyphen.
 func attributeDashMatch(key, val string, n *html.Node, ignoreCase bool) bool {
-	return matchAttribute(n, key,
+	return attributeDashMatchResource(key, val, n, ignoreCase, nil)
+}
+
+func attributeDashMatchResource(key, val string, n *html.Node, ignoreCase bool, guard *MatchControl) bool {
+	return matchAttributeResource(n, key,
 		func(s string) bool {
 			if matchInsensitiveValue(s, val, ignoreCase) {
 				return true
@@ -362,13 +399,17 @@ func attributeDashMatch(key, val string, n *html.Node, ignoreCase bool) bool {
 				return true
 			}
 			return false
-		})
+		}, guard)
 }
 
 // attributePrefixMatch returns a Selector that matches elements where
 // the attribute named key starts with val.
 func attributePrefixMatch(key, val string, n *html.Node, ignoreCase bool) bool {
-	return matchAttribute(n, key,
+	return attributePrefixMatchResource(key, val, n, ignoreCase, nil)
+}
+
+func attributePrefixMatchResource(key, val string, n *html.Node, ignoreCase bool, guard *MatchControl) bool {
+	return matchAttributeResource(n, key,
 		func(s string) bool {
 			if strings.TrimSpace(s) == "" {
 				return false
@@ -377,13 +418,17 @@ func attributePrefixMatch(key, val string, n *html.Node, ignoreCase bool) bool {
 				return strings.HasPrefix(strings.ToLower(s), strings.ToLower(val))
 			}
 			return strings.HasPrefix(s, val)
-		})
+		}, guard)
 }
 
 // attributeSuffixMatch matches elements where
 // the attribute named key ends with val.
 func attributeSuffixMatch(key, val string, n *html.Node, ignoreCase bool) bool {
-	return matchAttribute(n, key,
+	return attributeSuffixMatchResource(key, val, n, ignoreCase, nil)
+}
+
+func attributeSuffixMatchResource(key, val string, n *html.Node, ignoreCase bool, guard *MatchControl) bool {
+	return matchAttributeResource(n, key,
 		func(s string) bool {
 			if strings.TrimSpace(s) == "" {
 				return false
@@ -392,13 +437,17 @@ func attributeSuffixMatch(key, val string, n *html.Node, ignoreCase bool) bool {
 				return strings.HasSuffix(strings.ToLower(s), strings.ToLower(val))
 			}
 			return strings.HasSuffix(s, val)
-		})
+		}, guard)
 }
 
 // attributeSubstringMatch matches nodes where
 // the attribute named key contains val.
 func attributeSubstringMatch(key, val string, n *html.Node, ignoreCase bool) bool {
-	return matchAttribute(n, key,
+	return attributeSubstringMatchResource(key, val, n, ignoreCase, nil)
+}
+
+func attributeSubstringMatchResource(key, val string, n *html.Node, ignoreCase bool, guard *MatchControl) bool {
+	return matchAttributeResource(n, key,
 		func(s string) bool {
 			if strings.TrimSpace(s) == "" {
 				return false
@@ -407,16 +456,20 @@ func attributeSubstringMatch(key, val string, n *html.Node, ignoreCase bool) boo
 				return strings.Contains(strings.ToLower(s), strings.ToLower(val))
 			}
 			return strings.Contains(s, val)
-		})
+		}, guard)
 }
 
 // attributeRegexMatch  matches nodes where
 // the attribute named key matches the regular expression rx
 func attributeRegexMatch(key string, rx *regexp.Regexp, n *html.Node) bool {
-	return matchAttribute(n, key,
+	return attributeRegexMatchResource(key, rx, n, nil)
+}
+
+func attributeRegexMatchResource(key string, rx *regexp.Regexp, n *html.Node, guard *MatchControl) bool {
+	return matchAttributeResource(n, key,
 		func(s string) bool {
 			return rx.MatchString(s)
-		})
+		}, guard)
 }
 
 func (c attrSelector) Specificity() Specificity {
@@ -453,12 +506,16 @@ type compoundSelector struct {
 
 // Matches elements if each sub-selectors matches.
 func (t compoundSelector) Match(n *html.Node) bool {
+	return t.matchResource(n, nil)
+}
+
+func (t compoundSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	if len(t.selectors) == 0 {
 		return n.Type == html.ElementNode
 	}
 
 	for _, sel := range t.selectors {
-		if !sel.Match(n) {
+		if !matchResource(sel, n, guard) {
 			return false
 		}
 	}
@@ -488,20 +545,24 @@ type combinedSelector struct {
 }
 
 func (t combinedSelector) Match(n *html.Node) bool {
+	return t.matchResource(n, nil)
+}
+
+func (t combinedSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	if t.first == nil {
 		return false // maybe we should panic
 	}
 	switch t.combinator {
 	case 0:
-		return t.first.Match(n)
+		return matchResource(t.first, n, guard)
 	case ' ':
-		return descendantMatch(t.first, t.second, n)
+		return descendantMatchResource(t.first, t.second, n, guard)
 	case '>':
-		return childMatch(t.first, t.second, n)
+		return childMatchResource(t.first, t.second, n, guard)
 	case '+':
-		return siblingMatch(t.first, t.second, true, n)
+		return siblingMatchResource(t.first, t.second, true, n, guard)
 	case '~':
-		return siblingMatch(t.first, t.second, false, n)
+		return siblingMatchResource(t.first, t.second, false, n, guard)
 	default:
 		panic("unknown combinator")
 	}
@@ -509,12 +570,16 @@ func (t combinedSelector) Match(n *html.Node) bool {
 
 // matches an element if it matches d and has an ancestor that matches a.
 func descendantMatch(a, d Matcher, n *html.Node) bool {
-	if !d.Match(n) {
+	return descendantMatchResource(a, d, n, nil)
+}
+
+func descendantMatchResource(a, d Matcher, n *html.Node, guard *MatchControl) bool {
+	if !matchResource(d, n, guard) {
 		return false
 	}
 
 	for p := n.Parent; p != nil; p = p.Parent {
-		if a.Match(p) {
+		if matchResource(a, p, guard) {
 			return true
 		}
 	}
@@ -524,29 +589,40 @@ func descendantMatch(a, d Matcher, n *html.Node) bool {
 
 // matches an element if it matches d and its parent matches a.
 func childMatch(a, d Matcher, n *html.Node) bool {
-	return d.Match(n) && n.Parent != nil && a.Match(n.Parent)
+	return childMatchResource(a, d, n, nil)
+}
+
+func childMatchResource(a, d Matcher, n *html.Node, guard *MatchControl) bool {
+	return matchResource(d, n, guard) && n.Parent != nil && matchResource(a, n.Parent, guard)
 }
 
 // matches an element if it matches s2 and is preceded by an element that matches s1.
 // If adjacent is true, the sibling must be immediately before the element.
 func siblingMatch(s1, s2 Matcher, adjacent bool, n *html.Node) bool {
-	if !s2.Match(n) {
+	return siblingMatchResource(s1, s2, adjacent, n, nil)
+}
+
+func siblingMatchResource(s1, s2 Matcher, adjacent bool, n *html.Node, guard *MatchControl) bool {
+	if !matchResource(s2, n, guard) {
 		return false
 	}
 
 	if adjacent {
 		for n = n.PrevSibling; n != nil; n = n.PrevSibling {
+			if guard.step() {
+				return false
+			}
 			if n.Type == html.TextNode || n.Type == html.CommentNode {
 				continue
 			}
-			return s1.Match(n)
+			return matchResource(s1, n, guard)
 		}
 		return false
 	}
 
 	// Walk backwards looking for element that matches s1
 	for c := n.PrevSibling; c != nil; c = c.PrevSibling {
-		if s1.Match(c) {
+		if matchResource(s1, c, guard) {
 			return true
 		}
 	}
@@ -577,8 +653,12 @@ type SelectorGroup []Sel
 
 // Match returns true if the node matches one of the single selectors.
 func (s SelectorGroup) Match(n *html.Node) bool {
+	return s.matchResource(n, nil)
+}
+
+func (s SelectorGroup) matchResource(n *html.Node, guard *MatchControl) bool {
 	for _, sel := range s {
-		if sel.Match(n) {
+		if matchResource(sel, n, guard) {
 			return true
 		}
 	}

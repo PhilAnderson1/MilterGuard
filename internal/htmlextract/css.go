@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
@@ -309,6 +310,7 @@ type sheet struct {
 	unsupportedColours   int
 	runtime              sheetRuntime
 	shouldStop           func() bool
+	selectorControl      *cascadia.MatchControl
 	stopped              bool
 }
 

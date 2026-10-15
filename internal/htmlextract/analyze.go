@@ -177,6 +177,9 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 				} else {
 					resolved = r.styles.elementStyle(n, parentStyle, &rootStyle, f.vars, prepared.legacy, prepared.inline, &media, selectorContext, r.matches, r.expressions)
 				}
+				if r.styles.stopped {
+					return errStopped
+				}
 				r.styleStack = append(r.styleStack, resolved.style)
 				f.styleIndex = len(r.styleStack) - 1
 				style := &r.styleStack[f.styleIndex]

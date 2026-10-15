@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
@@ -172,7 +173,10 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	if p.stopped() {
 		return document, errStopped
 	}
-	document.styles = sheet{limits: p.Limits, shouldStop: p.shouldStop}
+	document.styles = sheet{
+		limits: p.Limits, shouldStop: p.shouldStop,
+		selectorControl: cascadia.NewMatchControl(p.shouldStop),
+	}
 	document.elements = make(map[*html.Node]elementPreparation)
 	type entry struct {
 		n, next           *html.Node

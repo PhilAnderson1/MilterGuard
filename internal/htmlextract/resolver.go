@@ -29,6 +29,18 @@ type mediaCacheKey struct {
 	fallback bool
 }
 
+func (s *sheet) matchSelector(m cascadia.Matcher, n *html.Node) (bool, bool) {
+	if s.selectorControl == nil {
+		s.selectorControl = cascadia.NewMatchControl(s.shouldStop)
+	}
+	matched, stopped := s.selectorControl.Match(m, n)
+	if stopped {
+		s.stopped = true
+		return false, false
+	}
+	return matched, true
+}
+
 func (s *sheet) mediaStates(width float64, fallback bool, work *matchBudget) ([]uint8, bool) {
 	key := mediaCacheKey{width: width, fallback: fallback}
 	if states := s.runtime.mediaCache[key]; states != nil {
@@ -378,7 +390,11 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 				if !matches.spend(selectorMatchCost(plan, selectorContext, matches.limit)) {
 					return cascadeWinners{}, false
 				}
-				matched = plan.scope.Match(n)
+				var complete bool
+				matched, complete = s.matchSelector(plan.scope, n)
+				if !complete {
+					return cascadeWinners{}, false
+				}
 			} else if plan.ancestorChain != nil {
 				var complete bool
 				matched, complete = s.matchAncestorChain(plan, n, selectorContext, matches)
@@ -389,7 +405,11 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 				if !matches.spend(selectorMatchCost(plan, selectorContext, matches.limit)) {
 					return cascadeWinners{}, false
 				}
-				matched = plan.matcher.Match(n)
+				var complete bool
+				matched, complete = s.matchSelector(plan.matcher, n)
+				if !complete {
+					return cascadeWinners{}, false
+				}
 			}
 			s.cacheMatch(plan, n, matched)
 		}

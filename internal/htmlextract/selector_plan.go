@@ -952,7 +952,7 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 		if !budget.spend(compoundCost(index, node)) {
 			return false, false
 		}
-		return plan.ancestorChain[index].Match(node), true
+		return s.matchSelector(plan.ancestorChain[index], node)
 	}
 	for nodeIndex := len(nodes) - 1; nodeIndex >= 0; nodeIndex-- {
 		node := nodes[nodeIndex]

@@ -29,19 +29,23 @@ type relativePseudoClassSelector struct {
 }
 
 func (s relativePseudoClassSelector) Match(n *html.Node) bool {
+	return s.matchResource(n, nil)
+}
+
+func (s relativePseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
 	switch s.name {
 	case "not":
 		// matches elements that do not match a.
-		return !s.match.Match(n)
+		return !matchResource(s.match, n, guard)
 	case "has":
 		//  matches elements with any descendant that matches a.
-		return hasDescendantMatch(n, s.match)
+		return hasDescendantMatchResource(n, s.match, guard)
 	case "haschild":
 		// matches elements with a child that matches a.
-		return hasChildMatch(n, s.match)
+		return hasChildMatchResource(n, s.match, guard)
 	default:
 		panic(fmt.Sprintf("unsupported relative pseudo class selector : %s", s.name))
 	}
@@ -49,8 +53,12 @@ func (s relativePseudoClassSelector) Match(n *html.Node) bool {
 
 // hasChildMatch returns whether n has any child that matches a.
 func hasChildMatch(n *html.Node, a SelectorGroup) bool {
+	return hasChildMatchResource(n, a, nil)
+}
+
+func hasChildMatchResource(n *html.Node, a SelectorGroup, guard *MatchControl) bool {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if a.Match(c) {
+		if matchResource(a, c, guard) {
 			return true
 		}
 	}
@@ -61,8 +69,15 @@ func hasChildMatch(n *html.Node, a SelectorGroup) bool {
 // testing whether any of them match a. It returns true as soon as a match is
 // found, or false if no match is found.
 func hasDescendantMatch(n *html.Node, a SelectorGroup) bool {
+	return hasDescendantMatchResource(n, a, nil)
+}
+
+func hasDescendantMatchResource(n *html.Node, a SelectorGroup, guard *MatchControl) bool {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if a.Match(c) || (c.Type == html.ElementNode && hasDescendantMatch(c, a)) {
+		if guard.step() {
+			return false
+		}
+		if matchResource(a, c, guard) || (c.Type == html.ElementNode && hasDescendantMatchResource(c, a, guard)) {
 			return true
 		}
 	}
@@ -94,13 +109,20 @@ type containsPseudoClassSelector struct {
 }
 
 func (s containsPseudoClassSelector) Match(n *html.Node) bool {
+	return s.matchResource(n, nil)
+}
+
+func (s containsPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	var text string
 	if s.own {
 		// matches nodes that directly contain the given text
-		text = strings.ToLower(nodeOwnText(n))
+		text = strings.ToLower(nodeOwnTextResource(n, guard))
 	} else {
 		// matches nodes that contain the given text.
-		text = strings.ToLower(nodeText(n))
+		text = strings.ToLower(nodeTextResource(n, guard))
+	}
+	if guard.step() {
+		return false
 	}
 	return strings.Contains(text, s.value)
 }
@@ -112,41 +134,69 @@ type regexpPseudoClassSelector struct {
 }
 
 func (s regexpPseudoClassSelector) Match(n *html.Node) bool {
+	return s.matchResource(n, nil)
+}
+
+func (s regexpPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	var text string
 	if s.own {
 		// matches nodes whose text directly matches the specified regular expression
-		text = nodeOwnText(n)
+		text = nodeOwnTextResource(n, guard)
 	} else {
 		// matches nodes whose text matches the specified regular expression
-		text = nodeText(n)
+		text = nodeTextResource(n, guard)
+	}
+	if guard.step() {
+		return false
 	}
 	return s.regexp.MatchString(text)
 }
 
 // writeNodeText writes the text contained in n and its descendants to b.
 func writeNodeText(n *html.Node, b *bytes.Buffer) {
+	writeNodeTextResource(n, b, nil)
+}
+
+func writeNodeTextResource(n *html.Node, b *bytes.Buffer, guard *MatchControl) {
+	if guard.step() {
+		return
+	}
 	switch n.Type {
 	case html.TextNode:
 		b.WriteString(n.Data)
 	case html.ElementNode:
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			writeNodeText(c, b)
+			writeNodeTextResource(c, b, guard)
+			if guard != nil && guard.stopped {
+				return
+			}
 		}
 	}
 }
 
 // nodeText returns the text contained in n and its descendants.
 func nodeText(n *html.Node) string {
+	return nodeTextResource(n, nil)
+}
+
+func nodeTextResource(n *html.Node, guard *MatchControl) string {
 	var b bytes.Buffer
-	writeNodeText(n, &b)
+	writeNodeTextResource(n, &b, guard)
 	return b.String()
 }
 
 // nodeOwnText returns the contents of the text nodes that are direct
 // children of n.
 func nodeOwnText(n *html.Node) string {
+	return nodeOwnTextResource(n, nil)
+}
+
+func nodeOwnTextResource(n *html.Node, guard *MatchControl) string {
 	var b bytes.Buffer
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if guard.step() {
+			return b.String()
+		}
 		if c.Type == html.TextNode {
 			b.WriteString(c.Data)
 		}
@@ -161,20 +211,28 @@ type nthPseudoClassSelector struct {
 }
 
 func (s nthPseudoClassSelector) Match(n *html.Node) bool {
+	return s.matchResource(n, nil)
+}
+
+func (s nthPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	if s.a == 0 {
 		if s.last {
-			return simpleNthLastChildMatch(s.b, s.ofType, n)
+			return simpleNthLastChildMatchResource(s.b, s.ofType, n, guard)
 		} else {
-			return simpleNthChildMatch(s.b, s.ofType, n)
+			return simpleNthChildMatchResource(s.b, s.ofType, n, guard)
 		}
 	}
-	return nthChildMatch(s.a, s.b, s.last, s.ofType, n)
+	return nthChildMatchResource(s.a, s.b, s.last, s.ofType, n, guard)
 }
 
 // nthChildMatch implements :nth-child(an+b).
 // If last is true, implements :nth-last-child instead.
 // If ofType is true, implements :nth-of-type instead.
 func nthChildMatch(a, b int, last, ofType bool, n *html.Node) bool {
+	return nthChildMatchResource(a, b, last, ofType, n, nil)
+}
+
+func nthChildMatchResource(a, b int, last, ofType bool, n *html.Node, guard *MatchControl) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
@@ -187,6 +245,9 @@ func nthChildMatch(a, b int, last, ofType bool, n *html.Node) bool {
 	i := -1
 	count := 0
 	for c := parent.FirstChild; c != nil; c = c.NextSibling {
+		if guard.step() {
+			return false
+		}
 		if (c.Type != html.ElementNode) || (ofType && c.Data != n.Data) {
 			continue
 		}
@@ -219,6 +280,10 @@ func nthChildMatch(a, b int, last, ofType bool, n *html.Node) bool {
 // simpleNthChildMatch implements :nth-child(b).
 // If ofType is true, implements :nth-of-type instead.
 func simpleNthChildMatch(b int, ofType bool, n *html.Node) bool {
+	return simpleNthChildMatchResource(b, ofType, n, nil)
+}
+
+func simpleNthChildMatchResource(b int, ofType bool, n *html.Node, guard *MatchControl) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
@@ -230,6 +295,9 @@ func simpleNthChildMatch(b int, ofType bool, n *html.Node) bool {
 
 	count := 0
 	for c := parent.FirstChild; c != nil; c = c.NextSibling {
+		if guard.step() {
+			return false
+		}
 		if c.Type != html.ElementNode || (ofType && c.Data != n.Data) {
 			continue
 		}
@@ -247,6 +315,10 @@ func simpleNthChildMatch(b int, ofType bool, n *html.Node) bool {
 // simpleNthLastChildMatch implements :nth-last-child(b).
 // If ofType is true, implements :nth-last-of-type instead.
 func simpleNthLastChildMatch(b int, ofType bool, n *html.Node) bool {
+	return simpleNthLastChildMatchResource(b, ofType, n, nil)
+}
+
+func simpleNthLastChildMatchResource(b int, ofType bool, n *html.Node, guard *MatchControl) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
@@ -258,6 +330,9 @@ func simpleNthLastChildMatch(b int, ofType bool, n *html.Node) bool {
 
 	count := 0
 	for c := parent.LastChild; c != nil; c = c.PrevSibling {
+		if guard.step() {
+			return false
+		}
 		if c.Type != html.ElementNode || (ofType && c.Data != n.Data) {
 			continue
 		}
@@ -280,6 +355,10 @@ type onlyChildPseudoClassSelector struct {
 // Match implements :only-child.
 // If `ofType` is true, it implements :only-of-type instead.
 func (s onlyChildPseudoClassSelector) Match(n *html.Node) bool {
+	return s.matchResource(n, nil)
+}
+
+func (s onlyChildPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
@@ -291,6 +370,9 @@ func (s onlyChildPseudoClassSelector) Match(n *html.Node) bool {
 
 	count := 0
 	for c := parent.FirstChild; c != nil; c = c.NextSibling {
+		if guard.step() {
+			return false
+		}
 		if (c.Type != html.ElementNode) || (s.ofType && c.Data != n.Data) {
 			continue
 		}
@@ -318,11 +400,18 @@ type emptyElementPseudoClassSelector struct {
 
 // Matches empty elements.
 func (s emptyElementPseudoClassSelector) Match(n *html.Node) bool {
+	return s.matchResource(n, nil)
+}
+
+func (s emptyElementPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
 
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if guard.step() {
+			return false
+		}
 		switch c.Type {
 		case html.ElementNode:
 			return false
@@ -357,13 +446,21 @@ func hasAttr(n *html.Node, attr string) bool {
 	return matchAttribute(n, attr, func(string) bool { return true })
 }
 
+func hasAttrResource(n *html.Node, attr string, guard *MatchControl) bool {
+	return matchAttributeResource(n, attr, func(string) bool { return true }, guard)
+}
+
 type linkPseudoClassSelector struct {
 	abstractPseudoClass
 }
 
 // Match implements :link
 func (s linkPseudoClassSelector) Match(n *html.Node) bool {
-	return (n.DataAtom == atom.A || n.DataAtom == atom.Area || n.DataAtom == atom.Link) && hasAttr(n, "href")
+	return s.matchResource(n, nil)
+}
+
+func (s linkPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
+	return (n.DataAtom == atom.A || n.DataAtom == atom.Area || n.DataAtom == atom.Link) && hasAttrResource(n, "href", guard)
 }
 
 type langPseudoClassSelector struct {
@@ -372,13 +469,17 @@ type langPseudoClassSelector struct {
 }
 
 func (s langPseudoClassSelector) Match(n *html.Node) bool {
-	own := matchAttribute(n, "lang", func(val string) bool {
+	return s.matchResource(n, nil)
+}
+
+func (s langPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
+	own := matchAttributeResource(n, "lang", func(val string) bool {
 		return val == s.lang || strings.HasPrefix(val, s.lang+"-")
-	})
+	}, guard)
 	if n.Parent == nil {
 		return own
 	}
-	return own || s.Match(n.Parent)
+	return own || s.matchResource(n.Parent, guard)
 }
 
 type enabledPseudoClassSelector struct {
@@ -386,16 +487,20 @@ type enabledPseudoClassSelector struct {
 }
 
 func (s enabledPseudoClassSelector) Match(n *html.Node) bool {
+	return s.matchResource(n, nil)
+}
+
+func (s enabledPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
 	switch n.DataAtom {
 	case atom.A, atom.Area, atom.Link:
-		return hasAttr(n, "href")
+		return hasAttrResource(n, "href", guard)
 	case atom.Optgroup, atom.Menuitem, atom.Fieldset:
-		return !hasAttr(n, "disabled")
+		return !hasAttrResource(n, "disabled", guard)
 	case atom.Button, atom.Input, atom.Select, atom.Textarea, atom.Option:
-		return !hasAttr(n, "disabled") && !inDisabledFieldset(n)
+		return !hasAttrResource(n, "disabled", guard) && !inDisabledFieldsetResource(n, guard)
 	}
 	return false
 }
@@ -405,20 +510,31 @@ type disabledPseudoClassSelector struct {
 }
 
 func (s disabledPseudoClassSelector) Match(n *html.Node) bool {
+	return s.matchResource(n, nil)
+}
+
+func (s disabledPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
 	switch n.DataAtom {
 	case atom.Optgroup, atom.Menuitem, atom.Fieldset:
-		return hasAttr(n, "disabled")
+		return hasAttrResource(n, "disabled", guard)
 	case atom.Button, atom.Input, atom.Select, atom.Textarea, atom.Option:
-		return hasAttr(n, "disabled") || inDisabledFieldset(n)
+		return hasAttrResource(n, "disabled", guard) || inDisabledFieldsetResource(n, guard)
 	}
 	return false
 }
 
 func hasLegendInPreviousSiblings(n *html.Node) bool {
+	return hasLegendInPreviousSiblingsResource(n, nil)
+}
+
+func hasLegendInPreviousSiblingsResource(n *html.Node, guard *MatchControl) bool {
 	for s := n.PrevSibling; s != nil; s = s.PrevSibling {
+		if guard.step() {
+			return false
+		}
 		if s.DataAtom == atom.Legend {
 			return true
 		}
@@ -427,14 +543,21 @@ func hasLegendInPreviousSiblings(n *html.Node) bool {
 }
 
 func inDisabledFieldset(n *html.Node) bool {
+	return inDisabledFieldsetResource(n, nil)
+}
+
+func inDisabledFieldsetResource(n *html.Node, guard *MatchControl) bool {
+	if guard.step() {
+		return false
+	}
 	if n.Parent == nil {
 		return false
 	}
-	if n.Parent.DataAtom == atom.Fieldset && hasAttr(n.Parent, "disabled") &&
-		(n.DataAtom != atom.Legend || hasLegendInPreviousSiblings(n)) {
+	if n.Parent.DataAtom == atom.Fieldset && hasAttrResource(n.Parent, "disabled", guard) &&
+		(n.DataAtom != atom.Legend || hasLegendInPreviousSiblingsResource(n, guard)) {
 		return true
 	}
-	return inDisabledFieldset(n.Parent)
+	return inDisabledFieldsetResource(n.Parent, guard)
 }
 
 type checkedPseudoClassSelector struct {
@@ -442,17 +565,21 @@ type checkedPseudoClassSelector struct {
 }
 
 func (s checkedPseudoClassSelector) Match(n *html.Node) bool {
+	return s.matchResource(n, nil)
+}
+
+func (s checkedPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
 	switch n.DataAtom {
 	case atom.Input, atom.Menuitem:
-		return hasAttr(n, "checked") && matchAttribute(n, "type", func(val string) bool {
+		return hasAttrResource(n, "checked", guard) && matchAttributeResource(n, "type", func(val string) bool {
 			t := toLowerASCII(val)
 			return t == "checkbox" || t == "radio"
-		})
+		}, guard)
 	case atom.Option:
-		return hasAttr(n, "selected")
+		return hasAttrResource(n, "selected", guard)
 	}
 	return false
 }
