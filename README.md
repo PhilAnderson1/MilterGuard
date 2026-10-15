@@ -37,6 +37,21 @@ installs as a single executable, lets you manage sender lists and review
 rejected messages by email, and provides an accept mode for evaluating its
 decisions before enabling rejection.
 
+## Early results
+
+From 30 September to 15 October 2026, MilterGuard accepted 156 legitimate
+inbound emails and recorded 284 spam or fraud rejections on one production mail
+server. One rejection was borderline: marketing outreach following a website
+signup. No other misclassifications were observed.
+
+Testing used the Qwen3.6-35B-A3B model and an empty trusted-domain allowlist,
+with adaptive correspondent learning enabled. Repeated legitimate newsletters
+could therefore bypass subsequent AI scans. Rejection counts represent delivery
+attempts and may include retries.
+
+These are early production observations, not a comparative benchmark.
+Evaluation is ongoing.
+
 ## Who is MilterGuard for?
 
 MilterGuard is designed for administrators who run their own mail servers and
