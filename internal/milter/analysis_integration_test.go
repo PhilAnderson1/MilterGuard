@@ -55,7 +55,7 @@ func TestHTMLCPUProtectionSkipsAIAndRespectsMode(t *testing.T) {
 		t.Run(tc.mode, func(t *testing.T) {
 			const rejectMessage = "HTML CPU limit exceeded"
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
-			readings := []time.Duration{time.Second, 2*time.Second + time.Millisecond, 2*time.Second + time.Millisecond}
+			readings := []time.Duration{time.Second, 2*time.Second + time.Millisecond, 2*time.Second + time.Millisecond, 2*time.Second + time.Millisecond}
 			reading := 0
 			service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
 				Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,

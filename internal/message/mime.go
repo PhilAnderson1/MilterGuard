@@ -28,6 +28,7 @@ type extractionBudget struct {
 	cssBytesRemaining    int
 	memoryBytesRemaining int64
 	shouldFallback       func() bool
+	fallbackShouldStop   func() bool
 	forceFallback        bool
 	cpuLimitExceeded     bool
 	compactURLs          bool
@@ -44,6 +45,7 @@ func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBu
 		cssBytesRemaining:    limits.CSSBytes,
 		memoryBytesRemaining: limits.MemoryBytes,
 		shouldFallback:       control.ShouldFallback,
+		fallbackShouldStop:   control.FallbackShouldStop,
 		forceFallback:        control.ForceFallback,
 		compactURLs:          !control.DisableURLCompaction,
 	}

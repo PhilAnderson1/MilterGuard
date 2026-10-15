@@ -2,7 +2,6 @@ package cascadia
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
@@ -67,7 +66,7 @@ func ParseGroup(sel string) (SelectorGroup, error) {
 }
 
 // ParseGroupWithMemory parses a selector and charges a conservative allowance
-// for the strings, selector objects, slices and regexp program retained or
+// for the strings, selector objects and slices retained or
 // temporarily allocated while compiling it.
 func ParseGroupWithMemory(sel string, memory *resourceguard.Memory) (SelectorGroup, error) {
 	const selectorAllocationFactor = 32
@@ -284,7 +283,6 @@ func (c idSelector) PseudoElement() string {
 
 type attrSelector struct {
 	key, val, operation string
-	regexp              *regexp.Regexp
 	insensitive         bool
 }
 
@@ -312,8 +310,6 @@ func (t attrSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 		return attributeSuffixMatchResource(t.key, t.val, n, t.insensitive, guard)
 	case "*=":
 		return attributeSubstringMatchResource(t.key, t.val, n, t.insensitive, guard)
-	case "#=":
-		return attributeRegexMatchResource(t.key, t.regexp, n, guard)
 	default:
 		panic(fmt.Sprintf("unsuported operation : %s", t.operation))
 	}
@@ -468,19 +464,6 @@ func attributeSubstringMatchResource(key, val string, n *html.Node, ignoreCase b
 				return strings.Contains(strings.ToLower(s), strings.ToLower(val))
 			}
 			return strings.Contains(s, val)
-		}, guard)
-}
-
-// attributeRegexMatch  matches nodes where
-// the attribute named key matches the regular expression rx
-func attributeRegexMatch(key string, rx *regexp.Regexp, n *html.Node) bool {
-	return attributeRegexMatchResource(key, rx, n, nil)
-}
-
-func attributeRegexMatchResource(key string, rx *regexp.Regexp, n *html.Node, guard *MatchControl) bool {
-	return matchAttributeResource(n, key,
-		func(s string) bool {
-			return rx.MatchString(s)
 		}, guard)
 }
 

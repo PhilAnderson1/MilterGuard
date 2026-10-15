@@ -4,7 +4,6 @@ package cascadia
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -125,41 +124,50 @@ func (p *parser) parseIdentifier() (result string, err error) {
 
 // parseName parses a name (which is like an identifier, but doesn't have
 // extra restrictions on the first character).
-func (p *parser) parseName() (result string, err error) {
+func (p *parser) parseName() (string, error) {
 	i := p.i
+	start := i
+	segmentStart := i
+	var result strings.Builder
+	hasEscape := false
 loop:
 	for i < len(p.s) {
 		c := p.s[i]
 		switch {
 		case nameChar(c):
-			start := i
 			for i < len(p.s) && nameChar(p.s[i]) {
 				i++
 			}
-			result += p.s[start:i]
 		case c == '\\':
+			hasEscape = true
+			result.WriteString(p.s[segmentStart:i])
 			p.i = i
 			val, err := p.parseEscape()
 			if err != nil {
 				return "", err
 			}
 			i = p.i
-			result += val
+			result.WriteString(val)
+			segmentStart = i
 		default:
 			break loop
 		}
 	}
 
-	if result == "" {
+	if i == start {
 		return "", errors.New("expected name, found EOF instead")
 	}
 
 	p.i = i
-	return result, nil
+	if !hasEscape {
+		return p.s[start:i], nil
+	}
+	result.WriteString(p.s[segmentStart:i])
+	return result.String(), nil
 }
 
 // parseString parses a single- or double-quoted string.
-func (p *parser) parseString() (result string, err error) {
+func (p *parser) parseString() (string, error) {
 	i := p.i
 	if len(p.s) < i+2 {
 		return "", errors.New("expected string, found EOF instead")
@@ -167,21 +175,29 @@ func (p *parser) parseString() (result string, err error) {
 
 	quote := p.s[i]
 	i++
+	start := i
+	segmentStart := i
+	var result strings.Builder
+	hasEscape := false
 
 loop:
 	for i < len(p.s) {
 		switch p.s[i] {
 		case '\\':
+			hasEscape = true
+			result.WriteString(p.s[segmentStart:i])
 			if len(p.s) > i+1 {
 				switch c := p.s[i+1]; c {
 				case '\r':
 					if len(p.s) > i+2 && p.s[i+2] == '\n' {
 						i += 3
+						segmentStart = i
 						continue loop
 					}
 					fallthrough
 				case '\n', '\f':
 					i += 2
+					segmentStart = i
 					continue loop
 				}
 			}
@@ -191,20 +207,14 @@ loop:
 				return "", err
 			}
 			i = p.i
-			result += val
+			result.WriteString(val)
+			segmentStart = i
 		case quote:
 			break loop
 		case '\r', '\n', '\f':
 			return "", errors.New("unexpected end of line in string")
 		default:
-			start := i
-			for i < len(p.s) {
-				if c := p.s[i]; c == quote || c == '\\' || c == '\r' || c == '\n' || c == '\f' {
-					break
-				}
-				i++
-			}
-			result += p.s[start:i]
+			i++
 		}
 	}
 
@@ -216,41 +226,11 @@ loop:
 	i++
 
 	p.i = i
-	return result, nil
-}
-
-// parseRegex parses a regular expression; the end is defined by encountering an
-// unmatched closing ')' or ']' which is not consumed
-func (p *parser) parseRegex() (rx *regexp.Regexp, err error) {
-	i := p.i
-	if len(p.s) < i+2 {
-		return nil, errors.New("expected regular expression, found EOF instead")
+	if !hasEscape {
+		return p.s[start : i-1], nil
 	}
-
-	// number of open parens or brackets;
-	// when it becomes negative, finished parsing regex
-	open := 0
-
-loop:
-	for i < len(p.s) {
-		switch p.s[i] {
-		case '(', '[':
-			open++
-		case ')', ']':
-			open--
-			if open < 0 {
-				break loop
-			}
-		}
-		i++
-	}
-
-	if i >= len(p.s) {
-		return nil, errors.New("EOF in regular expression")
-	}
-	rx, err = regexp.Compile(p.s[p.i:i])
-	p.i = i
-	return rx, err
+	result.WriteString(p.s[segmentStart : i-1])
+	return result.String(), nil
 }
 
 // skipWhitespace consumes whitespace characters and comments.
@@ -388,6 +368,9 @@ func (p *parser) parseAttributeSelector() (attrSelector, error) {
 	} else if op[1] != '=' {
 		return attrSelector{}, fmt.Errorf(`expected equality operator, found "%s" instead`, op)
 	}
+	if op == "#=" {
+		return attrSelector{}, errors.New("regular expression attribute selectors are not supported")
+	}
 	p.i += len(op)
 
 	p.skipWhitespace()
@@ -395,16 +378,11 @@ func (p *parser) parseAttributeSelector() (attrSelector, error) {
 		return attrSelector{}, errors.New("unexpected EOF in attribute selector")
 	}
 	var val string
-	var rx *regexp.Regexp
-	if op == "#=" {
-		rx, err = p.parseRegex()
-	} else {
-		switch p.s[p.i] {
-		case '\'', '"':
-			val, err = p.parseString()
-		default:
-			val, err = p.parseIdentifier()
-		}
+	switch p.s[p.i] {
+	case '\'', '"':
+		val, err = p.parseString()
+	default:
+		val, err = p.parseIdentifier()
 	}
 	if err != nil {
 		return attrSelector{}, err
@@ -433,8 +411,8 @@ func (p *parser) parseAttributeSelector() (attrSelector, error) {
 	p.i++
 
 	switch op {
-	case "=", "!=", "~=", "|=", "^=", "$=", "*=", "#=":
-		return attrSelector{key: key, val: val, operation: op, regexp: rx, insensitive: ignoreCase}, nil
+	case "=", "!=", "~=", "|=", "^=", "$=", "*=":
+		return attrSelector{key: key, val: val, operation: op, insensitive: ignoreCase}, nil
 	default:
 		return attrSelector{}, fmt.Errorf("attribute operator %q is not supported", op)
 	}
@@ -523,21 +501,7 @@ func (p *parser) parsePseudoclassSelector() (out Sel, pseudoElement string, err 
 		out = containsPseudoClassSelector{own: name == "containsown", value: val}
 
 	case "matches", "matchesown":
-		if !p.consumeParenthesis() {
-			return out, "", errExpectedParenthesis
-		}
-		rx, err := p.parseRegex()
-		if err != nil {
-			return out, "", err
-		}
-		if p.i >= len(p.s) {
-			return out, "", errors.New("unexpected EOF in pseudo selector")
-		}
-		if !p.consumeClosingParenthesis() {
-			return out, "", errExpectedClosingParenthesis
-		}
-
-		out = regexpPseudoClassSelector{own: name == "matchesown", regexp: rx}
+		return out, "", fmt.Errorf("regular expression pseudo-class :%s is not supported", name)
 
 	case "nth-child", "nth-last-child", "nth-of-type", "nth-last-of-type":
 		if !p.consumeParenthesis() {

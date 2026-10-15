@@ -389,7 +389,7 @@ func TestUnrelatedKeyframesPreserveConcealmentEvidence(t *testing.T) {
 }
 
 func TestBoundedHTMLFallbackStreamsAttributesAndKeepsFirstDestination(t *testing.T) {
-	got := extractBoundedHTMLFallback(`<base ignored="x" href="https://example.test/root/"><a class="offer" href="first" href="second">Review</a><img alt="notice" src="cid:image-id">`, true)
+	got := extractBoundedHTMLFallback(`<base ignored="x" href="https://example.test/root/"><a class="offer" href="first" href="second">Review</a><img alt="notice" src="cid:image-id">`, true, nil)
 	if len(got.Links) != 1 || got.Links[0] != "https://example.test/root/first" {
 		t.Fatalf("fallback links = %#v", got.Links)
 	}
@@ -398,5 +398,19 @@ func TestBoundedHTMLFallbackStreamsAttributesAndKeepsFirstDestination(t *testing
 	}
 	if got.Text != "Review" || got.VisibleText != "" || !got.HTMLFallbackUsed {
 		t.Fatalf("fallback content = %+v", got)
+	}
+}
+
+func TestFallbackTokenizerHonoursSeparateCPUStop(t *testing.T) {
+	checks := 0
+	got := extractBoundedHTMLFallback(strings.Repeat("<x>", 2000)+"late text", true, func() bool {
+		checks++
+		return checks > 1
+	})
+	if !got.HTMLCPULimitExceeded || !got.ExtractionIncomplete || !got.HTMLFallbackUsed {
+		t.Fatalf("fallback flags = %+v", got)
+	}
+	if checks < 2 {
+		t.Fatalf("fallback stop checks = %d, want at least 2", checks)
 	}
 }

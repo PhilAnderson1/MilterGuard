@@ -35,9 +35,7 @@ func (c classSelector) String() string {
 
 func (c attrSelector) String() string {
 	val := c.val
-	if c.operation == "#=" {
-		val = c.regexp.String()
-	} else if c.operation != "" {
+	if c.operation != "" {
 		val = fmt.Sprintf(`"%s"`, val)
 	}
 
@@ -60,14 +58,6 @@ func (c containsPseudoClassSelector) String() string {
 		s += "Own"
 	}
 	return fmt.Sprintf(`:%s("%s")`, s, c.value)
-}
-
-func (c regexpPseudoClassSelector) String() string {
-	s := "matches"
-	if c.own {
-		s += "Own"
-	}
-	return fmt.Sprintf(":%s(%s)", s, c.regexp.String())
 }
 
 func (c nthPseudoClassSelector) String() string {

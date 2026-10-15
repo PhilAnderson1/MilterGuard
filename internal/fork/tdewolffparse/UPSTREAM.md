@@ -23,5 +23,8 @@ Local compatibility changes:
 - The CSS parser has an opt-in resource guard that charges retained tokens and
   parser-state allocation to MilterGuard's shared monotonic memory budget,
   samples cooperative cancellation, and rejects unsafe top-level closing
-  delimiters. The ordinary upstream constructor retains its original behavior.
+  delimiters. Its parser loops must either charge a token or advance the
+  guarded input; this keeps non-retaining paths such as unknown at-rule bodies
+  cancellable. The ordinary upstream constructor retains its original
+  behavior.
 The upstream MIT licence is retained as `LICENSE.md`.

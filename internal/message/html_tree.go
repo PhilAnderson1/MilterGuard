@@ -212,13 +212,13 @@ func htmlToText(source string) extractedContent {
 func htmlToTextWithBudget(source string, budget *extractionBudget) extractedContent {
 	budget.htmlParts++
 	if budget.useFallback() {
-		content := extractBoundedHTMLFallback(source, budget.compactURLs)
+		content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallbackShouldStop)
 		content.HTMLCPULimitExceeded = true
 		return content
 	}
 	limits, ok := budget.htmlLimits(len(source))
 	if !ok {
-		content := extractBoundedHTMLFallback(source, budget.compactURLs)
+		content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallbackShouldStop)
 		content.ExtractionIncomplete = true
 		return content
 	}
@@ -233,21 +233,21 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 	inspection, err := htmlextract.AnalyzeWithStop([]byte(source), limits, budget.shouldFallback)
 	budget.consumeHTML(inspection.Usage)
 	if htmlextract.IsStopped(err) || budget.useFallback() {
-		content := extractBoundedHTMLFallback(source, budget.compactURLs)
+		content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallbackShouldStop)
 		content.HTMLCPULimitExceeded = true
 		return content
 	}
 	if err != nil {
 		// A bounded lexical fallback retains evidence when tree/style processing
 		// cannot complete. It is explicitly reported as incomplete extraction.
-		content := extractBoundedHTMLFallback(source, budget.compactURLs)
+		content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallbackShouldStop)
 		content.ExtractionIncomplete = true
 		return content
 	}
 	memory := resourceguard.NewMemory(budget.memoryBytesRemaining)
 	mapBytes := int64(len(inspection.Text)+len(inspection.Elements))*64 + 256
 	if !memory.Reserve(mapBytes) {
-		content := extractBoundedHTMLFallback(source, budget.compactURLs)
+		content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallbackShouldStop)
 		content.ExtractionIncomplete = true
 		return content
 	}

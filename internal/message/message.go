@@ -106,10 +106,12 @@ type Analysis struct {
 }
 
 // HTMLProcessingControl lets the caller switch HTML parts to the bounded
-// lexical fallback when an external resource budget has expired. The callback
-// is sampled only at safe extraction boundaries and must be inexpensive.
+// lexical fallback when an external resource budget has expired. ShouldFallback
+// controls full analysis; FallbackShouldStop provides the fallback tokenizer's
+// separate budget. Both callbacks must be inexpensive.
 type HTMLProcessingControl struct {
 	ShouldFallback       func() bool
+	FallbackShouldStop   func() bool
 	ForceFallback        bool
 	DisableURLCompaction bool
 }

@@ -253,6 +253,36 @@ func TestRejectionDetailDisplaysVisibleBodyAndAttachesOriginal(t *testing.T) {
 	}
 }
 
+func TestRejectionDetailUsesBoundedHTMLFallback(t *testing.T) {
+	entry := stores.Rejection{ID: 7, Sender: "sender@example.net", Recipients: []string{"user@example.com"}, RejectedAt: time.Now()}
+	repository := &rejectionRepositoryStub{entry: entry}
+	raw := []byte("From: sender@example.net\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n" +
+		`<p>Visible notice</p><div style="display:none">Unverified hidden text</div>`)
+	source := &messageSourceStub{contents: raw}
+	readings := []time.Duration{0, 2 * time.Millisecond, 2 * time.Millisecond}
+	reading := 0
+	p := New(Dependencies{
+		Rejections: repository, MessageSource: source, MaxMessageSize: 1 << 20,
+		MaxHTMLParseCPUMilliseconds: 1,
+		ThreadCPUTime: func() (time.Duration, bool) {
+			value := readings[min(reading, len(readings)-1)]
+			reading++
+			return value, true
+		},
+	})
+
+	response, err := p.ExecuteLine(context.Background(), "REJECTION 7", Actor{DefaultRecipient: "user@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.Text, "Visible notice") || !strings.Contains(response.Text, "Unverified hidden text") {
+		t.Fatalf("bounded fallback text missing: %q", response.Text)
+	}
+	if !strings.Contains(response.Text, "HTML extraction incomplete") {
+		t.Fatalf("bounded fallback limitation missing: %q", response.Text)
+	}
+}
+
 func TestRejectionDetailWarnsWhenSavedMessageWasTruncated(t *testing.T) {
 	entry := stores.Rejection{ID: 7, Sender: "sender@example.net", Recipients: []string{"user@example.com"}, RejectedAt: time.Now()}
 	repository := &rejectionRepositoryStub{entry: entry}

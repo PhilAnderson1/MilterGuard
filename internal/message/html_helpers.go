@@ -2,6 +2,7 @@ package message
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/url"
 	"strings"
@@ -175,8 +176,12 @@ func compactURLPartChanged(value string, limit int) (string, bool) {
 // extractBoundedHTMLFallback retains tokenizer text after a tree/style resource
 // limit. It never bypasses the primary limits and deliberately makes no
 // visibility claim; callers disclose that extraction was incomplete.
-func extractBoundedHTMLFallback(source string, compactURLs bool) extractedContent {
-	z := xhtml.NewTokenizer(bytes.NewBufferString(source))
+func extractBoundedHTMLFallback(source string, compactURLs bool, shouldStop func() bool) extractedContent {
+	if shouldStop != nil && shouldStop() {
+		return extractedContent{Text: "[HTML tokenization stopped]", HTMLFallbackUsed: true,
+			ExtractionIncomplete: true, HTMLCPULimitExceeded: true}
+	}
+	z := xhtml.NewTokenizerWithStop(bytes.NewBufferString(source), shouldStop)
 	var text strings.Builder
 	links := linkCollector{compactURLs: compactURLs}
 	var images imageRefCollector
@@ -264,7 +269,8 @@ func extractBoundedHTMLFallback(source string, compactURLs bool) extractedConten
 	value := normalizeHTMLText(sanitizeSenderText(text.String()))
 	value = rewritePlainTextURLs(value, compactURLs, &links)
 	return extractedContent{Text: value, HTMLFallbackUsed: true,
-		Links: links.links, ImageRefs: images.refs, ExtractionIncomplete: !complete}
+		Links: links.links, ImageRefs: images.refs, ExtractionIncomplete: !complete,
+		HTMLCPULimitExceeded: errors.Is(z.Err(), xhtml.ErrResourceStopped)}
 }
 
 func fallbackDestination(raw string, base *url.URL) (string, bool) {

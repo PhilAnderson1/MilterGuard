@@ -239,6 +239,9 @@ func (p *parser) insertOpenElement(n *Node) {
 	p.guard.openElement(p, n)
 	p.oe = append(p.oe, n)
 	p.guard.stacks(p)
+	if len(p.oe) > 512 {
+		panic("html: open stack of elements exceeds 512 nodes")
+	}
 }
 
 // shouldFosterParent returns whether the next node to be added should be

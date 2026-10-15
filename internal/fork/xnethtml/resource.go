@@ -78,6 +78,19 @@ func (g *resourceGuard) attributes(n int) (err error) {
 	return nil
 }
 
+func (g *resourceGuard) tokenizerAttribute(keyBytes, valueBytes int) (err error) {
+	if g == nil {
+		return nil
+	}
+	// In addition to the retained key and value strings, each source attribute
+	// grows the tokenizer's span slice, its name-deduplication map, or the
+	// token's Attribute slice. Charge duplicate attributes too: their temporary
+	// key allocations still contribute to the monotonic allocation budget.
+	const structuralBytes = 64
+	g.reserve(int64(keyBytes) + int64(valueBytes) + structuralBytes)
+	return nil
+}
+
 func (g *resourceGuard) mustAttributes(n int) {
 	if err := g.attributes(n); err != nil {
 		panic(resourceAbort{err})

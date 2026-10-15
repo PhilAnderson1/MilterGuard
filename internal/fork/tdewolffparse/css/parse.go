@@ -108,6 +108,10 @@ func NewParser(r *parse.Input, isInline bool) *Parser {
 func NewParserWithLimits(r *parse.Input, isInline bool, limits ResourceLimits) *Parser {
 	guard := newResourceGuard(limits)
 	if limits.ShouldStop != nil {
+		// Parser-loop invariant: every iteration must either charge a token
+		// through the resource guard or advance this guarded input. The progress
+		// callback is the cancellation backstop for grammar paths, such as
+		// unknown at-rule bodies, that intentionally do not retain tokens.
 		r.SetProgressCheck(func() error {
 			if limits.ShouldStop() {
 				return ErrResourceStopped

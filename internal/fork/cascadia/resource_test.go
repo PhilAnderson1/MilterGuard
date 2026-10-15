@@ -28,6 +28,28 @@ func TestMatchWithStopInterruptsDescendantSearch(t *testing.T) {
 	}
 }
 
+func TestMatchWithStopInterruptsLangAncestorSearch(t *testing.T) {
+	selector, err := ParseGroup(`:lang(en)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := &html.Node{Type: html.ElementNode, Data: "div"}
+	n := root
+	for range 1_000 {
+		child := &html.Node{Type: html.ElementNode, Data: "div"}
+		n.AppendChild(child)
+		n = child
+	}
+	checks := 0
+	matched, stopped := MatchWithStop(selector, n, func() bool {
+		checks++
+		return checks == 2
+	})
+	if matched || !stopped {
+		t.Fatalf("matched=%v stopped=%v, want false/true", matched, stopped)
+	}
+}
+
 func TestMatchWithStopPreservesMatchResult(t *testing.T) {
 	selector, err := ParseGroup(`div > p.notice`)
 	if err != nil {

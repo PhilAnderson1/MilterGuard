@@ -1,6 +1,7 @@
 package cascadia
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -84,5 +85,36 @@ func TestParseString(t *testing.T) {
 		if got != want {
 			t.Errorf("parsing %q: got %q, want %q", source, got, want)
 		}
+	}
+}
+
+func TestEscapeHeavyParsingUsesBoundedAllocations(t *testing.T) {
+	const escapes = 4096
+	want := strings.Repeat("z", escapes)
+	for _, test := range []struct {
+		name   string
+		source string
+		parse  func(*parser) (string, error)
+	}{
+		{"name", strings.Repeat(`\z`, escapes), (*parser).parseName},
+		{"string", `"` + strings.Repeat(`\z`, escapes) + `"`, (*parser).parseString},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got string
+			allocs := testing.AllocsPerRun(10, func() {
+				p := &parser{s: test.source}
+				var err error
+				got, err = test.parse(p)
+				if err != nil {
+					t.Fatalf("parse failed: %v", err)
+				}
+			})
+			if got != want {
+				t.Fatalf("parsed value has length %d, want %d", len(got), len(want))
+			}
+			if allocs > 64 {
+				t.Fatalf("parse used %.0f allocations for %d escapes, want at most 64", allocs, escapes)
+			}
+		})
 	}
 }

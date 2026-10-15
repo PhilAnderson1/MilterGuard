@@ -338,7 +338,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 	return nil
 }
 
-func (p processor) process(input []byte) (Document, error) {
+func (p processor) process(input []byte) (result Document, resultErr error) {
 	if p.cpu == nil {
 		p.cpu = &cpuGuard{shouldStop: p.shouldStop}
 	}
@@ -366,12 +366,18 @@ func (p processor) process(input []byte) (Document, error) {
 		Usage:                parsedResourceUsage(len(input), &document),
 		UnresolvedStylesheet: s.unresolvedStylesheet,
 	}
+	// Parsing establishes the document and its shared memory counter, but later
+	// selector indexing and viewing-case analysis also reserve from that counter.
+	// Refresh usage after the return values have been assigned so every exit path
+	// reports the complete per-part charge to the message-wide budget.
+	defer func() {
+		result.Usage = parsedResourceUsage(len(input), &document)
+	}()
 	if p.stopped() {
 		return in, errStopped
 	}
 	s.buildSelectorIndex()
 	if p.memory.Exhausted() {
-		in.Usage = parsedResourceUsage(len(input), &document)
 		return in, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
 	}
 	if p.stopped() {
@@ -384,7 +390,6 @@ func (p processor) process(input []byte) (Document, error) {
 		int64(document.extractableElementCount)*(int64(unsafe.Sizeof(Element{}))+int64(unsafe.Sizeof(visibilityLabel(0)))+int64(unsafe.Sizeof(concealmentReason(0))))
 	frameBytes := int64(document.treeDepth+1) * (int64(unsafe.Sizeof(viewingCaseFrame{})) + int64(unsafe.Sizeof(Style{})) + int64(unsafe.Sizeof(paintLayer{})))
 	if !p.memory.Reserve(resultBytes + frameBytes) {
-		in.Usage = parsedResourceUsage(len(input), &document)
 		return in, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
 	}
 	results := viewingCaseResults{
@@ -443,7 +448,6 @@ func (p processor) process(input []byte) (Document, error) {
 	}
 	in.Elements = results.elements
 	if p.memory.Exhausted() {
-		in.Usage = parsedResourceUsage(len(input), &document)
 		return in, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
 	}
 	return in, nil

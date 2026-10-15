@@ -598,95 +598,6 @@ var selectorTests = []selectorTest{
 		},
 	},
 	{
-		`<p id="p1">0123456789</p><p id="p2">abcdef</p><p id="p3">0123ABCD</p>`,
-		`p:matches([\d])`,
-		[]string{
-			`<p id="p1">0123456789</p>`,
-			`<p id="p3">0123ABCD</p>`,
-		},
-	},
-	{
-		`<p id="p1">0123456789</p><p id="p2">abcdef</p><p id="p3">0123ABCD</p>`,
-		`p:matches([a-z])`,
-		[]string{
-			`<p id="p2">abcdef</p>`,
-		},
-	},
-	{
-		`<p id="p1">0123456789</p><p id="p2">abcdef</p><p id="p3">0123ABCD</p>`,
-		`p:matches([a-zA-Z])`,
-		[]string{
-			`<p id="p2">abcdef</p>`,
-			`<p id="p3">0123ABCD</p>`,
-		},
-	},
-	{
-		`<p id="p1">0123456789</p><p id="p2">abcdef</p><p id="p3">0123ABCD</p>`,
-		`p:matches([^\d])`,
-		[]string{
-			`<p id="p2">abcdef</p>`,
-			`<p id="p3">0123ABCD</p>`,
-		},
-	},
-	{
-		`<p id="p1">0123456789</p><p id="p2">abcdef</p><p id="p3">0123ABCD</p>`,
-		`p:matches(^(0|a))`,
-		[]string{
-			`<p id="p1">0123456789</p>`,
-			`<p id="p2">abcdef</p>`,
-			`<p id="p3">0123ABCD</p>`,
-		},
-	},
-	{
-		`<p id="p1">0123456789</p><p id="p2">abcdef</p><p id="p3">0123ABCD</p>`,
-		`p:matches(^\d+$)`,
-		[]string{
-			`<p id="p1">0123456789</p>`,
-		},
-	},
-	{
-		`<p id="p1">0123456789</p><p id="p2">abcdef</p><p id="p3">0123ABCD</p>`,
-		`p:not(:matches(^\d+$))`,
-		[]string{
-			`<p id="p2">abcdef</p>`,
-			`<p id="p3">0123ABCD</p>`,
-		},
-	},
-	{
-		`<div><p id="p1">01234<em>567</em>89</p><div>`,
-		`div :matchesOwn(^\d+$)`,
-		[]string{
-			`<p id="p1">01234<em>567</em>89</p>`,
-			`<em>567</em>`,
-		},
-	},
-	{
-		`<ul>
-			<li><a id="a1" href="http://www.google.com/finance"></a>
-			<li><a id="a2" href="http://finance.yahoo.com/"></a>
-			<li><a id="a2" href="http://finance.untrusted.com/"/>
-			<li><a id="a3" href="https://www.google.com/news"/>
-			<li><a id="a4" href="http://news.yahoo.com"/>
-		</ul>`,
-		`[href#=(fina)]:not([href#=(\/\/[^\/]+untrusted)])`,
-		[]string{
-			`<a href="http://www.google.com/finance" id="a1"></a>`,
-			`<a href="http://finance.yahoo.com/" id="a2"></a>`,
-		},
-	},
-	{
-		`<ul>
-			<li><a id="a1" href="http://www.google.com/finance"/>
-			<li><a id="a2" href="http://finance.yahoo.com/"/>
-			<li><a id="a3" href="https://www.google.com/news"></a>
-			<li><a id="a4" href="http://news.yahoo.com"/>
-		</ul>`,
-		`[href#=(^https:\/\/[^\/]*\/?news)]`,
-		[]string{
-			`<a href="https://www.google.com/news" id="a3"></a>`,
-		},
-	},
-	{
 		`<form>
 			<label>Username <input type="text" name="username" /></label>
 			<label>Password <input type="password" name="password" /></label>
@@ -790,6 +701,20 @@ var selectorTests = []selectorTest{
 			`<div class="class2"></div>`,
 		},
 	},
+}
+
+func TestRegularExpressionSelectorsAreDisabled(t *testing.T) {
+	for _, selector := range []string{
+		`[href#=(example)]`,
+		`p:matches(example)`,
+		`p:matchesOwn(example)`,
+	} {
+		t.Run(selector, func(t *testing.T) {
+			if _, err := ParseGroup(selector); err == nil {
+				t.Fatalf("ParseGroup(%q) succeeded, want an unsupported-selector error", selector)
+			}
+		})
+	}
 }
 
 func setup(selector, testHTML string) (Selector, *html.Node, error) {

@@ -151,15 +151,24 @@ func (m *Message) ProcessedBody(maxChars int) string {
 // LLM-facing visibility annotations or concealed content. It is intended for
 // human-readable views; the original message remains the authoritative record.
 func (m *Message) VisibleBody(maxChars int) string {
+	return m.VisibleBodyWithHTMLControl(maxChars, HTMLProcessingControl{})
+}
+
+// VisibleBodyWithHTMLControl is VisibleBody with externally supplied HTML CPU
+// controls for callers which process stored or otherwise untrusted messages.
+func (m *Message) VisibleBodyWithHTMLControl(maxChars int, control HTMLProcessingControl) string {
 	if maxChars < 1 {
 		return ""
 	}
-	content := m.processedContent()
+	content := m.processedContentWithHTMLControl(control)
 	body := content.VisibleText
+	if content.HTMLFallbackUsed {
+		body = content.Text
+	}
 	if utf8.RuneCountInString(body) > maxChars {
 		body = sampleBody(body, maxChars)
 	}
-	if content.ExtractionIncomplete {
+	if content.ExtractionIncomplete || content.HTMLCPULimitExceeded {
 		body += "\n[HTML extraction incomplete; processing limits prevented extraction of the remainder]"
 	}
 	return body

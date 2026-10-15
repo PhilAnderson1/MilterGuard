@@ -909,7 +909,9 @@ func (z *Tokenizer) readTag(saveAttr bool) {
 		if z.err != nil {
 			break
 		}
-		if err := z.guard.attributes(1); err != nil {
+		keyBytes := z.pendingAttr[0].end - z.pendingAttr[0].start
+		valueBytes := z.pendingAttr[1].end - z.pendingAttr[1].start
+		if err := z.guard.tokenizerAttribute(keyBytes, valueBytes); err != nil {
 			z.err = err
 			break
 		}
@@ -1296,6 +1298,15 @@ func (z *Tokenizer) SetMaxBuf(n int) {
 // The input is assumed to be UTF-8 encoded.
 func NewTokenizer(r io.Reader) *Tokenizer {
 	return NewTokenizerFragment(r, "")
+}
+
+// NewTokenizerWithStop returns a tokenizer that samples shouldStop while
+// consuming input. If shouldStop returns true, the tokenizer reports
+// ErrResourceStopped.
+func NewTokenizerWithStop(r io.Reader, shouldStop func() bool) *Tokenizer {
+	z := NewTokenizer(r)
+	z.guard = &resourceGuard{limits: ResourceLimits{ShouldStop: shouldStop}}
+	return z
 }
 
 // NewTokenizerFragment returns a new HTML Tokenizer for the given Reader, for

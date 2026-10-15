@@ -125,9 +125,10 @@ ai:
   # domains, parameter names, and the complete URL internally.
   compact_prompt_urls: true
 
-  # Maximum CPU time, in milliseconds, for converting an HTML message into the
-  # analysis prompt. CPU time excludes time waiting to be scheduled. Set to 0
-  # to disable the limit.
+  # Maximum CPU time, in milliseconds, for primary HTML processing. If bounded
+  # fallback extraction is needed, its tokenizer receives a separate allowance
+  # of the same size, so total HTML CPU can approach twice this value. CPU time
+  # excludes time waiting to be scheduled. Set to 0 to disable the limit.
   max_html_parse_cpu_ms: 250
 
   # Action when the HTML CPU limit is reached: fallback continues with bounded

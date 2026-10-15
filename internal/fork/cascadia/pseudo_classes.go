@@ -3,7 +3,6 @@ package cascadia
 import (
 	"bytes"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
@@ -125,31 +124,6 @@ func (s containsPseudoClassSelector) matchResource(n *html.Node, guard *MatchCon
 		return false
 	}
 	return strings.Contains(text, s.value)
-}
-
-type regexpPseudoClassSelector struct {
-	abstractPseudoClass
-	regexp *regexp.Regexp
-	own    bool
-}
-
-func (s regexpPseudoClassSelector) Match(n *html.Node) bool {
-	return s.matchResource(n, nil)
-}
-
-func (s regexpPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
-	var text string
-	if s.own {
-		// matches nodes whose text directly matches the specified regular expression
-		text = nodeOwnTextResource(n, guard)
-	} else {
-		// matches nodes whose text matches the specified regular expression
-		text = nodeTextResource(n, guard)
-	}
-	if guard.step() {
-		return false
-	}
-	return s.regexp.MatchString(text)
 }
 
 // writeNodeText writes the text contained in n and its descendants to b.
@@ -473,6 +447,12 @@ func (s langPseudoClassSelector) Match(n *html.Node) bool {
 }
 
 func (s langPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
+	// Account every recursive ancestor visit. Selector-controlled loops and
+	// recursion must advance the guard so cooperative cancellation cannot be
+	// bypassed by a long traversal that performs no other guarded work.
+	if guard.step() {
+		return false
+	}
 	own := matchAttributeResource(n, "lang", func(val string) bool {
 		return val == s.lang || strings.HasPrefix(val, s.lang+"-")
 	}, guard)

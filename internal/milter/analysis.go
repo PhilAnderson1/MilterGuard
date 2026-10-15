@@ -10,6 +10,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/threadcpu"
 )
 
 const analysisResponseMargin = 5 * time.Second
@@ -143,7 +144,7 @@ func (s *analysisService) buildAnalysis(msg *message.Message, analysisContext me
 	if s.ai.MaxHTMLParseCPUMilliseconds == 0 {
 		return msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control), 0, false, false
 	}
-	clock := currentThreadCPUTime
+	clock := threadcpu.Now
 	if s.threadCPUTime != nil {
 		clock = s.threadCPUTime
 	}
@@ -163,6 +164,27 @@ func (s *analysisService) buildAnalysis(msg *message.Message, analysisContext me
 		return exceeded
 	}
 	control.ShouldFallback = shouldFallback
+	fallbackStarted := time.Duration(0)
+	fallbackStartedOK := false
+	fallbackExceeded := false
+	control.FallbackShouldStop = func() bool {
+		if fallbackExceeded {
+			return true
+		}
+		current, ok := clock()
+		if !ok {
+			return false
+		}
+		if !fallbackStartedOK {
+			fallbackStarted = current
+			fallbackStartedOK = true
+			return false
+		}
+		if current >= fallbackStarted && current-fallbackStarted > maximum {
+			fallbackExceeded = true
+		}
+		return fallbackExceeded
+	}
 	prepared := msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control)
 	finished, finishedOK := clock()
 	if !startedOK || !finishedOK || finished < started {

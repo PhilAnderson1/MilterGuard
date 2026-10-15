@@ -49,37 +49,41 @@ type IPHostnameResolver interface {
 }
 
 type Dependencies struct {
-	Correspondents  stores.CorrespondentAdminRepository
-	Rejections      stores.RejectionRepository
-	IPReputation    stores.IPReputationAdminRepository
-	SenderBlocklist stores.SenderBlocklistAdminRepository
-	Activity        stores.ActivityReporter
-	ServiceStatus   stores.ServiceStatusStore
-	CommandHistory  stores.CommandHistoryRepository
-	MessageSource   RejectionMessageSource
-	IPResolver      IPHostnameResolver
-	MaxMessageSize  int64
-	DatabaseTimeout time.Duration
-	ActivityExpiry  time.Duration
-	Now             func() time.Time
-	Logger          *slog.Logger
+	Correspondents              stores.CorrespondentAdminRepository
+	Rejections                  stores.RejectionRepository
+	IPReputation                stores.IPReputationAdminRepository
+	SenderBlocklist             stores.SenderBlocklistAdminRepository
+	Activity                    stores.ActivityReporter
+	ServiceStatus               stores.ServiceStatusStore
+	CommandHistory              stores.CommandHistoryRepository
+	MessageSource               RejectionMessageSource
+	IPResolver                  IPHostnameResolver
+	MaxMessageSize              int64
+	MaxHTMLParseCPUMilliseconds int
+	DatabaseTimeout             time.Duration
+	ActivityExpiry              time.Duration
+	Now                         func() time.Time
+	ThreadCPUTime               func() (time.Duration, bool)
+	Logger                      *slog.Logger
 }
 
 type Processor struct {
-	correspondents  stores.CorrespondentAdminRepository
-	rejections      stores.RejectionRepository
-	ipReputation    stores.IPReputationAdminRepository
-	senderBlocklist stores.SenderBlocklistAdminRepository
-	activity        stores.ActivityReporter
-	serviceStatus   stores.ServiceStatusStore
-	commandHistory  stores.CommandHistoryRepository
-	messageSource   RejectionMessageSource
-	ipResolver      IPHostnameResolver
-	maxMessageSize  int64
-	databaseTimeout time.Duration
-	activityExpiry  time.Duration
-	now             func() time.Time
-	log             *slog.Logger
+	correspondents              stores.CorrespondentAdminRepository
+	rejections                  stores.RejectionRepository
+	ipReputation                stores.IPReputationAdminRepository
+	senderBlocklist             stores.SenderBlocklistAdminRepository
+	activity                    stores.ActivityReporter
+	serviceStatus               stores.ServiceStatusStore
+	commandHistory              stores.CommandHistoryRepository
+	messageSource               RejectionMessageSource
+	ipResolver                  IPHostnameResolver
+	maxMessageSize              int64
+	maxHTMLParseCPUMilliseconds int
+	databaseTimeout             time.Duration
+	activityExpiry              time.Duration
+	now                         func() time.Time
+	threadCPUTime               func() (time.Duration, bool)
+	log                         *slog.Logger
 }
 
 // New constructs a transport-independent command processor from repository,
@@ -99,7 +103,8 @@ func New(deps Dependencies) *Processor {
 		serviceStatus:   deps.ServiceStatus,
 		commandHistory:  deps.CommandHistory,
 		ipResolver:      deps.IPResolver,
-		maxMessageSize:  deps.MaxMessageSize, databaseTimeout: deps.DatabaseTimeout, activityExpiry: deps.ActivityExpiry,
-		now: deps.Now, log: deps.Logger,
+		maxMessageSize:  deps.MaxMessageSize, maxHTMLParseCPUMilliseconds: deps.MaxHTMLParseCPUMilliseconds,
+		databaseTimeout: deps.DatabaseTimeout, activityExpiry: deps.ActivityExpiry,
+		now: deps.Now, threadCPUTime: deps.ThreadCPUTime, log: deps.Logger,
 	}
 }

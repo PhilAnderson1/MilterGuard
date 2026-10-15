@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 func initialPtr() *Style {
@@ -932,6 +933,14 @@ func TestUnsupportedSelectorUncertaintyIsLimitedToRelevantDeclarations(t *testin
 			t.Errorf("%s label = %q, want %q", text, got, want)
 		}
 	}
+
+	in = inspectHTML(t, `<style>p[data-value#=(a+) ]{display:none}</style><p data-value="aaaa">regex target</p><div>unrelated</div>`)
+	if got := findText(t, in, "regex target").Label; got != "unknown" {
+		t.Fatalf("regex target label = %q, want unknown", got)
+	}
+	if got := findText(t, in, "unrelated").Label; got != "visible" {
+		t.Fatalf("regex-unrelated label = %q, want visible", got)
+	}
 }
 
 func TestSuppressedGeneratedPseudoElementsDoNotAffectSourceText(t *testing.T) {
@@ -1554,6 +1563,20 @@ func TestAnalyzeEnforcesSharedMemoryBudget(t *testing.T) {
 	}
 	if document.Usage.MemoryBytes != limits.MemoryBytes {
 		t.Fatalf("memory usage=%d want=%d", document.Usage.MemoryBytes, limits.MemoryBytes)
+	}
+}
+
+func TestAnalyzeReportsFinalMemoryUsage(t *testing.T) {
+	limits := DefaultLimits()
+	memory := resourceguard.NewMemory(limits.MemoryBytes)
+	document, err := (processor{Limits: limits, memory: memory}).process([]byte(
+		`<style>p.notice{display:none}</style><main><p class="notice">concealed</p><p>visible</p></main>`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := document.Usage.MemoryBytes, memory.Used(); got != want {
+		t.Fatalf("reported memory usage=%d, final memory counter=%d", got, want)
 	}
 }
 
