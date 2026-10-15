@@ -2,6 +2,7 @@ package htmlextract
 
 import (
 	"bytes"
+	"errors"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -307,48 +308,27 @@ type sheet struct {
 	unsupportedNesting   bool
 	unsupportedColours   int
 	runtime              sheetRuntime
+	shouldStop           func() bool
+	stopped              bool
 }
 
-// admitCSS applies allocation-light source bounds before tdewolff's parser is
-// allowed to accumulate a selector or declaration value into a token slice.
-// CSS is counted across style elements and style attributes so splitting a
-// payload into many individually acceptable inputs cannot bypass the document
-// limit.
-func (s *sheet) admitCSS(text string, inline bool) (admitted, malformed bool) {
-	if s.cascadeIncomplete || s.workIncomplete {
-		return false, false
+// admitCSS applies the cumulative source and work bounds. Per-construct and
+// stack limits are enforced where the local CSS parser grows those resources.
+func (s *sheet) admitCSS(text string) bool {
+	if s.cascadeIncomplete || s.workIncomplete || s.stopped {
+		return false
 	}
 	if len(text) > s.limits.CSSBytes || s.cssBytes > s.limits.CSSBytes-len(text) {
 		s.abandonCascade()
-		return false, false
+		return false
 	}
-	// Account for the complete lexer/preflight pass before doing it. Selector
-	// and declaration processing below is charged separately because it is an
-	// additional pass over those token ranges.
+	// Account for the complete parser pass before doing it. Selector and
+	// declaration processing below is charged separately.
 	if !s.chargePlanningBytes(len(text)) {
-		return false, false
-	}
-	preflight := inspectCSSConstructs(text, inline, s.limits.CSSConstructBytes, s.limits.CSSConstructTokens, s.limits.Depth)
-	if preflight == cssPreflightLimitExceeded {
-		if inline {
-			// A style attribute cannot affect elements outside its subtree. Count
-			// the input against the shared document budget, but keep the resulting
-			// uncertainty local to the element instead of discarding stylesheets.
-			s.cssBytes += len(text)
-			return false, true
-		}
-		s.abandonCascade()
-		return false, false
+		return false
 	}
 	s.cssBytes += len(text)
-	if preflight == cssPreflightUnsafeDelimiter && inline {
-		return false, true
-	}
-	if preflight == cssPreflightUnsafeDelimiter {
-		s.abandonCascade()
-		return false, true
-	}
-	return true, false
+	return true
 }
 
 func (s *sheet) chargePlanningWork(value string) bool {
@@ -1026,12 +1006,20 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 	if !inline {
 		s.invalidateMediaCache()
 	}
-	admitted, malformed := s.admitCSS(text, inline)
-	if !admitted {
-		return cssParseResult{incomplete: malformed}
+	if !s.admitCSS(text) {
+		return cssParseResult{}
 	}
-	compatibility := parserCompatibleCSS(text)
-	p := css.NewParser(parse.NewInputString(compatibility.text), inline)
+	compatibility := parserCompatibleCSS(text, s.shouldStop)
+	if compatibility.stopped {
+		s.stopped = true
+		return cssParseResult{}
+	}
+	p := css.NewParserWithLimits(parse.NewInputString(compatibility.text), inline, css.ResourceLimits{
+		ConstructBytes:  s.limits.CSSConstructBytes,
+		ConstructTokens: s.limits.CSSConstructTokens,
+		Depth:           s.limits.Depth,
+		ShouldStop:      s.shouldStop,
+	}, nil)
 	var conditions *conditionFrame
 	// Each at-rule temporarily suspends its enclosing qualified rule. Keep
 	// this separate from conditions, which are retained by parsed rules.
@@ -1062,37 +1050,49 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 		values := p.Values()
 		switch g {
 		case css.ErrorGrammar:
-			if p.HasParseError() {
-				insideNestedGroup := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
-				if !inline && rulesetDepth > 0 && (hasTopLevelCSSBlock(values) || (current < 0 && insideNestedGroup)) {
-					s.noteUnsupportedNesting()
+			if !p.HasParseError() {
+				err := p.Err()
+				if errors.Is(err, css.ErrResourceStopped) {
+					s.stopped = true
+					return cssParseResult{declarations: out}
 				}
-				// Recovery inside an inline at-rule can consume its closing brace
-				// without emitting EndAtRuleGrammar. Subsequent declarations would
-				// then look nested and be silently discarded. The block boundary
-				// is no longer reliable: preserve local uncertainty instead.
-				if inline && conditions != nil {
-					return cssParseResult{declarations: out, incomplete: true}
+				var limitErr *css.ResourceLimitError
+				if errors.As(err, &limitErr) || errors.Is(err, css.ErrUnsafeDelimiter) {
+					if inline {
+						return cssParseResult{declarations: out, incomplete: true}
+					}
+					s.abandonCascade()
 				}
-				// A stray right brace in a qualified-rule prelude can make
-				// tdewolff silently pop its enclosing at-rule state without
-				// emitting EndAtRuleGrammar. Its reported tokenType is whitespace,
-				// but the brace remains in Values. Do not retain our now-stale
-				// condition frame and misclassify later top-level rules.
-				if !inline && conditions != nil && hasCSSToken(values, css.RightBraceToken) {
-					return cssParseResult{declarations: out, incomplete: true}
-				}
-				// tdewolff's declaration recovery decrements its nesting level for
-				// an unmatched ')' or ']'. The level then remains negative, so the
-				// recovery routine can consume later declarations or the rest of
-				// the sheet. Other reported parse errors recover at the normal CSS
-				// boundary and remain safe to skip.
-				if tokenType == css.RightParenthesisToken || tokenType == css.RightBracketToken {
-					return cssParseResult{declarations: out, incomplete: true}
-				}
-				continue
+				return cssParseResult{declarations: out}
 			}
-			return cssParseResult{declarations: out}
+			insideNestedGroup := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
+			if !inline && rulesetDepth > 0 && (hasTopLevelCSSBlock(values) || (current < 0 && insideNestedGroup)) {
+				s.noteUnsupportedNesting()
+			}
+			// Recovery inside an inline at-rule can consume its closing brace
+			// without emitting EndAtRuleGrammar. Subsequent declarations would
+			// then look nested and be silently discarded. The block boundary
+			// is no longer reliable: preserve local uncertainty instead.
+			if inline && conditions != nil {
+				return cssParseResult{declarations: out, incomplete: true}
+			}
+			// A stray right brace in a qualified-rule prelude can make
+			// tdewolff silently pop its enclosing at-rule state without
+			// emitting EndAtRuleGrammar. Its reported tokenType is whitespace,
+			// but the brace remains in Values. Do not retain our now-stale
+			// condition frame and misclassify later top-level rules.
+			if !inline && conditions != nil && hasCSSToken(values, css.RightBraceToken) {
+				return cssParseResult{declarations: out, incomplete: true}
+			}
+			// tdewolff's declaration recovery decrements its nesting level for
+			// an unmatched ')' or ']'. The level then remains negative, so the
+			// recovery routine can consume later declarations or the rest of
+			// the sheet. Other reported parse errors recover at the normal CSS
+			// boundary and remain safe to skip.
+			if tokenType == css.RightParenthesisToken || tokenType == css.RightBracketToken {
+				return cssParseResult{declarations: out, incomplete: true}
+			}
+			continue
 		case css.BeginAtRuleGrammar:
 			importsAllowed = false
 			if !inline && opaqueRuleBearingAtRule(string(data)) {

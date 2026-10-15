@@ -3,6 +3,7 @@ package css
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"strconv"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
@@ -83,8 +84,10 @@ type Parser struct {
 	err    string
 	errPos int
 
-	buf   []Token
-	level int
+	buf         []Token
+	level       int
+	guard       *resourceGuard
+	resourceErr error
 
 	data         []byte
 	tt           TokenType
@@ -97,10 +100,30 @@ type Parser struct {
 
 // NewParser returns a new CSS parser from an io.Reader. isInline specifies whether this is an inline style attribute.
 func NewParser(r *parse.Input, isInline bool) *Parser {
+	return newParser(r, isInline, nil)
+}
+
+// NewParserWithLimits returns a parser with limits enforced at the operations
+// that retain construct tokens, copy custom-property values, and grow stacks.
+func NewParserWithLimits(r *parse.Input, isInline bool, limits ResourceLimits, usage *ResourceUsage) *Parser {
+	guard := newResourceGuard(limits, usage)
+	if limits.ShouldStop != nil {
+		r.SetProgressCheck(func() error {
+			if limits.ShouldStop() {
+				return ErrResourceStopped
+			}
+			return nil
+		})
+	}
+	return newParser(r, isInline, guard)
+}
+
+func newParser(r *parse.Input, isInline bool, guard *resourceGuard) *Parser {
 	l := NewLexer(r)
 	p := &Parser{
 		l:     l,
 		state: make([]State, 0, 4),
+		guard: guard,
 	}
 
 	if isInline {
@@ -114,11 +137,14 @@ func NewParser(r *parse.Input, isInline bool) *Parser {
 
 // HasParseError returns true if there is a parse error (and not a read error).
 func (p *Parser) HasParseError() bool {
-	return p.err != ""
+	return p.resourceErr == nil && p.err != ""
 }
 
 // Err returns the error encountered during parsing, this is often io.EOF but also other errors can be returned.
 func (p *Parser) Err() error {
+	if p.resourceErr != nil {
+		return p.resourceErr
+	}
 	if p.err != "" {
 		r := buffer.NewReader(p.l.r.Bytes())
 		return parse.NewError(r, p.errPos, p.err)
@@ -127,7 +153,19 @@ func (p *Parser) Err() error {
 }
 
 // Next returns the next Grammar. It returns ErrorGrammar when an error was encountered. Using Err() one can retrieve the error message.
-func (p *Parser) Next() (GrammarType, TokenType, []byte) {
+func (p *Parser) Next() (gt GrammarType, tt TokenType, data []byte) {
+	if p.resourceErr != nil {
+		return ErrorGrammar, ErrorToken, nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if _, ok := recovered.(resourceAbort); ok {
+				gt, tt, data = ErrorGrammar, ErrorToken, nil
+				return
+			}
+			panic(recovered)
+		}
+	}()
 	p.err = ""
 
 	if p.prevEnd {
@@ -136,7 +174,7 @@ func (p *Parser) Next() (GrammarType, TokenType, []byte) {
 	} else {
 		p.tt, p.data = p.popToken(true)
 	}
-	gt := p.state[len(p.state)-1](p)
+	gt = p.state[len(p.state)-1](p)
 	return gt, p.tt, p.data
 }
 
@@ -153,7 +191,7 @@ func (p *Parser) Values() []Token {
 func (p *Parser) popToken(allowComment bool) (TokenType, []byte) {
 	p.prevWS = false
 	p.prevComment = false
-	tt, data := p.l.Next()
+	tt, data := p.rawToken()
 	for !p.keepWS && tt == WhitespaceToken || tt == CommentToken {
 		if tt == WhitespaceToken {
 			p.prevWS = true
@@ -163,17 +201,68 @@ func (p *Parser) popToken(allowComment bool) (TokenType, []byte) {
 				break
 			}
 		}
-		tt, data = p.l.Next()
+		tt, data = p.rawToken()
 	}
 	return tt, data
 }
 
 func (p *Parser) initBuf() {
 	p.buf = p.buf[:0]
+	p.guard.resetConstruct()
 }
 
 func (p *Parser) pushBuf(tt TokenType, data []byte) {
+	if err := p.guard.token(data); err != nil {
+		p.abort(err)
+	}
 	p.buf = append(p.buf, Token{tt, data})
+}
+
+func (p *Parser) rawToken() (TokenType, []byte) {
+	tt, data := p.l.Next()
+	if err := p.l.Err(); err != nil && err != io.EOF {
+		p.abort(err)
+	}
+	return tt, data
+}
+
+func (p *Parser) abort(err error) {
+	p.resourceErr = err
+	panic(resourceAbort{})
+}
+
+func (p *Parser) pushState(state State) {
+	if err := p.guard.depth(len(p.state)); err != nil {
+		p.abort(err)
+	}
+	p.state = append(p.state, state)
+}
+
+func (p *Parser) openComponent() {
+	if err := p.guard.depth(p.level + 1); err != nil {
+		p.abort(err)
+	}
+	p.level++
+}
+
+func (p *Parser) closeComponent() {
+	if p.level == 0 {
+		p.abort(ErrUnsafeDelimiter)
+	}
+	p.level--
+}
+
+func (p *Parser) rejectUnsafeDelimiter(tt TokenType) {
+	if tt == RightParenthesisToken || tt == RightBracketToken {
+		p.abort(ErrUnsafeDelimiter)
+	}
+}
+
+func (p *Parser) appendCustomValue(value, data []byte) []byte {
+	if err := p.guard.token(data); err != nil {
+		p.abort(err)
+	}
+	return append(value, data...)
 }
 
 ////////////////////////////////////////////////////////////////
@@ -237,6 +326,12 @@ func (p *Parser) parseDeclarationList() GrammarType {
 
 func (p *Parser) parseAtRule() GrammarType {
 	p.initBuf()
+	// Bound the at-keyword before Copy allocates storage for it. The keyword
+	// is part of the at-rule construct even though it is exposed separately
+	// from Values.
+	if err := p.guard.token(p.data); err != nil {
+		p.abort(err)
+	}
 	p.data = parse.ToLower(parse.Copy(p.data))
 	atRuleName := p.data
 	if len(atRuleName) > 0 && atRuleName[1] == '-' {
@@ -252,20 +347,21 @@ func (p *Parser) parseAtRule() GrammarType {
 		tt, data := p.popToken(false)
 		if tt == LeftBraceToken && p.level == 0 {
 			if atRule == Font_Face || atRule == Page {
-				p.state = append(p.state, (*Parser).parseAtRuleDeclarationList)
+				p.pushState((*Parser).parseAtRuleDeclarationList)
 			} else if atRule == Document || atRule == Keyframes || atRule == Layer || atRule == Media || atRule == Supports {
-				p.state = append(p.state, (*Parser).parseAtRuleRuleList)
+				p.pushState((*Parser).parseAtRuleRuleList)
 			} else {
-				p.state = append(p.state, (*Parser).parseAtRuleUnknown)
+				p.pushState((*Parser).parseAtRuleUnknown)
 			}
 			return BeginAtRuleGrammar
 		} else if (tt == SemicolonToken || tt == RightBraceToken) && p.level == 0 || tt == ErrorToken {
 			p.prevEnd = (tt == RightBraceToken)
 			return AtRuleGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
-			p.level++
+			p.openComponent()
 		} else if tt == RightParenthesisToken || tt == RightBraceToken || tt == RightBracketToken {
 			if p.level == 0 {
+				p.rejectUnsafeDelimiter(tt)
 				// TODO: buggy
 				p.pushBuf(tt, data)
 				if 1 < len(p.state) {
@@ -274,7 +370,7 @@ func (p *Parser) parseAtRule() GrammarType {
 				p.err, p.errPos = "unexpected ending in at rule", p.l.r.Offset()
 				return ErrorGrammar
 			}
-			p.level--
+			p.closeComponent()
 		}
 		if first {
 			if tt == LeftParenthesisToken || tt == LeftBracketToken {
@@ -326,9 +422,9 @@ func (p *Parser) parseAtRuleUnknown() GrammarType {
 		return EndAtRuleGrammar
 	}
 	if p.tt == LeftParenthesisToken || p.tt == LeftBraceToken || p.tt == LeftBracketToken || p.tt == FunctionToken {
-		p.level++
+		p.openComponent()
 	} else if p.tt == RightParenthesisToken || p.tt == RightBraceToken || p.tt == RightBracketToken {
-		p.level--
+		p.closeComponent()
 	}
 	return TokenGrammar
 }
@@ -350,15 +446,16 @@ func (p *Parser) parseQualifiedRule() GrammarType {
 			tt, data = p.popToken(false)
 		}
 		if tt == LeftBraceToken && p.level == 0 {
-			p.state = append(p.state, (*Parser).parseQualifiedRuleDeclarationList)
+			p.pushState((*Parser).parseQualifiedRuleDeclarationList)
 			return BeginRulesetGrammar
 		} else if tt == ErrorToken {
 			p.err, p.errPos = "unexpected ending in qualified rule", p.l.r.Offset()
 			return ErrorGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
-			p.level++
+			p.openComponent()
 		} else if tt == RightParenthesisToken || tt == RightBraceToken || tt == RightBracketToken {
 			if p.level == 0 {
+				p.rejectUnsafeDelimiter(tt)
 				// TODO: buggy
 				p.pushBuf(tt, data)
 				if 1 < len(p.state) {
@@ -367,7 +464,7 @@ func (p *Parser) parseQualifiedRule() GrammarType {
 				p.err, p.errPos = "unexpected ending in qualified rule", p.l.r.Offset()
 				return ErrorGrammar
 			}
-			p.level--
+			p.closeComponent()
 		}
 		if len(data) == 1 && (data[0] == ',' || data[0] == '>' || data[0] == '+' || data[0] == '~') {
 			skipWS = true
@@ -398,6 +495,7 @@ func (p *Parser) parseQualifiedRuleDeclarationList() GrammarType {
 
 func (p *Parser) parseDeclaration() GrammarType {
 	var offset int // first colon offset
+	valueStarted := false
 	p.initBuf()
 	p.pushBuf(p.tt, p.data)
 	for {
@@ -462,21 +560,26 @@ func (p *Parser) parseDeclaration() GrammarType {
 			// nested ruleset
 			p.tt = WhitespaceToken
 			p.data = emptyBytes
-			p.state = append(p.state, (*Parser).parseQualifiedRuleDeclarationList)
+			p.pushState((*Parser).parseQualifiedRuleDeclarationList)
 			return BeginRulesetGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
-			p.level++
+			p.openComponent()
 		} else if tt == RightParenthesisToken || tt == RightBraceToken || tt == RightBracketToken {
 			if p.level == 0 {
 				p.err, p.errPos = "unexpected ending in declaration", p.l.r.Offset()
 				return p.parseDeclarationError(tt, data)
 			}
-			p.level--
+			p.closeComponent()
 		}
 		if (p.prevWS || p.prevComment) && p.buf[len(p.buf)-1].TokenType != WhitespaceToken {
 			p.pushBuf(WhitespaceToken, wsBytes)
 		}
 		p.pushBuf(tt, data)
+		if !valueStarted && tt == ColonToken && p.level == 0 {
+			// The property name is no longer retained as part of the value work.
+			p.guard.resetConstruct()
+			valueStarted = true
+		}
 		if offset == 0 {
 			offset = p.l.r.Offset() - len(data)
 		}
@@ -494,9 +597,9 @@ func (p *Parser) parseDeclarationError(tt TokenType, data []byte) GrammarType {
 			}
 			return ErrorGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
-			p.level++
+			p.openComponent()
 		} else if tt == RightParenthesisToken || tt == RightBraceToken || tt == RightBracketToken {
-			p.level--
+			p.closeComponent()
 		}
 
 		if p.prevWS {
@@ -510,30 +613,37 @@ func (p *Parser) parseDeclarationError(tt TokenType, data []byte) GrammarType {
 
 func (p *Parser) parseCustomProperty() GrammarType {
 	p.initBuf()
+	// The property name is exposed separately from the copied value, but must
+	// still be bounded before the caller turns it into an owned string.
+	if err := p.guard.token(p.data); err != nil {
+		p.abort(err)
+	}
 	if tt, data := p.popToken(false); tt != ColonToken {
 		p.l.r.Move(-len(data))
 		p.err, p.errPos = "expected colon in custom property", p.l.r.Offset()
 		p.l.r.Move(len(data))
 		return ErrorGrammar
 	}
+	p.guard.resetConstruct()
 	val := []byte{}
 	for {
-		tt, data := p.l.Next()
+		tt, data := p.rawToken()
 		if (tt == SemicolonToken || tt == RightBraceToken) && p.level == 0 || tt == ErrorToken {
 			p.prevEnd = (tt == RightBraceToken)
-			p.pushBuf(CustomPropertyValueToken, val)
+			p.buf = append(p.buf, Token{CustomPropertyValueToken, val})
 			return CustomPropertyGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
-			p.level++
+			p.openComponent()
 		} else if tt == RightParenthesisToken || tt == RightBraceToken || tt == RightBracketToken {
 			if p.level == 0 {
+				p.rejectUnsafeDelimiter(tt)
 				// TODO: buggy
 				p.pushBuf(tt, data)
 				p.err, p.errPos = "unexpected ending in custom property", p.l.r.Offset()
 				return ErrorGrammar
 			}
-			p.level--
+			p.closeComponent()
 		}
-		val = append(val, data...)
+		val = p.appendCustomValue(val, data)
 	}
 }

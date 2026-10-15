@@ -179,7 +179,7 @@ func TestMatchWorkMaximumKeepsOverBudgetSentinelRepresentable(t *testing.T) {
 	}
 }
 
-func TestCSSInputIsBoundedBeforeParsing(t *testing.T) {
+func TestCSSInputIsBoundedDuringParsing(t *testing.T) {
 	limits := DefaultLimits()
 	oversized := `p{color:` + strings.Repeat(`0 0 0 1px,`, limits.CSSConstructBytes) + `red}`
 	s := sheet{limits: limits}
@@ -189,8 +189,8 @@ func TestCSSInputIsBoundedBeforeParsing(t *testing.T) {
 	if !s.cascadeIncomplete {
 		t.Fatal("oversized stylesheet did not invalidate the cascade")
 	}
-	if s.cssBytes != 0 {
-		t.Fatalf("oversized stylesheet was admitted: CSS bytes = %d", s.cssBytes)
+	if s.cssBytes != len(oversized) {
+		t.Fatalf("CSS bytes = %d, want %d", s.cssBytes, len(oversized))
 	}
 }
 
@@ -264,7 +264,7 @@ func TestNestedCustomPropertyCannotBypassCSSConstructLimit(t *testing.T) {
 	}
 }
 
-func TestCSSConstructTokenLimitPrecedesFullParser(t *testing.T) {
+func TestCSSParserEnforcesConstructTokenLimit(t *testing.T) {
 	limits := DefaultLimits()
 	limits.CSSConstructBytes = 1_000
 	limits.CSSConstructTokens = 8
@@ -272,6 +272,24 @@ func TestCSSConstructTokenLimitPrecedesFullParser(t *testing.T) {
 	s.parseCSS(`p{color:0 0 0 0 0 0 0 0 0}`, false)
 	if !s.cascadeIncomplete {
 		t.Fatal("token-heavy declaration bypassed construct limit")
+	}
+}
+
+func TestCSSParserSamplesCooperativeStop(t *testing.T) {
+	calls := 0
+	s := sheet{
+		limits: DefaultLimits(),
+		shouldStop: func() bool {
+			calls++
+			return true
+		},
+	}
+	s.parseCSS(`/*`+strings.Repeat(`x`, 8<<10)+`*/p{color:red}`, false)
+	if !s.stopped {
+		t.Fatal("CSS parsing did not report the cooperative stop")
+	}
+	if calls == 0 {
+		t.Fatal("stop callback was not sampled")
 	}
 }
 
@@ -284,13 +302,10 @@ func TestCSSConstructLimitBoundsRuleListSemicolonRuns(t *testing.T) {
 		`p{color:red}` + strings.Repeat(`;`, limits.CSSConstructTokens+1),
 		`@charset "utf-8";` + strings.Repeat(`;`, limits.CSSConstructTokens+1),
 	} {
-		if outcome := inspectCSSConstructs(source, false, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth); outcome != cssPreflightLimitExceeded {
-			t.Errorf("semicolon run outcome = %d, want limit exceeded for %q", outcome, source)
-		}
 		s := sheet{limits: limits}
 		s.parseCSS(source, false)
 		if !s.cascadeIncomplete {
-			t.Errorf("semicolon run reached the full parser for %q", source)
+			t.Errorf("semicolon run bypassed parser construct limit for %q", source)
 		}
 	}
 }
@@ -299,12 +314,14 @@ func TestCSSConstructByteLimitBoundsRuleListSemicolonRuns(t *testing.T) {
 	limits := DefaultLimits()
 	limits.CSSConstructBytes = 8
 	limits.CSSConstructTokens = 1_000
-	if outcome := inspectCSSConstructs(strings.Repeat(`;`, limits.CSSConstructBytes+1), false, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth); outcome != cssPreflightLimitExceeded {
-		t.Fatalf("semicolon run outcome = %d, want limit exceeded", outcome)
+	s := sheet{limits: limits}
+	s.parseCSS(strings.Repeat(`;`, limits.CSSConstructBytes+1), false)
+	if !s.cascadeIncomplete {
+		t.Fatal("byte-heavy semicolon run bypassed parser construct limit")
 	}
 }
 
-func TestCSSConstructPreflightKeepsDeclarationAndAtRuleSemicolonBoundaries(t *testing.T) {
+func TestCSSParserKeepsDeclarationAndAtRuleSemicolonBoundaries(t *testing.T) {
 	limits := DefaultLimits()
 	limits.CSSConstructBytes = 32
 	limits.CSSConstructTokens = 8
@@ -319,8 +336,10 @@ func TestCSSConstructPreflightKeepsDeclarationAndAtRuleSemicolonBoundaries(t *te
 		{name: "at-rules", source: strings.Repeat(`@unknown;`, 100)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if outcome := inspectCSSConstructs(test.source, test.inline, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth); outcome != cssPreflightAccepted {
-				t.Fatalf("bounded constructs rejected with outcome %d", outcome)
+			s := sheet{limits: limits}
+			result := s.parseCSSResult(test.source, test.inline)
+			if s.cascadeIncomplete || result.incomplete {
+				t.Fatal("bounded constructs were rejected")
 			}
 		})
 	}
@@ -337,14 +356,16 @@ func TestCSSRuleListSemicolonFloodReportsLimit(t *testing.T) {
 	}
 }
 
-func TestCSSContextDepthLimitPrecedesFullParser(t *testing.T) {
+func TestCSSParserEnforcesContextDepthLimit(t *testing.T) {
 	limits := DefaultLimits()
 	limits.Depth = 4
 	nested := func(depth int) string {
 		return strings.Repeat(`@media all{`, depth) + `p{display:none}` + strings.Repeat(`}`, depth)
 	}
-	if outcome := inspectCSSConstructs(nested(limits.Depth-1), false, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth); outcome != cssPreflightAccepted {
-		t.Fatalf("CSS at context depth limit rejected with outcome %d", outcome)
+	atLimit := sheet{limits: limits}
+	atLimit.parseCSS(nested(limits.Depth-1), false)
+	if atLimit.cascadeIncomplete {
+		t.Fatal("CSS at context depth limit was rejected")
 	}
 	s := sheet{limits: limits}
 	s.parseCSS(nested(limits.Depth), false)
@@ -353,7 +374,7 @@ func TestCSSContextDepthLimitPrecedesFullParser(t *testing.T) {
 	}
 }
 
-func TestCSSConstructPreflightMirrorsVendorPrefixedAtRules(t *testing.T) {
+func TestCSSParserBoundsVendorPrefixedAtRulesByConstruct(t *testing.T) {
 	limits := DefaultLimits()
 	limits.CSSConstructBytes = 32
 	for _, atRule := range []string{"@-x-media screen", "@-x-supports (display:block)", "@-moz-document url-prefix()", "@-webkit-keyframes pulse"} {
@@ -362,16 +383,12 @@ func TestCSSConstructPreflightMirrorsVendorPrefixedAtRules(t *testing.T) {
 			if len(source) <= limits.CSSConstructBytes {
 				t.Fatalf("test source is only %d bytes", len(source))
 			}
-			if !boundedCSSConstructs(source, false, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth) {
+			s := sheet{limits: limits}
+			s.parseCSS(source, false)
+			if s.cascadeIncomplete {
 				t.Fatal("bounded nested rules were treated as one construct")
 			}
 		})
-	}
-}
-
-func TestCSSConstructPreflightDoesNotPromoteUnknownVendorAtRule(t *testing.T) {
-	if got := atRuleContext("@-x-widget"); got != cssDeclarationList {
-		t.Fatalf("unknown vendor at-rule context = %v, want declaration list", got)
 	}
 }
 
@@ -416,7 +433,7 @@ func TestOversizedCSSMakesVisibilityUnknown(t *testing.T) {
 	}
 	text := findText(t, document, "T")
 	if text.Label != "unknown" {
-		t.Fatalf("label = %q, want unknown after CSS preflight limit", text.Label)
+		t.Fatalf("label = %q, want unknown after CSS parser limit", text.Label)
 	}
 }
 

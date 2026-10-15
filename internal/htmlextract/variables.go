@@ -155,15 +155,25 @@ func advanceDelimiters(stack []css.TokenType, kind css.TokenType) ([]css.TokenTy
 type cssParserCompatibility struct {
 	text                            string
 	insertedRightParenthesisEscapes []int
+	stopped                         bool
 }
 
-func parserCompatibleCSS(text string) cssParserCompatibility {
+func parserCompatibleCSS(text string, shouldStop func() bool) cssParserCompatibility {
 	hasComments := strings.Contains(text, "/*")
 	needsDelimiterCompatibility := containsFold(text, "var(") && strings.Contains(text, ")") && (strings.Contains(text, "[") || strings.Contains(text, "{"))
 	if !hasComments && !needsDelimiterCompatibility {
 		return cssParserCompatibility{text: text}
 	}
-	l := css.NewLexer(parse.NewInputString(text))
+	input := parse.NewInputString(text)
+	if shouldStop != nil {
+		input.SetProgressCheck(func() error {
+			if shouldStop() {
+				return css.ErrResourceStopped
+			}
+			return nil
+		})
+	}
+	l := css.NewLexer(input)
 	var stack []css.TokenType
 	var b strings.Builder
 	var insertedRightParenthesisEscapes []int
@@ -174,6 +184,9 @@ func parserCompatibleCSS(text string) cssParserCompatibility {
 		kind, raw := l.Next()
 		if kind == css.ErrorToken {
 			if !errors.Is(l.Err(), io.EOF) {
+				if errors.Is(l.Err(), css.ErrResourceStopped) {
+					return cssParserCompatibility{text: text, stopped: true}
+				}
 				return cssParserCompatibility{text: text}
 			}
 			break
@@ -184,7 +197,12 @@ func parserCompatibleCSS(text string) cssParserCompatibility {
 				b.WriteString(text[:offset])
 				changed = true
 			}
-			b.WriteByte(' ')
+			// Preserve the source width. Ordinary parser paths collapse this
+			// whitespace, while custom-property values retain it, allowing the
+			// parser's construct-byte guard to charge the original comment size.
+			for range raw {
+				b.WriteByte(' ')
+			}
 			offset += len(raw)
 			continue
 		}

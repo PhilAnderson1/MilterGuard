@@ -172,7 +172,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	if p.stopped() {
 		return document, errStopped
 	}
-	document.styles = sheet{limits: p.Limits}
+	document.styles = sheet{limits: p.Limits, shouldStop: p.shouldStop}
 	document.elements = make(map[*html.Node]elementPreparation)
 	type entry struct {
 		n, next           *html.Node
@@ -325,6 +325,9 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		if n.Type == html.TextNode && e.scope == scopeActive {
 			document.extractableTextCount++
 		}
+	}
+	if document.styles.stopped {
+		return document, errStopped
 	}
 	if document.styles.cascadeIncomplete || document.styles.workIncomplete {
 		// No prepared per-element CSS can be used once global style analysis is

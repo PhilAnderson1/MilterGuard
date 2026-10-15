@@ -18,4 +18,10 @@ Local compatibility changes:
   parser buffer instead of advancing the slice's base pointer. This preserves
   buffer capacity across declarations and avoids repeated allocations without
   changing the emitted grammar events or values.
+- `Input` can sample an optional progress callback as bytes are consumed. The
+  CSS parser uses it for cooperative cancellation while scanning large tokens.
+- The CSS parser has an opt-in resource guard that bounds retained construct
+  bytes and tokens, custom-property copies, component and parser-state depth,
+  and unsafe top-level closing delimiters. The ordinary upstream constructor
+  retains its original unlimited behavior.
 The upstream MIT licence is retained as `LICENSE.md`.

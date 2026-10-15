@@ -15,6 +15,9 @@ type Input struct {
 	err   error
 
 	restore func()
+
+	progressCheck func() error
+	nextProgress  int
 }
 
 // NewInput returns a new Input for a given io.Input and uses io.ReadAll to read it into a byte slice.
@@ -100,6 +103,9 @@ func (z *Input) PeekErr(pos int) error {
 // Peek returns the ith byte relative to the end position.
 // Peek returns 0 when an error has occurred, Err returns the erroz.
 func (z *Input) Peek(pos int) byte {
+	if z.err != nil {
+		return 0
+	}
 	pos += z.pos
 	return z.buf[pos]
 }
@@ -121,6 +127,19 @@ func (z *Input) PeekRune(pos int) (rune, int) {
 // Move advances the position.
 func (z *Input) Move(n int) {
 	z.pos += n
+	if n > 0 && z.progressCheck != nil && z.pos >= z.nextProgress {
+		z.nextProgress = z.pos + 1024
+		if err := z.progressCheck(); err != nil {
+			z.err = err
+		}
+	}
+}
+
+// SetProgressCheck installs an allocation-free callback sampled while input is
+// consumed. Returning an error stops subsequent peeks and makes Err report it.
+func (z *Input) SetProgressCheck(check func() error) {
+	z.progressCheck = check
+	z.nextProgress = z.pos + 1024
 }
 
 // MoveRune advances the position by the length of the current rune.

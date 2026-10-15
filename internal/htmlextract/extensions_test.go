@@ -548,7 +548,7 @@ func TestMalformedInlineDelimiterUncertaintyRemainsLocal(t *testing.T) {
 	}
 }
 
-func TestCSSDelimiterPreflightAcceptsBalancedComponents(t *testing.T) {
+func TestCSSParserAcceptsBalancedComponents(t *testing.T) {
 	limits := DefaultLimits()
 	for _, source := range []string{
 		`[data-x="("]{color:rgb(1 2 3 / .5)}`,
@@ -556,8 +556,10 @@ func TestCSSDelimiterPreflightAcceptsBalancedComponents(t *testing.T) {
 		`p{--x:{a:[b(c)]};color:var(--x, red)}`,
 		`p{--x:red;color:var(--x,[unused)])}`,
 	} {
-		if outcome := inspectCSSConstructs(source, false, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth); outcome != cssPreflightAccepted {
-			t.Errorf("valid CSS rejected with outcome %d: %s", outcome, source)
+		s := sheet{limits: limits}
+		s.parseCSS(source, false)
+		if s.cascadeIncomplete {
+			t.Errorf("valid CSS rejected: %s", source)
 		}
 	}
 }

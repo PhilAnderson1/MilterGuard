@@ -2,8 +2,9 @@
 
 MilterGuard keeps the parser code that receives untrusted HTML and CSS in this
 tree so resource limits can be enforced at the operations that consume the
-resources. The HTML fork has direct tokenizer and tree-builder limits. CSS
-still uses bounded admission checks before invoking its parser.
+resources. The HTML fork has direct tokenizer and tree-builder limits, and the
+CSS fork directly bounds token accumulation, copied values, parser depth, and
+tokenizer progress.
 
 The imported packages are:
 

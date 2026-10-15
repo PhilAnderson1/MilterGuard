@@ -29,7 +29,7 @@ path.
 | `internal/ai` | Builds chat-completions requests, applies endpoint retries, and validates AI decisions. |
 | `internal/attachment` | Detects prohibited executable attachments and inspects supported archives. |
 | `internal/config` | Loads defaults, strictly decodes YAML, and validates cross-setting requirements. |
-| `internal/htmlextract` | Applies direct HTML parser limits and bounded CSS admission checks, then derives presentation and visibility evidence from the parsed document. |
+| `internal/htmlextract` | Applies direct HTML and CSS parser limits, then derives presentation and visibility evidence from the parsed document. |
 | `internal/fork` | Holds the source forks of the HTML tree builder, CSS parser, and selector engine used by `internal/htmlextract`, together with upstream provenance and tests. |
 | `internal/mailaddr` | Provides canonical mailbox parsing and normalization shared by message processing, policy, administration, and persistence. |
 | `internal/mailauth` | Owns provider-neutral authentication evidence, the verifier boundary, trusted-header compatibility parsing, alignment, and exact-message storage. |
@@ -143,15 +143,14 @@ scripts or fetch external resources. Processing proceeds through these stages:
    allowing for parser-generated ancestors. Collect applicable stylesheets,
    inline styles, legacy presentation attributes, and selector profiles while
    distinguishing active, head, and inert content.
-3. Admit each CSS source through `sheet.admitCSS` before constructing the
-   locally forked `tdewolff` CSS parser in
-   `internal/fork/tdewolffparse/css`. Enforce a cumulative CSS byte limit and charge
-   preflight work, then use the lexer-based `css_preflight.go` checks to bound
-   individual constructs by bytes and tokens, including malformed rule-list
-   separator runs, and reject unsafe unmatched delimiters. These checks protect
-   parser token accumulation and condition tracking. They apply to style
-   elements, style attributes, conditional-comment
-   styles, and decoded data-URL stylesheets, including nested imports.
+3. Enforce a cumulative CSS byte limit, then parse each source with the local
+   `tdewolff` fork in `internal/fork/tdewolffparse/css`. A small in-parser guard
+   bounds bytes and tokens where constructs are retained, bounds component and
+   parser-state depth where those stacks grow, rejects closing delimiters that
+   would corrupt recovery state, and samples cooperative cancellation during
+   tokenization. The limits apply to style elements, style attributes,
+   conditional-comment styles, and decoded data-URL stylesheets, including
+   nested imports.
 4. Prepare declarations and build a selector index, then evaluate a bounded
    set of viewport cases. Resolve the cascade, inheritance, custom properties,
    expressions, layout, clipping, opacity, and colours with shared matching
@@ -364,9 +363,8 @@ Important trust boundaries include:
 - `netsafety` and RDAP pinned dialing prevent requests to internal services.
 - Message content, images, and links are always treated as untrusted data by
   the AI request.
-- HTML tree construction enforces limits inside the local parser. CSS parsing
-  retains bounded admission checks before the parser processes adversarial
-  input.
+- HTML tree construction and CSS parsing enforce limits inside the local
+  parser forks at the operations that consume CPU or memory.
 - Rejected-message archive paths are constructed beneath one configured root.
 
 Changes at these boundaries should retain explicit validation and focused
