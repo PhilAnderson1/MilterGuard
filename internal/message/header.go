@@ -5,7 +5,7 @@ import (
 	"mime"
 	"strings"
 
-	"golang.org/x/net/html/charset"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/charset"
 )
 
 var headerWordDecoder = &mime.WordDecoder{

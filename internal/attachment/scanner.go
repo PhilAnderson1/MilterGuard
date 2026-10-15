@@ -23,7 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"golang.org/x/net/html/charset"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/charset"
 	"golang.org/x/text/unicode/norm"
 )
 

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"golang.org/x/net/html"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 type processor struct {

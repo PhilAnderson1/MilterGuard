@@ -1,8 +1,8 @@
 package htmlextract
 
 import (
-	"github.com/andybalholm/cascadia"
-	"golang.org/x/net/html"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 // Applying a declaration entails validity checks, cascade comparison and

@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"golang.org/x/net/html"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 // parseMSOConditionalStyles extracts style elements from a downlevel-hidden

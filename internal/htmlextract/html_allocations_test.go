@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"golang.org/x/net/html"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 func formattingExpansionPrefix() string {

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"golang.org/x/net/html"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 func void(n string) bool {

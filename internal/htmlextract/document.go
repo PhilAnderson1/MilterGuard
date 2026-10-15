@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"golang.org/x/net/html"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 // Text describes one extractable text node. Label and ConcealmentReasons are

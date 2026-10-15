@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tdewolff/parse/v2/css"
-	xhtml "golang.org/x/net/html"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
+	xhtml "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 func TestConditionalCases(t *testing.T) {

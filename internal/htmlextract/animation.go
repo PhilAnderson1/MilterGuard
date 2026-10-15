@@ -3,7 +3,7 @@ package htmlextract
 import (
 	"strings"
 
-	"github.com/tdewolff/parse/v2/css"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 )
 
 // animationValue is immutable declaration preparation. Names retain CSS case;

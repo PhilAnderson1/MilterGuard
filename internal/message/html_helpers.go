@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	xhtml "golang.org/x/net/html"
+	xhtml "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 var markdownURLReplacer = strings.NewReplacer(

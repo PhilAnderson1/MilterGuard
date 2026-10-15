@@ -3,8 +3,8 @@ package htmlextract
 import (
 	"strings"
 
-	"github.com/tdewolff/parse/v2"
-	"github.com/tdewolff/parse/v2/css"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 )
 
 type cssPreflightContext uint8

@@ -13,7 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
-	"golang.org/x/net/html/charset"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/charset"
 )
 
 const (

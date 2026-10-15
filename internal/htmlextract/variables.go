@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/tdewolff/parse/v2"
-	"github.com/tdewolff/parse/v2/css"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 )
 
 const maxValueBytes = 16384

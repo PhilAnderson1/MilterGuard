@@ -6,9 +6,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/tdewolff/parse/v2"
-	"github.com/tdewolff/parse/v2/css"
-	"golang.org/x/net/html"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 const (
@@ -1037,6 +1037,11 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 	// this separate from conditions, which are retained by parsed rules.
 	var enclosingRules []int
 	var nestedGroups []bool
+	// Record the qualified-rule depth at which each block at-rule began.
+	// tdewolff also reports keyframe selectors such as "from" as rulesets;
+	// this lets us distinguish those from a qualified rule nested directly
+	// inside another qualified rule.
+	var atRuleRulesetDepth []int
 	conditionDepth := 0
 	rulesetDepth := 0
 	defaultNamespace := false
@@ -1126,6 +1131,7 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			enclosingRules = append(enclosingRules, enclosingRule)
 			parentNested := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
 			nestedGroups = append(nestedGroups, cssNestingGroup(string(data)) && (enclosingRule >= 0 || parentNested))
+			atRuleRulesetDepth = append(atRuleRulesetDepth, rulesetDepth)
 			conditionDepth++
 			if conditionDepth > s.conditionDepth {
 				s.conditionDepth = conditionDepth
@@ -1138,6 +1144,7 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 				current = enclosingRules[len(enclosingRules)-1]
 				enclosingRules = enclosingRules[:len(enclosingRules)-1]
 				nestedGroups = nestedGroups[:len(nestedGroups)-1]
+				atRuleRulesetDepth = atRuleRulesetDepth[:len(atRuleRulesetDepth)-1]
 			}
 		case css.AtRuleGrammar:
 			if !s.chargePlanningTokens(values) {
@@ -1158,7 +1165,14 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			}
 		case css.BeginRulesetGrammar:
 			importsAllowed = false
-			if !inline && len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1] {
+			// Newer tdewolff releases emit nested qualified rules directly
+			// instead of routing them through declaration-error recovery.
+			// MilterGuard does not yet resolve CSS nesting, so preserve the
+			// conservative whole-stylesheet uncertainty used for older parser
+			// event streams.
+			nestedQualifiedRule := rulesetDepth > 0 &&
+				(len(atRuleRulesetDepth) == 0 || rulesetDepth > atRuleRulesetDepth[len(atRuleRulesetDepth)-1])
+			if !inline && (nestedQualifiedRule || len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]) {
 				s.noteUnsupportedNesting()
 			}
 			rulesetDepth++

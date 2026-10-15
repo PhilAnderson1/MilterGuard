@@ -3,8 +3,8 @@ package htmlextract
 import (
 	"strings"
 
-	"github.com/andybalholm/cascadia"
-	"golang.org/x/net/html"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 const siblingMatchWeight int64 = 10

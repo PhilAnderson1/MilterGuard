@@ -3,8 +3,8 @@ package htmlextract
 import (
 	"strings"
 
-	"github.com/tdewolff/parse/v2/css"
-	"golang.org/x/net/html"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 // Empty basic shapes do not require box dimensions. Nonempty shapes are not

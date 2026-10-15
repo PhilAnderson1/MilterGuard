@@ -4,7 +4,7 @@ import (
 	"math"
 	"strings"
 
-	"golang.org/x/net/html"
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 // Email reading panes can be substantially narrower than a desktop browser.

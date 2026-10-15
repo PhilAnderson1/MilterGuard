@@ -1,6 +1,6 @@
 package htmlextract
 
-import "golang.org/x/net/html"
+import "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 
 func parseColor(s string) (string, valueStatus) {
 	c, status := readColour(s)

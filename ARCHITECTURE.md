@@ -30,6 +30,7 @@ path.
 | `internal/attachment` | Detects prohibited executable attachments and inspects supported archives. |
 | `internal/config` | Loads defaults, strictly decodes YAML, and validates cross-setting requirements. |
 | `internal/htmlextract` | Guards HTML/CSS parsing with preflight checks and derives bounded presentation and visibility evidence from the parsed document. |
+| `internal/fork` | Holds the source forks of the HTML tree builder, CSS parser, and selector engine used by `internal/htmlextract`, together with upstream provenance and tests. |
 | `internal/mailaddr` | Provides canonical mailbox parsing and normalization shared by message processing, policy, administration, and persistence. |
 | `internal/mailauth` | Owns provider-neutral authentication evidence, the verifier boundary, trusted-header compatibility parsing, alignment, and exact-message storage. |
 | `internal/mailauth/moxverify` | Adapts Mox SPF, DKIM, and DMARC verification to bounded, provider-neutral evidence using a dedicated resolver and resource limits. |
@@ -130,8 +131,9 @@ presentation evidence for its text and image-like elements. It does not execute
 scripts or fetch external resources. Processing proceeds through these stages:
 
 1. Validate limits and bound input bytes. Run the tokenizer-based HTML
-   preflight in `html_preflight.go` **before** calling the `x/net/html` tree
-   builder. The preflight bounds tree-building tokens, text nodes, attributes,
+   preflight in `html_preflight.go` **before** calling the locally forked
+   `x/net/html` tree builder in `internal/fork/xnethtml`. The preflight bounds
+   tree-building tokens, text nodes, attributes,
    and explicit nesting, including markup inside `noscript` and foreign
    content. Scoped implicit closures keep supported optional-end-tag sequences
    shallow; ambiguous recovery and foreign-content boundaries retain
@@ -154,7 +156,8 @@ scripts or fetch external resources. Processing proceeds through these stages:
    inline styles, legacy presentation attributes, and selector profiles while
    distinguishing active, head, and inert content.
 3. Admit each CSS source through `sheet.admitCSS` before constructing the
-   full `tdewolff` CSS parser. Enforce a cumulative CSS byte limit and charge
+   locally forked `tdewolff` CSS parser in
+   `internal/fork/tdewolffparse/css`. Enforce a cumulative CSS byte limit and charge
    preflight work, then use the lexer-based `css_preflight.go` checks to bound
    individual constructs by bytes and tokens, including malformed rule-list
    separator runs, and reject unsafe unmatched delimiters. These checks protect
@@ -170,6 +173,14 @@ scripts or fetch external resources. Processing proceeds through these stages:
    overflow, positioned descendants of clipped ancestors, and applicable
    legacy email width/height presentation hints; it does not attempt full box
    layout.
+
+Selector compilation and matching use the local Cascadia fork in
+`internal/fork/cascadia`. All three forks retain their upstream tests and an
+`UPSTREAM.md` file recording the source tag and commit. Their imports point at
+one another where necessary so the HTML tree and selector engine share the
+same node and atom types. Upstream updates must preserve that package graph,
+run both the fork tests and application tests, and compare processed output
+against the saved email corpus.
 
 HTML preflight, tree collection, and presentation analysis use separate
 explicit stacks because each pass tracks different state and limits. CSS

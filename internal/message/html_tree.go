@@ -10,7 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
-	xhtml "golang.org/x/net/html"
+	xhtml "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
 type HTMLExtractionMode uint8

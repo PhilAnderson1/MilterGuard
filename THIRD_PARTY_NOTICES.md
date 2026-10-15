@@ -6,10 +6,10 @@ licence texts are reproduced verbatim in `THIRD_PARTY_LICENSES`.
 
 | Software | Version | Licence and notice files |
 | --- | --- | --- |
-| github.com/andybalholm/cascadia | v1.3.3 | `github.com-andybalholm-cascadia.txt` |
+| github.com/andybalholm/cascadia (source fork) | v1.3.5 | `github.com-andybalholm-cascadia.txt` |
 | github.com/beorn7/perks | v1.0.1 | `github.com-beorn7-perks.txt` |
 | github.com/cespare/xxhash/v2 | v2.2.0 | `github.com-cespare-xxhash-v2.txt` |
-| Go standard library | Go 1.25 or later | `go-standard-library.txt` |
+| Go standard library | Go 1.26 or later | `go-standard-library.txt` |
 | github.com/dustin/go-humanize | v1.0.1 | `github.com-dustin-go-humanize.txt` |
 | github.com/google/uuid | v1.6.0 | `github.com-google-uuid.txt` |
 | github.com/mattn/go-isatty | v0.0.24 | `github.com-mattn-go-isatty.txt` |
@@ -24,10 +24,11 @@ licence texts are reproduced verbatim in `THIRD_PARTY_LICENSES`.
 | github.com/prometheus/common | v0.45.0 | `apache-2.0.txt`, `github.com-prometheus-common-notice.txt` |
 | github.com/prometheus/procfs | v0.12.0 | `apache-2.0.txt`, `github.com-prometheus-procfs-notice.txt` |
 | github.com/remyoudompheng/bigfft | v0.0.0-20230129092748-24d4a6f8daec | `github.com-remyoudompheng-bigfft.txt` |
-| github.com/tdewolff/parse/v2 | v2.8.5 | `github.com-tdewolff-parse-v2.txt` |
-| golang.org/x/net | v0.58.0 | `golang.org-x-net.txt` |
-| golang.org/x/sys | v0.47.0 | `golang.org-x-sys.txt` |
-| golang.org/x/text | v0.41.0 | `golang.org-x-text.txt` |
+| github.com/tdewolff/parse/v2 (source fork) | v2.8.17 | `github.com-tdewolff-parse-v2.txt` |
+| golang.org/x/net/html (source fork) | x/net v0.61.0 | `golang.org-x-net.txt` |
+| golang.org/x/net | v0.61.0 | `golang.org-x-net.txt` |
+| golang.org/x/sys | v0.49.0 | `golang.org-x-sys.txt` |
+| golang.org/x/text | v0.43.0 | `golang.org-x-text.txt` |
 | google.golang.org/protobuf | v1.31.0 | `google.golang.org-protobuf.txt`, `google.golang.org-protobuf-patents.txt` |
 | gopkg.in/yaml.v3 | v3.0.1 | `gopkg.in-yaml.v3.txt` |
 | Mozilla Public Suffix List data embedded by Mox | Mox v0.0.17 snapshot | `mozilla-public-license-2.0.txt` |
