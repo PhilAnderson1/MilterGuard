@@ -283,7 +283,7 @@ func defaults() Config {
 		},
 		Attachments: AttachmentsConfig{
 			BlockExecutables: true, AddIPReputationStrike: false,
-			BlockedExtensions: []string{"exe", "com", "scr", "pif", "bat", "cmd", "ps1", "vbs", "js", "jse", "msi", "dll", "jar", "lnk", "iso", "7z", "rar"},
+			BlockedExtensions: []string{"exe", "com", "scr", "pif", "bat", "cmd", "ps1", "vbs", "js", "jse", "msi", "dll", "jar", "lnk", "iso", "7z", "rar", "z"},
 			InspectSignatures: true, InspectArchives: true, MaxAttachmentBytes: 10 << 20,
 			MaxArchiveDepth: 2, MaxArchiveFiles: 100, MaxArchiveUncompressedBytes: 50 << 20,
 			EncryptedArchiveAction: "reject", UnscannableAction: "accept", InvalidMIMEAction: "reject",

@@ -72,6 +72,61 @@ func TestDirectAttachmentBlockedByDecodedFilename(t *testing.T) {
 	}
 }
 
+func TestProhibitedArchiveDetectedByMagicWithDisguisedFilename(t *testing.T) {
+	tests := []struct {
+		name      string
+		extension string
+		data      []byte
+		detection string
+	}{
+		{name: "RAR4", extension: "rar", data: []byte{'R', 'a', 'r', '!', 0x1a, 0x07, 0x00}, detection: "RAR archive signature"},
+		{name: "RAR5", extension: "rar", data: []byte{'R', 'a', 'r', '!', 0x1a, 0x07, 0x01, 0x00}, detection: "RAR archive signature"},
+		{name: "7z", extension: "7z", data: []byte{'7', 'z', 0xbc, 0xaf, 0x27, 0x1c}, detection: "7z archive signature"},
+		{name: "Unix compress", extension: "z", data: []byte{0x1f, 0x9d, 0x90}, detection: "Unix compress archive signature"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options := testScanner().options
+			options.BlockedExtensions = append(options.BlockedExtensions, test.extension)
+			scanner := New(options)
+			finding, err := scanner.Scan(
+				"application/octet-stream", "", `attachment; filename="product-specifications.dat"`, test.data,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finding == nil || finding.Path != "product-specifications.dat" || finding.Detection != test.detection {
+				t.Fatalf("finding = %#v", finding)
+			}
+		})
+	}
+}
+
+func TestProhibitedArchiveMagicRequiresBlockedExtension(t *testing.T) {
+	for _, data := range [][]byte{
+		{'R', 'a', 'r', '!', 0x1a, 0x07, 0x00},
+		{'R', 'a', 'r', '!', 0x1a, 0x07, 0x01, 0x00},
+		{'7', 'z', 0xbc, 0xaf, 0x27, 0x1c},
+		{0x1f, 0x9d, 0x90},
+	} {
+		finding, err := testScanner().Scan(
+			"application/octet-stream", "", `attachment; filename="archive.dat"`, data,
+		)
+		if err != nil || finding != nil {
+			t.Fatalf("data %x: finding = %#v, error = %v", data, finding, err)
+		}
+	}
+}
+
+func TestInvalidUnixCompressFlagsDoNotTriggerSignature(t *testing.T) {
+	finding, err := testScanner().Scan(
+		"application/octet-stream", "", `attachment; filename="data.bin"`, []byte{0x1f, 0x9d, 0x08},
+	)
+	if err != nil || finding != nil {
+		t.Fatalf("finding = %#v, error = %v", finding, err)
+	}
+}
+
 func TestDirectAttachmentBlockedExtensionAfterDisplayLimit(t *testing.T) {
 	filename := strings.Repeat("a", 300) + ".exe"
 	finding, err := testScanner().Scan(

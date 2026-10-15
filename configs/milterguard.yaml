@@ -231,13 +231,16 @@ attachments:
     - jar
     - lnk
     - iso
-    # 7z and RAR archives are blocked because MilterGuard cannot decompress
-    # and inspect their contents, not because the formats are executable.
+    # 7z, RAR, and Unix compress archives are blocked because MilterGuard
+    # cannot decompress and inspect their contents, not because the formats
+    # are executable.
     - 7z
     - rar
+    - z
 
-  # Detect Windows PE, ELF, Mach-O, and executable script signatures even when
-  # the filename extension has been disguised.
+  # Detect Windows PE, ELF, Mach-O and executable scripts by content. RAR, 7z
+  # and Unix compress signatures are also detected when their corresponding
+  # rar, 7z or z extension remains in blocked_extensions.
   inspect_file_signatures: true
 
   # Inspect the contents of ZIP, TAR, GZIP, and BZIP2 attachments.

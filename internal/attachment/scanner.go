@@ -187,7 +187,7 @@ func (s *Scanner) scanMIME(contentType, transferEncoding, contentDisposition str
 	decoded, err := decodeTransferStrict(state.ctx, transferEncoding, data, s.options.MaxAttachmentBytes)
 	if err != nil {
 		if s.options.InspectSignatures {
-			if signature := executableSignature(decoded); signature != "" {
+			if signature := s.prohibitedSignature(decoded); signature != "" {
 				return &Finding{Path: cleanLocation(location), Detection: signature}, nil
 			}
 		}
@@ -258,7 +258,7 @@ func (s *Scanner) scanFile(location, filename, mediaType string, data []byte, ar
 		return &Finding{Path: cleanLocation(location), Detection: "blocked extension ." + extension}, nil
 	}
 	if s.options.InspectSignatures {
-		if signature := executableSignature(data); signature != "" {
+		if signature := s.prohibitedSignature(data); signature != "" {
 			return &Finding{Path: cleanLocation(location), Detection: signature}, nil
 		}
 	}
@@ -349,7 +349,7 @@ func (s *Scanner) scanZIP(location string, data []byte, archiveDepth int, state 
 		entryData, err := s.readArchiveEntry(entry, state)
 		_ = entry.Close()
 		if s.options.InspectSignatures {
-			if signature := executableSignature(entryData); signature != "" {
+			if signature := s.prohibitedSignature(entryData); signature != "" {
 				return &Finding{Path: entryLocation, Detection: signature}, nil
 			}
 		}
@@ -415,7 +415,7 @@ func (s *Scanner) scanPartialZIP(location string, data []byte, archiveDepth int,
 		entryData, readErr := s.readArchiveEntry(entryReader, state)
 		_ = entryReader.Close()
 		if s.options.InspectSignatures {
-			if signature := executableSignature(entryData); signature != "" {
+			if signature := s.prohibitedSignature(entryData); signature != "" {
 				return &Finding{Path: entryLocation, Detection: signature}, nil
 			}
 		}
@@ -463,7 +463,7 @@ func (s *Scanner) scanTAR(location string, reader io.Reader, archiveDepth int, s
 		}
 		entryData, err := s.readArchiveEntry(tarReader, state)
 		if s.options.InspectSignatures {
-			if signature := executableSignature(entryData); signature != "" {
+			if signature := s.prohibitedSignature(entryData); signature != "" {
 				return &Finding{Path: entryLocation, Detection: signature}, nil
 			}
 		}
@@ -684,7 +684,7 @@ func explicitAttachment(contentDisposition string) bool {
 }
 
 func (s *Scanner) disguisedBinaryContent(data []byte) bool {
-	if s.options.InspectSignatures && binaryExecutableSignature(data) != "" {
+	if s.options.InspectSignatures && (binaryExecutableSignature(data) != "" || s.prohibitedArchiveSignature(data) != "") {
 		return true
 	}
 	return s.options.InspectArchives && archiveFormat("", "", data) != ""
@@ -776,6 +776,34 @@ func archiveFormat(filename, mediaType string, data []byte) string {
 		return "gzip"
 	case strings.HasSuffix(lowerName, ".bz2") || strings.HasSuffix(lowerName, ".bzip2") || mediaType == "application/x-bzip2":
 		return "bzip2"
+	default:
+		return ""
+	}
+}
+
+func (s *Scanner) prohibitedSignature(data []byte) string {
+	if signature := s.prohibitedArchiveSignature(data); signature != "" {
+		return signature
+	}
+	return executableSignature(data)
+}
+
+func (s *Scanner) prohibitedArchiveSignature(data []byte) string {
+	_, blockCompress := s.blocked["z"]
+	if blockCompress && len(data) >= 3 && hasPrefix(data, []byte{0x1f, 0x9d}) {
+		flags, maxBits := data[2], data[2]&0x1f
+		if flags&0x60 == 0 && maxBits >= 9 && maxBits <= 16 {
+			return "Unix compress archive signature"
+		}
+	}
+	_, blockRAR := s.blocked["rar"]
+	_, block7z := s.blocked["7z"]
+	switch {
+	case blockRAR && (hasPrefix(data, []byte{'R', 'a', 'r', '!', 0x1a, 0x07, 0x00}) ||
+		hasPrefix(data, []byte{'R', 'a', 'r', '!', 0x1a, 0x07, 0x01, 0x00})):
+		return "RAR archive signature"
+	case block7z && hasPrefix(data, []byte{'7', 'z', 0xbc, 0xaf, 0x27, 0x1c}):
+		return "7z archive signature"
 	default:
 		return ""
 	}
