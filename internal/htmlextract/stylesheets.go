@@ -15,6 +15,10 @@ const (
 	maxCSSMediaTypeBytes = 1024
 )
 
+func htmlSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
+}
+
 func oversizedCSSMediaTypeMayApply(value string) bool {
 	start := 0
 	for start < len(value) && htmlSpace(value[start]) {

@@ -1,10 +1,9 @@
 # Parser source forks
 
 MilterGuard keeps the parser code that receives untrusted HTML and CSS in this
-tree so resource limits can ultimately be enforced at the operations that
-consume the resources. The initial import preserves upstream behavior; the
-existing admission preflights remain active until equivalent in-parser limits
-have been implemented and tested.
+tree so resource limits can be enforced at the operations that consume the
+resources. The HTML fork has direct tokenizer and tree-builder limits. CSS
+still uses bounded admission checks before invoking its parser.
 
 The imported packages are:
 

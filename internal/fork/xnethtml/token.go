@@ -125,6 +125,7 @@ type span struct {
 
 // A Tokenizer returns a stream of HTML Tokens.
 type Tokenizer struct {
+	guard *resourceGuard
 	// r is the source of the HTML text.
 	r io.Reader
 	// tt is the TokenType of the current token.
@@ -233,6 +234,10 @@ func (z *Tokenizer) Err() error {
 // It sets z.err if the underlying reader returns an error.
 // Pre-condition: z.err == nil.
 func (z *Tokenizer) readByte() byte {
+	if err := z.guard.readByte(); err != nil {
+		z.err = err
+		return 0
+	}
 	if z.raw.end >= len(z.buf) {
 		// Our buffer is exhausted and we have to read from z.r. Check if the
 		// previous read resulted in an error.
@@ -900,6 +905,13 @@ func (z *Tokenizer) readTag(saveAttr bool) {
 		z.raw.end--
 		z.readTagAttrKey()
 		z.readTagAttrVal()
+		if z.err != nil {
+			break
+		}
+		if err := z.guard.attributes(1); err != nil {
+			z.err = err
+			break
+		}
 		// Save pendingAttr if saveAttr and that attribute has a non-empty key, and the key hasn't been seen before.
 		key := string(lower(bytes.Clone(z.buf[z.pendingAttr[0].start:z.pendingAttr[0].end])))
 		if saveAttr && z.pendingAttr[0].start != z.pendingAttr[0].end && !z.attrNames[key] {

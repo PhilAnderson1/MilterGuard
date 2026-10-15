@@ -29,7 +29,7 @@ path.
 | `internal/ai` | Builds chat-completions requests, applies endpoint retries, and validates AI decisions. |
 | `internal/attachment` | Detects prohibited executable attachments and inspects supported archives. |
 | `internal/config` | Loads defaults, strictly decodes YAML, and validates cross-setting requirements. |
-| `internal/htmlextract` | Guards HTML/CSS parsing with preflight checks and derives bounded presentation and visibility evidence from the parsed document. |
+| `internal/htmlextract` | Applies direct HTML parser limits and bounded CSS admission checks, then derives presentation and visibility evidence from the parsed document. |
 | `internal/fork` | Holds the source forks of the HTML tree builder, CSS parser, and selector engine used by `internal/htmlextract`, together with upstream provenance and tests. |
 | `internal/mailaddr` | Provides canonical mailbox parsing and normalization shared by message processing, policy, administration, and persistence. |
 | `internal/mailauth` | Owns provider-neutral authentication evidence, the verifier boundary, trusted-header compatibility parsing, alignment, and exact-message storage. |
@@ -130,27 +130,15 @@ headers before the upstream authentication filters add fresh local results.
 presentation evidence for its text and image-like elements. It does not execute
 scripts or fetch external resources. Processing proceeds through these stages:
 
-1. Validate limits and bound input bytes. Run the tokenizer-based HTML
-   preflight in `html_preflight.go` **before** calling the locally forked
-   `x/net/html` tree builder in `internal/fork/xnethtml`. The preflight bounds
-   tree-building tokens, text nodes, attributes,
-   and explicit nesting, including markup inside `noscript` and foreign
-   content. Scoped implicit closures keep supported optional-end-tag sequences
-   shallow; ambiguous recovery and foreign-content boundaries retain
-   conservative depth accounting, and ambiguous end-tag recovery across an
-   HTML/foreign-content boundary is rejected before parsing.
-   `html_allocations.go` also budgets implied
-   table wrappers, formatting reconstruction, and adoption-agency copies,
-   including copied attributes, before tree construction. The preflight also
-   bounds cumulative string copying when discarded tokens cause the tree
-   builder to merge successive text runs into one node. Its bounded state
-   deliberately overestimates ambiguous recovery, so malformed input may be
-   rejected before reaching the exact final-tree limits. Check cancellation
-   during the scan and again before starting the tree builder. This protects
-   the allocating tree builder
-   and its error recovery from adversarial input; checking the completed tree
-   alone is insufficient.
-2. Build the HTML tree with scripting disabled, then traverse it with an
+1. Validate limits and bound input bytes. Build the HTML tree with scripting
+   disabled using the local `x/net/html` fork in `internal/fork/xnethtml`.
+   A shared in-parser guard counts attributes before tokenizer allocation,
+   counts nodes and recovery clones where the tree builder creates them,
+   bounds open-element, formatting, and template stacks, and limits cumulative
+   string copying when successive text tokens merge. It samples cooperative
+   cancellation during tokenization and tree recovery, so adversarial input is
+   stopped at the operations consuming CPU and memory.
+2. Traverse the completed tree with an
    explicit stack. Recheck actual node, text, attribute, and depth limits,
    allowing for parser-generated ancestors. Collect applicable stylesheets,
    inline styles, legacy presentation attributes, and selector profiles while
@@ -182,7 +170,7 @@ same node and atom types. Upstream updates must preserve that package graph,
 run both the fork tests and application tests, and compare processed output
 against the saved email corpus.
 
-HTML preflight, tree collection, and presentation analysis use separate
+The HTML parser, tree collection, and presentation analysis use separate
 explicit stacks because each pass tracks different state and limits. CSS
 source limits apply across parser inputs within a document; `internal/message`
 carries the remaining extraction budgets across HTML MIME parts. Splitting
@@ -229,8 +217,8 @@ extracts links and image references. Only confidently visible text can suppress
 fallback vision analysis; an unresolved stylesheet removes that confidence.
 Analysis errors or cooperative stops switch extraction to a bounded lexical
 fallback, with fallback and completeness information carried into the prompt.
-Conditional Outlook comment fragments receive the same HTML preflight before
-their separate tree parse, with scripting disabled and smaller fragment limits.
+Conditional Outlook comment fragments use the same directly bounded HTML
+parser, with scripting disabled and smaller fragment limits.
 If fragment parsing or extraction exceeds a limit, a fixed omission marker and
 `ExtractionIncomplete` disclose the gap; partial fragment text and links are
 discarded. The marker is excluded from recipient-visible text and confidence
@@ -245,8 +233,8 @@ uncertain.
 The Milter analysis service additionally measures HTML processing CPU time and
 supplies the cooperative stop callback. The configured limit action selects
 fallback, rejection, or denial-of-service rejection, subject to operating mode.
-An in-progress library call cannot be interrupted by this callback, so CPU
-checks supplement the mandatory preflight guards rather than replacing them.
+The HTML fork samples the callback while tokenizing and building the tree; the
+remaining bounded analysis stages sample it during their own traversals.
 
 ## AI analysis
 
@@ -376,9 +364,9 @@ Important trust boundaries include:
 - `netsafety` and RDAP pinned dialing prevent requests to internal services.
 - Message content, images, and links are always treated as untrusted data by
   the AI request.
-- HTML tree construction and full CSS parsing require their preflight guards;
-  subsequent traversal limits and CPU checks do not replace admission checks
-  before the libraries process adversarial input.
+- HTML tree construction enforces limits inside the local parser. CSS parsing
+  retains bounded admission checks before the parser processes adversarial
+  input.
 - Rejected-message archive paths are constructed beneath one configured root.
 
 Changes at these boundaries should retain explicit validation and focused

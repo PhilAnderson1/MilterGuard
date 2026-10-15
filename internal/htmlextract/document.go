@@ -2,6 +2,7 @@ package htmlextract
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -116,7 +117,7 @@ type parsedDocument struct {
 	extractableElementCount int
 	msoOrderUncertain       bool
 	attributeWork           selectorAttributeProfile
-	lexical                 lexicalUsage
+	parserUsage             html.ResourceUsage
 }
 
 type elementPreparation struct {
@@ -128,8 +129,8 @@ type elementPreparation struct {
 
 // The HTML5 tree builder can insert a small fixed set of structural ancestors
 // absent from a source fragment, notably html/body. Table wrappers such as
-// tbody are not included here: preflight counts nested tables so their
-// cumulative generated depth can be allowed separately.
+// tbody are not included here: the final-tree walk accounts for table wrapper
+// levels along each path separately.
 const impliedTreeDepthMargin = 4
 
 func (p selectorAttributeProfile) empty() bool {
@@ -144,18 +145,27 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	if len(input) > p.Limits.InputBytes {
 		return document, fmt.Errorf("limit: input bytes > %d", p.Limits.InputBytes)
 	}
-	lexical, err := measurePreflightWithStop(input, p.Limits, p.shouldStop)
-	document.lexical = lexical
-	if err != nil {
-		return document, err
-	}
-	if p.stopped() {
-		return document, errStopped
-	}
 	// Email extraction does not execute scripts; parse noscript fallback content
 	// in the corresponding HTML5 tree-construction mode.
-	root, err := html.ParseWithOptions(bytes.NewReader(input), html.ParseOptionEnableScripting(false))
+	root, err := html.ParseWithOptions(bytes.NewReader(input),
+		html.ParseOptionEnableScripting(false),
+		html.ParseOptionResourceLimits(html.ResourceLimits{
+			Nodes:              p.Limits.Nodes,
+			TextNodes:          p.Limits.TextNodes,
+			Attributes:         p.Limits.Attributes,
+			Depth:              p.Limits.Depth,
+			TextMergeCopyBytes: maxHTMLTextMergeCopyBytes,
+			ShouldStop:         p.shouldStop,
+		}, &document.parserUsage),
+	)
 	if err != nil {
+		if errors.Is(err, html.ErrResourceStopped) {
+			return document, errStopped
+		}
+		var limitErr *html.ResourceLimitError
+		if errors.As(err, &limitErr) {
+			return document, fmt.Errorf("limit: HTML parser %s > %d", limitErr.Resource, limitErr.Limit)
+		}
 		return document, err
 	}
 	document.root = root
@@ -165,9 +175,9 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	document.styles = sheet{limits: p.Limits}
 	document.elements = make(map[*html.Node]elementPreparation)
 	type entry struct {
-		n, next *html.Node
-		depth   int
-		scope   nodeScope
+		n, next           *html.Node
+		depth, tableDepth int
+		scope             nodeScope
 		// Styles declared below noscript are client-dependent: some email
 		// sanitizers discard the container while others retain its fallback
 		// content. Keep parsing the rules, but do not let them establish a
@@ -175,7 +185,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		uncertainStylesheetOrigin bool
 		entered                   bool
 	}
-	stack := make([]entry, 1, max(1, document.lexical.depth+1))
+	stack := make([]entry, 1, max(1, document.parserUsage.Depth+1))
 	stack[0] = entry{n: root}
 	msoRevealedDepth := 0
 	for len(stack) > 0 {
@@ -195,7 +205,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 				}
 			}
 			stack = append(stack, entry{
-				n: child, depth: e.depth + 1, scope: e.scope,
+				n: child, depth: e.depth + 1, tableDepth: e.tableDepth, scope: e.scope,
 				uncertainStylesheetOrigin: e.uncertainStylesheetOrigin,
 			})
 			continue
@@ -203,6 +213,9 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		e.entered = true
 		e.next = e.n.FirstChild
 		n := e.n
+		if n.Type == html.ElementNode && n.Data == "table" {
+			e.tableDepth++
+		}
 		// Use subtraction after the greater-than check rather than adding the
 		// margin to a caller-provided limit, which could overflow int.
 		if e.depth > p.Limits.Depth {
@@ -213,7 +226,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			// adding parser allowances.
 			if excess > impliedTreeDepthMargin {
 				excess -= impliedTreeDepthMargin
-				if excess > document.lexical.nestedTables && excess-document.lexical.nestedTables > document.lexical.nestedTables {
+				if excess > e.tableDepth && excess-e.tableDepth > e.tableDepth {
 					return document, fmt.Errorf("limit: tree depth > %d", p.Limits.Depth)
 				}
 			}

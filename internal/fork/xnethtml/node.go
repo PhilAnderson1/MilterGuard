@@ -54,6 +54,10 @@ type Node struct {
 	Data      string
 	Namespace string
 	Attr      []Attribute
+
+	// parserImplied distinguishes tree-builder recovery nodes from elements
+	// created directly from source tokens.
+	parserImplied bool
 }
 
 // InsertBefore inserts newChild as a child of n, immediately before oldChild

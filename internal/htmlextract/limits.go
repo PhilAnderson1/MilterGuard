@@ -22,9 +22,9 @@ type Limits struct {
 // MaxViewingCases is the hard ceiling for conditional evaluations per document.
 const MaxViewingCases = 16
 
-// maxHTMLDepth keeps the largest preflight-admitted tree below x/net/html's
-// hard 512-open-element ceiling even when tree construction inserts the full
-// fixed margin and two wrapper levels for every lexically nested table.
+// maxHTMLDepth keeps the largest admitted tree below the HTML parser's hard
+// 512-open-element ceiling even when tree construction inserts two wrapper
+// levels for every nested table.
 const maxHTMLDepth = 168
 
 // maxHTMLTextMergeCopyBytes bounds repeated string copying in x/net/html's

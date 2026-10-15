@@ -9,8 +9,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 	xhtml "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 )
 
 type HTMLExtractionMode uint8
@@ -531,16 +531,17 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 		e.omitConditionalComment(out)
 		return
 	}
-	limits := htmlextract.DefaultLimits()
-	limits.InputBytes = maxConditionalFragmentBytes
-	limits.Nodes = maxConditionalFragmentNodes
-	limits.TextNodes = maxConditionalFragmentNodes
-	limits.Depth = maxConditionalFragmentDepth
-	if err := htmlextract.PreflightWithStop([]byte(raw), limits, e.shouldStop); err != nil {
-		e.omitConditionalComment(out)
-		return
-	}
-	fragment, err := xhtml.ParseFragmentWithOptions(strings.NewReader(raw), nil, xhtml.ParseOptionEnableScripting(false))
+	fragment, err := xhtml.ParseFragmentWithOptions(strings.NewReader(raw), nil,
+		xhtml.ParseOptionEnableScripting(false),
+		xhtml.ParseOptionResourceLimits(xhtml.ResourceLimits{
+			Nodes:              maxConditionalFragmentNodes,
+			TextNodes:          maxConditionalFragmentNodes,
+			Attributes:         maxConditionalFragmentNodes,
+			Depth:              maxConditionalFragmentDepth,
+			TextMergeCopyBytes: maxConditionalFragmentBytes,
+			ShouldStop:         e.shouldStop,
+		}, nil),
+	)
 	if err != nil || (e.shouldStop != nil && e.shouldStop()) {
 		e.omitConditionalComment(out)
 		return

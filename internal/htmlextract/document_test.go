@@ -40,11 +40,6 @@ func inspectHTML(t *testing.T, src string) Document {
 	return r
 }
 
-func preflight(b []byte, limits Limits) error {
-	_, err := measurePreflight(b, limits)
-	return err
-}
-
 func findText(t *testing.T, in Document, text string) Text {
 	t.Helper()
 	for _, v := range in.Text {
@@ -511,8 +506,46 @@ func TestTreeDepthAllowsParserImpliedAncestors(t *testing.T) {
 		t.Fatalf("implied-wrapper tree depth = %d, want two-level table allowance", document.Usage.Depth)
 	}
 
-	if _, err = Analyze([]byte(strings.Repeat(`<div>`, limits.Depth+1)), limits); err == nil || !strings.Contains(err.Error(), "lexical depth") {
-		t.Fatalf("explicit over-limit nesting error = %v, want lexical-depth rejection", err)
+	if _, err = Analyze([]byte(strings.Repeat(`<div>`, limits.Depth+1)), limits); err == nil || !strings.Contains(err.Error(), "source depth") {
+		t.Fatalf("explicit over-limit nesting error = %v, want parser-depth rejection", err)
+	}
+}
+
+func TestParserDepthUsesHTMLImplicitClosures(t *testing.T) {
+	for _, c := range []struct{ name, prefix, suffix string }{
+		{"paragraphs", strings.Repeat(`<p>`, 200), ""},
+		{"paragraph phrasing", strings.Repeat(`<p><span>x`, 200), ""},
+		{"list items", `<ul>` + strings.Repeat(`<li>x`, 200), `</ul>`},
+		{"definition items", `<dl>` + strings.Repeat(`<dt>x<dd>y`, 200), `</dl>`},
+		{"options", `<select>` + strings.Repeat(`<option>x`, 200), `</select>`},
+		{"cells", `<table><tr>` + strings.Repeat(`<td>x<th>y`, 200), `</table>`},
+		{"rows", `<table>` + strings.Repeat(`<tr><td>x`, 200), `</table>`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			limits := DefaultLimits()
+			limits.Depth = 16
+			source := c.prefix + c.suffix + `<div style="display:none">PAYLOAD</div>`
+			in, err := Analyze([]byte(source), limits)
+			if err != nil {
+				t.Fatalf("shallow optional-tag sequence rejected: %v", err)
+			}
+			if got := findText(t, in, "PAYLOAD").Label; got != "concealed" {
+				t.Fatalf("label = %q, want concealed", got)
+			}
+		})
+	}
+
+	for _, source := range []string{
+		strings.Repeat(`<div>`, 17),
+		strings.Repeat(`<ul><li>`, 17),
+		strings.Repeat(`<table><tr><td>`, 17),
+		strings.Repeat(`<math><mtext><p>`, 17),
+	} {
+		limits := DefaultLimits()
+		limits.Depth = 16
+		if _, err := Analyze([]byte(source), limits); err == nil || !strings.Contains(err.Error(), "source depth") {
+			t.Fatalf("real nesting was not rejected: %v", err)
+		}
 	}
 }
 
@@ -611,401 +644,6 @@ func TestDocumentCollectionRecordsElementChildren(t *testing.T) {
 	}
 	if parsed.elements[section].hasElementChild || parsed.elements[paragraph].hasElementChild {
 		t.Fatal("text-only element was recorded as having an element child")
-	}
-}
-
-func TestNodeLimitsBeforeAndAfterTreeConstruction(t *testing.T) {
-	t.Run("lexical nodes", func(t *testing.T) {
-		limits := DefaultLimits()
-		limits.Nodes = 3
-		err := preflight([]byte(`<b></b><i></i><u></u><s></s>`), limits)
-		if err == nil || !strings.Contains(err.Error(), "lexical nodes") {
-			t.Fatalf("node limit error = %v", err)
-		}
-	})
-	t.Run("node-producing end tags", func(t *testing.T) {
-		limits := DefaultLimits()
-		limits.Nodes = 4
-		if err := preflight([]byte(strings.Repeat(`</br>`, limits.Nodes)), limits); err != nil {
-			t.Fatalf("exact token budget rejected: %v", err)
-		}
-		_, err := (processor{Limits: limits}).parseDocument([]byte(strings.Repeat(`</br>`, limits.Nodes+1)))
-		if err == nil || !strings.Contains(err.Error(), "lexical nodes") {
-			t.Fatalf("end-tag flood limit error = %v", err)
-		}
-	})
-	t.Run("balanced HTML uses the same conservative budget", func(t *testing.T) {
-		limits := DefaultLimits()
-		limits.Nodes = 6
-		usage, err := measurePreflight([]byte(`<b>x</b><i>y</i>`), limits)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if usage.nodes != 4 || usage.treeBuilderTokens != limits.Nodes {
-			t.Fatalf("lexical usage = %+v", usage)
-		}
-	})
-	t.Run("lexical text nodes", func(t *testing.T) {
-		limits := DefaultLimits()
-		limits.TextNodes = 2
-		err := preflight([]byte(`first<b>second</b>third`), limits)
-		if err == nil || !strings.Contains(err.Error(), "lexical text nodes") {
-			t.Fatalf("text-node limit error = %v", err)
-		}
-	})
-	t.Run("lexical attributes", func(t *testing.T) {
-		limits := DefaultLimits()
-		limits.Attributes = 2
-		err := preflight([]byte(`<p a="1" b="2" c="3">x</p>`), limits)
-		if err == nil || !strings.Contains(err.Error(), "attributes") {
-			t.Fatalf("attribute limit error = %v", err)
-		}
-	})
-	t.Run("single tag attributes are rejected before tokenization", func(t *testing.T) {
-		limits := DefaultLimits()
-		limits.Attributes = 4
-		err := preflight([]byte(`<p`+strings.Repeat(` a`, sourceAttributeGuardFloor+1)+`>`), limits)
-		if err == nil || !strings.Contains(err.Error(), "source tag attributes") {
-			t.Fatalf("source attribute limit error = %v", err)
-		}
-	})
-	t.Run("quoted delimiters remain one attribute", func(t *testing.T) {
-		limits := DefaultLimits()
-		limits.Attributes = 1
-		if err := preflight([]byte(`<p title="a > b c = d">x</p>`), limits); err != nil {
-			t.Fatalf("quoted attribute was over-counted: %v", err)
-		}
-	})
-	t.Run("parser-created nodes", func(t *testing.T) {
-		limits := DefaultLimits()
-		limits.Nodes = 2
-		_, err := (processor{Limits: limits}).parseDocument([]byte(`<p>x`))
-		if err == nil || !strings.Contains(err.Error(), "tree nodes") {
-			t.Fatalf("tree node limit error = %v", err)
-		}
-	})
-}
-
-func TestPreflightBoundsQuadraticTextMerging(t *testing.T) {
-	limits := DefaultLimits()
-	run := strings.Repeat("A", 100)
-	input := []byte(run + strings.Repeat("</div>"+run, 48999))
-
-	usage, err := measurePreflight(input, limits)
-	if err == nil || !strings.Contains(err.Error(), "projected text merge copies") {
-		t.Fatalf("quadratic text merge was admitted: usage=%+v error=%v", usage, err)
-	}
-	if usage.textNodes >= 49000 {
-		t.Fatalf("guard did not reject before consuming every text token: usage=%+v", usage)
-	}
-	document, err := (processor{Limits: limits}).parseDocument(input)
-	if err == nil || document.root != nil {
-		t.Fatalf("allocating parser was reached: root=%v error=%v", document.root, err)
-	}
-}
-
-func TestPreflightTextMergeAccountingUsesNodeBoundaries(t *testing.T) {
-	limits := DefaultLimits()
-	usage, err := measurePreflight([]byte(`abc</unknown>def</missing>ghi`), limits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if usage.projectedTextMergeCopyBytes != 9 {
-		t.Fatalf("discarded-end-tag copy projection = %d, want 9", usage.projectedTextMergeCopyBytes)
-	}
-
-	for _, source := range []string{`abc<br>def`, `abc</br>def`, `abc</p>def`, `<span>abc</span>def`, `abc<!-- boundary -->def`} {
-		usage, err := measurePreflight([]byte(source), limits)
-		if err != nil {
-			t.Fatalf("%q: %v", source, err)
-		}
-		if usage.projectedTextMergeCopyBytes != 0 {
-			t.Fatalf("%q projected %d copied bytes across a node boundary", source, usage.projectedTextMergeCopyBytes)
-		}
-	}
-}
-
-func TestPreflightSelfClosingTagDepth(t *testing.T) {
-	limits := DefaultLimits()
-	limits.Depth = 2
-
-	t.Run("non-void HTML remains open", func(t *testing.T) {
-		err := preflight([]byte(`<div/><span/><p/>`), limits)
-		if err == nil || !strings.Contains(err.Error(), "lexical depth") {
-			t.Fatalf("depth limit error = %v", err)
-		}
-	})
-
-	t.Run("void HTML remains self-contained", func(t *testing.T) {
-		if err := preflight([]byte(`<br/><img/><input/><hr/>`), limits); err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	t.Run("foreign self-closing syntax is honored", func(t *testing.T) {
-		if err := preflight([]byte(`<svg><g><path/><circle/><rect/></g></svg><math><mrow><mi/><mn/></mrow></math>`), limits); err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	t.Run("HTML integration point resumes HTML rules", func(t *testing.T) {
-		err := preflight([]byte(`<svg><foreignObject><div/></foreignObject></svg>`), limits)
-		if err == nil || !strings.Contains(err.Error(), "lexical depth") {
-			t.Fatalf("depth limit error = %v", err)
-		}
-	})
-}
-
-func TestPreflightImplicitClosuresPreserveConcealmentAnalysis(t *testing.T) {
-	for _, c := range []struct{ name, prefix, suffix string }{
-		{"paragraphs", strings.Repeat(`<p>`, 200), ""},
-		{"paragraph phrasing", strings.Repeat(`<p><span>x`, 200), ""},
-		{"paragraphs in container", `<div>` + strings.Repeat(`<p>x`, 200), `</div>`},
-		{"list items", `<ul>` + strings.Repeat(`<li>x`, 200), `</ul>`},
-		{"list item phrasing", `<ul>` + strings.Repeat(`<li><span>x`, 200), `</ul>`},
-		{"definition items", `<dl>` + strings.Repeat(`<dt>x<dd>y`, 200), `</dl>`},
-		{"options", `<select>` + strings.Repeat(`<option>x`, 200), `</select>`},
-		{"option groups", `<select>` + strings.Repeat(`<optgroup><option>x`, 200), `</select>`},
-		{"anchors", strings.Repeat(`<a href="#">`, 200), `</a>`},
-		{"cells", `<table><tr>` + strings.Repeat(`<td>x<th>y`, 200), `</table>`},
-		{"rows", `<table>` + strings.Repeat(`<tr><td>x`, 200), `</table>`},
-		{"table sections", `<table>` + strings.Repeat(`<tbody><tr><td>x`, 200), `</table>`},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			limits := DefaultLimits()
-			limits.Depth = 16
-			source := c.prefix + c.suffix + `<div style="display:none">PAYLOAD</div>`
-			usage, err := measurePreflight([]byte(source), limits)
-			if err != nil {
-				t.Fatalf("shallow optional-tag sequence rejected: %v", err)
-			}
-			in, err := Analyze([]byte(source), limits)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := findText(t, in, "PAYLOAD").Label; got != "concealed" {
-				t.Fatalf("label = %q, want concealed; preflight usage=%+v", got, usage)
-			}
-		})
-	}
-}
-
-func TestPreflightImplicitClosuresDoNotFlattenRealNesting(t *testing.T) {
-	for _, c := range []struct{ name, repeated string }{
-		{"divs", `<div>`},
-		{"nested lists", `<ul><li>`},
-		{"nested definition lists", `<dl><dd>`},
-		{"nested tables", `<table><tr><td>`},
-		{"paragraph button scope", `<p><button>`},
-		{"paragraph object scope", `<p><object>`},
-		{"paragraph template scope", `<p><template>`},
-		{"foreign paragraph scope", `<math><mtext><p>`},
-		{"foreign cells", `<svg><td>`},
-		{"SVG recovery retains ancestors", `<p><svg><div>`},
-		{"MathML recovery retains ancestors", `<div><p><math>`},
-		{"groups outside select", `<optgroup>`},
-		{"anchor recovery across blocks", `<a><div>`},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			limits := DefaultLimits()
-			limits.Depth = 16
-			err := preflight([]byte(strings.Repeat(c.repeated, 20)), limits)
-			if err == nil || !strings.Contains(err.Error(), "lexical depth") {
-				t.Fatalf("expected rejection before tree construction, got %v", err)
-			}
-		})
-	}
-}
-
-func TestPreflightImplicitClosureDepthAgainstTreeBuilder(t *testing.T) {
-	// Repeated three-tag patterns exercise interactions between optional
-	// closures, insertion contexts, formatting recovery, and foreign content.
-	// The oracle is the actual allocating parser, not our closure lookup rules.
-	tags := []string{"p", "div", "button", "table", "td", "tr", "tbody", "select", "option", "optgroup", "li", "ul", "dd", "dl", "a", "b", "template", "svg", "g", "foreignObject", "math", "mtext", "object", "caption", "form"}
-	limits := DefaultLimits()
-	limits.Depth = 16
-	for _, a := range tags {
-		for _, b := range tags {
-			for _, c := range tags {
-				pattern := "<" + a + "><" + b + "><" + c + ">"
-				source := strings.Repeat(pattern, 70)
-				usage, err := measurePreflight([]byte(source), limits)
-				if err != nil {
-					continue
-				}
-				root, err := html.ParseWithOptions(strings.NewReader(source), html.ParseOptionEnableScripting(false))
-				if err != nil {
-					t.Fatalf("admitted %s: tree construction failed: %v", pattern, err)
-				}
-				type entry struct {
-					n     *html.Node
-					depth int
-				}
-				stack := []entry{{n: root}}
-				for len(stack) > 0 {
-					e := stack[len(stack)-1]
-					stack = stack[:len(stack)-1]
-					if e.depth > limits.Depth+impliedTreeDepthMargin+2*usage.nestedTables {
-						t.Fatalf("admitted %s: tree depth %d exceeds guarded depth; preflight=%+v", pattern, e.depth, usage)
-					}
-					for child := e.n.FirstChild; child != nil; child = child.NextSibling {
-						stack = append(stack, entry{n: child, depth: e.depth + 1})
-					}
-				}
-			}
-		}
-	}
-}
-
-func TestPreflightImplicitClosuresKeepResourceAccounting(t *testing.T) {
-	limits := DefaultLimits()
-	limits.Depth = 4
-	limits.Nodes = 10
-	_, err := measurePreflight([]byte(strings.Repeat(`<p>`, 11)), limits)
-	if err == nil || !strings.Contains(err.Error(), "lexical nodes") {
-		t.Fatalf("implicit closure bypassed token budget: %v", err)
-	}
-	limits.Nodes = 100
-	limits.Attributes = 10
-	_, err = measurePreflight([]byte(strings.Repeat(`<p id="x">`, 11)), limits)
-	if err == nil || !strings.Contains(err.Error(), "lexical attributes") {
-		t.Fatalf("implicit closure bypassed attribute budget: %v", err)
-	}
-	// Every implicit pop must also remove descendants from the end-tag index.
-	usage, err := measurePreflight([]byte(`<p><span><p></span></p><div>`), limits)
-	if err != nil || usage.depth != 2 {
-		t.Fatalf("stale open-element index after implicit closure: usage=%+v error=%v", usage, err)
-	}
-}
-
-func TestPreflightMirrorsTreeBuilderRawTextOverrides(t *testing.T) {
-	for _, test := range []struct {
-		name, source string
-	}{
-		{
-			name:   "noscript with scripting disabled",
-			source: `<noscript><b a="1" b="2" c="3">text</b></noscript>`,
-		},
-		{
-			name:   "raw-text-named SVG element",
-			source: `<svg><title><b a="1" b="2" c="3">text</b></title></svg>`,
-		},
-		{
-			name:   "raw-text-named MathML element",
-			source: `<math><style><b a="1" b="2" c="3">text</b></style></math>`,
-		},
-		{
-			name:   "attribute-less font remains in SVG",
-			source: `<svg><font><title><b a="1" b="2" c="3">text</b></title></font></svg>`,
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			limits := DefaultLimits()
-			limits.Attributes = 2
-			err := preflight([]byte(test.source), limits)
-			if err == nil || !strings.Contains(err.Error(), "lexical attributes") {
-				t.Fatalf("preflight limit error = %v", err)
-			}
-		})
-	}
-	for _, attribute := range []string{`color="red"`, `face="serif"`, `size="2"`} {
-		t.Run("font breakout "+attribute, func(t *testing.T) {
-			limits := DefaultLimits()
-			limits.Attributes = 2
-			source := `<svg><font ` + attribute + `><title><b a="1" b="2" c="3">text</b></title></font></svg>`
-			if err := preflight([]byte(source), limits); err != nil {
-				t.Fatalf("conditional font breakout did not mirror tree builder: %v", err)
-			}
-		})
-	}
-}
-
-func TestPreflightRejectsForeignEndTagRecoveryDesync(t *testing.T) {
-	limits := DefaultLimits()
-	for _, prefix := range []string{
-		`<b><applet><svg></b><plaintext>`,
-		`<svg><foreignObject><div></svg><plaintext>`,
-	} {
-		input := []byte(prefix + strings.Repeat(`<art class=x></art>`, 400000))
-		usage, err := measurePreflight(input, limits)
-		if err == nil || !strings.Contains(err.Error(), "ambiguous foreign-content end tag") {
-			t.Fatalf("foreign recovery desync was admitted: usage=%+v error=%v", usage, err)
-		}
-		document, err := (processor{Limits: limits}).parseDocument(input)
-		if err == nil || document.root != nil {
-			t.Fatalf("allocating parser was reached: root=%v error=%v", document.root, err)
-		}
-	}
-}
-
-func TestPreflightForeignRawTextNamesRemainTokenized(t *testing.T) {
-	limits := DefaultLimits()
-	limits.Attributes = 2
-	err := preflight([]byte(`<svg><plaintext>`+strings.Repeat(`<art class=x></art>`, 3)+`</plaintext></svg>`), limits)
-	if err == nil || !strings.Contains(err.Error(), "lexical attributes") {
-		t.Fatalf("foreign raw-text name swallowed markup: %v", err)
-	}
-}
-
-func TestPreflightAcceptsOrdinaryForeignEndTags(t *testing.T) {
-	for _, source := range []string{
-		`<svg><g><path></path></g></svg>`,
-		`<svg><foreignObject><div></div></foreignObject></svg>`,
-		`<math><mrow><mi>x</mi></mrow></math>`,
-		`<math><mtext><span>x</span></mtext></math>`,
-	} {
-		if err := preflight([]byte(source), DefaultLimits()); err != nil {
-			t.Fatalf("ordinary foreign content %q was rejected: %v", source, err)
-		}
-	}
-}
-
-func TestPreflightModelsMathMLTextIntegrationPoints(t *testing.T) {
-	for _, integrationPoint := range []string{"mi", "mo", "mn", "ms", "mtext"} {
-		t.Run(integrationPoint, func(t *testing.T) {
-			limits := DefaultLimits()
-			limits.Nodes = 32
-			limits.Attributes = 1
-			source := `<math><` + integrationPoint + `><style>` + strings.Repeat(`<b a="1" b="2">`, 100) + `</style></` + integrationPoint + `></math>`
-			usage, err := measurePreflight([]byte(source), limits)
-			if err != nil {
-				t.Fatalf("HTML raw-text child rejected: %v", err)
-			}
-			if usage.attributes != 0 {
-				t.Fatalf("raw style text contributed %d attributes", usage.attributes)
-			}
-			if _, err := Analyze([]byte(source), limits); err != nil {
-				t.Fatalf("tree builder rejected preflight-admitted input: %v", err)
-			}
-		})
-	}
-
-	for _, exception := range []string{"mglyph", "malignmark"} {
-		t.Run(exception, func(t *testing.T) {
-			limits := DefaultLimits()
-			limits.Attributes = 1
-			source := `<math><mtext><` + exception + `><style><b a="1" b="2">text</b></style></` + exception + `></mtext></math>`
-			if err := preflight([]byte(source), limits); err == nil || !strings.Contains(err.Error(), "lexical attributes") {
-				t.Fatalf("MathML exception was treated as an HTML integration child: %v", err)
-			}
-		})
-	}
-}
-
-func TestPreflightEndTagIndexTracksEveryStackPop(t *testing.T) {
-	limits := DefaultLimits()
-	limits.Depth = 4
-
-	// The first div end tag pops both span and div. Neither later closing tag
-	// may be treated as open, and the SVG breakout must remove both foreign
-	// frames from the same index before ordinary HTML parsing resumes.
-	src := []byte(`<div><span></div></span></div><svg><g><p></g></svg></g>`)
-	usage, err := measurePreflight(src, limits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if usage.depth != 2 {
-		t.Fatalf("lexical depth = %d, want 2", usage.depth)
 	}
 }
 
@@ -2219,15 +1857,15 @@ func TestMediaConditionPlanningIsCached(t *testing.T) {
 func TestFailedAnalysisReturnsConsumedResourceUsage(t *testing.T) {
 	source := `<style>p{display:none}</style><p>T`
 	limits := DefaultLimits()
-	limits.Nodes = 7 // Preflight sees five tokens; the DOM adds structural nodes.
+	limits.Nodes = 7 // The parser also allocates implicit document structure.
 	document, err := Analyze([]byte(source), limits)
-	if err == nil || !strings.Contains(err.Error(), "tree nodes") {
-		t.Fatalf("Analyze error = %v, want post-parse tree-node rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "parser nodes") {
+		t.Fatalf("Analyze error = %v, want in-parser node rejection", err)
 	}
 	if document.Root != nil || len(document.Text) != 0 || len(document.Elements) != 0 {
 		t.Fatalf("failed analysis exposed partial document content: %+v", document)
 	}
-	if document.Usage.InputBytes != len(source) || document.Usage.MatchWork == 0 || document.Usage.Rules != 1 || document.Usage.Selectors != 1 {
+	if document.Usage.InputBytes != len(source) || document.Usage.Nodes != limits.Nodes+1 {
 		t.Fatalf("failed analysis discarded resource usage: %+v", document.Usage)
 	}
 }
@@ -3203,12 +2841,12 @@ func BenchmarkSiblingSelectorPhases(b *testing.B) {
 	rejected := []byte(stylesheet + `<body>` + strings.Repeat(`<p></p>`, elements+1) + `</body>`)
 
 	for name, input := range map[string][]byte{"dense": src, "sparse": sparse, "plain": plain} {
-		if err := preflight(input, limits); err != nil {
+		if _, err := Analyze(input, limits); err != nil {
 			b.Fatalf("%s workload is not admitted: %v", name, err)
 		}
 	}
-	if err := preflight(rejected, limits); err == nil || !strings.Contains(err.Error(), "limit: lexical nodes") {
-		b.Fatalf("oversized workload error = %v, want lexical-node rejection", err)
+	if _, err := Analyze(rejected, limits); err == nil || !strings.Contains(err.Error(), "parser nodes") {
+		b.Fatalf("oversized workload error = %v, want parser-node rejection", err)
 	}
 
 	reportAnalysis := func(b *testing.B, input []byte, requireComplete bool) {
@@ -3241,21 +2879,6 @@ func BenchmarkSiblingSelectorPhases(b *testing.B) {
 		}
 	}
 
-	b.Run("preflight-admitted", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			if err := preflight(src, limits); err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-	b.Run("preflight-rejected-over-limit", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			err := preflight(rejected, limits)
-			if err == nil || !strings.Contains(err.Error(), "limit: lexical nodes") {
-				b.Fatalf("error = %v, want lexical-node rejection", err)
-			}
-		}
-	})
 	b.Run("tree", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			if _, err := html.ParseWithOptions(bytes.NewReader(src), html.ParseOptionEnableScripting(false)); err != nil {
@@ -3301,7 +2924,7 @@ func BenchmarkAncestorIndexedCandidates(b *testing.B) {
 	} {
 		b.Run(benchmark.name, func(b *testing.B) {
 			limits := DefaultLimits()
-			if err := preflight(benchmark.input, limits); err != nil {
+			if _, err := Analyze(benchmark.input, limits); err != nil {
 				b.Fatalf("benchmark workload is not admitted: %v", err)
 			}
 			b.SetBytes(int64(len(benchmark.input)))

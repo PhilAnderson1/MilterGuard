@@ -18,6 +18,9 @@ import (
 // A parser implements the HTML5 parsing algorithm:
 // https://html.spec.whatwg.org/multipage/syntax.html#tree-construction
 type parser struct {
+	guard *resourceGuard
+	// implied is non-zero while processing a tree-builder-generated token.
+	implied int
 	// tokenizer provides the tokens for the parser.
 	tokenizer *Tokenizer
 	// tok is the most recently read token.
@@ -233,7 +236,9 @@ func (p *parser) addChild(n *Node) {
 }
 
 func (p *parser) insertOpenElement(n *Node) {
+	p.guard.openElement(p, n)
 	p.oe = append(p.oe, n)
+	p.guard.stacks(p)
 	if len(p.oe) > 512 {
 		panic("html: open stack of elements exceeds 512 nodes")
 	}
@@ -292,6 +297,7 @@ func (p *parser) fosterParent(n *Node) {
 		prev = parent.LastChild
 	}
 	if prev != nil && prev.Type == TextNode && n.Type == TextNode {
+		p.guard.textMerge(len(prev.Data))
 		prev.Data += n.Data
 		return
 	}
@@ -307,22 +313,23 @@ func (p *parser) addText(text string) {
 	}
 
 	if p.shouldFosterParent() {
-		p.fosterParent(&Node{
+		p.fosterParent(p.newNode(Node{
 			Type: TextNode,
 			Data: text,
-		})
+		}))
 		return
 	}
 
 	t := p.top()
 	if n := t.LastChild; n != nil && n.Type == TextNode {
+		p.guard.textMerge(len(n.Data))
 		n.Data += text
 		return
 	}
-	p.addChild(&Node{
+	p.addChild(p.newNode(Node{
 		Type: TextNode,
 		Data: text,
-	})
+	}))
 }
 
 func attrCompare(a, b Attribute) int {
@@ -335,12 +342,26 @@ func attrCompare(a, b Attribute) int {
 
 // addElement adds a child element based on the current token.
 func (p *parser) addElement() {
-	p.addChild(&Node{
-		Type:     ElementNode,
-		DataAtom: p.tok.DataAtom,
-		Data:     p.tok.Data,
-		Attr:     p.tok.Attr,
-	})
+	p.addChild(p.newNode(Node{
+		Type:          ElementNode,
+		DataAtom:      p.tok.DataAtom,
+		Data:          p.tok.Data,
+		Attr:          p.tok.Attr,
+		parserImplied: p.implied != 0,
+	}))
+}
+
+func (p *parser) newNode(n Node) *Node {
+	p.guard.node(n.Type)
+	return &n
+}
+
+func (p *parser) cloneNode(n *Node) *Node {
+	p.guard.node(n.Type)
+	p.guard.mustAttributes(len(n.Attr))
+	clone := n.clone()
+	clone.parserImplied = true
+	return clone
 }
 
 // Section 12.2.4.3.
@@ -415,7 +436,7 @@ func (p *parser) reconstructActiveFormattingElements() {
 	}
 	for {
 		i++
-		clone := p.afe[i].clone()
+		clone := p.cloneNode(p.afe[i])
 		p.addChild(clone)
 		p.afe[i] = clone
 		if i == len(p.afe)-1 {
@@ -514,12 +535,13 @@ func initialIM(p *parser) bool {
 			return true
 		}
 	case CommentToken:
-		p.doc.AppendChild(&Node{
+		p.doc.AppendChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 		return true
 	case DoctypeToken:
+		p.guard.node(DoctypeNode)
 		n, quirks := parseDoctype(p.tok.Data)
 		p.doc.AppendChild(n)
 		p.quirks = quirks
@@ -559,10 +581,10 @@ func beforeHTMLIM(p *parser) bool {
 			return true
 		}
 	case CommentToken:
-		p.doc.AppendChild(&Node{
+		p.doc.AppendChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 		return true
 	}
 	p.parseImpliedToken(StartTagToken, a.Html, a.Html.String())
@@ -598,10 +620,10 @@ func beforeHeadIM(p *parser) bool {
 			return true
 		}
 	case CommentToken:
-		p.addChild(&Node{
+		p.addChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 		return true
 	case DoctypeToken:
 		// Ignore the token.
@@ -713,10 +735,10 @@ func inHeadIM(p *parser) bool {
 			return true
 		}
 	case CommentToken:
-		p.addChild(&Node{
+		p.addChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 		return true
 	case DoctypeToken:
 		// Ignore the token.
@@ -821,10 +843,10 @@ func afterHeadIM(p *parser) bool {
 			return true
 		}
 	case CommentToken:
-		p.addChild(&Node{
+		p.addChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 		return true
 	case DoctypeToken:
 		// Ignore the token.
@@ -841,7 +863,7 @@ func afterHeadIM(p *parser) bool {
 }
 
 // copyAttributes copies attributes of src not found on dst to dst.
-func copyAttributes(dst *Node, src Token) {
+func (p *parser) copyAttributes(dst *Node, src Token) {
 	if len(src.Attr) == 0 {
 		return
 	}
@@ -851,6 +873,7 @@ func copyAttributes(dst *Node, src Token) {
 	}
 	for _, t := range src.Attr {
 		if _, ok := attr[t.Key]; !ok {
+			p.guard.mustAttributes(1)
 			dst.Attr = append(dst.Attr, t)
 			attr[t.Key] = t.Val
 		}
@@ -890,7 +913,7 @@ func inBodyIM(p *parser) bool {
 			if p.oe.contains(a.Template) {
 				return true
 			}
-			copyAttributes(p.oe[0], p.tok)
+			p.copyAttributes(p.oe[0], p.tok)
 		case a.Base, a.Basefont, a.Bgsound, a.Link, a.Meta, a.Noframes, a.Script, a.Style, a.Template, a.Title:
 			return inHeadIM(p)
 		case a.Body:
@@ -901,7 +924,7 @@ func inBodyIM(p *parser) bool {
 				body := p.oe[1]
 				if body.Type == ElementNode && body.DataAtom == a.Body {
 					p.framesetOK = false
-					copyAttributes(body, p.tok)
+					p.copyAttributes(body, p.tok)
 				}
 			}
 		case a.Frameset:
@@ -1223,10 +1246,10 @@ func inBodyIM(p *parser) bool {
 			p.inBodyEndTagOther(p.tok.DataAtom, p.tok.Data)
 		}
 	case CommentToken:
-		p.addChild(&Node{
+		p.addChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 	case ErrorToken:
 		// TODO: remove this divergence from the HTML5 spec.
 		if len(p.templateStack) > 0 {
@@ -1350,7 +1373,7 @@ func (p *parser) inBodyEndTagFormatting(tagAtom a.Atom, tagName string) {
 				continue
 			}
 			// Step 14.7.
-			clone := node.clone()
+			clone := p.cloneNode(node)
 			p.afe[p.afe.index(node)] = clone
 			p.oe[p.oe.index(node)] = clone
 			node = clone
@@ -1381,7 +1404,7 @@ func (p *parser) inBodyEndTagFormatting(tagAtom a.Atom, tagName string) {
 
 		// Steps 16-18. Reparent nodes from the furthest block's children
 		// to a clone of the formatting element.
-		clone := formattingElement.clone()
+		clone := p.cloneNode(formattingElement)
 		reparentChildren(clone, furthestBlock)
 		furthestBlock.AppendChild(clone)
 
@@ -1527,10 +1550,10 @@ func inTableIM(p *parser) bool {
 			return inHeadIM(p)
 		}
 	case CommentToken:
-		p.addChild(&Node{
+		p.addChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 		return true
 	case DoctypeToken:
 		// Ignore the token.
@@ -1597,10 +1620,10 @@ func inColumnGroupIM(p *parser) bool {
 			p.tok.Data = s
 		}
 	case CommentToken:
-		p.addChild(&Node{
+		p.addChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 		return true
 	case DoctypeToken:
 		// Ignore the token.
@@ -1684,10 +1707,10 @@ func inTableBodyIM(p *parser) bool {
 			return true
 		}
 	case CommentToken:
-		p.addChild(&Node{
+		p.addChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 		return true
 	}
 
@@ -1891,10 +1914,10 @@ func afterBodyIM(p *parser) bool {
 		if len(p.oe) < 1 || p.oe[0].DataAtom != a.Html {
 			panic("html: bad parser state: <html> element not found, in the after-body insertion mode")
 		}
-		p.oe[0].AppendChild(&Node{
+		p.oe[0].AppendChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 		return true
 	}
 	p.im = inBodyIM
@@ -1905,10 +1928,10 @@ func afterBodyIM(p *parser) bool {
 func inFramesetIM(p *parser) bool {
 	switch p.tok.Type {
 	case CommentToken:
-		p.addChild(&Node{
+		p.addChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 	case TextToken:
 		// Ignore all text but whitespace.
 		s := strings.Map(func(c rune) rune {
@@ -1955,10 +1978,10 @@ func inFramesetIM(p *parser) bool {
 func afterFramesetIM(p *parser) bool {
 	switch p.tok.Type {
 	case CommentToken:
-		p.addChild(&Node{
+		p.addChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 	case TextToken:
 		// Ignore all text but whitespace.
 		s := strings.Map(func(c rune) rune {
@@ -2007,10 +2030,10 @@ func afterAfterBodyIM(p *parser) bool {
 			return inBodyIM(p)
 		}
 	case CommentToken:
-		p.doc.AppendChild(&Node{
+		p.doc.AppendChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 		return true
 	case DoctypeToken:
 		return inBodyIM(p)
@@ -2023,10 +2046,10 @@ func afterAfterBodyIM(p *parser) bool {
 func afterAfterFramesetIM(p *parser) bool {
 	switch p.tok.Type {
 	case CommentToken:
-		p.doc.AppendChild(&Node{
+		p.doc.AppendChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 	case TextToken:
 		// Ignore all text but whitespace.
 		s := strings.Map(func(c rune) rune {
@@ -2071,10 +2094,10 @@ func parseForeignContent(p *parser) bool {
 		p.tok.Data = strings.Replace(p.tok.Data, "\x00", "\ufffd", -1)
 		p.addText(p.tok.Data)
 	case CommentToken:
-		p.addChild(&Node{
+		p.addChild(p.newNode(Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
-		})
+		}))
 	case StartTagToken:
 		b := breakout[p.tok.Data]
 		if p.tok.DataAtom == a.Font {
@@ -2193,7 +2216,9 @@ func (p *parser) parseImpliedToken(t TokenType, dataAtom a.Atom, data string) {
 		Data:     data,
 	}
 	p.hasSelfClosingToken = false
+	p.implied++
 	p.parseCurrentToken()
+	p.implied--
 	p.tok, p.hasSelfClosingToken = realToken, selfClosing
 }
 
@@ -2207,6 +2232,7 @@ func (p *parser) parseCurrentToken() {
 
 	consumed := false
 	for !consumed {
+		p.guard.stacks(p)
 		if p.inForeignContent() {
 			consumed = parseForeignContent(p)
 		} else {
@@ -2223,7 +2249,11 @@ func (p *parser) parseCurrentToken() {
 func (p *parser) parse() (err error) {
 	defer func() {
 		if panicErr := recover(); panicErr != nil {
-			err = fmt.Errorf("%s", panicErr)
+			if abort, ok := panicErr.(resourceAbort); ok {
+				err = abort.err
+			} else {
+				err = fmt.Errorf("%s", panicErr)
+			}
 		}
 	}()
 	// Iterate until EOF. Any other error will cause an early return.
@@ -2287,10 +2317,7 @@ func ParseOptionEnableScripting(enable bool) ParseOption {
 // ParseWithOptions is like Parse, with options.
 func ParseWithOptions(r io.Reader, opts ...ParseOption) (*Node, error) {
 	p := &parser{
-		tokenizer: NewTokenizer(r),
-		doc: &Node{
-			Type: DocumentNode,
-		},
+		tokenizer:  NewTokenizer(r),
 		scripting:  true,
 		framesetOK: true,
 		im:         initialIM,
@@ -2299,6 +2326,7 @@ func ParseWithOptions(r io.Reader, opts ...ParseOption) (*Node, error) {
 	for _, f := range opts {
 		f(p)
 	}
+	p.doc = p.newNode(Node{Type: DocumentNode})
 
 	if err := p.parse(); err != nil {
 		return nil, err
@@ -2322,9 +2350,6 @@ func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) (
 		contextTag = context.DataAtom.String()
 	}
 	p := &parser{
-		doc: &Node{
-			Type: DocumentNode,
-		},
 		scripting: true,
 		fragment:  true,
 		context:   context,
@@ -2338,12 +2363,14 @@ func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) (
 	for _, f := range opts {
 		f(p)
 	}
+	p.doc = p.newNode(Node{Type: DocumentNode})
 
-	root := &Node{
-		Type:     ElementNode,
-		DataAtom: a.Html,
-		Data:     a.Html.String(),
-	}
+	root := p.newNode(Node{
+		Type:          ElementNode,
+		DataAtom:      a.Html,
+		Data:          a.Html.String(),
+		parserImplied: true,
+	})
 	p.doc.AppendChild(root)
 	p.oe = nodeStack{root}
 	if context != nil && context.DataAtom == a.Template {

@@ -310,7 +310,7 @@ func TestConditionalOmissionReachesPromptAndStrippedBody(t *testing.T) {
 	}
 }
 
-func TestConditionalFragmentUsesScriptingDisabledPreflightAndParser(t *testing.T) {
+func TestConditionalFragmentUsesScriptingDisabledBoundedParser(t *testing.T) {
 	got := htmlToText(`<!--[if mso]><noscript><a href="https://example.test/fallback">Fallback notice</a></noscript><![endif]-->`)
 	if got.ExtractionIncomplete || !strings.Contains(got.Text, "Fallback notice") || len(got.Links) != 1 {
 		t.Fatalf("conditional noscript content was not extracted: %+v", got)

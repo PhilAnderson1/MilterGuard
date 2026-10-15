@@ -6,10 +6,8 @@
 // concealed, client-dependent, or unknown using bounded evaluation intended
 // for untrusted email input.
 //
-// Parsing and analysis use separate explicit stacks rather than recursion.
-// Input depth is attacker-controlled, and each pass carries different state:
-// the preflight tracks lexical nesting, document collection tracks the parsed
-// tree, and presentation analysis tracks inherited styles and paint layers.
-// Keeping those stacks separate preserves their distinct limits and failure
-// semantics.
+// Parsing and analysis use explicit stacks rather than recursion. The forked
+// HTML parser enforces resource limits while tokenizing and building the tree;
+// document collection and presentation analysis then apply their own bounded
+// traversals for the state each pass needs.
 package htmlextract

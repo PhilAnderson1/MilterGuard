@@ -27,8 +27,8 @@ func Analyze(input []byte, limits Limits) (Document, error) {
 }
 
 // AnalyzeWithStop is Analyze with a cooperative stop check. The callback is
-// sampled between bounded phases and during long traversals; library calls
-// already in progress cannot be interrupted.
+// sampled inside the forked parsers as well as between bounded analysis phases
+// and during long traversals.
 func AnalyzeWithStop(input []byte, limits Limits, shouldStop func() bool) (Document, error) {
 	p := processor{Limits: limits, shouldStop: shouldStop}
 	return p.process(input)
@@ -447,10 +447,10 @@ func parsedResourceUsage(inputBytes int, document *parsedDocument) ResourceUsage
 	s := &document.styles
 	return ResourceUsage{
 		InputBytes:                 inputBytes,
-		Nodes:                      max(document.nodeCount, document.lexical.nodes),
-		TextNodes:                  max(document.textCount, document.lexical.textNodes),
-		Attributes:                 max(document.attributeCount, document.lexical.attributes),
-		Depth:                      max(document.treeDepth, document.lexical.depth),
+		Nodes:                      max(document.nodeCount, document.parserUsage.Nodes),
+		TextNodes:                  max(document.textCount, document.parserUsage.TextNodes),
+		Attributes:                 max(document.attributeCount, document.parserUsage.Attributes),
+		Depth:                      max(document.treeDepth, document.parserUsage.Depth),
 		CSSDepth:                   s.conditionDepth,
 		Rules:                      s.rulesSeen,
 		Selectors:                  s.selectors,
