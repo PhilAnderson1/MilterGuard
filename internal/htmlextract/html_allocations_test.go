@@ -65,7 +65,7 @@ func TestAllocationProjectionAgainstTreeBuilder(t *testing.T) {
 	// foreign integration, and table insertion modes against the actual parser.
 	random := rand.New(rand.NewSource(39))
 	prefixes := []string{"", `<p><b><i><em>seed</p>`, `<div><object><p><b><i>`, `<table><tr><td><b>`, `<math><mtext><a>`}
-	tokens := []string{"x", " ", `<p>`, `</p>`, `<div>`, `</div>`, `<b>`, `</b>`, `<i class="x">`, `</i>`, `<a>`, `</a>`, `<table>`, `</table>`, `<tr>`, `</tr>`, `<td>`, `</td>`, `<object>`, `</object>`, `<template>`, `</template>`, `<svg>`, `</svg>`, `<mtext>`, `<span>`, `</span>`, `</br>`, `<select>`, `</select>`, `<option>`, `<button>`, `</button>`, `<form>`, `</form>`, `<caption>`, `</caption>`, `<math>`, `</math>`, `<foreignObject>`, `</foreignObject>`, `<li>`, `</li>`, `<h1>`, `</h1>`, `<nobr>`, `</nobr>`, `<font color="red" size="2">`, `</font>`, `<marquee>`, `</marquee>`, `<applet>`, `</applet>`}
+	tokens := []string{"x", " ", `<p>`, `</p>`, `<div>`, `</div>`, `<b>`, `</b>`, `<i class="x">`, `</i>`, `<a>`, `</a>`, `<table>`, `</table>`, `<tr>`, `</tr>`, `<td>`, `</td>`, `<object>`, `</object>`, `<template>`, `</template>`, `<svg>`, `</svg>`, `<mtext>`, `<span>`, `</span>`, `</br>`, `<select>`, `</select>`, `<option>`, `<button>`, `</button>`, `<form>`, `</form>`, `<caption>`, `</caption>`, `<math>`, `</math>`, `<foreignObject>`, `</foreignObject>`, `<li>`, `</li>`, `<h1>`, `</h1>`, `<nobr>`, `</nobr>`, `<font>`, `<font color="red" size="2">`, `</font>`, `<marquee>`, `</marquee>`, `<applet>`, `</applet>`}
 	limits := DefaultLimits()
 	limits.Nodes = 1000
 	limits.Attributes = 1000
@@ -110,7 +110,7 @@ func TestAllocationPreflightChecksCancellationDuringAttributes(t *testing.T) {
 	}
 	source.WriteByte('>')
 	usage, err := measurePreflightWithStop([]byte(source.String()), DefaultLimits(), func() bool { return true })
-	if !IsStopped(err) || usage.attributes != 256 {
+	if !IsStopped(err) || usage.attributes != 0 {
 		t.Fatalf("attribute scan ignored cancellation: usage=%+v error=%v", usage, err)
 	}
 }

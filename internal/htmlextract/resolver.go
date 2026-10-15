@@ -463,12 +463,9 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
 	scope := buildVariables(parentVars, winners.variables, winners.alternateColourSchemeVars, budget)
-	// Normally buildVariables copies computed values into its own scope, making
-	// the cascade map reusable. An unresolved scope retains the map so it can
-	// distinguish unknown local definitions from inherited variables.
-	if scope != nil && scope.unresolved != nil && winners.variables != nil {
-		s.runtime.variableScratch = nil
-	} else if winners.variables != nil {
+	// Variable scopes never retain the cascade map, so it can be reused by the
+	// next element even when expression evaluation was abandoned.
+	if winners.variables != nil {
 		s.runtime.variableScratch = winners.variables
 	}
 	if budget.exhausted {

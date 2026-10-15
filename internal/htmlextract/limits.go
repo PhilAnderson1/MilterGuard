@@ -22,6 +22,11 @@ type Limits struct {
 // MaxViewingCases is the hard ceiling for conditional evaluations per document.
 const MaxViewingCases = 16
 
+// maxHTMLDepth keeps the largest preflight-admitted tree below x/net/html's
+// hard 512-open-element ceiling even when tree construction inserts the full
+// fixed margin and two wrapper levels for every lexically nested table.
+const maxHTMLDepth = 168
+
 // Selector cost functions use MatchWork+1 as a saturated over-budget value.
 // Keep that sentinel representable for every accepted caller-supplied limit.
 const maxMatchWork = int64(1<<63 - 2)
@@ -74,6 +79,9 @@ func (l Limits) validate() error {
 	}
 	if l.MatchWork > maxMatchWork {
 		return fmt.Errorf("invalid limit: MatchWork must be at most %d", maxMatchWork)
+	}
+	if l.Depth > maxHTMLDepth {
+		return fmt.Errorf("invalid limit: Depth must be at most %d", maxHTMLDepth)
 	}
 	return nil
 }

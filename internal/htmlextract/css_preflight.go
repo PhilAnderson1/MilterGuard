@@ -34,8 +34,8 @@ const (
 // boundedCSSConstructs retains the compact boolean interface used by limit
 // tests. Production callers use inspectCSSConstructs so malformed delimiters
 // can be distinguished from ordinary size exhaustion.
-func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int) bool {
-	return inspectCSSConstructs(source, inline, byteLimit, tokenLimit) == cssPreflightAccepted
+func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit, contextLimit int) bool {
+	return inspectCSSConstructs(source, inline, byteLimit, tokenLimit, contextLimit) == cssPreflightAccepted
 }
 
 // inspectCSSConstructs tokenizes without retaining tokens and rejects any
@@ -43,7 +43,7 @@ func boundedCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 // also rejects unmatched ')' and ']' at construct level: tdewolff can otherwise pop
 // parser state without reporting the corresponding at-rule boundary, causing
 // our condition stack to diverge from its stream.
-func inspectCSSConstructs(source string, inline bool, byteLimit, tokenLimit int) cssPreflightOutcome {
+func inspectCSSConstructs(source string, inline bool, byteLimit, tokenLimit, contextLimit int) cssPreflightOutcome {
 	lexer := css.NewLexer(parse.NewInputString(source))
 	initialContext := cssRuleList
 	if inline {
@@ -160,6 +160,9 @@ func inspectCSSConstructs(source string, inline bool, byteLimit, tokenLimit int)
 			case css.LeftBracketToken:
 				componentClosers = append(componentClosers, css.RightBracketToken)
 			case css.LeftBraceToken:
+				if len(contexts)-1 >= contextLimit {
+					return cssPreflightLimitExceeded
+				}
 				contexts = append(contexts, atRuleContext(atRule))
 				phase = cssConstructStart
 				atRule = ""

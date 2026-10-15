@@ -469,12 +469,29 @@ func TestHTMLEscapedCSSPunctuationDoesNotBecomeDeclarationSyntax(t *testing.T) {
 	for _, source := range []string{
 		`<span style="display\:none">Visible</span>`,
 		`<span style="display\3A none">Visible</span>`,
-		`<span style="display:block\;visibility:hidden">Visible</span>`,
 	} {
 		got := htmlToText(source)
 		if got.Text != "Visible" || got.VisibleText != "Visible" {
 			t.Fatalf("escaped CSS punctuation became syntax for %q: %+v", source, got)
 		}
+	}
+
+	// The escaped semicolon remains part of the display value rather than
+	// introducing a visibility declaration. Legacy clients may nevertheless
+	// interpret escaped compatibility values differently, so it is uncertain.
+	got := htmlToText(`<span style="display:block\;visibility:hidden">Visible</span>`)
+	if got.Text != `<visibility-uncertain>Visible</visibility-uncertain>` || got.VisibleText != "Visible" || got.ConfidentVisibleChars != 0 {
+		t.Fatalf("escaped CSS value punctuation was not kept uncertain: %+v", got)
+	}
+}
+
+func TestHTMLOpaqueRuleBearingAtRuleReportsIncompleteCSS(t *testing.T) {
+	got := htmlToText(`<style>@scope{#target{display:none}}</style><p id="target">Visible</p>`)
+	if !got.CSSIncomplete {
+		t.Fatal("opaque rule-bearing at-rule did not report incomplete CSS")
+	}
+	if got.ConfidentVisibleChars != 0 || got.VisibleText != "Visible" {
+		t.Fatalf("incomplete CSS confidence was not propagated: %+v", got)
 	}
 }
 

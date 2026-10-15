@@ -472,6 +472,7 @@ func TestMalformedCSSDelimiterCannotDesynchroniseAtRuleState(t *testing.T) {
 	}{
 		{"audit stray bracket", `@media print{#x]{a:b}} #b{display:none}`},
 		{"stray parenthesis", `@media print{#x){a:b}} #b{display:none}`},
+		{"stray brace", `@media print{a}} #b{display:none}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			document, err := Analyze([]byte(`<style>`+test.css+`</style><p id="b">T</p>`), DefaultLimits())
@@ -485,6 +486,49 @@ func TestMalformedCSSDelimiterCannotDesynchroniseAtRuleState(t *testing.T) {
 				t.Fatal("malformed stylesheet did not abandon confident cascade analysis")
 			}
 		})
+	}
+}
+
+func TestOpaqueRuleBearingAtRulesReportUnresolvedStylesheet(t *testing.T) {
+	for _, test := range []struct {
+		name, css string
+	}{
+		{"container", `@container (min-width:0px){#target{display:none}}`},
+		{"scope", `@scope (#wrapper){#target{display:none}}`},
+		{"starting style", `@starting-style{#target{display:none}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, `<style>`+test.css+`</style><div id="wrapper"><p id="target">T</p></div>`)
+			if !document.UnresolvedStylesheet {
+				t.Fatal("opaque rule-bearing at-rule was treated as fully resolved")
+			}
+			if got := findText(t, document, "T").Label; got != "visible" {
+				t.Fatalf("opaque body unexpectedly entered the parsed cascade: %q", got)
+			}
+		})
+	}
+}
+
+func TestDescriptorAtRulesDoNotReportUnresolvedStylesheet(t *testing.T) {
+	document := inspectHTML(t, `<style>@font-face{font-family:x;src:url(x)}@page{margin:0}p{display:none}</style><p>T</p>`)
+	if document.UnresolvedStylesheet {
+		t.Fatal("known descriptor-only at-rule made the stylesheet unresolved")
+	}
+	if got := findText(t, document, "T").Label; got != "concealed" {
+		t.Fatalf("ordinary rule after descriptor blocks = %q, want concealed", got)
+	}
+}
+
+func TestRecoverableDeclarationErrorInsideMediaRetainsCascade(t *testing.T) {
+	document, err := Analyze([]byte(`<style>@media screen{p{broken;display:none}}</style><p>T</p>`), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findText(t, document, "T").Label; got != "concealed" {
+		t.Fatalf("label = %q, want concealed", got)
+	}
+	if document.Usage.CSSLimitExceeded {
+		t.Fatal("recoverable declaration error abandoned the shared cascade")
 	}
 }
 
@@ -512,7 +556,7 @@ func TestCSSDelimiterPreflightAcceptsBalancedComponents(t *testing.T) {
 		`p{--x:{a:[b(c)]};color:var(--x, red)}`,
 		`p{--x:red;color:var(--x,[unused)])}`,
 	} {
-		if outcome := inspectCSSConstructs(source, false, limits.CSSConstructBytes, limits.CSSConstructTokens); outcome != cssPreflightAccepted {
+		if outcome := inspectCSSConstructs(source, false, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth); outcome != cssPreflightAccepted {
 			t.Errorf("valid CSS rejected with outcome %d: %s", outcome, source)
 		}
 	}
@@ -1018,6 +1062,10 @@ func TestVariables(t *testing.T) {
 		{"escaped direct reference", `<p style="--hidden:none;display:var(\2d\2d hidden)">T</p>`, "concealed"},
 		{"escaped transitive reference", `<p style="background:white;color:black;--white:white;--x:var(\2d\2d white);color:var(--x)">T</p>`, "concealed"},
 		{"escaped definition name", `<p style="--\78:none;display:var(--x)">T</p>`, "concealed"},
+		{"escaped initial dashes preserve uppercase name", `<p style="\2d\2dX:block;display:var(--X,none)">T</p>`, "visible"},
+		{"escaped initial dashes remain case sensitive", `<p style="\2d\2dX:none;display:var(--x,block)">T</p>`, "visible"},
+		{"escaped stylesheet definition preserves uppercase name", `<style>p{\2d\2dX:block;display:var(--X,none)}</style><p>T</p>`, "visible"},
+		{"escaped colon remains in definition name", `<p style="--x\:Y:none;display:var(--x\:Y)">T</p>`, "concealed"},
 		{"escaped reference remains case sensitive", `<p style="--X:none;display:var(\2d\2d x,block)">T</p>`, "visible"},
 		{"escaped missing reference fallback", `<p style="display:var(\2d\2d missing,none)">T</p>`, "concealed"},
 		{"escaped cycle dependency", `<p style="--a:var(\2d\2d b);--b:var(--a);display:var(--a,none)">T</p>`, "concealed"},
@@ -1297,8 +1345,29 @@ func TestVariableSortingChargesLogarithmicFactor(t *testing.T) {
 	defs := map[string]candidate{"--a": {}, "--b": {}}
 	budget := expressionBudget{remaining: int64(len(defs) + variableSortWork(len(defs)) - 1)}
 	scope := buildVariables(nil, defs, nil, &budget)
-	if !budget.exhausted || scope.unresolved == nil {
+	if !budget.exhausted || !scope.allUnresolved {
 		t.Fatalf("under-budget variable sort was not abandoned safely: budget=%+v scope=%+v", budget, scope)
+	}
+	if scope.values != nil || scope.colourDependent != nil {
+		t.Fatalf("abandoned variable scope retained maps: %+v", scope)
+	}
+}
+
+func TestVariableDefinitionCeilingUsesConstantSizeScope(t *testing.T) {
+	defs := make(map[string]candidate, 1_025)
+	for i := 0; i < 1_025; i++ {
+		defs[fmt.Sprintf("--v%d", i)] = candidate{}
+	}
+	budget := expressionBudget{remaining: 10_000}
+	scope := buildVariables(nil, defs, nil, &budget)
+	if !scope.allUnresolved || scope.values != nil || scope.colourDependent != nil {
+		t.Fatalf("oversized definition set retained per-name state: %+v", scope)
+	}
+	if got := scope.get("--missing", &budget); got.status != valueUnsupported {
+		t.Fatalf("lookup in abandoned scope = %+v, want unsupported", got)
+	}
+	if !scope.colourSchemeDependent("--missing", &budget) {
+		t.Fatal("abandoned scope did not preserve colour-scheme uncertainty")
 	}
 }
 
@@ -1321,7 +1390,7 @@ func TestLiteralVariableScopeSkipsDependencyGraph(t *testing.T) {
 	// graph path would additionally require sorting and visitation work.
 	budget := expressionBudget{remaining: int64(2 * len(defs))}
 	scope := buildVariables(nil, defs, nil, &budget)
-	if budget.exhausted || budget.remaining != 0 || scope.unresolved != nil {
+	if budget.exhausted || budget.remaining != 0 || scope.allUnresolved {
 		t.Fatalf("literal scope used graph work: budget=%+v scope=%+v", budget, scope)
 	}
 	for name, want := range map[string]string{"--display": "none", "--size": "10px", "--empty": ""} {
@@ -1355,7 +1424,7 @@ func TestLiteralVariableScopePreservesKeywordsAndColourDependencies(t *testing.T
 	}
 	budget := expressionBudget{remaining: 1_000}
 	scope := buildVariables(parent, defs, map[string]bool{"--literal": true, "--alternate-only": true}, &budget)
-	if scope.unresolved != nil || budget.exhausted {
+	if scope.allUnresolved || budget.exhausted {
 		t.Fatalf("literal keyword scope unresolved: budget=%+v scope=%+v", budget, scope)
 	}
 	for name, want := range map[string]variableValue{

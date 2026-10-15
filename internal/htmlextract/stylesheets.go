@@ -10,10 +10,37 @@ import (
 	"golang.org/x/net/html"
 )
 
-const maxImportDepth = 8
+const (
+	maxImportDepth       = 8
+	maxCSSMediaTypeBytes = 1024
+)
+
+func oversizedCSSMediaTypeMayApply(value string) bool {
+	start := 0
+	for start < len(value) && htmlSpace(value[start]) {
+		start++
+	}
+	if start == len(value) {
+		return true
+	}
+	const cssMediaType = "text/css"
+	end := start + len(cssMediaType)
+	if end > len(value) || !equalASCIIFold(value[start:end], cssMediaType) {
+		return false
+	}
+	return end == len(value) || value[end] == ';' || htmlSpace(value[end])
+}
 
 func cssTypeAttributeApplies(n *html.Node) bool {
-	typ := strings.TrimSpace(attr(n, "type"))
+	typ := attr(n, "type")
+	// mime.ParseMediaType builds a map for every parameter. Avoid allowing one
+	// HTML attribute to turn an input-sized parameter list into a much larger
+	// transient allocation. A text/css prefix remains potentially applicable;
+	// accepting malformed trailing parameters is conservative for visibility.
+	if len(typ) > maxCSSMediaTypeBytes {
+		return oversizedCSSMediaTypeMayApply(typ)
+	}
+	typ = strings.TrimSpace(typ)
 	if typ == "" {
 		return true
 	}

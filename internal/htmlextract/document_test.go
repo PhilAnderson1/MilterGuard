@@ -215,6 +215,43 @@ func TestLargeStylesheetOfBoundedConstructsIsAccepted(t *testing.T) {
 	}
 }
 
+func TestRetainedValueTokensHaveDocumentBudget(t *testing.T) {
+	limits := DefaultLimits()
+	value := strings.Repeat("0 ", 1_400)
+	source := `p{--payload:` + value + `}`
+	limits.CSSBytes = len(source)
+	s := sheet{limits: limits}
+	s.parseCSS(source, false)
+	if !s.workIncomplete {
+		t.Fatal("token-dense custom property did not exhaust retained-token budget")
+	}
+	if got, maximum := s.retainedTokenBytes, s.retainedTokenBudget(); got > maximum {
+		t.Fatalf("retained token bytes = %d, budget = %d", got, maximum)
+	}
+}
+
+func TestOrdinaryCustomPropertiesFitRetainedTokenBudget(t *testing.T) {
+	limits := DefaultLimits()
+	limits.CSSBytes = 4 << 10
+	var source strings.Builder
+	source.WriteString(`p{--base:12px;`)
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&source, "--v%d:var(--base, %dpx);", i, i)
+	}
+	source.WriteString(`display:var(--display,block)}`)
+	if source.Len() >= limits.CSSBytes {
+		t.Fatalf("test stylesheet size = %d", source.Len())
+	}
+	s := sheet{limits: limits}
+	s.parseCSS(source.String(), false)
+	if s.workIncomplete || s.cascadeIncomplete {
+		t.Fatalf("ordinary custom properties exhausted style analysis: %+v", s)
+	}
+	if s.retainedTokenBytes == 0 || s.retainedTokenBytes > s.retainedTokenBudget() {
+		t.Fatalf("retained token bytes = %d, budget = %d", s.retainedTokenBytes, s.retainedTokenBudget())
+	}
+}
+
 func TestNestedCustomPropertyCannotBypassCSSConstructLimit(t *testing.T) {
 	for name, value := range map[string]string{
 		"nested block": `{` + strings.Repeat(`x`, 40) + `}`,
@@ -243,6 +280,22 @@ func TestCSSConstructTokenLimitPrecedesFullParser(t *testing.T) {
 	}
 }
 
+func TestCSSContextDepthLimitPrecedesFullParser(t *testing.T) {
+	limits := DefaultLimits()
+	limits.Depth = 4
+	nested := func(depth int) string {
+		return strings.Repeat(`@media all{`, depth) + `p{display:none}` + strings.Repeat(`}`, depth)
+	}
+	if outcome := inspectCSSConstructs(nested(limits.Depth-1), false, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth); outcome != cssPreflightAccepted {
+		t.Fatalf("CSS at context depth limit rejected with outcome %d", outcome)
+	}
+	s := sheet{limits: limits}
+	s.parseCSS(nested(limits.Depth), false)
+	if !s.cascadeIncomplete {
+		t.Fatal("over-deep CSS context stack reached the full parser")
+	}
+}
+
 func TestCSSConstructPreflightMirrorsVendorPrefixedAtRules(t *testing.T) {
 	limits := DefaultLimits()
 	limits.CSSConstructBytes = 32
@@ -252,7 +305,7 @@ func TestCSSConstructPreflightMirrorsVendorPrefixedAtRules(t *testing.T) {
 			if len(source) <= limits.CSSConstructBytes {
 				t.Fatalf("test source is only %d bytes", len(source))
 			}
-			if !boundedCSSConstructs(source, false, limits.CSSConstructBytes, limits.CSSConstructTokens) {
+			if !boundedCSSConstructs(source, false, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth) {
 				t.Fatal("bounded nested rules were treated as one construct")
 			}
 		})
@@ -341,11 +394,15 @@ func TestOversizedInlineStyleKeepsUncertaintyLocal(t *testing.T) {
 	}
 }
 
-func TestAnalyzeDoesNotPreallocateCallerDepth(t *testing.T) {
+func TestAnalyzeValidatesHTMLParserDepthCeiling(t *testing.T) {
 	limits := DefaultLimits()
-	limits.Depth = int(^uint(0) >> 1)
+	limits.Depth = maxHTMLDepth
 	if _, err := Analyze([]byte(`<p>T</p>`), limits); err != nil {
-		t.Fatal(err)
+		t.Fatalf("maximum depth rejected: %v", err)
+	}
+	limits.Depth++
+	if _, err := Analyze([]byte(`<p>T</p>`), limits); err == nil || !strings.Contains(err.Error(), "Depth must be at most") {
+		t.Fatalf("over-maximum depth error = %v", err)
 	}
 }
 
@@ -503,8 +560,23 @@ func TestNodeLimitsBeforeAndAfterTreeConstruction(t *testing.T) {
 		limits := DefaultLimits()
 		limits.Attributes = 2
 		err := preflight([]byte(`<p a="1" b="2" c="3">x</p>`), limits)
-		if err == nil || !strings.Contains(err.Error(), "lexical attributes") {
+		if err == nil || !strings.Contains(err.Error(), "attributes") {
 			t.Fatalf("attribute limit error = %v", err)
+		}
+	})
+	t.Run("single tag attributes are rejected before tokenization", func(t *testing.T) {
+		limits := DefaultLimits()
+		limits.Attributes = 4
+		err := preflight([]byte(`<p`+strings.Repeat(` a`, sourceAttributeGuardFloor+1)+`>`), limits)
+		if err == nil || !strings.Contains(err.Error(), "source tag attributes") {
+			t.Fatalf("source attribute limit error = %v", err)
+		}
+	})
+	t.Run("quoted delimiters remain one attribute", func(t *testing.T) {
+		limits := DefaultLimits()
+		limits.Attributes = 1
+		if err := preflight([]byte(`<p title="a > b c = d">x</p>`), limits); err != nil {
+			t.Fatalf("quoted attribute was over-counted: %v", err)
 		}
 	})
 	t.Run("parser-created nodes", func(t *testing.T) {
@@ -686,6 +758,10 @@ func TestPreflightMirrorsTreeBuilderRawTextOverrides(t *testing.T) {
 			name:   "raw-text-named MathML element",
 			source: `<math><style><b a="1" b="2" c="3">text</b></style></math>`,
 		},
+		{
+			name:   "attribute-less font remains in SVG",
+			source: `<svg><font><title><b a="1" b="2" c="3">text</b></title></font></svg>`,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			limits := DefaultLimits()
@@ -693,6 +769,48 @@ func TestPreflightMirrorsTreeBuilderRawTextOverrides(t *testing.T) {
 			err := preflight([]byte(test.source), limits)
 			if err == nil || !strings.Contains(err.Error(), "lexical attributes") {
 				t.Fatalf("preflight limit error = %v", err)
+			}
+		})
+	}
+	for _, attribute := range []string{`color="red"`, `face="serif"`, `size="2"`} {
+		t.Run("font breakout "+attribute, func(t *testing.T) {
+			limits := DefaultLimits()
+			limits.Attributes = 2
+			source := `<svg><font ` + attribute + `><title><b a="1" b="2" c="3">text</b></title></font></svg>`
+			if err := preflight([]byte(source), limits); err != nil {
+				t.Fatalf("conditional font breakout did not mirror tree builder: %v", err)
+			}
+		})
+	}
+}
+
+func TestPreflightModelsMathMLTextIntegrationPoints(t *testing.T) {
+	for _, integrationPoint := range []string{"mi", "mo", "mn", "ms", "mtext"} {
+		t.Run(integrationPoint, func(t *testing.T) {
+			limits := DefaultLimits()
+			limits.Nodes = 32
+			limits.Attributes = 1
+			source := `<math><` + integrationPoint + `><style>` + strings.Repeat(`<b a="1" b="2">`, 100) + `</style></` + integrationPoint + `></math>`
+			usage, err := measurePreflight([]byte(source), limits)
+			if err != nil {
+				t.Fatalf("HTML raw-text child rejected: %v", err)
+			}
+			if usage.attributes != 0 {
+				t.Fatalf("raw style text contributed %d attributes", usage.attributes)
+			}
+			if _, err := Analyze([]byte(source), limits); err != nil {
+				t.Fatalf("tree builder rejected preflight-admitted input: %v", err)
+			}
+		})
+	}
+
+	for _, exception := range []string{"mglyph", "malignmark"} {
+		t.Run(exception, func(t *testing.T) {
+			limits := DefaultLimits()
+			limits.Attributes = 1
+			source := `<math><mtext><` + exception + `><style><b a="1" b="2">text</b></style></` + exception + `></mtext></math>`
+			if err := preflight([]byte(source), limits); err == nil || !strings.Contains(err.Error(), "lexical attributes") {
+				t.Fatalf("MathML exception was treated as an HTML integration child: %v", err)
 			}
 		})
 	}
@@ -830,17 +948,17 @@ func TestCSSIdentifierEscapesDoNotChangeTokenMeaning(t *testing.T) {
 		{
 			"escaped bang is part of identifier",
 			`display:block;display:none\!important`,
-			"visible",
+			"unknown",
 		},
 		{
 			"escaped trailing space is part of identifier",
 			`visibility:visible;visibility:hidden\ `,
-			"visible",
+			"unknown",
 		},
 		{
 			"escaped digit remains an identifier",
 			`opacity:1;opacity:\30`,
-			"visible",
+			"unknown",
 		},
 		{
 			"comment may separate priority tokens",
@@ -858,6 +976,41 @@ func TestCSSIdentifierEscapesDoNotChangeTokenMeaning(t *testing.T) {
 			in := inspectHTML(t, `<p style="`+c.style+`">T</p>`)
 			if got := findText(t, in, "T").Label; got != c.want {
 				t.Fatalf("label = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestLegacyEscapedValuesRemainUncertain(t *testing.T) {
+	cases := []struct {
+		name, source, want string
+	}{
+		{
+			"inline IE suffix",
+			`<p style="display:none\9">T</p>`,
+			"unknown",
+		},
+		{
+			"stylesheet IE suffix",
+			`<style>p{display:none\9}</style><p>T</p>`,
+			"unknown",
+		},
+		{
+			"later valid declaration wins",
+			`<p style="display:none\9;display:block">T</p>`,
+			"visible",
+		},
+		{
+			"unrelated property remains irrelevant",
+			`<p style="untracked:none\9">T</p>`,
+			"visible",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			in := inspectHTML(t, test.source)
+			if got := findText(t, in, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
 			}
 		})
 	}
@@ -1361,6 +1514,31 @@ func TestStyleElementRequiresCSSMIMEType(t *testing.T) {
 				t.Fatalf("label = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestOversizedStylesheetMIMETypeAvoidsParameterParsing(t *testing.T) {
+	padding := strings.Repeat("x", maxCSSMediaTypeBytes)
+	for _, test := range []struct {
+		name, typ, want string
+	}{
+		{"valid CSS parameters", `text/css;p=` + padding, "concealed"},
+		{"malformed CSS parameters remain conservative", `text/css;` + padding, "concealed"},
+		{"non-CSS type", `text/plain;p=` + padding, "visible"},
+		{"whitespace-only type", strings.Repeat(" ", maxCSSMediaTypeBytes+1), "concealed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			document := inspectHTML(t, `<style type="`+test.typ+`">p{display:none}</style><p>T</p>`)
+			if got := findText(t, document, "T").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+
+	typ := `text/css;p=` + padding
+	document := inspectHTML(t, `<link rel="stylesheet" type="`+typ+`" href="data:text/css,p%7Bdisplay%3Anone%7D"><p>T</p>`)
+	if got := findText(t, document, "T").Label; got != "unknown" {
+		t.Fatalf("linked stylesheet label = %q, want unknown", got)
 	}
 }
 
@@ -2071,6 +2249,60 @@ func TestAttributeAwareSelectorChargesConservativeBound(t *testing.T) {
 	want := plan.cost + withAttributes - withoutAttributes
 	if plan.uncertain || cost != want || cost <= plan.cost {
 		t.Fatalf("attribute selector cost = %d, want conservative %d above static %d: %+v", cost, want, plan.cost, plan)
+	}
+}
+
+func TestAncestorMatcherChargesAttributesOnInspectedNode(t *testing.T) {
+	const paragraphs = 400
+	largeClass := strings.Repeat("x", 512<<10)
+	source := `<style>.needle p{color:red}</style><body class="` + largeClass + `">` +
+		strings.Repeat(`<p>x</p>`, paragraphs) + `<div style="display:none">PAYLOAD</div>`
+	document, err := Analyze([]byte(source), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Usage.MatchWorkExhausted {
+		t.Fatalf("unrelated large ancestor class exhausted match work: %+v", document.Usage)
+	}
+	if got := findText(t, document, "PAYLOAD").Label; got != "concealed" {
+		t.Fatalf("payload label = %q, want concealed; usage=%+v", got, document.Usage)
+	}
+	if document.Usage.MatchWork < selectorByteWork(len(largeClass)) {
+		t.Fatalf("large inspected class was not charged: %+v", document.Usage)
+	}
+}
+
+func TestAncestorMatcherDoesNotCacheLeafNodeStates(t *testing.T) {
+	sequence := 0
+	plan := planSelectorList(`.needle p`, &sequence)[0]
+	if plan.uncertain || plan.ancestorChain == nil || ancestorChainNeedsMap(plan.complexity) {
+		t.Fatalf("unexpected simple ancestor plan: %+v", plan)
+	}
+	ancestor := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "needle"}}}
+	target := &html.Node{Type: html.ElementNode, Data: "p", Parent: ancestor}
+	ancestor.FirstChild = target
+	prepared := map[*html.Node]elementPreparation{
+		ancestor: {},
+		target:   {},
+	}
+	ancestorProfile := prepared[ancestor]
+	ancestorProfile.selector.observe(ancestor)
+	prepared[ancestor] = ancestorProfile
+	targetProfile := prepared[target]
+	targetProfile.selector.observe(target)
+	prepared[target] = targetProfile
+	s := sheet{limits: DefaultLimits(), index: selectorIndex{count: 1}}
+	budget := matchBudget{limit: s.limits.MatchWork}
+	matched, complete := s.matchAncestorChain(&plan, target, selectorMatchContext{depth: 1, nodes: 2, elements: prepared}, &budget)
+	if !complete || !matched {
+		t.Fatalf("simple ancestor result: matched=%t complete=%t", matched, complete)
+	}
+	if len(s.runtime.ancestorStates) != 0 {
+		t.Fatalf("simple chain allocated per-node state maps: %d", len(s.runtime.ancestorStates))
+	}
+	recent := s.runtime.ancestorRecent[plan.ancestorCache]
+	if recent.node != ancestor || s.runtime.matchCacheUnits != 1 {
+		t.Fatalf("reusable ancestor state was not retained: recent=%+v units=%d", recent, s.runtime.matchCacheUnits)
 	}
 }
 

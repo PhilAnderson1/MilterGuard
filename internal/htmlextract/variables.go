@@ -218,6 +218,50 @@ func parserCompatibleCSS(text string) cssParserCompatibility {
 	return cssParserCompatibility{text: b.String(), insertedRightParenthesisEscapes: insertedRightParenthesisEscapes}
 }
 
+// declarationProperty restores the author-written spelling of an escaped
+// custom-property name. The CSS parser lowercases declaration names before it
+// decodes escapes, which can change the case-sensitive name (for example,
+// \2d\2dX becomes --x instead of --X). Re-lexing the bounded grammar span
+// preserves escape boundaries, including an escaped colon within the name.
+func (c cssParserCompatibility) declarationProperty(parsed string, grammarStart, grammarEnd int) (string, bool) {
+	property := normalizeDeclarationProperty(parsed)
+	if !strings.HasPrefix(property, "--") || !strings.Contains(parsed, `\`) {
+		return property, true
+	}
+	if grammarStart < 0 || grammarEnd > len(c.text) || grammarStart >= grammarEnd {
+		return property, false
+	}
+	l := css.NewLexer(parse.NewInputString(c.text[grammarStart:grammarEnd]))
+	var name []byte
+	for {
+		kind, raw := l.Next()
+		switch kind {
+		case css.WhitespaceToken, css.CommentToken, css.SemicolonToken:
+			continue
+		case css.IdentToken, css.CustomPropertyNameToken:
+			name = raw
+		default:
+			return property, false
+		}
+		break
+	}
+	for {
+		kind, _ := l.Next()
+		if kind == css.WhitespaceToken || kind == css.CommentToken {
+			continue
+		}
+		if kind != css.ColonToken {
+			return property, false
+		}
+		break
+	}
+	property = normalizeDeclarationProperty(string(name))
+	if !strings.HasPrefix(property, "--") {
+		return property, false
+	}
+	return property, true
+}
+
 // restoreDeclarationValue removes only escapes inserted by
 // parserCompatibleCSS. Author-written escapes can occur in strings, URLs and
 // custom properties and must remain byte-for-byte intact. Parser offsets bound
@@ -417,9 +461,9 @@ type variableValue struct {
 type variableScope struct {
 	parent              *variableScope
 	values              map[string]variableValue
-	unresolved          map[string]candidate
 	colourDependent     map[string]bool
 	hasColourDependency bool
+	allUnresolved       bool
 }
 
 func (s *variableScope) get(name string, budget *expressionBudget) variableValue {
@@ -427,11 +471,11 @@ func (s *variableScope) get(name string, budget *expressionBudget) variableValue
 		if !budget.charge(1) {
 			return variableValue{status: valueUnsupported}
 		}
+		if s.allUnresolved {
+			return variableValue{status: valueUnsupported}
+		}
 		if v, ok := s.values[name]; ok {
 			return v
-		}
-		if _, ok := s.unresolved[name]; ok {
-			return variableValue{status: valueUnsupported}
 		}
 	}
 	return variableValue{status: valueInvalid}
@@ -444,6 +488,9 @@ func (s *variableScope) colourSchemeDependent(name string, budget *expressionBud
 			// colour-scheme dependent, so preserve the uncertainty.
 			return true
 		}
+		if s.allUnresolved {
+			return true
+		}
 		if dependent, ok := s.colourDependent[name]; ok {
 			return dependent
 		}
@@ -451,15 +498,11 @@ func (s *variableScope) colourSchemeDependent(name string, budget *expressionBud
 	return false
 }
 
-func unresolvedVariableScope(parent *variableScope, defs map[string]candidate, alternate map[string]bool) *variableScope {
-	dependent := make(map[string]bool, len(defs)+len(alternate))
-	for name := range defs {
-		dependent[name] = true
-	}
-	for name := range alternate {
-		dependent[name] = true
-	}
-	return &variableScope{parent: parent, unresolved: defs, colourDependent: dependent, hasColourDependency: len(dependent) > 0}
+func unresolvedVariableScope(parent *variableScope) *variableScope {
+	// Once variable evaluation has been abandoned, treating every lookup as
+	// unresolved is conservative and avoids copying an attacker-sized set of
+	// property names on the resource-exhaustion path.
+	return &variableScope{parent: parent, hasColourDependency: true, allUnresolved: true}
 }
 
 // buildLiteralVariables handles scopes whose winning custom properties cannot
@@ -475,7 +518,7 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 		}
 	}
 	if !budget.charge(len(defs)) {
-		return unresolvedVariableScope(parent, defs, alternate), true
+		return unresolvedVariableScope(parent), true
 	}
 	s := &variableScope{parent: parent, values: make(map[string]variableValue, len(defs))}
 	for name, definition := range defs {
@@ -493,7 +536,7 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 		}
 		s.values[name] = value
 		if budget.exhausted {
-			return unresolvedVariableScope(parent, defs, alternate), true
+			return unresolvedVariableScope(parent), true
 		}
 	}
 
@@ -503,7 +546,7 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 		return s, true
 	}
 	if !budget.charge(len(defs) + len(alternate)) {
-		return unresolvedVariableScope(parent, defs, alternate), true
+		return unresolvedVariableScope(parent), true
 	}
 	s.colourDependent = make(map[string]bool, len(defs)+len(alternate))
 	for name := range alternate {
@@ -528,7 +571,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		return parent
 	}
 	if len(defs)+len(alternate) > 1024 || !budget.charge(len(defs)+len(alternate)) {
-		return unresolvedVariableScope(parent, defs, alternate)
+		return unresolvedVariableScope(parent)
 	}
 	if scope, ok := buildLiteralVariables(parent, defs, alternate, budget); ok {
 		return scope
@@ -539,7 +582,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		ordered = append(ordered, n)
 	}
 	if !budget.charge(variableSortWork(len(ordered))) {
-		return unresolvedVariableScope(parent, defs, alternate)
+		return unresolvedVariableScope(parent)
 	}
 	sort.Strings(ordered)
 	tokens := map[string][]valueToken{}
@@ -598,7 +641,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	for _, n := range ordered {
 		visit(n, 0)
 		if budget.exhausted {
-			return unresolvedVariableScope(parent, defs, alternate)
+			return unresolvedVariableScope(parent)
 		}
 	}
 	for n := range cyclic {
@@ -635,7 +678,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	for _, n := range ordered {
 		resolveName(n, 0)
 		if budget.exhausted {
-			return unresolvedVariableScope(parent, defs, alternate)
+			return unresolvedVariableScope(parent)
 		}
 	}
 	if len(alternate) == 0 && (parent == nil || !parent.hasColourDependency) {

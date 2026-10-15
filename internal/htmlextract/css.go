@@ -72,6 +72,14 @@ const (
 
 var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "line-height", "overflow-x", "overflow-y", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "letter-spacing", "word-spacing", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
 
+const (
+	// valueToken occupies 24 bytes on supported 64-bit platforms before its
+	// string data. Token-dense custom properties can otherwise expand admitted
+	// CSS into a much larger retained representation.
+	retainedTokenBytesEstimate = int64(24)
+	retainedTokenBudgetFactor  = int64(8)
+)
+
 // A declaration progresses through these preparation states:
 //
 //   - tokensReady makes valueTokens and valueStatus meaningful. A false value
@@ -205,6 +213,54 @@ func prepareDeclarations(ds []declaration) []declaration {
 	return ds
 }
 
+func retainedTokenBytes(tokens []valueToken) int64 {
+	bytes := int64(cap(tokens)) * retainedTokenBytesEstimate
+	for _, token := range tokens {
+		bytes += int64(len(token.raw))
+	}
+	return bytes
+}
+
+func (s *sheet) retainedTokenBudget() int64 {
+	cssBytes := int64(s.limits.CSSBytes)
+	if cssBytes > maxMatchWork/retainedTokenBudgetFactor {
+		return maxMatchWork
+	}
+	return cssBytes * retainedTokenBudgetFactor
+}
+
+func (s *sheet) prepareDeclaration(d declaration) declaration {
+	if s.workIncomplete {
+		d.valueTokens = nil
+		d.tokensReady = false
+		d.variableDependencies = nil
+		d.dependenciesReady = false
+		return d
+	}
+	d = prepareDeclaration(d)
+	cost := retainedTokenBytes(d.valueTokens)
+	budget := s.retainedTokenBudget()
+	if cost > budget-s.retainedTokenBytes {
+		s.workIncomplete = true
+		// Do not retain the declaration that crossed the limit. Earlier token
+		// streams remain bounded by the budget and are released with the sheet.
+		d.valueTokens = nil
+		d.tokensReady = false
+		d.variableDependencies = nil
+		d.dependenciesReady = false
+		return d
+	}
+	s.retainedTokenBytes += cost
+	return d
+}
+
+func (s *sheet) prepareDeclarations(ds []declaration) []declaration {
+	for i := range ds {
+		ds[i] = s.prepareDeclaration(ds[i])
+	}
+	return ds
+}
+
 type rule struct {
 	plans                        []selectorPlan
 	decls                        []declaration
@@ -224,6 +280,7 @@ type sheetRuntime struct {
 	candidateMarks      []uint32
 	candidateGeneration uint32
 	ancestorNodes       []*html.Node
+	ancestorRecent      []ancestorStateEntry
 	ancestorStates      []map[*html.Node]ancestorChainState
 	activeAncestors     activeAncestorBuckets
 	variableScratch     map[string]candidate
@@ -242,6 +299,7 @@ type sheet struct {
 	conditionDepth       int
 	index                selectorIndex
 	cssBytes             int
+	retainedTokenBytes   int64
 	mediaConditions      map[string]mediaCondition
 	importDepth          int
 	keyframeNames        map[string]struct{}
@@ -270,7 +328,7 @@ func (s *sheet) admitCSS(text string, inline bool) (admitted, malformed bool) {
 	if !s.chargePlanningBytes(len(text)) {
 		return false, false
 	}
-	preflight := inspectCSSConstructs(text, inline, s.limits.CSSConstructBytes, s.limits.CSSConstructTokens)
+	preflight := inspectCSSConstructs(text, inline, s.limits.CSSConstructBytes, s.limits.CSSConstructTokens, s.limits.Depth)
 	if preflight == cssPreflightLimitExceeded {
 		if inline {
 			// A style attribute cannot affect elements outside its subtree. Count
@@ -373,9 +431,29 @@ func hasTopLevelCSSBlock(tokens []css.Token) bool {
 	return false
 }
 
+func hasCSSToken(tokens []css.Token, kind css.TokenType) bool {
+	for _, token := range tokens {
+		if token.TokenType == kind {
+			return true
+		}
+	}
+	return false
+}
+
 func cssNestingGroup(name string) bool {
 	switch asciiLower(name) {
 	case "@media", "@supports", "@container", "@layer", "@scope", "@starting-style":
+		return true
+	}
+	return false
+}
+
+// tdewolff exposes the bodies of these rule-bearing at-rules as opaque token
+// streams. Their nested selectors therefore cannot be evaluated here even
+// though supporting clients may apply them.
+func opaqueRuleBearingAtRule(name string) bool {
+	switch asciiLower(name) {
+	case "@container", "@scope", "@starting-style":
 		return true
 	}
 	return false
@@ -747,7 +825,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 		d.valueTokens = parsed.tokens
 		d.valueStatus = parsed.status
 		d.tokensReady = tokensReady
-		return prepareDeclaration(d)
+		return s.prepareDeclaration(d)
 	}
 	s.order++
 	if custom {
@@ -760,7 +838,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 		// cascade.
 		return []declaration{prepared(declaration{
 			prop: animationProperty, value: value, important: imp, order: s.order,
-			shorthand: true, animationShorthand: prop == "animation",
+			shorthand: true, animationShorthand: prop == "animation", unsupported: parsed.unsafeIdentifier,
 		})}
 	}
 	if prop == "margin" {
@@ -777,7 +855,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 				unsupported: uncertain || parsed.status == valueUnsupported || parsed.unsafeIdentifier,
 				valueTokens: componentTokens, valueStatus: componentStatus, tokensReady: true,
 			}
-			out = append(out, prepareDeclaration(d))
+			out = append(out, s.prepareDeclaration(d))
 		}
 		return out
 	}
@@ -796,15 +874,9 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 			if !uncertain {
 				d.value = values[i]
 			}
-			out = append(out, prepareDeclaration(d))
+			out = append(out, s.prepareDeclaration(d))
 		}
 		return out
-	}
-	// None of the tracked property grammars accepts an arbitrary identifier.
-	// If decoding it would change its token type or boundaries, it cannot be a
-	// supported keyword and the browser will reject the declaration.
-	if parsed.unsafeWithoutFunction {
-		return nil
 	}
 	for p, n := range names {
 		if n == prop {
@@ -813,7 +885,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	}
 	if prop == "background" {
 		if len(value) > maxValueBytes {
-			return prepareDeclarations([]declaration{
+			return s.prepareDeclarations([]declaration{
 				{prop: background, value: value, important: imp, order: s.order, unsupported: true},
 				{prop: backgroundImage, value: value, important: imp, order: s.order, unsupported: true},
 			})
@@ -830,7 +902,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 				prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true}),
 			}
 		}
-		return prepareDeclarations(backgroundDeclarationsTokens(asciiLower(value), parsed.tokens, parsed.status, imp, s.order))
+		return s.prepareDeclarations(backgroundDeclarationsTokens(asciiLower(value), parsed.tokens, parsed.status, imp, s.order))
 	}
 	if prop == "mask" {
 		return []declaration{prepared(declaration{prop: maskImage, value: value, important: imp, order: s.order, unsupported: true})}
@@ -848,6 +920,14 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 			out = append(out, prepared(declaration{prop: p, value: value, important: imp, order: s.order, unsupported: true}))
 		}
 		return out
+	}
+	// Decoding an escaped identifier can change its token type or boundaries.
+	// Standards-based clients reject those values, but legacy clients also use
+	// this syntax for compatibility hacks such as display:none\9. Preserve the
+	// uncertainty for tracked properties above; unrelated properties remain
+	// irrelevant to the visibility model.
+	if parsed.unsafeWithoutFunction {
+		return nil
 	}
 	return nil
 }
@@ -989,6 +1069,14 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 				if inline && conditions != nil {
 					return cssParseResult{declarations: out, incomplete: true}
 				}
+				// A stray right brace in a qualified-rule prelude can make
+				// tdewolff silently pop its enclosing at-rule state without
+				// emitting EndAtRuleGrammar. Its reported tokenType is whitespace,
+				// but the brace remains in Values. Do not retain our now-stale
+				// condition frame and misclassify later top-level rules.
+				if !inline && conditions != nil && hasCSSToken(values, css.RightBraceToken) {
+					return cssParseResult{declarations: out, incomplete: true}
+				}
 				// tdewolff's declaration recovery decrements its nesting level for
 				// an unmatched ')' or ']'. The level then remains negative, so the
 				// recovery routine can consume later declarations or the rest of
@@ -1002,6 +1090,9 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			return cssParseResult{declarations: out}
 		case css.BeginAtRuleGrammar:
 			importsAllowed = false
+			if !inline && opaqueRuleBearingAtRule(string(data)) {
+				s.unresolvedStylesheet = true
+			}
 			// Descriptor declarations inside @page, @font-face and similar
 			// blocks never belong to an enclosing qualified rule. Clear the
 			// active rule before tdewolff emits the block's declarations so
@@ -1122,7 +1213,7 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			if !s.chargePlanningTokens(values) {
 				return cssParseResult{declarations: out}
 			}
-			prop := normalizeDeclarationProperty(string(data))
+			prop, propertySafe := compatibility.declarationProperty(string(data), grammarStart, grammarEnd)
 			insideNestedGroup := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
 			if !inline && rulesetDepth > 0 && g != css.CustomPropertyGrammar && (hasTopLevelCSSBlock(values) || (current < 0 && insideNestedGroup)) {
 				s.noteUnsupportedNesting()
@@ -1131,6 +1222,9 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			applicable := (inline && conditions == nil) || (!inline && current >= 0)
 			if !applicable || !relevantNormalizedDeclarationProperty(prop) {
 				continue
+			}
+			if !propertySafe {
+				return cssParseResult{declarations: out, incomplete: true}
 			}
 			vals := rawTokenString(values)
 			var declarations []declaration

@@ -164,7 +164,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 				f.selectorPath.attributes = max(f.selectorPath.attributes, selectorCurrent.attributes)
 				selectorContext := selectorMatchContext{
 					current: selectorCurrent, path: f.selectorPath, document: r.document.attributeWork,
-					depth: len(r.frames) - 1, nodes: r.document.nodeCount,
+					depth: len(r.frames) - 1, nodes: r.document.nodeCount, elements: r.document.elements,
 				}
 				parentStyle := &r.styleStack[f.styleIndex]
 				var resolved elementStyleResult

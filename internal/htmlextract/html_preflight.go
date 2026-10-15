@@ -17,10 +17,11 @@ func void(n string) bool {
 }
 
 func foreignBreakout(n string) bool {
-	// HTML start tags that end ordinary SVG/MathML foreign-content parsing.
-	// Treat font conservatively as a breakout without inspecting its attributes.
+	// HTML start tags that unconditionally end ordinary SVG/MathML
+	// foreign-content parsing. Font is conditional and handled after its
+	// attributes have been inspected.
 	switch n {
-	case "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt", "em", "embed", "font", "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing", "menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup", "table", "tt", "u", "ul", "var":
+	case "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt", "em", "embed", "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing", "menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup", "table", "tt", "u", "ul", "var":
 		return true
 	default:
 		return false
@@ -28,14 +29,24 @@ func foreignBreakout(n string) bool {
 }
 
 type lexicalFrame struct {
-	name         string
-	foreign      bool
-	htmlChildren bool
+	name             string
+	foreign          bool
+	htmlChildren     bool
+	mathNamespace    bool
+	mathTextChildren bool
 	// Foreign-content recovery can leave the lexical and allocating stacks
 	// different. Such a frame cannot justify a later implicit closure.
 	uncertain        bool
 	formatting       *preflightFormatting
 	formattingMarker *preflightFormattingScope
+}
+
+func mathMLTextIntegrationName(name string) bool {
+	switch name {
+	case "mi", "mo", "mn", "ms", "mtext":
+		return true
+	}
+	return false
 }
 
 // measurePreflight bounds explicit lexical nesting before the HTML5 tree builder
@@ -200,6 +211,9 @@ func PreflightWithStop(input []byte, limits Limits, shouldStop func() bool) erro
 }
 
 func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexicalUsage, error) {
+	if err := preflightStartTagAttributes(b, max(l.Attributes, sourceAttributeGuardFloor), shouldStop); err != nil {
+		return lexicalUsage{}, err
+	}
 	z := html.NewTokenizer(bytes.NewReader(b))
 	var stack []lexicalFrame
 	open := make(map[string]int)
@@ -271,11 +285,16 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 		n := string(raw)
 		allocations.uncertainInsertionMode(n)
 		attributes := 0
+		fontBreakout := false
 		if t == html.StartTagToken || t == html.SelfClosingTagToken {
 			for more {
-				_, _, more = z.TagAttr()
+				key, _, next := z.TagAttr()
+				more = next
 				usage.attributes++
 				attributes++
+				if n == "font" && (bytes.Equal(key, []byte("color")) || bytes.Equal(key, []byte("face")) || bytes.Equal(key, []byte("size"))) {
+					fontBreakout = true
+				}
 				if usage.attributes&255 == 0 && shouldStop != nil && shouldStop() {
 					return usage, errStopped
 				}
@@ -320,13 +339,19 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 		}
 
 		parentForeign := len(stack) > 0 && stack[len(stack)-1].foreign && !stack[len(stack)-1].htmlChildren
+		// MathML text integration points process ordinary child start tags in
+		// HTML mode. mglyph and malignmark are the two specified exceptions and
+		// remain in the MathML namespace.
+		if parentForeign && stack[len(stack)-1].mathTextChildren && n != "mglyph" && n != "malignmark" {
+			parentForeign = false
+		}
 		foreignBreakoutToken := false
-		if parentForeign && foreignBreakout(n) {
+		if parentForeign && (foreignBreakout(n) || n == "font" && fontBreakout) {
 			allocations.uncertain = true
 			// The HTML tree builder pops ordinary foreign elements and
 			// reprocesses this token in HTML mode.
 			keep := len(stack)
-			for keep > 0 && stack[keep-1].foreign && !stack[keep-1].htmlChildren {
+			for keep > 0 && stack[keep-1].foreign && !stack[keep-1].htmlChildren && !stack[keep-1].mathTextChildren {
 				keep--
 			}
 			popTo(keep, "", false)
@@ -340,6 +365,12 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 			foreignBreakoutToken = true
 		}
 		foreign := parentForeign || n == "svg" || n == "math"
+		mathNamespace := false
+		if parentForeign {
+			mathNamespace = stack[len(stack)-1].mathNamespace
+		} else if n == "math" {
+			mathNamespace = true
+		}
 		if n == "a" || n == "nobr" {
 			if err := allocations.endFormatting(n, stack); err != nil {
 				return usage, err
@@ -385,9 +416,11 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 			continue
 		}
 		frame := lexicalFrame{
-			name:         n,
-			foreign:      foreign,
-			htmlChildren: foreign && (n == "foreignobject" || n == "desc" || n == "title"),
+			name:             n,
+			foreign:          foreign,
+			htmlChildren:     foreign && !mathNamespace && (n == "foreignobject" || n == "desc" || n == "title"),
+			mathNamespace:    mathNamespace,
+			mathTextChildren: mathNamespace && mathMLTextIntegrationName(n),
 		}
 		// Track possible HTML formatting in foreign content too. Integration
 		// and recovery can disagree with the conservative lexical namespace;
