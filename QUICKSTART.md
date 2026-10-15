@@ -32,12 +32,14 @@ configuration, security, testing, and maintenance information.
    sudo ./install.sh
    ```
 
-3. Configure the AI service in `/etc/milterguard/milterguard.yaml`. A compatible
-   locally hosted service is recommended, but the supplied configuration works
-   with OpenRouter after adding an [OpenRouter API key](https://openrouter.ai)
-   to `ai.api_key`. For another hosted service or a local AI server, configure
-   the endpoint URL, endpoint type, model name, and API key. If the local server
-   does not require authentication, use a non-empty placeholder key.
+3. Configure the AI service in `/etc/milterguard/milterguard.yaml`. You can use
+   a compatible hosted service or a local AI server. The supplied configuration
+   works with OpenRouter after adding an
+   [OpenRouter API key](https://openrouter.ai) to `ai.api_key`. For another
+   service, configure the endpoint URL, endpoint type, model name, and API key.
+   If the local server does not require authentication, use a non-empty
+   placeholder key. See [Running AI locally](OPERATING_GUIDE.md#running-ai-locally)
+   for local setup guidance.
 
 4. Validate the configuration:
 
