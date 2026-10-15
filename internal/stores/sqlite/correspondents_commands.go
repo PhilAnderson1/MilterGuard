@@ -21,6 +21,11 @@ func (r *correspondentRepository) AddManual(ctx context.Context, sender, recipie
 	now := r.now().UTC()
 	created := false
 	err := r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		// An explicit address allow supersedes only the matching recipient's
+		// exact-mailbox block. Domain and server-wide blocks remain in force.
+		if err := deleteExactSenderBlocksTx(ctx, tx, recipient, []string{sender}); err != nil {
+			return err
+		}
 		var exists int
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM correspondents
 			WHERE local_address = ? AND correspondent = ?)`, recipient, sender).Scan(&exists); err != nil {

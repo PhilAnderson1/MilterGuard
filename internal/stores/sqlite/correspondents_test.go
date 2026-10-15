@@ -196,6 +196,80 @@ func TestAddManualCreatesAndConvertsExistingCorrespondents(t *testing.T) {
 	}
 }
 
+func TestAddManualRemovesOnlyMatchingRecipientExactBlock(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	database := testCorrespondentDatabase(t, filepath.Join(t.TempDir(), "milterguard.db"))
+	correspondents := newCorrespondentRepository(CorrespondentOptions{UseAllowlist: true, MaxEntries: 10}, database, nil)
+	blocks := NewSenderBlocklist(database, SenderBlocklistOptions{Expiry: 24 * time.Hour, MaxEntries: 10, Now: func() time.Time { return now }})
+	for _, entry := range []stores.SenderBlockEntry{
+		{Recipient: "owner@example.com", SenderKind: stores.SenderBlockExactMailbox, SenderValue: "sender@example.net"},
+		{Recipient: "other@example.com", SenderKind: stores.SenderBlockExactMailbox, SenderValue: "sender@example.net"},
+		{Recipient: "*", SenderKind: stores.SenderBlockExactMailbox, SenderValue: "sender@example.net"},
+		{Recipient: "owner@example.com", SenderKind: stores.SenderBlockDomain, SenderValue: "example.net"},
+	} {
+		if _, _, err := blocks.AddSenderBlock(context.Background(), entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := correspondents.AddManual(context.Background(), "Sender@Example.NET", "Owner@Example.COM"); err != nil {
+		t.Fatal(err)
+	}
+	page, err := blocks.ListSenderBlocks(context.Background(), stores.SenderBlockListQuery{
+		Recipients: stores.RecipientScope{All: true}, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Entries) != 3 {
+		t.Fatalf("remaining blocks = %+v", page.Entries)
+	}
+	for _, entry := range page.Entries {
+		if entry.Recipient == "owner@example.com" && entry.SenderKind == stores.SenderBlockExactMailbox {
+			t.Fatalf("matching exact block was retained: %+v", entry)
+		}
+	}
+}
+
+func TestLearnAuthenticatedRemovesRecipientExactBlocks(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	database := testCorrespondentDatabase(t, filepath.Join(t.TempDir(), "milterguard.db"))
+	correspondents := newCorrespondentRepository(CorrespondentOptions{
+		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: stores.CorrespondentScopePerSender, MaxEntries: 10,
+	}, database, nil)
+	blocks := NewSenderBlocklist(database, SenderBlocklistOptions{Expiry: 24 * time.Hour, MaxEntries: 10, Now: func() time.Time { return now }})
+	for _, entry := range []stores.SenderBlockEntry{
+		{Recipient: "owner@example.com", SenderKind: stores.SenderBlockExactMailbox, SenderValue: "first@example.net"},
+		{Recipient: "owner@example.com", SenderKind: stores.SenderBlockExactMailbox, SenderValue: "second@example.net"},
+		{Recipient: "*", SenderKind: stores.SenderBlockExactMailbox, SenderValue: "first@example.net"},
+		{Recipient: "owner@example.com", SenderKind: stores.SenderBlockDomain, SenderValue: "example.net"},
+	} {
+		if _, _, err := blocks.AddSenderBlock(context.Background(), entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := correspondents.LearnAuthenticated(context.Background(), "Owner@Example.COM", []string{
+		"First@Example.NET", "second@example.net",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := blocks.ListSenderBlocks(context.Background(), stores.SenderBlockListQuery{
+		Recipients: stores.RecipientScope{All: true}, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Entries) != 2 {
+		t.Fatalf("remaining blocks = %+v", page.Entries)
+	}
+	for _, entry := range page.Entries {
+		if entry.Recipient == "owner@example.com" && entry.SenderKind == stores.SenderBlockExactMailbox {
+			t.Fatalf("outbound recipient's exact block was retained: %+v", entry)
+		}
+	}
+}
+
 func TestDeleteCorrespondentHonorsRecipientScope(t *testing.T) {
 	store := newTestCorrespondentRepository(t, CorrespondentOptions{UseAllowlist: true, MaxEntries: 10}, nil)
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)

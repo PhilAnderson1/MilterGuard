@@ -70,6 +70,11 @@ func (r *senderBlocklistRepository) AddSenderBlock(ctx context.Context, entry st
 	created := false
 	var id int64
 	err = r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		if entry.SenderKind == stores.SenderBlockExactMailbox {
+			if err := deleteCorrespondentsForExactBlockTx(ctx, tx, entry.Recipient, entry.SenderValue); err != nil {
+				return err
+			}
+		}
 		err := tx.QueryRowContext(ctx, `SELECT id FROM sender_blocklist
 			WHERE recipient=? AND sender_kind=? AND sender_value=?`, entry.Recipient, entry.SenderKind, entry.SenderValue).Scan(&id)
 		if err != nil && err != sql.ErrNoRows {

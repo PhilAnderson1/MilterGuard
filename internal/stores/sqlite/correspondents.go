@@ -80,6 +80,12 @@ func (r *correspondentRepository) LearnAuthenticated(ctx context.Context, localA
 	added := 0
 	err := r.db.WithTx(ctx, nil, func(tx *sql.Tx) error {
 		added = 0
+		// Sending authenticated mail to an exact-blocked correspondent is an
+		// explicit reversal of that local sender's block. Domain and server-wide
+		// blocks are intentionally unaffected.
+		if err := deleteExactSenderBlocksTx(ctx, tx, localAddress, recipients); err != nil {
+			return err
+		}
 		if cutoff, enabled := r.staleCutoff(now); enabled {
 			args := append(append([]any{}, targetArgs...), cutoff)
 			if _, err := tx.ExecContext(ctx, `DELETE FROM correspondents WHERE `+target+` AND last_activity_at_ms < ?`, args...); err != nil {

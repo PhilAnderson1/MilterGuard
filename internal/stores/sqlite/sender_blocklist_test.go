@@ -166,3 +166,55 @@ func TestSenderBlocklistDeleteIsExactToScopeAndPattern(t *testing.T) {
 		t.Fatalf("bulk delete = %d, %v", removed, err)
 	}
 }
+
+func TestExactSenderBlockRemovesConflictingCorrespondents(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	database := testCorrespondentDatabase(t, filepath.Join(t.TempDir(), "milterguard.db"))
+	correspondents := newCorrespondentRepository(CorrespondentOptions{UseAllowlist: true, MaxEntries: 10}, database, nil)
+	blocks := NewSenderBlocklist(database, SenderBlocklistOptions{Expiry: 24 * time.Hour, MaxEntries: 10, Now: func() time.Time { return now }})
+	for _, recipient := range []string{"first@example.com", "second@example.com"} {
+		if _, err := correspondents.AddManual(context.Background(), "sender@example.net", recipient); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, _, err := blocks.AddSenderBlock(context.Background(), stores.SenderBlockEntry{
+		Recipient: "first@example.com", SenderKind: stores.SenderBlockExactMailbox, SenderValue: "sender@example.net",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records := correspondentSnapshot(t, correspondents)
+	if _, found := records["first@example.com\x00sender@example.net"]; found {
+		t.Fatal("recipient-specific block retained the conflicting correspondent")
+	}
+	if _, found := records["second@example.com\x00sender@example.net"]; !found {
+		t.Fatal("recipient-specific block removed another recipient's correspondent")
+	}
+
+	if _, _, err := blocks.AddSenderBlock(context.Background(), stores.SenderBlockEntry{
+		Recipient: "*", SenderKind: stores.SenderBlockExactMailbox, SenderValue: "sender@example.net",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if records := correspondentSnapshot(t, correspondents); len(records) != 0 {
+		t.Fatalf("server-wide exact block retained correspondents: %+v", records)
+	}
+}
+
+func TestDomainSenderBlockPreservesExactCorrespondents(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	database := testCorrespondentDatabase(t, filepath.Join(t.TempDir(), "milterguard.db"))
+	correspondents := newCorrespondentRepository(CorrespondentOptions{UseAllowlist: true, MaxEntries: 10}, database, nil)
+	blocks := NewSenderBlocklist(database, SenderBlocklistOptions{Expiry: 24 * time.Hour, MaxEntries: 10, Now: func() time.Time { return now }})
+	if _, err := correspondents.AddManual(context.Background(), "sender@example.net", "owner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := blocks.AddSenderBlock(context.Background(), stores.SenderBlockEntry{
+		Recipient: "owner@example.com", SenderKind: stores.SenderBlockDomain, SenderValue: "example.net",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if records := correspondentSnapshot(t, correspondents); len(records) != 1 {
+		t.Fatalf("domain block removed exact correspondent: %+v", records)
+	}
+}

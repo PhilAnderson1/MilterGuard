@@ -27,10 +27,11 @@ For initial installation and activation, follow the
 7. [Basic virus protection](#basic-virus-protection)
 8. [Rejection history and saved messages](#rejection-history-and-saved-messages)
 9. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
-10. [Administration commands](#administration-commands)
-11. [Routine operation](#routine-operation)
-12. [Replay saved email](#replay-saved-email)
-13. [Remove MilterGuard](#remove-milterguard)
+10. [Running AI locally](#running-ai-locally)
+11. [Administration commands](#administration-commands)
+12. [Routine operation](#routine-operation)
+13. [Replay saved email](#replay-saved-email)
+14. [Remove MilterGuard](#remove-milterguard)
 
 ## Configure the AI service
 
@@ -38,54 +39,25 @@ MilterGuard's configuration file is `/etc/milterguard/milterguard.yaml`.
 Edit it before starting the service, preserving its YAML indentation and using
 spaces rather than tabs.
 
-MilterGuard works with a range of third-party AI API providers as well as
-locally hosted models. Running the model locally provides greater privacy,
-reliability, and consistency, with no per-request API charges, so it is the
-recommended option.
+MilterGuard supports hosted AI services and locally run models through a
+compatible API. Hosted services avoid the need to operate inference hardware;
+local models give you control over model versions and keep message analysis on
+your own systems. Choose the option that suits your privacy, cost and
+operational requirements. For local setup guidance, see
+[Running AI locally](#running-ai-locally).
 
-### Running AI locally
+### Endpoint and model settings
 
-The recommended Qwen3.6-35B-A3B model provides strong results with relatively
-modest hardware requirements. A system with an 8 GB GPU, such as an RTX 4060,
-and 32 GB of system RAM should work well with a suitable quantization and
-configuration.
+MilterGuard supports compatible services including OpenRouter, OpenAI, and
+llama.cpp. Set `endpoint`, `endpoint_type`, `model`, and `api_key` to match the
+service. The selected model must support image input if image analysis is
+enabled.
 
-The model is available from:
-
-https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF
-
-Choose the largest quantization that fits comfortably within the available GPU
-and system memory. Quantizations below 4-bit may reduce classification quality
-and are not recommended. This practical guide explains how to run the model
-efficiently with limited GPU memory:
-
-https://piefed.crash.cx/c/localllama/p/123973/how-to-run-qwen-35b-a3b-on-4gb-to-8gb-of-vram-with-24-gb-system-ram
-
-Serve the model through llama.cpp:
-
-https://github.com/ggml-org/llama.cpp
-
-Set MilterGuard's AI timeout high enough for the slowest messages and image
-analysis, and keep the MTA's Milter timeout longer than the AI timeout. Start
-with `ai.max_concurrent: 2`, then increase it only if the server can handle
-additional requests without excessive memory use or response times.
-
-Before using a local model on live mail, follow [Replay saved email](#replay-saved-email)
-to check its classification accuracy and response time against representative
-legitimate, spam, and scam messages.
-
-### Hosted and other compatible services
-
-To use OpenRouter instead, create an account and API key at
+For example, to use OpenRouter, create an account and API key at
 https://openrouter.ai. The supplied configuration already contains the necessary
 OpenRouter settings; replace the placeholder `ai.api_key` with your key. If the
 configured model is no longer available, select a current compatible model and
 test it before enabling rejection.
-
-MilterGuard also supports OpenAI-compatible services, including OpenAI and
-llama.cpp. Set `endpoint`, `endpoint_type`, `model`, and `api_key` to match the
-service. The selected model must support image input if image analysis is
-enabled.
 
 Set `ai.input_cost_per_million_tokens` and
 `ai.output_cost_per_million_tokens` to the selected model's USD prices if you
@@ -392,7 +364,10 @@ endpoint:
 
 - Authenticated SMTP submissions bypass AI analysis when
   `filtering.scan_authenticated` is `false`, as it is in the supplied
-  configuration so that outbound emails can bypass scanning.
+  configuration so that outbound emails can bypass scanning. When authenticated
+  outbound-recipient learning is enabled, sending to an address also removes a
+  recipient-specific exact-address block before adding or refreshing the
+  correspondent. Domain and server-wide blocks remain in force.
 - A sender in the correspondent allowlist can be accepted without AI analysis
   when the configured authentication requirements are met. By default, this
   requires an aligned SPF or DKIM pass for the visible `From:` domain.
@@ -610,6 +585,37 @@ but only after the hostname has been forward-resolved back to the connecting IP.
 This protects shared mail providers without allowing a forged PTR record to
 bypass reputation handling.
 
+## Running AI locally
+
+The recommended Qwen3.6-35B-A3B model provides strong results with relatively
+modest hardware requirements. A system with an 8 GB GPU, such as an RTX 4060,
+and 32 GB of system RAM should work well with a suitable quantization and
+configuration.
+
+The model is available from:
+
+https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF
+
+Choose the largest quantization that fits comfortably within the available GPU
+and system memory. Quantizations below 4-bit may reduce classification quality
+and are not recommended. This practical guide explains how to run the model
+efficiently with limited GPU memory:
+
+https://piefed.crash.cx/c/localllama/p/123973/how-to-run-qwen-35b-a3b-on-4gb-to-8gb-of-vram-with-24-gb-system-ram
+
+Serve the model through llama.cpp:
+
+https://github.com/ggml-org/llama.cpp
+
+Set MilterGuard's AI timeout high enough for the slowest messages and image
+analysis, and keep the MTA's Milter timeout longer than the AI timeout. Start
+with `ai.max_concurrent: 2`, then increase it only if the server can handle
+additional requests without excessive memory use or response times.
+
+Before using a local model on live mail, follow [Replay saved email](#replay-saved-email)
+to check its classification accuracy and response time against representative
+legitimate, spam, and scam messages.
+
 ## Administration commands
 
 ### Command line
@@ -659,13 +665,17 @@ EXIT
   deliveries. HTML/CSS CPU-limit decisions have their own protection category
   and are not counted as AI scans. It is restricted to administrators.
 - `WHITELIST ADD`, `WHITELIST DELETE`, and `WHITELIST LIST` manage trusted
-  correspondent addresses.
+  correspondent addresses. Adding an address removes an exact-address block
+  for the same recipient. It does not override a domain or server-wide block.
 - `BLOCKLIST ADD`, `BLOCKLIST DELETE`, and `BLOCKLIST LIST` manage manual
   visible-sender blocks. A sender pattern is either one exact mailbox or
   `*@example.com`; arbitrary wildcards are not supported. Command-line
   additions and deletions require an explicit scope. For mutations, `*`
   identifies the server-wide entry. Administrators can use `ALL` with
   `BLOCKLIST DELETE` to remove the matching pattern from every recipient scope.
+  Adding an exact-address block removes the corresponding trusted relationship
+  for that recipient; a server-wide exact-address block removes it for every
+  recipient.
 - `REJECTIONS` lists rejected messages, including their rejection IDs and
   reasons.
 - `REJECTION <id>` displays the rejection information and decoded, cleaned

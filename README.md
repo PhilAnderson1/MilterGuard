@@ -8,13 +8,9 @@
 
 [![CI](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml)
 
-MilterGuard is an AI-first spam and scam filter for Postfix, built from the
-ground up to assess email through its meaning, intent and context. It combines
-message content with connection details, verified sender authentication and
-HTML visibility evidence to help an AI model judge whether the contact is
-legitimate or unwanted. Run it with a local model or a compatible hosted AI
-service. It is also designed to work with other MTAs that support the Sendmail
-Milter protocol.
+MilterGuard is an AI-first spam and scam filter for Postfix that assesses email
+by meaning, intent and context. It works with local or hosted AI models and is
+designed to support other Milter-compatible mail servers.
 
 [Quick start](QUICKSTART.md) · [Operating guide](OPERATING_GUIDE.md) · [Latest release](https://github.com/PhilAnderson1/MilterGuard/releases/latest)
 
@@ -58,9 +54,8 @@ MilterGuard requires:
 
 - A Linux mail server whose MTA supports the Sendmail Milter protocol. Postfix
   is tested and documented.
-- Access to a suitable `v1/chat/completions` AI endpoint. Running the AI model
-  locally is recommended, but MilterGuard also supports hosted services such as
-  OpenRouter and OpenAI.
+- Access to a suitable `v1/chat/completions` AI endpoint, using a local model
+  or a hosted service such as OpenRouter or OpenAI.
 
 ## Install
 
