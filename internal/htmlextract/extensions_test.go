@@ -954,6 +954,80 @@ func TestMSODownlevelRevealedContentIsClientDependent(t *testing.T) {
 	}
 }
 
+func TestMSODownlevelRevealedConditionEvaluation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		condition string
+		universal bool
+	}{
+		{"mso", `mso`, true},
+		{"minimum supported version", `gte mso 9`, true},
+		{"common wrapper", `(gte mso 9)|(IE)`, true},
+		{"case insensitive", `(GTE MSO 9)|(ie)`, true},
+		{"not mso", `!mso`, false},
+		{"conjunction", `!mso & !IE`, false},
+		{"obsolete version", `lte mso 8`, false},
+		{"version dependent", `gte mso 16`, false},
+		{"IE dependent", `IE`, false},
+		{"unsupported", `mso && future`, false},
+		{"unbalanced", `(mso`, false},
+		{"over byte limit", strings.Repeat("!", maxMSOConditionBytes) + `mso`, false},
+		{"over depth limit", strings.Repeat("(", maxMSOConditionDepth+1) + `mso` + strings.Repeat(")", maxMSOConditionDepth+1), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := msoConditionAlwaysTrue(test.condition); got != test.universal {
+				t.Fatalf("msoConditionAlwaysTrue(%q) = %t, want %t", test.condition, got, test.universal)
+			}
+		})
+	}
+}
+
+func TestMSODownlevelRevealedPredicatesControlConfidence(t *testing.T) {
+	for _, test := range []struct {
+		name, condition, want string
+	}{
+		{"conjunction", `!mso & !IE`, "unknown"},
+		{"obsolete version", `lte mso 8`, "unknown"},
+		{"version dependent", `gte mso 16`, "unknown"},
+		{"unparseable", `mso && future`, "unknown"},
+		{"always true", `(gte mso 9)|(IE)`, "visible"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := `<!--[if ` + test.condition + `]><!--><p>Conditional</p><!--<![endif]-->`
+			document := inspectHTML(t, source)
+			if got := findText(t, document, "Conditional").Label; got != test.want {
+				t.Fatalf("label = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestMSODownlevelRevealedFosteredTextMakesDocumentUncertain(t *testing.T) {
+	document := inspectHTML(t, `<p>Legit notice</p><table><!--[if !mso]><!-->APPROVE WIRE TRANSFER NOW<!--<![endif]--></table>`)
+	for _, text := range []string{"Legit notice", "APPROVE WIRE TRANSFER NOW"} {
+		if got := findText(t, document, text).Label; got != "unknown" {
+			t.Errorf("%q label = %q, want unknown", text, got)
+		}
+	}
+}
+
+func TestMSODownlevelRevealedTableCellKeepsLocalUncertainty(t *testing.T) {
+	for _, container := range []string{
+		`<table><tr><td><!--[if !mso]><!-->Conditional<!--<![endif]--></td></tr></table>`,
+		`<table><caption><!--[if !mso]><!-->Conditional<!--<![endif]--></caption></table>`,
+	} {
+		document := inspectHTML(t, `<p>Ordinary</p>`+container+`<p>After</p>`)
+		if got := findText(t, document, "Conditional").Label; got != "unknown" {
+			t.Errorf("conditional label = %q, want unknown", got)
+		}
+		for _, text := range []string{"Ordinary", "After"} {
+			if got := findText(t, document, text).Label; got != "visible" {
+				t.Errorf("%q label = %q, want visible", text, got)
+			}
+		}
+	}
+}
+
 func TestMSOConditionalStyleRetainsOnlyConsumedAttributes(t *testing.T) {
 	var style xhtml.Node
 	retainConditionalStyleAttribute(&style, []byte("data-unused"), []byte(strings.Repeat("x", 1024)))

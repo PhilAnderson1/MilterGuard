@@ -123,14 +123,24 @@ const (
 	msoRevealedEnd
 )
 
+const (
+	maxMSOConditionBytes  = 1024
+	maxMSOConditionTokens = 256
+	maxMSOConditionDepth  = 32
+	minMSOVersion         = 9
+	maxMSOVersion         = 16
+)
+
+const msoConditionUniverse uint32 = 1<<(2*(maxMSOVersion-minMSOVersion+1)) - 1
+
 // msoDownlevelRevealedMarker recognizes the paired comments used to expose
-// markup to ordinary HTML clients while excluding it from Word-based Outlook:
+// markup to ordinary HTML clients conditionally in Word-based Outlook:
 //
 // <!--[if !mso]><!--> ... <!--<![endif]-->
 //
-// x/net/html preserves these as separate comment nodes, although tree
-// construction may move the intervening head/body elements. Tracking them in
-// document order therefore works across those parser insertions.
+// x/net/html preserves these as separate comment nodes. Conditions that are
+// not true throughout the supported Outlook environment range make the region
+// client-dependent. Malformed or over-limit conditions are uncertain too.
 func msoDownlevelRevealedMarker(data string) msoRevealedMarker {
 	trimmed := strings.TrimSpace(data)
 	if equalASCIIFold(trimmed, "<![endif]") {
@@ -140,13 +150,223 @@ func msoDownlevelRevealedMarker(data string) msoRevealedMarker {
 		return msoRevealedNone
 	}
 	end := strings.Index(trimmed, "]>")
-	if end < 0 || !equalASCIIFold(strings.TrimSpace(trimmed[len("[if "):end]), "!mso") {
+	if end < 0 {
 		return msoRevealedNone
 	}
-	if strings.HasPrefix(strings.TrimSpace(trimmed[end+2:]), "<!") {
-		return msoRevealedStart
+	if !strings.HasPrefix(strings.TrimSpace(trimmed[end+2:]), "<!") {
+		return msoRevealedNone
 	}
-	return msoRevealedNone
+	condition := trimmed[len("[if "):end]
+	if msoConditionAlwaysTrue(condition) {
+		// This downlevel-revealed wrapper does not create a client-dependent
+		// region when every supported Word/IE environment includes its body.
+		return msoRevealedNone
+	}
+	// False, version-dependent, unsupported, and malformed predicates all mean
+	// that the ordinary-client body cannot be called confidently visible.
+	return msoRevealedStart
+}
+
+type msoConditionParser struct {
+	input  string
+	pos    int
+	tokens int
+	failed bool
+}
+
+func msoConditionAlwaysTrue(condition string) bool {
+	if len(condition) == 0 || len(condition) > maxMSOConditionBytes {
+		return false
+	}
+	p := msoConditionParser{input: condition}
+	mask := p.parseOr(0)
+	p.skipSpace()
+	return !p.failed && p.pos == len(p.input) && mask == msoConditionUniverse
+}
+
+func (p *msoConditionParser) parseOr(depth int) uint32 {
+	mask := p.parseAnd(depth)
+	for !p.failed && p.take('|') {
+		mask |= p.parseAnd(depth)
+	}
+	return mask
+}
+
+func (p *msoConditionParser) parseAnd(depth int) uint32 {
+	mask := p.parseUnary(depth)
+	for !p.failed && p.take('&') {
+		mask &= p.parseUnary(depth)
+	}
+	return mask
+}
+
+func (p *msoConditionParser) parseUnary(depth int) uint32 {
+	if depth > maxMSOConditionDepth {
+		p.failed = true
+		return 0
+	}
+	if p.take('!') {
+		return msoConditionUniverse ^ p.parseUnary(depth+1)
+	}
+	if p.take('(') {
+		mask := p.parseOr(depth + 1)
+		if !p.take(')') {
+			p.failed = true
+		}
+		return mask
+	}
+	return p.parseAtom()
+}
+
+func (p *msoConditionParser) parseAtom() uint32 {
+	word := p.word()
+	if word == "" {
+		p.failed = true
+		return 0
+	}
+	switch {
+	case equalASCIIFold(word, "true"):
+		return msoConditionUniverse
+	case equalASCIIFold(word, "false"):
+		return 0
+	case equalASCIIFold(word, "IE"):
+		return msoIEMask()
+	case equalASCIIFold(word, "mso"):
+		if version, ok := p.optionalNumber(); ok {
+			return msoVersionMask("eq", version)
+		}
+		return msoConditionUniverse
+	case equalASCIIFold(word, "lt"), equalASCIIFold(word, "lte"), equalASCIIFold(word, "gt"), equalASCIIFold(word, "gte"):
+		feature := p.word()
+		if !equalASCIIFold(feature, "mso") {
+			p.failed = true
+			return 0
+		}
+		version, ok := p.number()
+		if !ok {
+			p.failed = true
+			return 0
+		}
+		return msoVersionMask(asciiLower(word), version)
+	default:
+		p.failed = true
+		return 0
+	}
+}
+
+func (p *msoConditionParser) take(want byte) bool {
+	p.skipSpace()
+	if p.pos >= len(p.input) || p.input[p.pos] != want {
+		return false
+	}
+	p.pos++
+	p.noteToken()
+	return true
+}
+
+func (p *msoConditionParser) word() string {
+	p.skipSpace()
+	start := p.pos
+	for p.pos < len(p.input) {
+		c := p.input[p.pos]
+		if c < 'A' || c > 'Z' {
+			if c < 'a' || c > 'z' {
+				break
+			}
+		}
+		p.pos++
+	}
+	if p.pos == start {
+		return ""
+	}
+	p.noteToken()
+	return p.input[start:p.pos]
+}
+
+func (p *msoConditionParser) optionalNumber() (int, bool) {
+	p.skipSpace()
+	if p.pos >= len(p.input) || p.input[p.pos] < '0' || p.input[p.pos] > '9' {
+		return 0, false
+	}
+	return p.number()
+}
+
+func (p *msoConditionParser) number() (int, bool) {
+	p.skipSpace()
+	start := p.pos
+	value := 0
+	for p.pos < len(p.input) && p.input[p.pos] >= '0' && p.input[p.pos] <= '9' {
+		digit := int(p.input[p.pos] - '0')
+		if value > (1<<31-1-digit)/10 {
+			p.failed = true
+			return 0, false
+		}
+		value = value*10 + digit
+		p.pos++
+	}
+	if p.pos == start {
+		return 0, false
+	}
+	p.noteToken()
+	return value, true
+}
+
+func (p *msoConditionParser) skipSpace() {
+	for p.pos < len(p.input) {
+		switch p.input[p.pos] {
+		case ' ', '\t', '\r', '\n', '\f':
+			p.pos++
+		default:
+			return
+		}
+	}
+}
+
+func (p *msoConditionParser) noteToken() {
+	p.tokens++
+	if p.tokens > maxMSOConditionTokens {
+		p.failed = true
+	}
+}
+
+func msoIEMask() uint32 {
+	var mask uint32
+	for version := minMSOVersion; version <= maxMSOVersion; version++ {
+		mask |= 1 << msoEnvironmentBit(version, true)
+	}
+	return mask
+}
+
+func msoVersionMask(operator string, wanted int) uint32 {
+	var mask uint32
+	for version := minMSOVersion; version <= maxMSOVersion; version++ {
+		matches := false
+		switch operator {
+		case "eq":
+			matches = version == wanted
+		case "lt":
+			matches = version < wanted
+		case "lte":
+			matches = version <= wanted
+		case "gt":
+			matches = version > wanted
+		case "gte":
+			matches = version >= wanted
+		}
+		if matches {
+			mask |= 1 << msoEnvironmentBit(version, false)
+			mask |= 1 << msoEnvironmentBit(version, true)
+		}
+	}
+	return mask
+}
+
+func msoEnvironmentBit(version int, ie bool) uint {
+	bit := 2 * (version - minMSOVersion)
+	if ie {
+		bit++
+	}
+	return uint(bit)
 }
 
 func hasASCIIFoldPrefix(value, prefix string) bool {

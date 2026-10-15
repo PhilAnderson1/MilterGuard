@@ -135,9 +135,13 @@ scripts or fetch external resources. Processing proceeds through these stages:
    and explicit nesting, including markup inside `noscript` and foreign
    content. Scoped implicit closures keep supported optional-end-tag sequences
    shallow; ambiguous recovery and foreign-content boundaries retain
-   conservative depth accounting. `html_allocations.go` also budgets implied
+   conservative depth accounting, and ambiguous end-tag recovery across an
+   HTML/foreign-content boundary is rejected before parsing.
+   `html_allocations.go` also budgets implied
    table wrappers, formatting reconstruction, and adoption-agency copies,
-   including copied attributes, before tree construction. Its bounded state
+   including copied attributes, before tree construction. The preflight also
+   bounds cumulative string copying when discarded tokens cause the tree
+   builder to merge successive text runs into one node. Its bounded state
    deliberately overestimates ambiguous recovery, so malformed input may be
    rejected before reaching the exact final-tree limits. Check cancellation
    during the scan and again before starting the tree builder. This protects
@@ -152,9 +156,10 @@ scripts or fetch external resources. Processing proceeds through these stages:
 3. Admit each CSS source through `sheet.admitCSS` before constructing the
    full `tdewolff` CSS parser. Enforce a cumulative CSS byte limit and charge
    preflight work, then use the lexer-based `css_preflight.go` checks to bound
-   individual constructs by bytes and tokens and reject unsafe unmatched
-   delimiters. These checks protect parser token accumulation and condition
-   tracking. They apply to style elements, style attributes, conditional-comment
+   individual constructs by bytes and tokens, including malformed rule-list
+   separator runs, and reject unsafe unmatched delimiters. These checks protect
+   parser token accumulation and condition tracking. They apply to style
+   elements, style attributes, conditional-comment
    styles, and decoded data-URL stylesheets, including nested imports.
 4. Prepare declarations and build a selector index, then evaluate a bounded
    set of viewport cases. Resolve the cascade, inheritance, custom properties,
@@ -218,7 +223,13 @@ their separate tree parse, with scripting disabled and smaller fragment limits.
 If fragment parsing or extraction exceeds a limit, a fixed omission marker and
 `ExtractionIncomplete` disclose the gap; partial fragment text and links are
 discarded. The marker is excluded from recipient-visible text and confidence
-counts.
+counts. Downlevel-revealed markers retained in a table foster-parenting context
+make document presentation uncertain because the tree builder may move their
+source text away from the marker comments. Their bounded conditional-expression
+evaluator recognizes common MSO/IE boolean and version predicates; only a
+predicate true throughout the supported Outlook range preserves confident
+visibility, while variable, malformed, or unsupported predicates remain
+uncertain.
 
 The Milter analysis service additionally measures HTML processing CPU time and
 supplies the cooperative stop callback. The configured limit action selects

@@ -280,6 +280,68 @@ func TestCSSConstructTokenLimitPrecedesFullParser(t *testing.T) {
 	}
 }
 
+func TestCSSConstructLimitBoundsRuleListSemicolonRuns(t *testing.T) {
+	limits := DefaultLimits()
+	limits.CSSConstructBytes = 1_000
+	limits.CSSConstructTokens = 8
+	for _, source := range []string{
+		strings.Repeat(`;`, limits.CSSConstructTokens+1),
+		`p{color:red}` + strings.Repeat(`;`, limits.CSSConstructTokens+1),
+		`@charset "utf-8";` + strings.Repeat(`;`, limits.CSSConstructTokens+1),
+	} {
+		if outcome := inspectCSSConstructs(source, false, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth); outcome != cssPreflightLimitExceeded {
+			t.Errorf("semicolon run outcome = %d, want limit exceeded for %q", outcome, source)
+		}
+		s := sheet{limits: limits}
+		s.parseCSS(source, false)
+		if !s.cascadeIncomplete {
+			t.Errorf("semicolon run reached the full parser for %q", source)
+		}
+	}
+}
+
+func TestCSSConstructByteLimitBoundsRuleListSemicolonRuns(t *testing.T) {
+	limits := DefaultLimits()
+	limits.CSSConstructBytes = 8
+	limits.CSSConstructTokens = 1_000
+	if outcome := inspectCSSConstructs(strings.Repeat(`;`, limits.CSSConstructBytes+1), false, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth); outcome != cssPreflightLimitExceeded {
+		t.Fatalf("semicolon run outcome = %d, want limit exceeded", outcome)
+	}
+}
+
+func TestCSSConstructPreflightKeepsDeclarationAndAtRuleSemicolonBoundaries(t *testing.T) {
+	limits := DefaultLimits()
+	limits.CSSConstructBytes = 32
+	limits.CSSConstructTokens = 8
+	declarations := strings.Repeat(`;`, 100) + `color:red`
+	for _, test := range []struct {
+		name   string
+		source string
+		inline bool
+	}{
+		{name: "declaration list", source: `p{` + declarations + `}`},
+		{name: "inline declarations", source: declarations, inline: true},
+		{name: "at-rules", source: strings.Repeat(`@unknown;`, 100)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if outcome := inspectCSSConstructs(test.source, test.inline, limits.CSSConstructBytes, limits.CSSConstructTokens, limits.Depth); outcome != cssPreflightAccepted {
+				t.Fatalf("bounded constructs rejected with outcome %d", outcome)
+			}
+		})
+	}
+}
+
+func TestCSSRuleListSemicolonFloodReportsLimit(t *testing.T) {
+	limits := DefaultLimits()
+	document, err := Analyze([]byte(`<style>`+strings.Repeat(`;`, limits.CSSConstructTokens+1)+`</style><p>T</p>`), limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !document.Usage.CSSLimitExceeded {
+		t.Fatal("semicolon flood did not abandon the shared cascade")
+	}
+}
+
 func TestCSSContextDepthLimitPrecedesFullParser(t *testing.T) {
 	limits := DefaultLimits()
 	limits.Depth = 4
@@ -517,6 +579,41 @@ func TestDocumentCollectionPreparesElementMetadataOnce(t *testing.T) {
 	t.Fatal("missing prepared paragraph metadata")
 }
 
+func TestDocumentCollectionRecordsElementChildren(t *testing.T) {
+	parsed, err := (processor{Limits: DefaultLimits()}).parseDocument([]byte(`<main>text<!-- filler --><section>child</section></main><p>text only</p>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var main, section, paragraph *html.Node
+	stack := []*html.Node{parsed.root}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "main":
+				main = n
+			case "section":
+				section = n
+			case "p":
+				paragraph = n
+			}
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			stack = append(stack, child)
+		}
+	}
+	if main == nil || section == nil || paragraph == nil {
+		t.Fatalf("missing parsed elements: main=%v section=%v paragraph=%v", main, section, paragraph)
+	}
+	if !parsed.elements[main].hasElementChild {
+		t.Fatal("main element child was not recorded")
+	}
+	if parsed.elements[section].hasElementChild || parsed.elements[paragraph].hasElementChild {
+		t.Fatal("text-only element was recorded as having an element child")
+	}
+}
+
 func TestNodeLimitsBeforeAndAfterTreeConstruction(t *testing.T) {
 	t.Run("lexical nodes", func(t *testing.T) {
 		limits := DefaultLimits()
@@ -587,6 +684,45 @@ func TestNodeLimitsBeforeAndAfterTreeConstruction(t *testing.T) {
 			t.Fatalf("tree node limit error = %v", err)
 		}
 	})
+}
+
+func TestPreflightBoundsQuadraticTextMerging(t *testing.T) {
+	limits := DefaultLimits()
+	run := strings.Repeat("A", 100)
+	input := []byte(run + strings.Repeat("</div>"+run, 48999))
+
+	usage, err := measurePreflight(input, limits)
+	if err == nil || !strings.Contains(err.Error(), "projected text merge copies") {
+		t.Fatalf("quadratic text merge was admitted: usage=%+v error=%v", usage, err)
+	}
+	if usage.textNodes >= 49000 {
+		t.Fatalf("guard did not reject before consuming every text token: usage=%+v", usage)
+	}
+	document, err := (processor{Limits: limits}).parseDocument(input)
+	if err == nil || document.root != nil {
+		t.Fatalf("allocating parser was reached: root=%v error=%v", document.root, err)
+	}
+}
+
+func TestPreflightTextMergeAccountingUsesNodeBoundaries(t *testing.T) {
+	limits := DefaultLimits()
+	usage, err := measurePreflight([]byte(`abc</unknown>def</missing>ghi`), limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.projectedTextMergeCopyBytes != 9 {
+		t.Fatalf("discarded-end-tag copy projection = %d, want 9", usage.projectedTextMergeCopyBytes)
+	}
+
+	for _, source := range []string{`abc<br>def`, `abc</br>def`, `abc</p>def`, `<span>abc</span>def`, `abc<!-- boundary -->def`} {
+		usage, err := measurePreflight([]byte(source), limits)
+		if err != nil {
+			t.Fatalf("%q: %v", source, err)
+		}
+		if usage.projectedTextMergeCopyBytes != 0 {
+			t.Fatalf("%q projected %d copied bytes across a node boundary", source, usage.projectedTextMergeCopyBytes)
+		}
+	}
 }
 
 func TestPreflightSelfClosingTagDepth(t *testing.T) {
@@ -781,6 +917,46 @@ func TestPreflightMirrorsTreeBuilderRawTextOverrides(t *testing.T) {
 				t.Fatalf("conditional font breakout did not mirror tree builder: %v", err)
 			}
 		})
+	}
+}
+
+func TestPreflightRejectsForeignEndTagRecoveryDesync(t *testing.T) {
+	limits := DefaultLimits()
+	for _, prefix := range []string{
+		`<b><applet><svg></b><plaintext>`,
+		`<svg><foreignObject><div></svg><plaintext>`,
+	} {
+		input := []byte(prefix + strings.Repeat(`<art class=x></art>`, 400000))
+		usage, err := measurePreflight(input, limits)
+		if err == nil || !strings.Contains(err.Error(), "ambiguous foreign-content end tag") {
+			t.Fatalf("foreign recovery desync was admitted: usage=%+v error=%v", usage, err)
+		}
+		document, err := (processor{Limits: limits}).parseDocument(input)
+		if err == nil || document.root != nil {
+			t.Fatalf("allocating parser was reached: root=%v error=%v", document.root, err)
+		}
+	}
+}
+
+func TestPreflightForeignRawTextNamesRemainTokenized(t *testing.T) {
+	limits := DefaultLimits()
+	limits.Attributes = 2
+	err := preflight([]byte(`<svg><plaintext>`+strings.Repeat(`<art class=x></art>`, 3)+`</plaintext></svg>`), limits)
+	if err == nil || !strings.Contains(err.Error(), "lexical attributes") {
+		t.Fatalf("foreign raw-text name swallowed markup: %v", err)
+	}
+}
+
+func TestPreflightAcceptsOrdinaryForeignEndTags(t *testing.T) {
+	for _, source := range []string{
+		`<svg><g><path></path></g></svg>`,
+		`<svg><foreignObject><div></div></foreignObject></svg>`,
+		`<math><mrow><mi>x</mi></mrow></math>`,
+		`<math><mtext><span>x</span></mtext></math>`,
+	} {
+		if err := preflight([]byte(source), DefaultLimits()); err != nil {
+			t.Fatalf("ordinary foreign content %q was rejected: %v", source, err)
+		}
 	}
 }
 
@@ -2282,7 +2458,7 @@ func TestAncestorMatcherDoesNotCacheLeafNodeStates(t *testing.T) {
 	target := &html.Node{Type: html.ElementNode, Data: "p", Parent: ancestor}
 	ancestor.FirstChild = target
 	prepared := map[*html.Node]elementPreparation{
-		ancestor: {},
+		ancestor: {hasElementChild: true},
 		target:   {},
 	}
 	ancestorProfile := prepared[ancestor]
@@ -2333,7 +2509,7 @@ func TestDescendantChainUsesBoundedMatcher(t *testing.T) {
 	if !complete || matched {
 		t.Fatalf("bounded descendant result: matched=%t complete=%t", matched, complete)
 	}
-	const wantWork = 123 + 123*4 // path walk plus one "zzz" check per element
+	const wantWork = 123 + 123*4 + 122 // path walk, compound checks, and charged child probes
 	if budget.used != wantWork {
 		t.Fatalf("bounded descendant work = %d, want %d", budget.used, wantWork)
 	}
@@ -2828,7 +3004,7 @@ func TestActiveAncestorCandidatesMatchParentWalk(t *testing.T) {
 			}
 		}
 		var activation selectorAncestorActivation
-		if node.Type == html.ElementNode && hasElementChild(node) {
+		if node.Type == html.ElementNode && node.FirstChild != nil {
 			var complete bool
 			activation, complete = s.activateAncestorBuckets(node, nil)
 			if !complete {

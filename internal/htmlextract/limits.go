@@ -27,6 +27,12 @@ const MaxViewingCases = 16
 // fixed margin and two wrapper levels for every lexically nested table.
 const maxHTMLDepth = 168
 
+// maxHTMLTextMergeCopyBytes bounds repeated string copying in x/net/html's
+// parser. The tree builder appends a text token to the preceding text node,
+// and malformed tokens discarded between text runs can otherwise make those
+// appends quadratic while every ordinary tree-size limit remains satisfied.
+const maxHTMLTextMergeCopyBytes = 8 << 20
+
 // Selector cost functions use MatchWork+1 as a saturated over-budget value.
 // Keep that sentinel representable for every accepted caller-supplied limit.
 const maxMatchWork = int64(1<<63 - 2)

@@ -90,7 +90,15 @@ func inspectCSSConstructs(source string, inline bool, byteLimit, tokenLimit, con
 		if token == css.CommentToken && !(phase == cssValue && customProperty) {
 			continue
 		}
-		if phase == cssConstructStart && (token == css.WhitespaceToken || token == css.SemicolonToken) {
+		context := contexts[len(contexts)-1]
+		if phase == cssConstructStart && token == css.WhitespaceToken {
+			reset()
+			continue
+		}
+		// A semicolon is an empty declaration only in a declaration list. At
+		// rule-list level tdewolff starts a qualified rule and retains the
+		// semicolon (and subsequent tokens) until it reaches a block or EOF.
+		if phase == cssConstructStart && token == css.SemicolonToken && context == cssDeclarationList {
 			reset()
 			continue
 		}
@@ -124,12 +132,15 @@ func inspectCSSConstructs(source string, inline bool, byteLimit, tokenLimit, con
 			return cssPreflightUnsafeDelimiter
 		}
 
-		context := contexts[len(contexts)-1]
 		switch phase {
 		case cssConstructStart:
 			switch token {
-			case css.WhitespaceToken, css.CommentToken, css.SemicolonToken:
+			case css.WhitespaceToken, css.CommentToken:
 				reset()
+			case css.SemicolonToken:
+				// In a rule list this begins a qualified-rule prelude, so it
+				// remains charged until a block or EOF just as in the parser.
+				phase = cssPrelude
 			case css.RightBraceToken:
 				popContext()
 			case css.AtKeywordToken:
@@ -168,9 +179,13 @@ func inspectCSSConstructs(source string, inline bool, byteLimit, tokenLimit, con
 				atRule = ""
 				reset()
 			case css.SemicolonToken:
-				phase = cssConstructStart
-				atRule = ""
-				reset()
+				// A semicolon terminates an at-rule without a block. Within an
+				// ordinary qualified-rule prelude it is retained by the parser.
+				if atRule != "" {
+					phase = cssConstructStart
+					atRule = ""
+					reset()
+				}
 			case css.RightBraceToken:
 				popContext()
 			}

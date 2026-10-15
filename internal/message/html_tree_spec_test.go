@@ -236,6 +236,26 @@ func TestTreeExtractorRetainsFallbackPresentationsWithoutPresentationCode(t *tes
 	}
 }
 
+func TestTreeExtractorDoesNotCountFosteredMSOContentAsConfident(t *testing.T) {
+	got := htmlToText(`<p>Legit notice</p><table><!--[if !mso]><!-->APPROVE WIRE TRANSFER NOW<!--<![endif]--></table>`)
+	if got.ConfidentVisibleChars != 0 {
+		t.Fatalf("fostered MSO content produced %d confident visible characters", got.ConfidentVisibleChars)
+	}
+	if !strings.Contains(got.Text, `<visibility-uncertain>`) || !strings.Contains(got.Text, `APPROVE WIRE TRANSFER NOW`) {
+		t.Fatalf("fostered MSO content was not marked uncertain: %q", got.Text)
+	}
+}
+
+func TestTreeExtractorDoesNotCountOutlookFalsePredicateAsConfident(t *testing.T) {
+	got := htmlToText(`<p>Legit</p><!--[if !mso & !IE]><!-->TRANSFER FUNDS NOW<!--<![endif]-->`)
+	if got.ConfidentVisibleChars != len("Legit") {
+		t.Fatalf("confident visible characters = %d, want %d", got.ConfidentVisibleChars, len("Legit"))
+	}
+	if !strings.Contains(got.Text, `<visibility-uncertain>TRANSFER FUNDS NOW</visibility-uncertain>`) {
+		t.Fatalf("Outlook-false content was not marked uncertain: %q", got.Text)
+	}
+}
+
 func TestTreeExtractorAnnotatesMSOHiddenContent(t *testing.T) {
 	got := htmlToText(`<p>Visible</p><p style="mso-hide:all">Outlook-hidden</p>`)
 	if !strings.Contains(got.Text, `<visibility-uncertain>Outlook-hidden</visibility-uncertain>`) {

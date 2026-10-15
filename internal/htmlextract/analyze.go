@@ -276,7 +276,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					// definitely visible to the recipient.
 					f.layoutUncertain = true
 				}
-				if !r.matches.exhausted && !r.expressions.exhausted && hasElementChild(n) {
+				if !r.matches.exhausted && !r.expressions.exhausted && prepared.hasElementChild {
 					activation, complete := r.styles.activateAncestorBuckets(n, r.matches)
 					if complete {
 						f.ancestorKeys = activation
@@ -412,10 +412,11 @@ func (p processor) process(input []byte) (Document, error) {
 			break
 		}
 	}
-	if s.unsupportedNesting {
+	if s.unsupportedNesting || document.msoOrderUncertain {
 		// Nested selectors can target descendants, siblings, or ancestors of
-		// their parent match. Until those relative selectors are implemented,
-		// no element in the document is provably outside their reach.
+		// their parent match. Foster parenting can likewise move source text
+		// outside MSO conditional markers retained below a table. In either case,
+		// no element in the document is provably outside the uncertain region.
 		for i := range results.textLabels {
 			results.textLabels[i] |= labelUnknown
 		}

@@ -34,6 +34,7 @@ type lexicalFrame struct {
 	htmlChildren     bool
 	mathNamespace    bool
 	mathTextChildren bool
+	textRunBytes     int
 	// Foreign-content recovery can leave the lexical and allocating stacks
 	// different. Such a frame cannot justify a later implicit closure.
 	uncertain        bool
@@ -60,6 +61,7 @@ type lexicalUsage struct {
 	treeBuilderTokens                   int
 	nestedTables                        int
 	projectedNodes, projectedAttributes int
+	projectedTextMergeCopyBytes         int64
 }
 
 // implicitCloseIndex identifies a suffix that a new HTML start tag certainly
@@ -220,6 +222,37 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 	var usage lexicalUsage
 	allocations := allocationPreflight{limits: l, usage: &usage}
 	openTables := 0
+	rootTextRunBytes := 0
+	textRun := func() *int {
+		if len(stack) == 0 {
+			return &rootTextRunBytes
+		}
+		return &stack[len(stack)-1].textRunBytes
+	}
+	noteText := func(textBytes int) error {
+		if textBytes == 0 {
+			return nil
+		}
+		run := textRun()
+		copyBudget := int64(min(l.InputBytes, maxHTMLTextMergeCopyBytes))
+		if int64(*run) > copyBudget-usage.projectedTextMergeCopyBytes {
+			return fmt.Errorf("limit: projected text merge copies > %d bytes", copyBudget)
+		}
+		usage.projectedTextMergeCopyBytes += int64(*run)
+		if textBytes > l.InputBytes-*run {
+			// The decoded text retained below one projected parent cannot exceed
+			// the complete admitted input by more than tokenizer replacement of
+			// NUL bytes. Saturation keeps malformed input from overflowing this
+			// accounting; the copy budget will reject its next merge.
+			*run = l.InputBytes
+		} else {
+			*run += textBytes
+		}
+		return nil
+	}
+	breakTextRun := func() {
+		*textRun() = 0
+	}
 	popTo := func(keep int, name string, explicit bool) {
 		allocations.notePop(stack, keep, name, explicit)
 		clearScope := allocations.canClearScope(stack, keep, name, explicit)
@@ -269,8 +302,21 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 			if usage.textNodes > l.TextNodes {
 				return usage, fmt.Errorf("limit: lexical text nodes > %d", l.TextNodes)
 			}
+			// Entity and newline decoding cannot enlarge a token. NUL replacement
+			// can turn one source byte into the three-byte UTF-8 replacement rune;
+			// account for that expansion without asking Text to allocate it.
+			rawText := z.Raw()
+			textBytes := len(rawText) + 2*bytes.Count(rawText, []byte{0})
+			if err := noteText(textBytes); err != nil {
+				return usage, err
+			}
 		}
 		if t != html.StartTagToken && t != html.SelfClosingTagToken && t != html.EndTagToken {
+			if t == html.CommentToken {
+				// An inserted comment becomes the preceding sibling and prevents
+				// the next text token from appending to this text node.
+				breakTextRun()
+			}
 			if err := allocations.add(1, 0); err != nil {
 				return usage, err
 			}
@@ -312,15 +358,37 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 			if err := allocations.reconstruct(); err != nil {
 				return usage, err
 			}
-			if n == "br" || (n == "p" && implicitCloseIndex(stack, "p") < 0) {
+			nodeProducing := n == "br" || (n == "p" && implicitCloseIndex(stack, "p") < 0)
+			if nodeProducing {
 				if err := allocations.add(1, 0); err != nil {
 					return usage, err
 				}
+				breakTextRun()
 			}
 			if formattingTag(n) {
 				if err := allocations.endFormatting(n, stack); err != nil {
 					return usage, err
 				}
+			}
+			if len(stack) > 0 && stack[len(stack)-1].foreign {
+				// End tags at a foreign current node stay in the foreign-content
+				// algorithm even at HTML integration points. A match may pop a
+				// contiguous foreign suffix. If there is no such match, x/net/html
+				// can fall back to an HTML insertion mode whose special-element
+				// boundaries decide whether an older HTML match is ignored. Reject
+				// that malformed boundary case rather than predicting it incorrectly.
+				foreignMatch := -1
+				for i := len(stack) - 1; i >= 0 && stack[i].foreign; i-- {
+					if stack[i].name == n {
+						foreignMatch = i
+						break
+					}
+				}
+				if foreignMatch >= 0 {
+					popTo(foreignMatch, n, true)
+					continue
+				}
+				return usage, fmt.Errorf("limit: ambiguous foreign-content end tag")
 			}
 			// Unmatched end tags are common in malformed input and cannot
 			// affect this stack. Avoid searching the full bounded depth for
@@ -331,12 +399,21 @@ func measurePreflightWithStop(b []byte, l Limits, shouldStop func() bool) (lexic
 			}
 			for i := len(stack) - 1; i >= 0; i-- {
 				if stack[i].name == n {
+					for _, frame := range stack[i:] {
+						if frame.foreign {
+							return usage, fmt.Errorf("limit: ambiguous foreign-content end tag")
+						}
+					}
 					popTo(i, n, true)
 					break
 				}
 			}
 			continue
 		}
+
+		// An inserted element becomes its parent's preceding child. Do this
+		// before changing the lexical stack so the parent's text run is reset.
+		breakTextRun()
 
 		parentForeign := len(stack) > 0 && stack[len(stack)-1].foreign && !stack[len(stack)-1].htmlChildren
 		// MathML text integration points process ordinary child start tags in

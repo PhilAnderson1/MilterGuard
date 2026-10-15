@@ -114,6 +114,7 @@ type parsedDocument struct {
 	attributeCount          int
 	extractableTextCount    int
 	extractableElementCount int
+	msoOrderUncertain       bool
 	attributeWork           selectorAttributeProfile
 	lexical                 lexicalUsage
 }
@@ -122,6 +123,7 @@ type elementPreparation struct {
 	inline, legacy   []declaration
 	inlineIncomplete bool
 	selector         selectorAttributeProfile
+	hasElementChild  bool
 }
 
 // The HTML5 tree builder can insert a small fixed set of structural ancestors
@@ -185,6 +187,13 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			}
 			child := e.next
 			e.next = child.NextSibling
+			if e.n.Type == html.ElementNode && child.Type == html.ElementNode {
+				prepared := document.elements[e.n]
+				if !prepared.hasElementChild {
+					prepared.hasElementChild = true
+					document.elements[e.n] = prepared
+				}
+			}
 			stack = append(stack, entry{
 				n: child, depth: e.depth + 1, scope: e.scope,
 				uncertainStylesheetOrigin: e.uncertainStylesheetOrigin,
@@ -226,7 +235,27 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			}
 		}
 		if n.Type == html.CommentNode && (e.scope == scopeActive || e.scope == scopeHead) {
-			switch msoDownlevelRevealedMarker(n.Data) {
+			marker := msoDownlevelRevealedMarker(n.Data)
+			if marker != msoRevealedNone {
+				// Foster parenting can move text out of table insertion modes while
+				// leaving these source-order markers below the table. Once that has
+				// happened the final tree cannot identify the displaced region.
+			msoAncestors:
+				for i := len(stack) - 2; i >= 0; i-- {
+					ancestor := stack[i].n
+					if ancestor.Type != html.ElementNode {
+						continue
+					}
+					switch ancestor.Data {
+					case "td", "th", "caption":
+						break msoAncestors // Ordinary content here is not foster parented.
+					case "table", "tbody", "thead", "tfoot", "tr", "colgroup":
+						document.msoOrderUncertain = true
+						break msoAncestors
+					}
+				}
+			}
+			switch marker {
 			case msoRevealedStart:
 				msoRevealedDepth++
 			case msoRevealedEnd:

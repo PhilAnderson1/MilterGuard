@@ -982,10 +982,15 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 		state.seen = parentState.seen | state.matched
 		parentState = state
 		// A node without element children can never be encountered as an
-		// ancestor of a later match. Caching its state therefore cannot avoid
-		// future selector work, but leaf-heavy email trees make such entries the
-		// dominant allocation in this cache.
-		if hasElementChild(node) {
+		// ancestor of a later match. Tree collection records this once so cache
+		// admission never repeatedly scans attacker-controlled child lists.
+		// Tests and internal callers without prepared metadata cache
+		// conservatively; the shared cache-unit ceiling still bounds retention.
+		hasElementChild, complete := preparedHasElementChild(node, context.elements, budget)
+		if !complete {
+			return false, false
+		}
+		if hasElementChild {
 			if mapStates && s.runtime.matchCacheUnits < maxMatchCacheUnits {
 				if states == nil {
 					states = make(map[*html.Node]ancestorChainState)
@@ -1188,13 +1193,21 @@ func (s *sheet) hasAncestorSelectorIndex() bool {
 	return len(s.index.ancestorTags) != 0 || len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0
 }
 
-func hasElementChild(node *html.Node) bool {
+func preparedHasElementChild(node *html.Node, elements map[*html.Node]elementPreparation, budget *matchBudget) (bool, bool) {
+	if elements != nil {
+		return elements[node].hasElementChild, true
+	}
+	// Package-level matcher tests can operate without a parsedDocument. Keep
+	// that path bounded too rather than reintroducing an uncharged child scan.
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if !budget.spend(1) {
+			return false, false
+		}
 		if child.Type == html.ElementNode {
-			return true
+			return true, true
 		}
 	}
-	return false
+	return false, true
 }
 
 // activateAncestorBuckets records the current element's ancestor-index keys
