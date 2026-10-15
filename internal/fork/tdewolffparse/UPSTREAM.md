@@ -20,8 +20,8 @@ Local compatibility changes:
   changing the emitted grammar events or values.
 - `Input` can sample an optional progress callback as bytes are consumed. The
   CSS parser uses it for cooperative cancellation while scanning large tokens.
-- The CSS parser has an opt-in resource guard that bounds retained construct
-  bytes and tokens, custom-property copies, component and parser-state depth,
-  and unsafe top-level closing delimiters. The ordinary upstream constructor
-  retains its original unlimited behavior.
+- The CSS parser has an opt-in resource guard that charges retained tokens and
+  parser-state allocation to MilterGuard's shared monotonic memory budget,
+  samples cooperative cancellation, and rejects unsafe top-level closing
+  delimiters. The ordinary upstream constructor retains its original behavior.
 The upstream MIT licence is retained as `LICENSE.md`.

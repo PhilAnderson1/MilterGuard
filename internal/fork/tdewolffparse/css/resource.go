@@ -3,6 +3,8 @@ package css
 import (
 	"errors"
 	"fmt"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // ErrResourceStopped is returned when ResourceLimits.ShouldStop asks the CSS
@@ -13,20 +15,11 @@ var ErrResourceStopped = errors.New("css: resource processing stopped")
 // would otherwise corrupt the parser's recovery depth.
 var ErrUnsafeDelimiter = errors.New("css: unsafe unmatched delimiter")
 
-// ResourceLimits bounds one construct accumulated by the parser and its
-// parser-controlled stacks. Zero values leave that resource unlimited.
+// ResourceLimits stops parsing when the shared allocation budget or external
+// CPU guard is exhausted.
 type ResourceLimits struct {
-	ConstructBytes  int
-	ConstructTokens int
-	Depth           int
-	ShouldStop      func() bool
-}
-
-// ResourceUsage reports the largest construct and stack depth encountered.
-type ResourceUsage struct {
-	ConstructBytes  int
-	ConstructTokens int
-	Depth           int
+	ShouldStop func() bool
+	Memory     *resourceguard.Memory
 }
 
 // ResourceLimitError identifies the parser resource that exceeded its limit.
@@ -42,59 +35,43 @@ func (e *ResourceLimitError) Error() string {
 type resourceAbort struct{}
 
 type resourceGuard struct {
-	limits ResourceLimits
-	usage  *ResourceUsage
-	bytes  int
-	tokens int
+	limits   ResourceLimits
+	stateCap int
+	steps    uint32
 }
 
-func newResourceGuard(limits ResourceLimits, usage *ResourceUsage) *resourceGuard {
-	if usage != nil {
-		*usage = ResourceUsage{}
+const accountedTokenBytes = 32
+
+func (g *resourceGuard) reserve(bytes int64) error {
+	if g != nil && g.limits.Memory != nil && !g.limits.Memory.Reserve(bytes) {
+		return &ResourceLimitError{"memory bytes", int(g.limits.Memory.Limit())}
 	}
-	return &resourceGuard{limits: limits, usage: usage}
+	return nil
 }
 
-func (g *resourceGuard) resetConstruct() {
-	if g == nil {
-		return
-	}
-	g.bytes = 0
-	g.tokens = 0
+func newResourceGuard(limits ResourceLimits) *resourceGuard {
+	return &resourceGuard{limits: limits}
 }
 
 func (g *resourceGuard) token(data []byte) error {
 	if g == nil {
 		return nil
 	}
-	g.bytes += len(data)
-	g.tokens++
-	if g.usage != nil {
-		if g.bytes > g.usage.ConstructBytes {
-			g.usage.ConstructBytes = g.bytes
-		}
-		if g.tokens > g.usage.ConstructTokens {
-			g.usage.ConstructTokens = g.tokens
-		}
+	g.steps++
+	if g.limits.ShouldStop != nil && (g.steps == 1 || g.steps&255 == 0) && g.limits.ShouldStop() {
+		return ErrResourceStopped
 	}
-	if g.limits.ConstructBytes > 0 && g.bytes > g.limits.ConstructBytes {
-		return &ResourceLimitError{"construct bytes", g.limits.ConstructBytes}
-	}
-	if g.limits.ConstructTokens > 0 && g.tokens > g.limits.ConstructTokens {
-		return &ResourceLimitError{"construct tokens", g.limits.ConstructTokens}
+	if err := g.reserve(int64(accountedTokenBytes + len(data))); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (g *resourceGuard) depth(depth int) error {
-	if g == nil {
+func (g *resourceGuard) states(capacity int) error {
+	if g == nil || capacity <= g.stateCap {
 		return nil
 	}
-	if g.usage != nil && depth > g.usage.Depth {
-		g.usage.Depth = depth
-	}
-	if g.limits.Depth > 0 && depth > g.limits.Depth {
-		return &ResourceLimitError{"depth", g.limits.Depth}
-	}
-	return nil
+	err := g.reserve(int64(capacity-g.stateCap) * 16)
+	g.stateCap = capacity
+	return err
 }

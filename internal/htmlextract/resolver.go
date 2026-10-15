@@ -1,28 +1,11 @@
 package htmlextract
 
 import (
+	"unsafe"
+
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
-
-// Applying a declaration entails validity checks, cascade comparison and
-// candidate storage; weight it above a simple selector-index lookup.
-const declarationApplyWeight int64 = 16
-
-// Full resolution constructs cascade candidates and resolves presentation and
-// layout. Elements with no candidate selectors or local declarations need only
-// defaults and inheritance; charge that smaller path separately. Selector
-// discovery/matching and declaration application retain their own charges.
-const elementTraversalWork int64 = 128
-const elementInheritanceWork int64 = 48
-
-// Cache units are weighted retained records, not bytes: a match or ancestor
-// result costs one unit, while an attribute result also charges each retained
-// selector-bucket slice header. Go map buckets and allocator overhead vary by
-// release and entry mix, so 100,000 units represent several to low tens of MiB,
-// plus selector-count-bounded outer tables. Matching continues without caching
-// after the shared per-document limit is full.
-const maxMatchCacheUnits = 100_000
 
 type mediaCacheKey struct {
 	width    float64
@@ -41,21 +24,25 @@ func (s *sheet) matchSelector(m cascadia.Matcher, n *html.Node) (bool, bool) {
 	return matched, true
 }
 
-func (s *sheet) mediaStates(width float64, fallback bool, work *matchBudget) ([]uint8, bool) {
+func (s *sheet) mediaStates(width float64, fallback bool, work *cpuGuard) ([]uint8, bool) {
 	key := mediaCacheKey{width: width, fallback: fallback}
 	if states := s.runtime.mediaCache[key]; states != nil {
 		return states, true
 	}
 	if s.runtime.mediaCache == nil {
+		if !s.memory.Reserve(128) {
+			return nil, false
+		}
 		s.runtime.mediaCache = make(map[mediaCacheKey][]uint8)
 	}
-	var cost int64
 	hasConditions := false
 	for i := range s.rules {
-		cost += s.rules[i].mediaStateWork(fallback)
 		hasConditions = hasConditions || s.rules[i].conditions != nil
 	}
-	if cost > 0 && work != nil && !work.spend(cost) {
+	if work != nil && !work.check() {
+		return nil, false
+	}
+	if !s.memory.Reserve(int64(len(s.rules)) + 48) {
 		return nil, false
 	}
 	states := make([]uint8, len(s.rules))
@@ -71,45 +58,35 @@ func (s *sheet) mediaStates(width float64, fallback bool, work *matchBudget) ([]
 	return states, true
 }
 
-type matchBudget struct {
-	limit     int64
-	used      int64
-	exhausted bool
-}
-
-func (b *matchBudget) spend(cost int64) bool {
-	if cost < 1 {
-		cost = 1
-	}
-	if b.exhausted || b.limit < 0 || b.used > b.limit || cost > b.limit-b.used {
-		b.exhausted = true
-		return false
-	}
-	b.used += cost
-	return true
-}
-
 func unresolvedStyle() Style {
 	return Style{}
 }
 
 func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
-	if !s.runtime.cacheMatches || s.runtime.matchCacheUnits >= maxMatchCacheUnits {
+	if !s.runtime.cacheMatches {
 		return
 	}
 	if s.runtime.matchCaches == nil {
+		if !s.memory.Reserve(int64(s.index.count) * int64(unsafe.Sizeof(map[*html.Node]uint8{}))) {
+			return
+		}
 		s.runtime.matchCaches = make([]map[*html.Node]uint8, s.index.count)
 	}
 	cache := s.runtime.matchCaches[plan.sequence]
 	if cache == nil {
+		if !s.memory.Reserve(128) {
+			return
+		}
 		cache = make(map[*html.Node]uint8)
 		s.runtime.matchCaches[plan.sequence] = cache
+	}
+	if _, exists := cache[n]; !exists && !s.memory.Reserve(32) {
+		return
 	}
 	cache[n] = 1
 	if matched {
 		cache[n] = 2
 	}
-	s.runtime.matchCacheUnits++
 }
 
 type candidate struct {
@@ -141,7 +118,7 @@ func (c candidate) beats(old candidate) bool {
 type evaluationContext struct {
 	parent, root *Style
 	vars         *variableScope
-	budget       *expressionBudget
+	budget       *cpuGuard
 	variableMemo *declarationScopeMemo
 }
 
@@ -197,7 +174,7 @@ type cascadeWinners struct {
 	animation                    candidate
 }
 
-func (m *mediaEvaluation) evaluate(s *sheet, work *matchBudget) ([]uint8, bool) {
+func (m *mediaEvaluation) evaluate(s *sheet, work *cpuGuard) ([]uint8, bool) {
 	if !m.ready {
 		m.states, m.complete = s.mediaStates(m.width, m.fallback, work)
 		m.ready = true
@@ -218,9 +195,6 @@ func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, con
 		return resolve(property, "unset", context.parent, context.root)
 	}
 	if v.status == valueUnsupported {
-		return Value{Text: d.value}, valueUnsupported
-	}
-	if len(v.text) > maxValueBytes {
 		return Value{Text: d.value}, valueUnsupported
 	}
 	value := normalizeCSSKeyword(v.text)
@@ -280,7 +254,7 @@ func (c evaluationContext) substitute(d *declaration) variableValue {
 // collectCascade identifies the declarations that win the CSS cascade for one
 // element. It reserves each declaration list's complete cost before mutating
 // the result so an exhausted work budget can never expose partial winners.
-func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, matches *matchBudget, context evaluationContext) (cascadeWinners, bool) {
+func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, matches *cpuGuard, context evaluationContext) (cascadeWinners, bool) {
 	var winners cascadeWinners
 	// Parsed declaration slices are immutable and stable for the duration of
 	// evaluation. Winners retain references plus per-use property/uncertainty
@@ -289,13 +263,7 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 		// Reserve the complete declaration-list cost before changing the
 		// cascade. A failed reservation must not leave a partially applied
 		// style that appears trustworthy.
-		applications := len(ds)
-		for i := range ds {
-			if ds[i].prop == allShorthandProperty {
-				applications += declarationProperties - 1
-			}
-		}
-		if applications > 0 && !matches.spend(int64(applications)*declarationApplyWeight) {
+		if len(ds) > 0 && !matches.check() {
 			return false
 		}
 		applyProperty := func(d *declaration, property int) {
@@ -387,7 +355,7 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 		}
 		if !cached {
 			if plan.uncertain {
-				if !matches.spend(selectorMatchCost(plan, selectorContext, matches.limit)) {
+				if !matches.check() {
 					return cascadeWinners{}, false
 				}
 				var complete bool
@@ -402,7 +370,7 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 					return cascadeWinners{}, false
 				}
 			} else {
-				if !matches.spend(selectorMatchCost(plan, selectorContext, matches.limit)) {
+				if !matches.check() {
 					return cascadeWinners{}, false
 				}
 				var complete bool
@@ -435,25 +403,14 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 	return winners, true
 }
 
-func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *variableScope, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, matches *matchBudget, budget *expressionBudget) elementStyleResult {
-	if s.cascadeIncomplete || s.workIncomplete {
-		if s.workIncomplete {
-			matches.exhausted = true
-		}
+func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *variableScope, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, matches *cpuGuard, budget *cpuGuard) elementStyleResult {
+	if s.cascadeIncomplete {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
-	// Once shared style-analysis work is exhausted, every remaining element is
-	// unresolved. Avoid any further style copies or candidate construction.
-	if matches.exhausted {
+	if !matches.check() {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
-	// Expression exhaustion makes all subsequent computed values unknowable.
-	// Stop before cascade collection and variable-scope allocation; unresolved
-	// styles conservatively produce visibility-uncertain output.
-	if budget.exhausted {
-		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
-	}
-	if !matches.spend(elementInheritanceWork) {
+	if !matches.check() {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
 	st := initial()
@@ -473,7 +430,7 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 		// effects are carried separately by viewingCaseFrame.
 		return elementStyleResult{style: st, variables: parentVars}
 	}
-	if !matches.spend(elementTraversalWork - elementInheritanceWork) {
+	if !matches.check() {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
 	variableMemo := declarationScopeMemo{}
@@ -488,7 +445,7 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	if winners.variables != nil {
 		s.runtime.variableScratch = winners.variables
 	}
-	if budget.exhausted {
+	if budget.stopped {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
 	context.vars = scope
@@ -554,7 +511,7 @@ func alternateColourSchemeEffects(d *declaration) concealmentReason {
 	}
 }
 
-func declarationUsesColourSchemeVariable(d *declaration, scope *variableScope, budget *expressionBudget, memo *declarationScopeMemo) bool {
+func declarationUsesColourSchemeVariable(d *declaration, scope *variableScope, budget *cpuGuard, memo *declarationScopeMemo) bool {
 	if d == nil || !d.hasVars {
 		return false
 	}

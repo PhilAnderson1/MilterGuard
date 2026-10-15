@@ -6,11 +6,13 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 const (
@@ -73,14 +75,6 @@ const (
 )
 
 var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "line-height", "overflow-x", "overflow-y", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "letter-spacing", "word-spacing", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
-
-const (
-	// valueToken occupies 24 bytes on supported 64-bit platforms before its
-	// string data. Token-dense custom properties can otherwise expand admitted
-	// CSS into a much larger retained representation.
-	retainedTokenBytesEstimate = int64(24)
-	retainedTokenBudgetFactor  = int64(8)
-)
 
 // A declaration progresses through these preparation states:
 //
@@ -183,7 +177,7 @@ func prepareDeclaration(d declaration) declaration {
 	}
 	if d.custom == "" && !d.hasVars && !d.shorthand && !contextualDeclaration(d) {
 		prepared := preparedDeclaration{}
-		if d.unsupported || len(d.value) > maxValueBytes {
+		if d.unsupported {
 			prepared.value = Value{Text: d.value}
 			prepared.status = valueUnsupported
 		} else {
@@ -198,7 +192,7 @@ func prepareDeclaration(d declaration) declaration {
 	} else if d.custom == "" && !d.hasVars && !d.shorthand && !d.unsupported {
 		value := normalizeCSSKeyword(d.value)
 		if (d.prop == fontSize || d.prop == opacity) && isMath(value) && d.tokensReady && d.valueStatus == valueResolved {
-			budget := expressionBudget{remaining: int64(maxValueTokens * 4)}
+			budget := cpuGuard{}
 			_, d.validity = evalMathTokens(d.prop, value, d.valueTokens, &initialStyle, &initialStyle, &budget)
 		} else {
 			_, d.validity = resolve(d.prop, value, &initialStyle, &initialStyle)
@@ -215,24 +209,8 @@ func prepareDeclarations(ds []declaration) []declaration {
 	return ds
 }
 
-func retainedTokenBytes(tokens []valueToken) int64 {
-	bytes := int64(cap(tokens)) * retainedTokenBytesEstimate
-	for _, token := range tokens {
-		bytes += int64(len(token.raw))
-	}
-	return bytes
-}
-
-func (s *sheet) retainedTokenBudget() int64 {
-	cssBytes := int64(s.limits.CSSBytes)
-	if cssBytes > maxMatchWork/retainedTokenBudgetFactor {
-		return maxMatchWork
-	}
-	return cssBytes * retainedTokenBudgetFactor
-}
-
 func (s *sheet) prepareDeclaration(d declaration) declaration {
-	if s.workIncomplete {
+	if !s.checkCPU() {
 		d.valueTokens = nil
 		d.tokensReady = false
 		d.variableDependencies = nil
@@ -240,19 +218,6 @@ func (s *sheet) prepareDeclaration(d declaration) declaration {
 		return d
 	}
 	d = prepareDeclaration(d)
-	cost := retainedTokenBytes(d.valueTokens)
-	budget := s.retainedTokenBudget()
-	if cost > budget-s.retainedTokenBytes {
-		s.workIncomplete = true
-		// Do not retain the declaration that crossed the limit. Earlier token
-		// streams remain bounded by the budget and are released with the sheet.
-		d.valueTokens = nil
-		d.tokensReady = false
-		d.variableDependencies = nil
-		d.dependenciesReady = false
-		return d
-	}
-	s.retainedTokenBytes += cost
 	return d
 }
 
@@ -264,11 +229,10 @@ func (s *sheet) prepareDeclarations(ds []declaration) []declaration {
 }
 
 type rule struct {
-	plans                        []selectorPlan
-	decls                        []declaration
-	conditions                   *conditionFrame
-	mediaWork, fallbackMediaWork int64
-	uncertainOrigin              bool
+	plans           []selectorPlan
+	decls           []declaration
+	conditions      *conditionFrame
+	uncertainOrigin bool
 }
 
 // sheetRuntime contains evaluation caches and reusable scratch storage. Rules,
@@ -286,7 +250,6 @@ type sheetRuntime struct {
 	ancestorStates      []map[*html.Node]ancestorChainState
 	activeAncestors     activeAncestorBuckets
 	variableScratch     map[string]candidate
-	matchCacheUnits     int
 }
 
 type sheet struct {
@@ -294,16 +257,11 @@ type sheet struct {
 	rulesSeen            int
 	selectors, order     int
 	limits               Limits
-	planningWork         int64
 	cascadeIncomplete    bool
-	workIncomplete       bool
 	planCount            int
-	conditionDepth       int
 	index                selectorIndex
 	cssBytes             int
-	retainedTokenBytes   int64
 	mediaConditions      map[string]mediaCondition
-	importDepth          int
 	keyframeNames        map[string]struct{}
 	unresolvedStylesheet bool
 	unsupportedNesting   bool
@@ -311,54 +269,45 @@ type sheet struct {
 	runtime              sheetRuntime
 	shouldStop           func() bool
 	selectorControl      *cascadia.MatchControl
+	cpu                  *cpuGuard
+	memory               *resourceguard.Memory
 	stopped              bool
 }
 
 // admitCSS applies the cumulative source and work bounds. Per-construct and
 // stack limits are enforced where the local CSS parser grows those resources.
 func (s *sheet) admitCSS(text string) bool {
-	if s.cascadeIncomplete || s.workIncomplete || s.stopped {
+	if s.cascadeIncomplete || s.stopped {
 		return false
 	}
 	if len(text) > s.limits.CSSBytes || s.cssBytes > s.limits.CSSBytes-len(text) {
 		s.abandonCascade()
 		return false
 	}
+	// Cover extractor-owned token strings, declarations, condition frames and
+	// parser compatibility copies. The forked parser and selector compiler
+	// additionally charge their allocations at their actual insertion points.
+	if !s.memory.Reserve(int64(len(text))*64 + 256) {
+		s.abandonCascade()
+		return false
+	}
 	// Account for the complete parser pass before doing it. Selector and
 	// declaration processing below is charged separately.
-	if !s.chargePlanningBytes(len(text)) {
+	if !s.checkCPU() {
 		return false
 	}
 	s.cssBytes += len(text)
 	return true
 }
 
-func (s *sheet) chargePlanningWork(value string) bool {
-	return s.chargePlanningBytes(len(value))
-}
-
-func (s *sheet) chargePlanningTokens(tokens []css.Token) bool {
-	bytes := 0
-	for _, token := range tokens {
-		bytes += len(token.Data)
-	}
-	return s.chargePlanningBytes(bytes)
-}
-
-func (s *sheet) chargePlanningBytes(bytes int) bool {
-	cost := int64(bytes) + 1
-	return s.chargePlanningCost(cost)
-}
-
-// chargePlanningCost reserves work from the shared style-analysis ceiling.
-// Callers with a narrower phase budget must check that budget first so a
-// phase-local fallback does not incorrectly mark all style work incomplete.
-func (s *sheet) chargePlanningCost(cost int64) bool {
-	if cost < 1 || s.planningWork > s.limits.MatchWork || cost > s.limits.MatchWork-s.planningWork {
-		s.workIncomplete = true
+func (s *sheet) checkCPU() bool {
+	if s.stopped {
 		return false
 	}
-	s.planningWork += cost
+	if s.cpu != nil && !s.cpu.check() {
+		s.stopped = true
+		return false
+	}
 	return true
 }
 
@@ -561,15 +510,7 @@ func cssTokensNeedRetention(prop string, values []css.Token) bool {
 // Token boundaries still determine trimming and !important; comments inside a
 // value become whitespace so removing one cannot join adjacent tokens.
 func parseUnretainedCSSTokens(ts []css.Token, fallback string) parsedDeclarationValue {
-	if len(ts) > maxValueTokens {
-		return parsedDeclarationValue{text: trimCSSWhitespace(fallback), status: valueUnsupported}
-	}
-	bytesSeen := 0
 	for _, token := range ts {
-		bytesSeen += len(token.Data)
-		if bytesSeen > maxValueBytes {
-			return parsedDeclarationValue{text: trimCSSWhitespace(fallback), status: valueUnsupported}
-		}
 		if token.TokenType == css.BadStringToken || token.TokenType == css.BadURLToken {
 			return parsedDeclarationValue{text: trimCSSWhitespace(fallback), status: valueInvalid}
 		}
@@ -713,14 +654,11 @@ func (s *sheet) declarations(prop, value string) []declaration {
 }
 
 func ownedValueTokens(values []css.Token, raw string) ([]valueToken, valueStatus) {
-	if len(values) > maxValueTokens {
-		return nil, valueUnsupported
-	}
 	tokens := make([]valueToken, 0, len(values))
 	offset := 0
 	for _, token := range values {
 		next := offset + len(token.Data)
-		if next > maxValueBytes || next > len(raw) {
+		if next > len(raw) {
 			return nil, valueUnsupported
 		}
 		if token.TokenType == css.BadStringToken || token.TokenType == css.BadURLToken {
@@ -866,12 +804,6 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 		}
 	}
 	if prop == "background" {
-		if len(value) > maxValueBytes {
-			return s.prepareDeclarations([]declaration{
-				{prop: background, value: value, important: imp, order: s.order, unsupported: true},
-				{prop: backgroundImage, value: value, important: imp, order: s.order, unsupported: true},
-			})
-		}
 		if parsed.unsafeIdentifier {
 			return []declaration{
 				prepared(declaration{prop: background, value: value, important: imp, order: s.order, shorthand: true, unsupported: true}),
@@ -1017,11 +949,9 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 		return cssParseResult{}
 	}
 	p := css.NewParserWithLimits(parse.NewInputString(compatibility.text), inline, css.ResourceLimits{
-		ConstructBytes:  s.limits.CSSConstructBytes,
-		ConstructTokens: s.limits.CSSConstructTokens,
-		Depth:           s.limits.Depth,
-		ShouldStop:      s.shouldStop,
-	}, nil)
+		ShouldStop: s.shouldStop,
+		Memory:     s.memory,
+	})
 	var conditions *conditionFrame
 	// Each at-rule temporarily suspends its enclosing qualified rule. Keep
 	// this separate from conditions, which are retained by parsed rules.
@@ -1043,7 +973,7 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 	var out []declaration
 	grammarEnd := 0
 	for {
-		if s.cascadeIncomplete || s.workIncomplete {
+		if s.cascadeIncomplete || s.stopped {
 			return cssParseResult{declarations: out}
 		}
 		grammarStart := grammarEnd
@@ -1107,7 +1037,7 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			// the enclosing rule only when this at-rule's block ends.
 			enclosingRule := current
 			current = -1
-			if !s.chargePlanningTokens(values) {
+			if !s.checkCPU() {
 				return cssParseResult{declarations: out}
 			}
 			vals := tokenString(values)
@@ -1125,19 +1055,12 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			default:
 				cond = mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
 			}
-			if conditionDepth >= s.limits.Depth {
-				s.abandonCascade()
-				return cssParseResult{declarations: out}
-			}
 			conditions = newConditionFrame(cond, conditions)
 			enclosingRules = append(enclosingRules, enclosingRule)
 			parentNested := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
 			nestedGroups = append(nestedGroups, cssNestingGroup(string(data)) && (enclosingRule >= 0 || parentNested))
 			atRuleRulesetDepth = append(atRuleRulesetDepth, rulesetDepth)
 			conditionDepth++
-			if conditionDepth > s.conditionDepth {
-				s.conditionDepth = conditionDepth
-			}
 		case css.EndAtRuleGrammar:
 			current = -1
 			if conditions != nil {
@@ -1149,7 +1072,7 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 				atRuleRulesetDepth = atRuleRulesetDepth[:len(atRuleRulesetDepth)-1]
 			}
 		case css.AtRuleGrammar:
-			if !s.chargePlanningTokens(values) {
+			if !s.checkCPU() {
 				return cssParseResult{declarations: out}
 			}
 			name := asciiLower(string(data))
@@ -1186,14 +1109,10 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 				continue
 			}
 			selector := tokenString(values)
-			if len(selector) > s.limits.SelectorBytes {
-				s.abandonCascade()
+			if !s.checkCPU() {
 				return cssParseResult{declarations: out}
 			}
-			if !s.chargePlanningWork(selector) {
-				return cssParseResult{declarations: out}
-			}
-			plans := planSelectorList(selector, &s.planCount)
+			plans := planSelectorList(selector, &s.planCount, s.memory)
 			if len(plans) == 0 {
 				continue
 			}
@@ -1204,17 +1123,16 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 					// let its HTML-oriented scope or index omit a possible match.
 					plans[i].scopePrefix = ""
 					plans[i].key = selectorKey{}
-					plans[i].makeUncertain()
+					plans[i].makeUncertain(s.memory)
 				}
 			}
 			s.selectors += len(plans)
 			s.rulesSeen++
-			if s.selectors > s.limits.Selectors || len(s.rules) >= s.limits.Rules {
+			if !s.memory.Reserve(int64(unsafe.Sizeof(rule{})) + int64(len(plans))*int64(unsafe.Sizeof(selectorPlan{}))) {
 				s.abandonCascade()
 				return cssParseResult{declarations: out}
 			}
 			r := rule{plans: plans, conditions: conditions}
-			r.prepareMediaWork()
 			s.rules = append(s.rules, r)
 			current = len(s.rules) - 1
 		case css.EndRulesetGrammar:
@@ -1226,7 +1144,7 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			// Unlike selectors and media queries, declaration values can end
 			// with an escaped whitespace character. Preserve the raw token data
 			// so it cannot be mistaken for insignificant surrounding space.
-			if !s.chargePlanningTokens(values) {
+			if !s.checkCPU() {
 				return cssParseResult{declarations: out}
 			}
 			prop, propertySafe := compatibility.declarationProperty(string(data), grammarStart, grammarEnd)
@@ -1314,6 +1232,5 @@ func (s *sheet) attachMediaCondition(firstRule int, media string) {
 			frames[parent] = frame
 		}
 		s.rules[i].conditions = frame
-		s.rules[i].prepareMediaWork()
 	}
 }

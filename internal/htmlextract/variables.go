@@ -3,7 +3,6 @@ package htmlextract
 import (
 	"errors"
 	"io"
-	"math/bits"
 	"sort"
 	"strings"
 
@@ -11,39 +10,12 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 )
 
-const maxValueBytes = 16384
-const maxValueTokens = 4096
-const maxExpressionDepth = 32
-
 type valueToken struct {
 	kind css.TokenType
 	raw  string
 }
-type expressionBudget struct {
-	remaining          int64
-	exhausted          bool
-	depthLimitExceeded bool
-}
 
-func (b *expressionBudget) rejectDepth() {
-	b.depthLimitExceeded = true
-}
-
-func (b *expressionBudget) charge(n int) bool {
-	if b.exhausted {
-		return false
-	}
-	b.remaining -= int64(n)
-	if b.remaining < 0 {
-		b.exhausted = true
-		return false
-	}
-	return true
-}
 func lexValue(s string) ([]valueToken, valueStatus) {
-	if len(s) > maxValueBytes {
-		return nil, valueUnsupported
-	}
 	l := css.NewLexer(parse.NewInputString(s))
 	var ts []valueToken
 	for {
@@ -53,9 +25,6 @@ func lexValue(s string) ([]valueToken, valueStatus) {
 				return nil, valueUnsupported
 			}
 			break
-		}
-		if len(ts) >= maxValueTokens {
-			return nil, valueUnsupported
 		}
 		if k == css.BadStringToken || k == css.BadURLToken {
 			return nil, valueInvalid
@@ -484,9 +453,9 @@ type variableScope struct {
 	allUnresolved       bool
 }
 
-func (s *variableScope) get(name string, budget *expressionBudget) variableValue {
+func (s *variableScope) get(name string, budget *cpuGuard) variableValue {
 	for ; s != nil; s = s.parent {
-		if !budget.charge(1) {
+		if !budget.check() {
 			return variableValue{status: valueUnsupported}
 		}
 		if s.allUnresolved {
@@ -499,9 +468,9 @@ func (s *variableScope) get(name string, budget *expressionBudget) variableValue
 	return variableValue{status: valueInvalid}
 }
 
-func (s *variableScope) colourSchemeDependent(name string, budget *expressionBudget) bool {
+func (s *variableScope) colourSchemeDependent(name string, budget *cpuGuard) bool {
 	for ; s != nil; s = s.parent {
-		if !budget.charge(1) {
+		if !budget.check() {
 			// Exhaustion cannot prove that no inherited definition is
 			// colour-scheme dependent, so preserve the uncertainty.
 			return true
@@ -528,14 +497,17 @@ func unresolvedVariableScope(parent *variableScope) *variableScope {
 // cycle detection and token-by-token substitution would only reproduce the
 // already prepared literal text. The boolean reports whether this fast path
 // was applicable, including when its own bounded work was exhausted.
-func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alternate map[string]bool, budget *expressionBudget) (*variableScope, bool) {
+func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alternate map[string]bool, budget *cpuGuard) (*variableScope, bool) {
 	for _, definition := range defs {
 		d := definition.d
 		if d == nil || !d.tokensReady || d.valueStatus != valueResolved || d.unsupported || definition.uncertainOrigin || d.hasVars || len(d.variableDependencies) != 0 {
 			return nil, false
 		}
 	}
-	if !budget.charge(len(defs)) {
+	if !budget.check() {
+		return unresolvedVariableScope(parent), true
+	}
+	if !budget.reserve(int64(len(defs))*96 + 64) {
 		return unresolvedVariableScope(parent), true
 	}
 	s := &variableScope{parent: parent, values: make(map[string]variableValue, len(defs))}
@@ -553,7 +525,7 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 			value = variableValue{text: trimCSSWhitespace(d.value), status: valueResolved}
 		}
 		s.values[name] = value
-		if budget.exhausted {
+		if budget.stopped {
 			return unresolvedVariableScope(parent), true
 		}
 	}
@@ -563,7 +535,10 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 	if len(alternate) == 0 && (parent == nil || !parent.hasColourDependency) {
 		return s, true
 	}
-	if !budget.charge(len(defs) + len(alternate)) {
+	if !budget.check() {
+		return unresolvedVariableScope(parent), true
+	}
+	if !budget.reserve(int64(len(defs)+len(alternate))*24 + 64) {
 		return unresolvedVariableScope(parent), true
 	}
 	s.colourDependent = make(map[string]bool, len(defs)+len(alternate))
@@ -584,22 +559,25 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 
 // A scope stores only this element's computed overrides. Parent references have
 // already been substituted, so a child's --b cannot change inherited --a:var(--b).
-func buildVariables(parent *variableScope, defs map[string]candidate, alternate map[string]bool, budget *expressionBudget) *variableScope {
+func buildVariables(parent *variableScope, defs map[string]candidate, alternate map[string]bool, budget *cpuGuard) *variableScope {
 	if len(defs) == 0 && len(alternate) == 0 {
 		return parent
 	}
-	if len(defs)+len(alternate) > 1024 || !budget.charge(len(defs)+len(alternate)) {
+	if !budget.check() {
 		return unresolvedVariableScope(parent)
 	}
 	if scope, ok := buildLiteralVariables(parent, defs, alternate, budget); ok {
 		return scope
+	}
+	if !budget.reserve(int64(len(defs))*320 + int64(len(alternate))*24 + 256) {
+		return unresolvedVariableScope(parent)
 	}
 	s := &variableScope{parent: parent, values: make(map[string]variableValue), colourDependent: make(map[string]bool)}
 	var ordered []string
 	for n := range defs {
 		ordered = append(ordered, n)
 	}
-	if !budget.charge(variableSortWork(len(ordered))) {
+	if !budget.check() {
 		return unresolvedVariableScope(parent)
 	}
 	sort.Strings(ordered)
@@ -632,12 +610,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 			}
 			return
 		}
-		if depth > maxExpressionDepth {
-			budget.rejectDepth()
-			s.values[n] = variableValue{status: valueUnsupported}
-			return
-		}
-		if !budget.charge(1 + len(tokens[n])) {
+		if !budget.check() {
 			s.values[n] = variableValue{status: valueUnsupported}
 			return
 		}
@@ -658,7 +631,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	}
 	for _, n := range ordered {
 		visit(n, 0)
-		if budget.exhausted {
+		if budget.stopped {
 			return unresolvedVariableScope(parent)
 		}
 	}
@@ -675,8 +648,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 			return parent.get(n, budget)
 		}
 		d := definition.d
-		if depth > maxExpressionDepth {
-			budget.rejectDepth()
+		if !budget.check() {
 			return variableValue{status: valueUnsupported}
 		}
 		var v variableValue
@@ -695,7 +667,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	}
 	for _, n := range ordered {
 		resolveName(n, 0)
-		if budget.exhausted {
+		if budget.stopped {
 			return unresolvedVariableScope(parent)
 		}
 	}
@@ -708,10 +680,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		if dependencyState[name] == 2 {
 			return s.colourDependent[name]
 		}
-		if alternate[name] || depth > maxExpressionDepth {
-			if depth > maxExpressionDepth {
-				budget.rejectDepth()
-			}
+		if alternate[name] {
 			s.colourDependent[name] = true
 			s.hasColourDependency = true
 			return true
@@ -723,7 +692,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		if !local {
 			return parent.colourSchemeDependent(name, budget)
 		}
-		if !budget.charge(1 + len(definition.d.variableDependencies)) {
+		if !budget.check() {
 			s.colourDependent[name] = true
 			s.hasColourDependency = true
 			return true
@@ -757,13 +726,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	return s
 }
 
-func variableSortWork(n int) int {
-	if n < 2 {
-		return 0
-	}
-	return n * bits.Len(uint(n-1))
-}
-func substitute(d *declaration, vars *variableScope, budget *expressionBudget) variableValue {
+func substitute(d *declaration, vars *variableScope, budget *cpuGuard) variableValue {
 	if !d.hasVars {
 		return variableValue{d.value, valueResolved}
 	}
@@ -774,22 +737,22 @@ func substitute(d *declaration, vars *variableScope, budget *expressionBudget) v
 		return vars.get(name, budget)
 	}, budget, 0)
 }
-func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget *expressionBudget, depth int) variableValue {
-	if depth > maxExpressionDepth {
-		budget.rejectDepth()
+
+func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget *cpuGuard, depth int) variableValue {
+	if !budget.check() {
 		return variableValue{status: valueUnsupported}
 	}
-	if !budget.charge(len(ts)) {
+	if !budget.check() {
 		return variableValue{status: valueUnsupported}
 	}
 	var out strings.Builder
 	for i := 0; i < len(ts); i++ {
 		t := ts[i]
 		if t.kind != css.FunctionToken || !equalASCIIFold(t.raw, "var(") {
-			// Token count bounds structural work, but a single token can contain
-			// almost maxValueBytes. Charge the bytes before copying them so large
-			// strings and identifiers cannot consume unmetered expression work.
-			if !budget.charge(len(t.raw)) {
+			if !budget.check() {
+				return variableValue{status: valueUnsupported}
+			}
+			if !budget.reserve(int64(len(t.raw))) {
 				return variableValue{status: valueUnsupported}
 			}
 			out.WriteString(t.raw)
@@ -823,17 +786,17 @@ func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget
 			if v.status != valueResolved {
 				return v
 			}
-			if !budget.charge(len(v.text)) {
+			if !budget.check() {
 				return variableValue{status: valueUnsupported}
 			}
 			// Whitespace prevents token concatenation such as var(--n)px.
+			if !budget.reserve(int64(len(v.text) + 2)) {
+				return variableValue{status: valueUnsupported}
+			}
 			out.WriteByte(' ')
 			out.WriteString(v.text)
 			out.WriteByte(' ')
 			i = end
-		}
-		if out.Len() > maxValueBytes {
-			return variableValue{status: valueUnsupported}
 		}
 	}
 	return variableValue{trimCSSWhitespace(out.String()), valueResolved}

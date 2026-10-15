@@ -3,14 +3,18 @@ package htmlextract
 import (
 	"errors"
 	"fmt"
+	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 type processor struct {
 	Limits           Limits
 	retainInspection bool // tests only; production results retain compact decisions
 	shouldStop       func() bool
+	cpu              *cpuGuard
+	memory           *resourceguard.Memory
 }
 
 var errStopped = errors.New("HTML processing stopped")
@@ -55,7 +59,6 @@ type viewingCaseFrame struct {
 	scope                nodeScope
 	presentationState
 	vars         *variableScope
-	selectorPath selectorAttributeProfile
 	ancestorKeys selectorAncestorActivation
 }
 
@@ -70,8 +73,8 @@ type viewingCaseRunner struct {
 	document         *parsedDocument
 	styles           *sheet
 	retainInspection bool
-	matches          *matchBudget
-	expressions      *expressionBudget
+	matches          *cpuGuard
+	expressions      *cpuGuard
 	results          *viewingCaseResults
 	frames           []viewingCaseFrame
 	styleStack       []Style
@@ -84,7 +87,7 @@ type viewingCaseRunner struct {
 
 func (r *viewingCaseRunner) evaluateColour(foreground Value) colourResult {
 	if !chargeColourEvaluation(foreground, r.layers, r.matches) {
-		return colourResult{uncertainty: "style-analysis work limit"}
+		return colourResult{uncertainty: "style-analysis CPU limit"}
 	}
 	if r.colourMemo.valid && r.colourMemo.generation == r.layerGeneration && r.colourMemo.foreground == foreground {
 		return r.colourMemo.result
@@ -158,14 +161,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 				if len(r.document.elements) != 0 {
 					prepared = r.document.elements[n]
 				}
-				selectorCurrent := prepared.selector
-				f.selectorPath.classes = max(f.selectorPath.classes, selectorCurrent.classes)
-				f.selectorPath.ids = max(f.selectorPath.ids, selectorCurrent.ids)
-				f.selectorPath.attributes = max(f.selectorPath.attributes, selectorCurrent.attributes)
-				selectorContext := selectorMatchContext{
-					current: selectorCurrent, path: f.selectorPath, document: r.document.attributeWork,
-					depth: len(r.frames) - 1, nodes: r.document.nodeCount, elements: r.document.elements,
-				}
+				selectorContext := selectorMatchContext{elements: r.document.elements}
 				parentStyle := &r.styleStack[f.styleIndex]
 				var resolved elementStyleResult
 				if prepared.inlineIncomplete {
@@ -279,7 +275,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					// definitely visible to the recipient.
 					f.layoutUncertain = true
 				}
-				if !r.matches.exhausted && !r.expressions.exhausted && prepared.hasElementChild {
+				if !r.matches.stopped && prepared.hasElementChild {
 					activation, complete := r.styles.activateAncestorBuckets(n, r.matches)
 					if complete {
 						f.ancestorKeys = activation
@@ -333,7 +329,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 		f.next = child.NextSibling
 		r.frames = append(r.frames, viewingCaseFrame{
 			n: child, styleIndex: f.styleIndex, scope: f.scope, presentationState: f.presentationState,
-			vars: f.vars, selectorPath: f.selectorPath,
+			vars: f.vars,
 		})
 	}
 	if !first && (textIndex != len(r.results.textLabels) || elementIndex != len(r.results.elementLabels)) {
@@ -343,11 +339,21 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 }
 
 func (p processor) process(input []byte) (Document, error) {
+	if p.cpu == nil {
+		p.cpu = &cpuGuard{shouldStop: p.shouldStop}
+	}
+	if p.memory == nil {
+		p.memory = resourceguard.NewMemory(p.Limits.MemoryBytes)
+	}
+	p.cpu.memory = p.memory
 	if p.stopped() {
 		return Document{}, errStopped
 	}
 	document, err := p.parseDocument(input)
 	if err != nil {
+		if p.memory.Exhausted() {
+			err = fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+		}
 		return Document{
 			Usage:                parsedResourceUsage(len(input), &document),
 			UnresolvedStylesheet: document.styles.unresolvedStylesheet,
@@ -363,20 +369,24 @@ func (p processor) process(input []byte) (Document, error) {
 	if p.stopped() {
 		return in, errStopped
 	}
-	s.buildSelectorIndex(document.treeDepth, document.nodeCount)
+	s.buildSelectorIndex()
+	if p.memory.Exhausted() {
+		in.Usage = parsedResourceUsage(len(input), &document)
+		return in, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+	}
 	if p.stopped() {
 		return in, errStopped
 	}
-	cap := p.Limits.MediaCases
-	if cap < 1 || cap > MaxViewingCases {
-		cap = MaxViewingCases
-	}
-	widths, fallback := s.viewingCases(cap)
-	in.Usage.MediaCases = len(widths)
+	widths, fallback := s.viewingCases()
 	s.runtime.cacheMatches = len(widths) > 1
-	exprLimit := p.Limits.ExpressionWork
-	budget := expressionBudget{remaining: exprLimit}
-	matches := matchBudget{limit: p.Limits.MatchWork, used: s.planningWork}
+	guard := p.cpu
+	resultBytes := int64(document.extractableTextCount)*(int64(unsafe.Sizeof(Text{}))+int64(unsafe.Sizeof(visibilityLabel(0)))+int64(unsafe.Sizeof(concealmentReason(0)))) +
+		int64(document.extractableElementCount)*(int64(unsafe.Sizeof(Element{}))+int64(unsafe.Sizeof(visibilityLabel(0)))+int64(unsafe.Sizeof(concealmentReason(0))))
+	frameBytes := int64(document.treeDepth+1) * (int64(unsafe.Sizeof(viewingCaseFrame{})) + int64(unsafe.Sizeof(Style{})) + int64(unsafe.Sizeof(paintLayer{})))
+	if !p.memory.Reserve(resultBytes + frameBytes) {
+		in.Usage = parsedResourceUsage(len(input), &document)
+		return in, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+	}
 	results := viewingCaseResults{
 		text:           make([]Text, 0, document.extractableTextCount),
 		elements:       make([]Element, 0, document.extractableElementCount),
@@ -387,7 +397,7 @@ func (p processor) process(input []byte) (Document, error) {
 	}
 	runner := viewingCaseRunner{
 		document: &document, styles: s, retainInspection: p.retainInspection,
-		matches: &matches, expressions: &budget, results: &results,
+		matches: guard, expressions: guard, results: &results,
 		frames:     make([]viewingCaseFrame, 0, document.treeDepth+1),
 		styleStack: make([]Style, 0, document.treeDepth+1),
 		layers:     make([]paintLayer, 0, document.treeDepth),
@@ -395,25 +405,15 @@ func (p processor) process(input []byte) (Document, error) {
 	}
 	for caseIndex, width := range widths {
 		if p.stopped() {
-			recordEvaluationUsage(&in.Usage, &matches, &budget, exprLimit, s)
 			return in, errStopped
 		}
 		if err := runner.run(width, fallback, caseIndex == 0); err != nil {
-			recordEvaluationUsage(&in.Usage, &matches, &budget, exprLimit, s)
+			if p.memory.Exhausted() {
+				err = fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+			}
 			return in, err
 		}
-		if (matches.exhausted || budget.exhausted) && caseIndex+1 < len(widths) {
-			// All later cases would receive unresolved styles. Mark their
-			// contribution directly instead of repeatedly traversing the DOM.
-			unknown := labelUnknown
-			for i := range results.textLabels {
-				results.textLabels[i] |= unknown
-			}
-			for i := range results.elementLabels {
-				results.elementLabels[i] |= unknown
-			}
-			break
-		}
+		_ = caseIndex
 	}
 	if s.unsupportedNesting || document.msoOrderUncertain {
 		// Nested selectors can target descendants, siblings, or ancestors of
@@ -442,7 +442,10 @@ func (p processor) process(input []byte) (Document, error) {
 		}
 	}
 	in.Elements = results.elements
-	recordEvaluationUsage(&in.Usage, &matches, &budget, exprLimit, s)
+	if p.memory.Exhausted() {
+		in.Usage = parsedResourceUsage(len(input), &document)
+		return in, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+	}
 	return in, nil
 }
 
@@ -450,31 +453,19 @@ func parsedResourceUsage(inputBytes int, document *parsedDocument) ResourceUsage
 	s := &document.styles
 	return ResourceUsage{
 		InputBytes:                 inputBytes,
-		Nodes:                      max(document.nodeCount, document.parserUsage.Nodes),
-		TextNodes:                  max(document.textCount, document.parserUsage.TextNodes),
-		Attributes:                 max(document.attributeCount, document.parserUsage.Attributes),
-		Depth:                      max(document.treeDepth, document.parserUsage.Depth),
-		CSSDepth:                   s.conditionDepth,
-		Rules:                      s.rulesSeen,
-		Selectors:                  s.selectors,
 		CSSBytes:                   s.cssBytes,
-		MatchWork:                  s.planningWork,
+		MemoryBytes:                memoryUsed(document.memory),
 		UnsupportedColourFunctions: s.unsupportedColours,
 
-		CSSLimitExceeded:   s.cascadeIncomplete,
-		MatchWorkExhausted: s.workIncomplete,
+		CSSLimitExceeded: s.cascadeIncomplete,
 	}
 }
 
-func recordEvaluationUsage(usage *ResourceUsage, matches *matchBudget, expressions *expressionBudget, expressionLimit int64, styles *sheet) {
-	usage.MatchWork = matches.used
-	usage.MatchWorkExhausted = matches.exhausted || styles.workIncomplete
-	usage.ExpressionWork = expressionLimit - expressions.remaining
-	if usage.ExpressionWork > expressionLimit {
-		usage.ExpressionWork = expressionLimit
+func memoryUsed(memory *resourceguard.Memory) int64 {
+	if memory == nil {
+		return 0
 	}
-	usage.ExpressionWorkExhausted = expressions.exhausted
-	usage.ExpressionDepthLimitExceeded = expressions.depthLimitExceeded
+	return memory.Used()
 }
 
 func mergeViewingCaseLabel(labels []visibilityLabel, index int, bit visibilityLabel) bool {

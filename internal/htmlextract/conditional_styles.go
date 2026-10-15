@@ -13,7 +13,7 @@ import (
 // clients, so their origin is always uncertain.
 func (s *sheet) parseMSOConditionalStyles(data string) {
 	fragment, ok := msoConditionalFragment(data)
-	if !ok || s.cascadeIncomplete || s.workIncomplete {
+	if !ok || s.cascadeIncomplete || s.stopped {
 		return
 	}
 	// Most MSO comments contain alternate table markup rather than CSS. Avoid
@@ -23,7 +23,7 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 	}
 	// Tokenizing the conditional markup is work in addition to parsing any CSS
 	// it contains. Charge that scan before starting it.
-	if !s.chargePlanningBytes(len(fragment)) {
+	if !s.checkCPU() {
 		return
 	}
 	z := html.NewTokenizer(strings.NewReader(fragment))
@@ -41,7 +41,7 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 		}
 		s.parseStylesheet(style.String(), attr(&styleNode, "media"), true)
 		style.Reset()
-		return !s.cascadeIncomplete && !s.workIncomplete
+		return !s.cascadeIncomplete && !s.stopped
 	}
 	for {
 		tokenType := z.Next()
@@ -124,11 +124,9 @@ const (
 )
 
 const (
-	maxMSOConditionBytes  = 1024
-	maxMSOConditionTokens = 256
-	maxMSOConditionDepth  = 32
-	minMSOVersion         = 9
-	maxMSOVersion         = 16
+	maxMSOConditionBytes = 1024
+	minMSOVersion        = 9
+	maxMSOVersion        = 16
 )
 
 const msoConditionUniverse uint32 = 1<<(2*(maxMSOVersion-minMSOVersion+1)) - 1
@@ -170,7 +168,6 @@ func msoDownlevelRevealedMarker(data string) msoRevealedMarker {
 type msoConditionParser struct {
 	input  string
 	pos    int
-	tokens int
 	failed bool
 }
 
@@ -201,10 +198,6 @@ func (p *msoConditionParser) parseAnd(depth int) uint32 {
 }
 
 func (p *msoConditionParser) parseUnary(depth int) uint32 {
-	if depth > maxMSOConditionDepth {
-		p.failed = true
-		return 0
-	}
 	if p.take('!') {
 		return msoConditionUniverse ^ p.parseUnary(depth+1)
 	}
@@ -260,7 +253,6 @@ func (p *msoConditionParser) take(want byte) bool {
 		return false
 	}
 	p.pos++
-	p.noteToken()
 	return true
 }
 
@@ -279,7 +271,6 @@ func (p *msoConditionParser) word() string {
 	if p.pos == start {
 		return ""
 	}
-	p.noteToken()
 	return p.input[start:p.pos]
 }
 
@@ -307,7 +298,6 @@ func (p *msoConditionParser) number() (int, bool) {
 	if p.pos == start {
 		return 0, false
 	}
-	p.noteToken()
 	return value, true
 }
 
@@ -319,13 +309,6 @@ func (p *msoConditionParser) skipSpace() {
 		default:
 			return
 		}
-	}
-}
-
-func (p *msoConditionParser) noteToken() {
-	p.tokens++
-	if p.tokens > maxMSOConditionTokens {
-		p.failed = true
 	}
 }
 

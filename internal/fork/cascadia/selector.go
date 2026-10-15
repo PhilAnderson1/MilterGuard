@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // Matcher is the interface for basic selector functionality.
@@ -62,7 +63,18 @@ func ParseWithPseudoElement(sel string) (Sel, error) {
 // Use `ParseGroupWithPseudoElements`
 // if you need support for pseudo-elements.
 func ParseGroup(sel string) (SelectorGroup, error) {
-	p := &parser{s: sel}
+	return ParseGroupWithMemory(sel, nil)
+}
+
+// ParseGroupWithMemory parses a selector and charges a conservative allowance
+// for the strings, selector objects, slices and regexp program retained or
+// temporarily allocated while compiling it.
+func ParseGroupWithMemory(sel string, memory *resourceguard.Memory) (SelectorGroup, error) {
+	const selectorAllocationFactor = 32
+	if memory != nil && !memory.Reserve(int64(len(sel)*selectorAllocationFactor+64)) {
+		return nil, fmt.Errorf("cascadia: memory limit exceeded")
+	}
+	p := &parser{s: sel, memory: memory}
 	compiled, err := p.parseSelectorGroup()
 	if err != nil {
 		return nil, err

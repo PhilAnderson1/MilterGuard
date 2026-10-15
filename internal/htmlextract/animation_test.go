@@ -2,7 +2,6 @@ package htmlextract
 
 import (
 	"html"
-	"strings"
 	"testing"
 )
 
@@ -78,21 +77,5 @@ func TestAnimationDefinitionSources(t *testing.T) {
 				t.Fatalf("label = %q, want %q", got, c.want)
 			}
 		})
-	}
-}
-
-func TestAnimationNameResolutionRemainsBounded(t *testing.T) {
-	document := inspectHTML(t, `<style>@keyframes dummy{from{}}</style><p style="visibility:hidden;animation-name:`+strings.Repeat("x", maxValueBytes+1)+`">T</p>`)
-	if got := findText(t, document, "T").Label; got != "unknown" {
-		t.Fatalf("oversized value label = %q, want unknown", got)
-	}
-	// A name lookup still hashes its bytes on each evaluation. Exhaustion must
-	// be charged rather than letting long static names evade the work budget.
-	s := sheet{keyframeNames: map[string]struct{}{"dummy": {}}}
-	d := prepareDeclaration(declaration{prop: animationProperty, value: strings.Repeat("x", 128), shorthand: true})
-	budget := expressionBudget{remaining: 1000}
-	matches := matchBudget{limit: 1}
-	if !s.potentiallyActiveAnimation(candidate{d: &d, set: true}, evaluationContext{budget: &budget}, &matches) || !matches.exhausted {
-		t.Fatal("name lookup exhaustion did not preserve uncertainty")
 	}
 }

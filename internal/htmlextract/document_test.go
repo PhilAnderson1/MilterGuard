@@ -1,18 +1,13 @@
 package htmlextract
 
 import (
-	"bytes"
-	"context"
-	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
@@ -134,147 +129,6 @@ func TestCascadeWinnerIsCompact(t *testing.T) {
 	}
 }
 
-func TestAnalyzeValidatesLimitsWithoutPanicking(t *testing.T) {
-	cases := []struct {
-		name   string
-		change func(*Limits)
-	}{
-		{"input bytes", func(l *Limits) { l.InputBytes = 0 }},
-		{"nodes", func(l *Limits) { l.Nodes = 0 }},
-		{"text nodes", func(l *Limits) { l.TextNodes = 0 }},
-		{"attributes", func(l *Limits) { l.Attributes = 0 }},
-		{"depth", func(l *Limits) { l.Depth = -1 }},
-		{"rules", func(l *Limits) { l.Rules = -1 }},
-		{"selectors", func(l *Limits) { l.Selectors = -1 }},
-		{"selector bytes", func(l *Limits) { l.SelectorBytes = 0 }},
-		{"CSS bytes", func(l *Limits) { l.CSSBytes = 0 }},
-		{"CSS construct bytes", func(l *Limits) { l.CSSConstructBytes = 0 }},
-		{"CSS construct tokens", func(l *Limits) { l.CSSConstructTokens = 0 }},
-		{"match work", func(l *Limits) { l.MatchWork = 0 }},
-		{"media cases", func(l *Limits) { l.MediaCases = 0 }},
-		{"expression work", func(l *Limits) { l.ExpressionWork = 0 }},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			limits := DefaultLimits()
-			c.change(&limits)
-			if _, err := Analyze([]byte(`<p>T</p>`), limits); err == nil || !strings.Contains(err.Error(), "invalid limit") {
-				t.Fatalf("validation error = %v", err)
-			}
-		})
-	}
-}
-
-func TestMatchWorkMaximumKeepsOverBudgetSentinelRepresentable(t *testing.T) {
-	limits := DefaultLimits()
-	limits.MatchWork = maxMatchWork
-	if _, err := Analyze([]byte(`<style>div ~ b ~ div{visibility:hidden}</style><div>T</div>`), limits); err != nil {
-		t.Fatalf("maximum safe MatchWork rejected: %v", err)
-	}
-
-	limits.MatchWork++
-	_, err := Analyze([]byte(`<style>div ~ b ~ div{visibility:hidden}</style><div>T</div>`), limits)
-	if err == nil || !strings.Contains(err.Error(), "invalid limit: MatchWork") {
-		t.Fatalf("overflowing MatchWork validation error = %v", err)
-	}
-}
-
-func TestCSSInputIsBoundedDuringParsing(t *testing.T) {
-	limits := DefaultLimits()
-	oversized := `p{color:` + strings.Repeat(`0 0 0 1px,`, limits.CSSConstructBytes) + `red}`
-	s := sheet{limits: limits}
-	if declarations := s.parseCSS(oversized, false); declarations != nil {
-		t.Fatalf("oversized stylesheet returned declarations: %+v", declarations)
-	}
-	if !s.cascadeIncomplete {
-		t.Fatal("oversized stylesheet did not invalidate the cascade")
-	}
-	if s.cssBytes != len(oversized) {
-		t.Fatalf("CSS bytes = %d, want %d", s.cssBytes, len(oversized))
-	}
-}
-
-func TestLargeStylesheetOfBoundedConstructsIsAccepted(t *testing.T) {
-	limits := DefaultLimits()
-	source := strings.Repeat(`p{color:red}`, 2_000)
-	if len(source) <= limits.CSSConstructBytes || len(source) >= limits.CSSBytes {
-		t.Fatalf("test stylesheet size = %d", len(source))
-	}
-	s := sheet{limits: limits}
-	s.parseCSS(source, false)
-	if s.cascadeIncomplete {
-		t.Fatal("bounded declarations were rejected based on total stylesheet size")
-	}
-	if len(s.rules) != 2_000 {
-		t.Fatalf("parsed rules = %d, want 2000", len(s.rules))
-	}
-}
-
-func TestRetainedValueTokensHaveDocumentBudget(t *testing.T) {
-	limits := DefaultLimits()
-	value := strings.Repeat("0 ", 1_400)
-	source := `p{--payload:` + value + `}`
-	limits.CSSBytes = len(source)
-	s := sheet{limits: limits}
-	s.parseCSS(source, false)
-	if !s.workIncomplete {
-		t.Fatal("token-dense custom property did not exhaust retained-token budget")
-	}
-	if got, maximum := s.retainedTokenBytes, s.retainedTokenBudget(); got > maximum {
-		t.Fatalf("retained token bytes = %d, budget = %d", got, maximum)
-	}
-}
-
-func TestOrdinaryCustomPropertiesFitRetainedTokenBudget(t *testing.T) {
-	limits := DefaultLimits()
-	limits.CSSBytes = 4 << 10
-	var source strings.Builder
-	source.WriteString(`p{--base:12px;`)
-	for i := 0; i < 100; i++ {
-		fmt.Fprintf(&source, "--v%d:var(--base, %dpx);", i, i)
-	}
-	source.WriteString(`display:var(--display,block)}`)
-	if source.Len() >= limits.CSSBytes {
-		t.Fatalf("test stylesheet size = %d", source.Len())
-	}
-	s := sheet{limits: limits}
-	s.parseCSS(source.String(), false)
-	if s.workIncomplete || s.cascadeIncomplete {
-		t.Fatalf("ordinary custom properties exhausted style analysis: %+v", s)
-	}
-	if s.retainedTokenBytes == 0 || s.retainedTokenBytes > s.retainedTokenBudget() {
-		t.Fatalf("retained token bytes = %d, budget = %d", s.retainedTokenBytes, s.retainedTokenBudget())
-	}
-}
-
-func TestNestedCustomPropertyCannotBypassCSSConstructLimit(t *testing.T) {
-	for name, value := range map[string]string{
-		"nested block": `{` + strings.Repeat(`x`, 40) + `}`,
-		"comment":      `/*` + strings.Repeat(`x`, 40) + `*/`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			limits := DefaultLimits()
-			limits.CSSConstructBytes = 32
-			s := sheet{limits: limits}
-			s.parseCSS(`p{--payload:`+value+`;display:none}`, false)
-			if !s.cascadeIncomplete {
-				t.Fatal("custom-property value bypassed construct limit")
-			}
-		})
-	}
-}
-
-func TestCSSParserEnforcesConstructTokenLimit(t *testing.T) {
-	limits := DefaultLimits()
-	limits.CSSConstructBytes = 1_000
-	limits.CSSConstructTokens = 8
-	s := sheet{limits: limits}
-	s.parseCSS(`p{color:0 0 0 0 0 0 0 0 0}`, false)
-	if !s.cascadeIncomplete {
-		t.Fatal("token-heavy declaration bypassed construct limit")
-	}
-}
-
 func TestCSSParserSamplesCooperativeStop(t *testing.T) {
 	calls := 0
 	s := sheet{
@@ -290,105 +144,6 @@ func TestCSSParserSamplesCooperativeStop(t *testing.T) {
 	}
 	if calls == 0 {
 		t.Fatal("stop callback was not sampled")
-	}
-}
-
-func TestCSSConstructLimitBoundsRuleListSemicolonRuns(t *testing.T) {
-	limits := DefaultLimits()
-	limits.CSSConstructBytes = 1_000
-	limits.CSSConstructTokens = 8
-	for _, source := range []string{
-		strings.Repeat(`;`, limits.CSSConstructTokens+1),
-		`p{color:red}` + strings.Repeat(`;`, limits.CSSConstructTokens+1),
-		`@charset "utf-8";` + strings.Repeat(`;`, limits.CSSConstructTokens+1),
-	} {
-		s := sheet{limits: limits}
-		s.parseCSS(source, false)
-		if !s.cascadeIncomplete {
-			t.Errorf("semicolon run bypassed parser construct limit for %q", source)
-		}
-	}
-}
-
-func TestCSSConstructByteLimitBoundsRuleListSemicolonRuns(t *testing.T) {
-	limits := DefaultLimits()
-	limits.CSSConstructBytes = 8
-	limits.CSSConstructTokens = 1_000
-	s := sheet{limits: limits}
-	s.parseCSS(strings.Repeat(`;`, limits.CSSConstructBytes+1), false)
-	if !s.cascadeIncomplete {
-		t.Fatal("byte-heavy semicolon run bypassed parser construct limit")
-	}
-}
-
-func TestCSSParserKeepsDeclarationAndAtRuleSemicolonBoundaries(t *testing.T) {
-	limits := DefaultLimits()
-	limits.CSSConstructBytes = 32
-	limits.CSSConstructTokens = 8
-	declarations := strings.Repeat(`;`, 100) + `color:red`
-	for _, test := range []struct {
-		name   string
-		source string
-		inline bool
-	}{
-		{name: "declaration list", source: `p{` + declarations + `}`},
-		{name: "inline declarations", source: declarations, inline: true},
-		{name: "at-rules", source: strings.Repeat(`@unknown;`, 100)},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			s := sheet{limits: limits}
-			result := s.parseCSSResult(test.source, test.inline)
-			if s.cascadeIncomplete || result.incomplete {
-				t.Fatal("bounded constructs were rejected")
-			}
-		})
-	}
-}
-
-func TestCSSRuleListSemicolonFloodReportsLimit(t *testing.T) {
-	limits := DefaultLimits()
-	document, err := Analyze([]byte(`<style>`+strings.Repeat(`;`, limits.CSSConstructTokens+1)+`</style><p>T</p>`), limits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !document.Usage.CSSLimitExceeded {
-		t.Fatal("semicolon flood did not abandon the shared cascade")
-	}
-}
-
-func TestCSSParserEnforcesContextDepthLimit(t *testing.T) {
-	limits := DefaultLimits()
-	limits.Depth = 4
-	nested := func(depth int) string {
-		return strings.Repeat(`@media all{`, depth) + `p{display:none}` + strings.Repeat(`}`, depth)
-	}
-	atLimit := sheet{limits: limits}
-	atLimit.parseCSS(nested(limits.Depth-1), false)
-	if atLimit.cascadeIncomplete {
-		t.Fatal("CSS at context depth limit was rejected")
-	}
-	s := sheet{limits: limits}
-	s.parseCSS(nested(limits.Depth), false)
-	if !s.cascadeIncomplete {
-		t.Fatal("over-deep CSS context stack reached the full parser")
-	}
-}
-
-func TestCSSParserBoundsVendorPrefixedAtRulesByConstruct(t *testing.T) {
-	limits := DefaultLimits()
-	limits.CSSConstructBytes = 32
-	for _, atRule := range []string{"@-x-media screen", "@-x-supports (display:block)", "@-moz-document url-prefix()", "@-webkit-keyframes pulse"} {
-		t.Run(atRule, func(t *testing.T) {
-			source := atRule + `{` + strings.Repeat(`p{color:red}`, 10) + `}`
-			if len(source) <= limits.CSSConstructBytes {
-				t.Fatalf("test source is only %d bytes", len(source))
-			}
-			s := sheet{limits: limits}
-			s.parseCSS(source, false)
-			if s.cascadeIncomplete {
-				t.Fatal("bounded nested rules were treated as one construct")
-			}
-		})
 	}
 }
 
@@ -420,149 +175,6 @@ func TestCSSByteLimitAppliesBeforeStyleTextCollection(t *testing.T) {
 	}
 	if got := findText(t, document, "T").Label; got != "unknown" {
 		t.Fatalf("label = %q, want unknown", got)
-	}
-}
-
-func TestOversizedCSSMakesVisibilityUnknown(t *testing.T) {
-	limits := DefaultLimits()
-	limits.CSSConstructBytes = 32
-	source := `<style>p{display:` + strings.Repeat(`x`, limits.CSSConstructBytes+1) + `}</style><p>T</p>`
-	document, err := (processor{Limits: limits}).process([]byte(source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := findText(t, document, "T")
-	if text.Label != "unknown" {
-		t.Fatalf("label = %q, want unknown after CSS parser limit", text.Label)
-	}
-}
-
-func TestOversizedInlineStyleKeepsUncertaintyLocal(t *testing.T) {
-	limits := DefaultLimits()
-	limits.CSSConstructBytes = 32
-	stylesheet := `.concealed{display:none}`
-	inline := `color:` + strings.Repeat(`x`, limits.CSSConstructBytes+1)
-	source := `<style>` + stylesheet + `</style>` +
-		`<p class="concealed">Hidden</p>` +
-		`<div style="` + inline + `">Uncertain<span>Descendant</span></div>` +
-		`<p>Visible</p>`
-	document, err := Analyze([]byte(source), limits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for text, want := range map[string]string{
-		"Hidden":     "concealed",
-		"Uncertain":  "unknown",
-		"Descendant": "unknown",
-		"Visible":    "visible",
-	} {
-		if got := findText(t, document, text).Label; got != want {
-			t.Errorf("%s label = %q, want %q", text, got, want)
-		}
-	}
-	if document.Usage.CSSLimitExceeded {
-		t.Fatalf("localized inline limit invalidated the cascade: %+v", document.Usage)
-	}
-	if want := len(stylesheet) + len(inline); document.Usage.CSSBytes != want {
-		t.Fatalf("CSS bytes = %d, want %d", document.Usage.CSSBytes, want)
-	}
-}
-
-func TestAnalyzeValidatesHTMLParserDepthCeiling(t *testing.T) {
-	limits := DefaultLimits()
-	limits.Depth = maxHTMLDepth
-	if _, err := Analyze([]byte(`<p>T</p>`), limits); err != nil {
-		t.Fatalf("maximum depth rejected: %v", err)
-	}
-	limits.Depth++
-	if _, err := Analyze([]byte(`<p>T</p>`), limits); err == nil || !strings.Contains(err.Error(), "Depth must be at most") {
-		t.Fatalf("over-maximum depth error = %v", err)
-	}
-}
-
-func TestTreeDepthAllowsParserImpliedAncestors(t *testing.T) {
-	limits := DefaultLimits()
-	boundary := strings.Repeat(`<div>`, limits.Depth) + `T`
-	document, err := Analyze([]byte(boundary), limits)
-	if err != nil {
-		t.Fatalf("boundary fragment rejected: %v", err)
-	}
-	if document.Usage.Depth <= limits.Depth || document.Usage.Depth > limits.Depth+impliedTreeDepthMargin {
-		t.Fatalf("boundary fragment depth = %d, want parser margin above %d", document.Usage.Depth, limits.Depth)
-	}
-
-	withTableWrapper := strings.Repeat(`<div>`, limits.Depth-3) + `<table><tr><td>T`
-	if document, err = Analyze([]byte(withTableWrapper), limits); err != nil {
-		t.Fatalf("boundary table fragment rejected: %v", err)
-	}
-	if document.Usage.Depth <= limits.Depth || document.Usage.Depth > limits.Depth+impliedTreeDepthMargin {
-		t.Fatalf("boundary table depth = %d, want parser margin above %d", document.Usage.Depth, limits.Depth)
-	}
-
-	nestedTables := 33
-	nestedTableSource := strings.Repeat(`<table><tr><td>`, nestedTables) + `T`
-	document, err = Analyze([]byte(nestedTableSource), limits)
-	if err != nil {
-		t.Fatalf("nested tables within lexical depth rejected: %v", err)
-	}
-	if document.Usage.Depth <= limits.Depth+impliedTreeDepthMargin || document.Usage.Depth > limits.Depth+impliedTreeDepthMargin+nestedTables {
-		t.Fatalf("nested-table tree depth = %d, want dynamic allowance above %d", document.Usage.Depth, limits.Depth+impliedTreeDepthMargin)
-	}
-
-	// A td directly below each table causes the parser to insert both tbody
-	// and tr. Those generated ancestors must not turn lexically bounded input
-	// into a post-allocation depth rejection.
-	impliedWrapperTables := 63
-	impliedWrapperSource := strings.Repeat(`<table><td>`, impliedWrapperTables) + `T`
-	document, err = Analyze([]byte(impliedWrapperSource), limits)
-	if err != nil {
-		t.Fatalf("nested tables with implied tbody/tr wrappers rejected: %v", err)
-	}
-	if document.Usage.Depth <= limits.Depth+impliedTreeDepthMargin+impliedWrapperTables ||
-		document.Usage.Depth > limits.Depth+impliedTreeDepthMargin+2*impliedWrapperTables {
-		t.Fatalf("implied-wrapper tree depth = %d, want two-level table allowance", document.Usage.Depth)
-	}
-
-	if _, err = Analyze([]byte(strings.Repeat(`<div>`, limits.Depth+1)), limits); err == nil || !strings.Contains(err.Error(), "source depth") {
-		t.Fatalf("explicit over-limit nesting error = %v, want parser-depth rejection", err)
-	}
-}
-
-func TestParserDepthUsesHTMLImplicitClosures(t *testing.T) {
-	for _, c := range []struct{ name, prefix, suffix string }{
-		{"paragraphs", strings.Repeat(`<p>`, 200), ""},
-		{"paragraph phrasing", strings.Repeat(`<p><span>x`, 200), ""},
-		{"list items", `<ul>` + strings.Repeat(`<li>x`, 200), `</ul>`},
-		{"definition items", `<dl>` + strings.Repeat(`<dt>x<dd>y`, 200), `</dl>`},
-		{"options", `<select>` + strings.Repeat(`<option>x`, 200), `</select>`},
-		{"cells", `<table><tr>` + strings.Repeat(`<td>x<th>y`, 200), `</table>`},
-		{"rows", `<table>` + strings.Repeat(`<tr><td>x`, 200), `</table>`},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			limits := DefaultLimits()
-			limits.Depth = 16
-			source := c.prefix + c.suffix + `<div style="display:none">PAYLOAD</div>`
-			in, err := Analyze([]byte(source), limits)
-			if err != nil {
-				t.Fatalf("shallow optional-tag sequence rejected: %v", err)
-			}
-			if got := findText(t, in, "PAYLOAD").Label; got != "concealed" {
-				t.Fatalf("label = %q, want concealed", got)
-			}
-		})
-	}
-
-	for _, source := range []string{
-		strings.Repeat(`<div>`, 17),
-		strings.Repeat(`<ul><li>`, 17),
-		strings.Repeat(`<table><tr><td>`, 17),
-		strings.Repeat(`<math><mtext><p>`, 17),
-	} {
-		limits := DefaultLimits()
-		limits.Depth = 16
-		if _, err := Analyze([]byte(source), limits); err == nil || !strings.Contains(err.Error(), "source depth") {
-			t.Fatalf("real nesting was not rejected: %v", err)
-		}
 	}
 }
 
@@ -609,24 +221,6 @@ func TestDocumentCollectionCountsExtractableResults(t *testing.T) {
 	if len(document.Text) != parsed.extractableTextCount || len(document.Elements) != parsed.extractableElementCount {
 		t.Fatalf("result counts = text %d, elements %d", len(document.Text), len(document.Elements))
 	}
-}
-
-func TestDocumentCollectionPreparesElementMetadataOnce(t *testing.T) {
-	source := []byte(`<p class="` + strings.Repeat("x", 32) + `" style="opacity:.5" hidden>T</p>`)
-	parsed, err := (processor{Limits: DefaultLimits()}).parseDocument(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for node, prepared := range parsed.elements {
-		if node.Data != "p" {
-			continue
-		}
-		if len(prepared.inline) != 1 || len(prepared.legacy) != 1 || prepared.selector.empty() {
-			t.Fatalf("prepared element metadata = %+v", prepared)
-		}
-		return
-	}
-	t.Fatal("missing prepared paragraph metadata")
 }
 
 func TestDocumentCollectionRecordsElementChildren(t *testing.T) {
@@ -712,44 +306,6 @@ func TestCascade(t *testing.T) {
 				t.Fatalf("got %s want %s: %+v", got, c.want, in)
 			}
 		})
-	}
-}
-
-func TestAllShorthandIsStoredOnceAndChargedForEveryProperty(t *testing.T) {
-	s := sheet{limits: DefaultLimits()}
-	inline := s.declarations("all", "revert")
-	if len(inline) != 1 || inline[0].prop != allShorthandProperty {
-		t.Fatalf("all shorthand declarations = %+v", inline)
-	}
-
-	wantWork := elementTraversalWork + int64(declarationProperties)*declarationApplyWeight
-	matches := matchBudget{limit: wantWork}
-	expressions := expressionBudget{remaining: s.limits.ExpressionWork}
-	result := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, inline, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
-	if matches.exhausted || matches.used != wantWork {
-		t.Fatalf("all shorthand work = %+v, want %d", matches, wantWork)
-	}
-	if result.style[display].Known {
-		t.Fatalf("all shorthand display = %+v, want unresolved", result.style[display])
-	}
-
-	matches = matchBudget{limit: wantWork - 1}
-	expressions = expressionBudget{remaining: s.limits.ExpressionWork}
-	s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, inline, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
-	if !matches.exhausted {
-		t.Fatal("all shorthand partially applied after its complete work reservation failed")
-	}
-}
-
-func TestRepeatedAllShorthandsDoNotAmplifyStoredDeclarations(t *testing.T) {
-	const declarations = 1_000
-	s := sheet{limits: DefaultLimits()}
-	s.parseCSS("p{"+strings.Repeat("all:x;", declarations)+"}", false)
-	if s.cascadeIncomplete || s.workIncomplete {
-		t.Fatalf("ordinary-size stylesheet was abandoned: %+v", s)
-	}
-	if len(s.rules) != 1 || len(s.rules[0].decls) != declarations {
-		t.Fatalf("stored declarations = %d, want %d", len(s.rules[0].decls), declarations)
 	}
 }
 
@@ -1303,30 +859,6 @@ func TestLinkedAndImportedStylesheets(t *testing.T) {
 	}
 }
 
-func TestCSSDataURLMetadataIsBoundedWithoutBreakingTerminalBase64Marker(t *testing.T) {
-	payload := `cHtkaXNwbGF5Om5vbmV9`
-	for _, reference := range []string{
-		`data:text/css;note="a;b";base64,` + payload,
-		`data:text/css;note="a;b"; BASE64 ,` + payload,
-	} {
-		decoded, isData, valid := decodeCSSDataURL(reference, maxValueBytes)
-		if !isData || !valid || string(decoded) != `p{display:none}` {
-			t.Fatalf("valid base64 data URL rejected: data=%t valid=%t decoded=%q", isData, valid, decoded)
-		}
-	}
-
-	oversized := `data:text/css;` + strings.Repeat(`a`, maxValueBytes) + `,p%7Bdisplay%3Anone%7D`
-	decoded, isData, valid := decodeCSSDataURL(oversized, maxValueBytes)
-	if !isData || valid || decoded != nil {
-		t.Fatalf("oversized metadata admitted: data=%t valid=%t decoded=%q", isData, valid, decoded)
-	}
-	s := sheet{limits: DefaultLimits()}
-	s.loadStylesheetReference(oversized, "")
-	if !s.unresolvedStylesheet {
-		t.Fatal("oversized metadata was not reported as an unresolved stylesheet")
-	}
-}
-
 func TestStyleElementRequiresCSSMIMEType(t *testing.T) {
 	for _, test := range []struct {
 		name, typ, want string
@@ -1472,108 +1004,6 @@ func TestAttributeSelectorOperatorsAreEvaluated(t *testing.T) {
 	}
 }
 
-func TestSelectorWorkLimitMakesUnprocessedTextUnknown(t *testing.T) {
-	limits := DefaultLimits()
-	limits.MatchWork = 2
-	inspection, err := (processor{Limits: limits}).process([]byte(`<style>p{display:none}</style><p>T</p><div>U</div>`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := findText(t, inspection, "T").Label; got != "unknown" {
-		t.Fatalf("affected text label = %q", got)
-	}
-	if got := findText(t, inspection, "U").Label; got != "unknown" {
-		t.Fatalf("text after budget exhaustion = %q", got)
-	}
-}
-
-func TestElementTraversalConsumesSharedWorkBudget(t *testing.T) {
-	s := sheet{limits: DefaultLimits()}
-	matches := matchBudget{limit: elementInheritanceWork}
-	expressions := expressionBudget{remaining: s.limits.ExpressionWork}
-	node := &html.Node{Type: html.ElementNode, Data: "p"}
-	first := s.elementStyle(node, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
-	if !first.style[display].Known || matches.exhausted {
-		t.Fatalf("first traversal = %+v, budget=%+v", first.style[display], matches)
-	}
-	second := s.elementStyle(node, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
-	if second.style[display].Known || !matches.exhausted {
-		t.Fatalf("second traversal = %+v, budget=%+v", second.style[display], matches)
-	}
-}
-
-func TestColourLayerTraversalConsumesSharedWorkBudget(t *testing.T) {
-	layers := make([]paintLayer, 128)
-	for i := range layers {
-		layers[i] = layer(initialPtr())
-	}
-	cost := int64(1 + len(layers))
-	enough := matchBudget{limit: cost}
-	if result := evaluateColour(initial()[color], layers, &enough); !result.known || enough.used != cost || enough.exhausted {
-		t.Fatalf("bounded colour result = %+v, budget=%+v", result, enough)
-	}
-	short := matchBudget{limit: cost - 1}
-	if result := evaluateColour(initial()[color], layers, &short); result.known || !short.exhausted {
-		t.Fatalf("over-budget colour result = %+v, budget=%+v", result, short)
-	}
-}
-
-func TestColourMemoRetainsPerTextWorkCharge(t *testing.T) {
-	style := initial()
-	runner := viewingCaseRunner{
-		matches: &matchBudget{limit: 100},
-		layers:  []paintLayer{layer(&style)},
-	}
-	first := runner.evaluateColour(style[color])
-	firstCharge := runner.matches.used
-	if !first.known || firstCharge == 0 {
-		t.Fatalf("first colour evaluation = %+v, budget=%+v", first, runner.matches)
-	}
-	second := runner.evaluateColour(style[color])
-	if second != first || runner.matches.used != 2*firstCharge {
-		t.Fatalf("memoized colour evaluation = %+v, budget=%+v; first=%+v, charge=%d", second, runner.matches, first, firstCharge)
-	}
-	runner.layerGeneration++
-	third := runner.evaluateColour(style[color])
-	if third != first || runner.matches.used != 3*firstCharge {
-		t.Fatalf("invalidated colour evaluation = %+v, budget=%+v", third, runner.matches)
-	}
-}
-
-func TestNeutralPaintLayerPreservesColourMemo(t *testing.T) {
-	style := initial()
-	neutral := paintLayer{
-		backgroundKnown: true, imageKnown: true,
-		opacity: 1, opacityKnown: true, compositionKnown: true, enhancementKnown: true,
-	}
-	sentinel := colourResult{uncertainty: "cached result"}
-	runner := viewingCaseRunner{
-		matches:         &matchBudget{limit: 100},
-		layers:          []paintLayer{neutral},
-		layerGeneration: 7,
-		colourMemo: colourMemo{
-			foreground: style[color], result: sentinel, generation: 7, valid: true,
-		},
-	}
-	node := &html.Node{Type: html.ElementNode, Data: "span"}
-	if changed := runner.enterPaintLayer(node, neutral); changed || runner.layerGeneration != 7 {
-		t.Fatalf("neutral entry changed colour context: changed=%t generation=%d", changed, runner.layerGeneration)
-	}
-	if got := runner.evaluateColour(style[color]); got != sentinel {
-		t.Fatalf("neutral layer missed retained memo: %+v", got)
-	}
-	if got, want := runner.matches.used, int64(1+len(runner.layers)); got != want {
-		t.Fatalf("memoized colour work=%d, want %d", got, want)
-	}
-	runner.leavePaintLayer(false)
-	if runner.layerGeneration != 7 || len(runner.layers) != 1 {
-		t.Fatalf("neutral exit changed context: generation=%d layers=%d", runner.layerGeneration, len(runner.layers))
-	}
-	if got := runner.evaluateColour(style[color]); got != sentinel {
-		t.Fatalf("parent memo was not retained after neutral child: %+v", got)
-	}
-}
-
 func TestColourAffectingPaintLayersInvalidateMemo(t *testing.T) {
 	neutral := paintLayer{
 		backgroundKnown: true, imageKnown: true,
@@ -1620,63 +1050,6 @@ func TestBodyPaintLayerAlwaysInvalidatesColourMemo(t *testing.T) {
 	runner.leavePaintLayer(true)
 	if runner.layerGeneration != 22 {
 		t.Fatalf("body exit generation=%d, want 22", runner.layerGeneration)
-	}
-}
-
-func TestSelectorWorkBudgetStopsBeforePartialCascadeIsTrusted(t *testing.T) {
-	limits := DefaultLimits()
-	limits.MatchWork = 5
-	s := sheet{limits: limits}
-	s.parseCSS(`p{display:none}p{display:block}`, false)
-	s.buildSelectorIndex(1, 1)
-	matches := matchBudget{limit: limits.MatchWork}
-	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	result := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
-	if !matches.exhausted || matches.used > matches.limit {
-		t.Fatalf("match budget was not enforced: %+v", matches)
-	}
-	if result.style[display].Known {
-		t.Fatalf("partial cascade was trusted: %+v", result.style[display])
-	}
-}
-
-func TestDeclarationApplicationWorkStopsBeforePartialCascadeIsTrusted(t *testing.T) {
-	limits := DefaultLimits()
-	s := sheet{limits: limits}
-	s.parseCSS(`*{color:red;color:green;color:blue}`, false)
-	s.buildSelectorIndex(1, 1)
-	plan := s.rules[0].plans[0]
-	declarations := int64(len(s.rules[0].decls))
-	if declarations < 2 {
-		t.Fatalf("test rule has only %d declarations", declarations)
-	}
-	// Leave enough work to match the selector but one unit less than is
-	// required to reserve the complete declaration list.
-	matches := matchBudget{limit: s.planningWork + 1 + plan.cost + declarations*declarationApplyWeight - 1, used: s.planningWork}
-	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	result := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
-	if !matches.exhausted {
-		t.Fatalf("declaration application did not exhaust budget: %+v", matches)
-	}
-	if result.style[color].Known {
-		t.Fatalf("partially applied cascade was trusted: %+v", result.style[color])
-	}
-}
-
-func TestSelectorIndexSkipsIrrelevantInactiveRules(t *testing.T) {
-	limits := DefaultLimits()
-	s := sheet{limits: limits}
-	s.parseCSS(`@media print{p{display:none}}@media print{div{display:none}}`, false)
-	s.buildSelectorIndex(1, 1)
-	work := elementTraversalWork + 1 // Traversal and the indexed p candidate.
-	for _, rule := range s.rules {
-		work += rule.mediaStateWork(false)
-	}
-	matches := matchBudget{limit: work}
-	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	result := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
-	if matches.exhausted || !result.style[display].Known {
-		t.Fatalf("irrelevant indexed rule consumed work: budget=%+v display=%+v", matches, result.style[display])
 	}
 }
 
@@ -1730,24 +1103,6 @@ func TestRelevantDeclarationPropertyClassification(t *testing.T) {
 	}
 }
 
-func TestAnalyzeReportsResourceUsage(t *testing.T) {
-	limits := DefaultLimits()
-	document, err := Analyze([]byte(`<style>@media screen{p,.x{font-size:calc(50% + 1px)}}</style><p class="x">T</p>`), limits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	usage := document.Usage
-	if usage.InputBytes == 0 || usage.Nodes == 0 || usage.TextNodes == 0 || usage.Attributes != 1 || usage.Depth == 0 {
-		t.Fatalf("missing HTML usage: %+v", usage)
-	}
-	if usage.CSSDepth != 1 || usage.Rules != 1 || usage.Selectors != 2 || usage.MediaCases == 0 {
-		t.Fatalf("missing CSS usage: %+v", usage)
-	}
-	if usage.MatchWork == 0 || usage.MatchWork > limits.MatchWork || usage.ExpressionWork > limits.ExpressionWork {
-		t.Fatalf("invalid work usage: %+v", usage)
-	}
-}
-
 func TestAnalyzeReportsUnsupportedColourFunctions(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1775,534 +1130,10 @@ func TestAnalyzeReportsUnsupportedColourFunctions(t *testing.T) {
 	}
 }
 
-func TestAnalyzeReportsExpressionDepthLimit(t *testing.T) {
-	tests := []struct {
-		name     string
-		property string
-		value    string
-	}{
-		{
-			name:     "variable fallback",
-			property: "display",
-			value: func() string {
-				value := "none"
-				for range maxExpressionDepth + 1 {
-					value = "var(--missing," + value + ")"
-				}
-				return value
-			}(),
-		},
-		{
-			name:     "arithmetic",
-			property: "font-size",
-			value:    strings.Repeat("calc(", maxExpressionDepth+1) + "1px" + strings.Repeat(")", maxExpressionDepth+1),
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			document, err := Analyze([]byte(`<p style="`+test.property+`:`+test.value+`">T</p>`), DefaultLimits())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !document.Usage.ExpressionDepthLimitExceeded {
-				t.Fatalf("expression depth limit was not reported: %+v", document.Usage)
-			}
-			if document.Usage.ExpressionWorkExhausted {
-				t.Fatalf("depth limit was misreported as work exhaustion: %+v", document.Usage)
-			}
-			if label := findText(t, document, "T").Label; label != "unknown" {
-				t.Fatalf("label = %q, want unknown", label)
-			}
-		})
-	}
-}
-
-func TestCSSLimitAbandonmentPreservesResourceUsage(t *testing.T) {
-	limits := DefaultLimits()
-	limits.Rules = 1
-	document, err := Analyze([]byte(`<style>p{display:none}b{display:none}</style><p>T</p>`), limits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if label := findText(t, document, "T").Label; label != "unknown" {
-		t.Fatalf("label = %q, want unknown", label)
-	}
-	usage := document.Usage
-	if !usage.CSSLimitExceeded {
-		t.Fatalf("CSS limit was not reported: %+v", usage)
-	}
-	if usage.Rules != 2 || usage.Selectors != 2 {
-		t.Fatalf("discarded CSS work was not retained: %+v", usage)
-	}
-	if usage.MatchWork <= 1 {
-		t.Fatalf("planning work was reset on abandonment: %+v", usage)
-	}
-}
-
-func TestCSSSourceScanningIsChargedAndReported(t *testing.T) {
-	const cssText = `p{display:none}`
-	document, err := Analyze([]byte(`<style>`+cssText+`</style><p>T</p>`), DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if document.Usage.CSSBytes != len(cssText) {
-		t.Fatalf("CSS bytes = %d, want %d", document.Usage.CSSBytes, len(cssText))
-	}
-	if document.Usage.MatchWork < int64(len(cssText)+1) {
-		t.Fatalf("CSS source scan was not charged: %+v", document.Usage)
-	}
-}
-
-func TestMediaConditionPlanningIsCached(t *testing.T) {
-	s := sheet{limits: DefaultLimits()}
-	condition := `(max-width: 600px)`
-	first := s.parseMediaCondition(condition)
-	if len(first) == 0 || s.planningWork == 0 {
-		t.Fatalf("first media parse was not retained or charged: condition=%+v work=%d", first, s.planningWork)
-	}
-	charged := s.planningWork
-	second := s.parseMediaCondition(condition)
-	if len(second) == 0 || s.planningWork != charged {
-		t.Fatalf("cached media parse was charged again: before=%d after=%d", charged, s.planningWork)
-	}
-	s.parseMediaCondition(`(min-width: 601px)`)
-	if s.planningWork <= charged {
-		t.Fatalf("distinct media parse was not charged: before=%d after=%d", charged, s.planningWork)
-	}
-}
-
-func TestFailedAnalysisReturnsConsumedResourceUsage(t *testing.T) {
-	source := `<style>p{display:none}</style><p>T`
-	limits := DefaultLimits()
-	limits.Nodes = 7 // The parser also allocates implicit document structure.
-	document, err := Analyze([]byte(source), limits)
-	if err == nil || !strings.Contains(err.Error(), "parser nodes") {
-		t.Fatalf("Analyze error = %v, want in-parser node rejection", err)
-	}
-	if document.Root != nil || len(document.Text) != 0 || len(document.Elements) != 0 {
-		t.Fatalf("failed analysis exposed partial document content: %+v", document)
-	}
-	if document.Usage.InputBytes != len(source) || document.Usage.Nodes != limits.Nodes+1 {
-		t.Fatalf("failed analysis discarded resource usage: %+v", document.Usage)
-	}
-}
-
-func TestCSSAbandonmentReleasesPreparedElementMetadata(t *testing.T) {
-	limits := DefaultLimits()
-	limits.Rules = 1
-	document, err := (processor{Limits: limits}).parseDocument([]byte(`<p class="before" style="display:none">A</p><style>b{display:none}i{display:none}</style><b class="after">B</b>`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !document.styles.cascadeIncomplete {
-		t.Fatal("CSS limit was not exhausted")
-	}
-	if document.elements != nil {
-		t.Fatalf("unusable element metadata was retained for %d elements", len(document.elements))
-	}
-}
-
-func TestAbandonedCascadeSkipsStylesheetReferences(t *testing.T) {
-	for _, incomplete := range []struct {
-		name    string
-		cascade bool
-		work    bool
-	}{
-		{name: "cascade", cascade: true},
-		{name: "work", work: true},
-	} {
-		t.Run(incomplete.name, func(t *testing.T) {
-			s := sheet{
-				limits:            DefaultLimits(),
-				cascadeIncomplete: incomplete.cascade,
-				workIncomplete:    incomplete.work,
-			}
-			node := &html.Node{Type: html.ElementNode, Data: "link", Attr: []html.Attribute{
-				{Key: "rel", Val: "stylesheet"},
-				{Key: "media", Val: "screen"},
-				{Key: "href", Val: "data:text/css,p%7Bdisplay%3Anone%7D"},
-			}}
-			if _, _, applies := s.stylesheetLink(node); applies {
-				t.Fatal("stylesheet link applied after cascade abandonment")
-			}
-			if s.planningWork != 0 {
-				t.Fatalf("stylesheet link consumed planning work: %d", s.planningWork)
-			}
-
-			s.loadStylesheetReference("https://example.invalid/style.css", "")
-			if s.unresolvedStylesheet || s.cssBytes != 0 || len(s.rules) != 0 {
-				t.Fatalf("stylesheet reference was processed after abandonment: %+v", s)
-			}
-		})
-	}
-}
-
-func TestOversizedDeclarationValueIsPreparedAsUnresolved(t *testing.T) {
-	s := sheet{limits: DefaultLimits()}
-	value := "rgb(" + strings.Repeat("0", maxValueBytes) + ")"
-	ds := s.declarations("color", value)
-	if len(ds) != 1 || ds[0].prepared == nil || ds[0].prepared.status != valueUnsupported {
-		t.Fatalf("oversized declaration was not bounded: %+v", ds)
-	}
-}
-
-func TestLongValidMathValueCanStillProveConcealment(t *testing.T) {
-	value := "calc(" + strings.Repeat("0px + ", 900) + "1px)"
-	if len(value) <= 4096 || len(value) > maxValueBytes {
-		t.Fatalf("invalid test value length %d", len(value))
-	}
-	document := inspectHTML(t, `<p style="font-size:`+value+`">T</p>`)
-	text := findText(t, document, "T")
-	if text.Label != "concealed" {
-		t.Fatalf("label = %q, want concealed", text.Label)
-	}
-	if size := textStyle(text, "font-size"); !size.Known || size.Number != 1 {
-		t.Fatalf("font size = %+v, want known 1px", size)
-	}
-}
-
-func TestDeclarationValuesShareWorkBudget(t *testing.T) {
-	limits := DefaultLimits()
-	limits.MatchWork = 4
-	s := sheet{limits: limits}
-	s.parseCSS(`p{display:none}`, false)
-	if !s.workIncomplete {
-		t.Fatal("declaration value did not exhaust the shared work budget")
-	}
-	matches := matchBudget{limit: limits.MatchWork, used: s.planningWork}
-	expressions := expressionBudget{remaining: limits.ExpressionWork}
-	result := s.elementStyle(&html.Node{Type: html.ElementNode, Data: "p"}, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
-	if !matches.exhausted || result.style[display].Known {
-		t.Fatalf("exhausted declaration work was trusted: budget=%+v display=%+v", matches, result.style[display])
-	}
-}
-
-func TestSelectorPlanningSharesWorkBudget(t *testing.T) {
-	selector := strings.Repeat(".a", 20)
-	limits := DefaultLimits()
-	limits.MatchWork = int64(len(selector))
-	s := sheet{limits: limits}
-	s.parseCSS(selector+`{display:none}`, false)
-	if !s.workIncomplete {
-		t.Fatal("selector planning did not exhaust the shared work budget")
-	}
-	if s.planCount != 0 || len(s.rules) != 0 {
-		t.Fatalf("selector was planned after budget exhaustion: plans=%d rules=%d", s.planCount, len(s.rules))
-	}
-}
-
-func TestSiblingSelectorWorkIsWeighted(t *testing.T) {
-	const nodes = 100
-	const limit = int64(1_000_000)
-	for _, selector := range []string{"q ~ p", "q + p"} {
-		sequence := 0
-		plan := planSelectorList(selector, &sequence)[0]
-		want := int64(5) + int64(nodes+1)*siblingMatchWeight
-		if got := selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, 1, nodes, limit); got != want {
-			t.Errorf("selectorExecutionCost(%q) = %d, want %d", selector, got, want)
-		}
-	}
-	sequence := 0
-	plan := planSelectorList("q p", &sequence)[0]
-	if got, want := selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, 4, nodes, limit), int64(10); got != want {
-		t.Errorf("descendant selector cost = %d, want %d", got, want)
-	}
-	sequence = 0
-	plan = planSelectorList("a ~ b ~ p", &sequence)[0]
-	if bound, additive := plannedSelectorCost(plan.complexity, selectorAttributeProfile{}, 1, nodes, limit), selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, 1, nodes, limit); bound <= additive {
-		t.Fatalf("nested sibling bound %d did not exceed additive cost %d", bound, additive)
-	}
-
-	maxInt := int(^uint(0) >> 1)
-	sequence = 0
-	plan = planSelectorList("q ~ p", &sequence)[0]
-	if got := selectorExecutionCost(plan.complexity, selectorAttributeProfile{}, 1, maxInt, limit); got != limit+1 {
-		t.Fatalf("overflowing execution cost = %d, want %d", got, limit+1)
-	}
-	if got := plannedSelectorCost(plan.complexity, selectorAttributeProfile{}, 1, maxInt, limit); got != limit+1 {
-		t.Fatalf("overflowing planned cost = %d, want %d", got, limit+1)
-	}
-}
-
-func TestAttributeAwareSelectorBoundRejectsExpensiveBacktracking(t *testing.T) {
-	limits := DefaultLimits()
-	s := sheet{limits: limits}
-	s.parseCSS(`.a1 .a2 .a3 p{display:none}`, false)
-	s.buildSelectorIndex(104, 108)
-	plan := &s.rules[0].plans[0]
-	profile := selectorAttributeProfile{classes: 3125, attributes: 3125}
-	context := selectorMatchContext{current: profile, path: profile, document: profile, depth: 104, nodes: 108}
-	if cost := selectorMatchCost(plan, context, limits.MatchWork); cost <= limits.MatchWork {
-		t.Fatalf("attribute-heavy selector match cost = %d, want over %d", cost, limits.MatchWork)
-	}
-}
-
-func TestSelectorAttributeCountWorkRoundsUp(t *testing.T) {
-	for _, test := range []struct {
-		attributes int
-		want       int64
-	}{
-		{attributes: 0, want: 0},
-		{attributes: 1, want: 1},
-		{attributes: 8, want: 1},
-		{attributes: 9, want: 2},
-		{attributes: 49_000, want: 6_125},
-	} {
-		if got := selectorAttributeCountWork(test.attributes); got != test.want {
-			t.Errorf("selectorAttributeCountWork(%d) = %d, want %d", test.attributes, got, test.want)
-		}
-	}
-}
-
-func TestSelectorAttributeProfileChargesTinyAttributes(t *testing.T) {
-	node := &html.Node{Type: html.ElementNode, Data: "p"}
-	for i := range 9 {
-		node.Attr = append(node.Attr, html.Attribute{Key: string(rune('a' + i))})
-	}
-	var profile selectorAttributeProfile
-	profile.observe(node)
-	if profile.attributes != 2 {
-		t.Fatalf("tiny attribute work = %d, want 2", profile.attributes)
-	}
-}
-
-func TestAttributeAwareSelectorChargesConservativeBound(t *testing.T) {
-	limits := DefaultLimits()
-	s := sheet{limits: limits}
-	s.parseCSS(`.ancestor p{display:none}`, false)
-	s.buildSelectorIndex(10, 20)
-	plan := &s.rules[0].plans[0]
-	profile := selectorAttributeProfile{classes: 100, ids: 2, attributes: 200}
-	context := selectorMatchContext{current: selectorAttributeProfile{}, path: profile, document: profile, depth: 10, nodes: 20}
-	cost := selectorMatchCost(plan, context, limits.MatchWork)
-	withAttributes := plannedSelectorCost(plan.execution, profile, context.depth, context.nodes, limits.MatchWork)
-	withoutAttributes := plannedSelectorCost(plan.execution, selectorAttributeProfile{}, context.depth, context.nodes, limits.MatchWork)
-	want := plan.cost + withAttributes - withoutAttributes
-	if plan.uncertain || cost != want || cost <= plan.cost {
-		t.Fatalf("attribute selector cost = %d, want conservative %d above static %d: %+v", cost, want, plan.cost, plan)
-	}
-}
-
-func TestAncestorMatcherChargesAttributesOnInspectedNode(t *testing.T) {
-	const paragraphs = 400
-	largeClass := strings.Repeat("x", 512<<10)
-	source := `<style>.needle p{color:red}</style><body class="` + largeClass + `">` +
-		strings.Repeat(`<p>x</p>`, paragraphs) + `<div style="display:none">PAYLOAD</div>`
-	document, err := Analyze([]byte(source), DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if document.Usage.MatchWorkExhausted {
-		t.Fatalf("unrelated large ancestor class exhausted match work: %+v", document.Usage)
-	}
-	if got := findText(t, document, "PAYLOAD").Label; got != "concealed" {
-		t.Fatalf("payload label = %q, want concealed; usage=%+v", got, document.Usage)
-	}
-	if document.Usage.MatchWork < selectorByteWork(len(largeClass)) {
-		t.Fatalf("large inspected class was not charged: %+v", document.Usage)
-	}
-}
-
-func TestAncestorMatcherDoesNotCacheLeafNodeStates(t *testing.T) {
-	sequence := 0
-	plan := planSelectorList(`.needle p`, &sequence)[0]
-	if plan.uncertain || plan.ancestorChain == nil || ancestorChainNeedsMap(plan.complexity) {
-		t.Fatalf("unexpected simple ancestor plan: %+v", plan)
-	}
-	ancestor := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "needle"}}}
-	target := &html.Node{Type: html.ElementNode, Data: "p", Parent: ancestor}
-	ancestor.FirstChild = target
-	prepared := map[*html.Node]elementPreparation{
-		ancestor: {hasElementChild: true},
-		target:   {},
-	}
-	ancestorProfile := prepared[ancestor]
-	ancestorProfile.selector.observe(ancestor)
-	prepared[ancestor] = ancestorProfile
-	targetProfile := prepared[target]
-	targetProfile.selector.observe(target)
-	prepared[target] = targetProfile
-	s := sheet{limits: DefaultLimits(), index: selectorIndex{count: 1}}
-	budget := matchBudget{limit: s.limits.MatchWork}
-	matched, complete := s.matchAncestorChain(&plan, target, selectorMatchContext{depth: 1, nodes: 2, elements: prepared}, &budget)
-	if !complete || !matched {
-		t.Fatalf("simple ancestor result: matched=%t complete=%t", matched, complete)
-	}
-	if len(s.runtime.ancestorStates) != 0 {
-		t.Fatalf("simple chain allocated per-node state maps: %d", len(s.runtime.ancestorStates))
-	}
-	recent := s.runtime.ancestorRecent[plan.ancestorCache]
-	if recent.node != ancestor || s.runtime.matchCacheUnits != 1 {
-		t.Fatalf("reusable ancestor state was not retained: recent=%+v units=%d", recent, s.runtime.matchCacheUnits)
-	}
-}
-
-func TestDescendantChainUsesBoundedMatcher(t *testing.T) {
-	limits := DefaultLimits()
-	s := sheet{limits: limits}
-	s.parseCSS(`zzz div div div{display:none}`, false)
-	s.buildSelectorIndex(122, 16_123)
-	if len(s.rules) != 1 || len(s.rules[0].plans) != 1 {
-		t.Fatalf("unexpected plans: %+v", s.rules)
-	}
-	plan := &s.rules[0].plans[0]
-	if plan.bound <= limits.MatchWork/2 {
-		t.Fatalf("descendant bound = %d, want a demonstrably expensive recursive bound", plan.bound)
-	}
-	if plan.uncertain || len(plan.ancestorChain) != 4 {
-		t.Fatalf("descendant selector did not receive a bounded chain: %+v", plan)
-	}
-	node := &html.Node{Type: html.ElementNode, Data: "div"}
-	for range 122 {
-		child := &html.Node{Type: html.ElementNode, Data: "div", Parent: node}
-		node.FirstChild = child
-		node = child
-	}
-	context := selectorMatchContext{depth: 122, nodes: 123}
-	budget := matchBudget{limit: limits.MatchWork}
-	matched, complete := s.matchAncestorChain(plan, node, context, &budget)
-	if !complete || matched {
-		t.Fatalf("bounded descendant result: matched=%t complete=%t", matched, complete)
-	}
-	const wantWork = 123 + 123*4 + 122 // path walk, compound checks, and charged child probes
-	if budget.used != wantWork {
-		t.Fatalf("bounded descendant work = %d, want %d", budget.used, wantWork)
-	}
-	sibling := &html.Node{Type: html.ElementNode, Data: "div", Parent: node.Parent}
-	before := budget.used
-	matched, complete = s.matchAncestorChain(plan, sibling, context, &budget)
-	if !complete || matched {
-		t.Fatalf("cached sibling result: matched=%t complete=%t", matched, complete)
-	}
-	if added := budget.used - before; added != 6 { // sibling + cached parent, then one 4-unit compound check
-		t.Fatalf("cached sibling work = %d, want 6", added)
-	}
-	s.runtime.ancestorStates = nil
-	s.runtime.ancestorNodes = nil
-	s.runtime.matchCacheUnits = 0
-	limited := matchBudget{limit: wantWork - 1}
-	if _, complete := s.matchAncestorChain(plan, node, context, &limited); complete || !limited.exhausted {
-		t.Fatalf("bounded matcher ignored exhaustion: %+v", limited)
-	}
-}
-
-func TestBoundedAncestorChainsMatchCascadia(t *testing.T) {
-	root, err := html.Parse(strings.NewReader(`<main class="a"><div><p class="b"><span class="c"><em id="target">T</em></span></p><p class="x">X</p></div></main>`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var elements []*html.Node
-	stack := []*html.Node{root}
-	for len(stack) > 0 {
-		n := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if n.Type == html.ElementNode {
-			elements = append(elements, n)
-		}
-		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			stack = append(stack, child)
-		}
-	}
-	for _, selector := range []string{
-		`html main div`, `html > body main div`, `html main > div span em`, `.a > div .b .c`, `html div:not(.missing) p`,
-	} {
-		t.Run(selector, func(t *testing.T) {
-			sequence := 0
-			plan := planSelectorList(selector, &sequence)[0]
-			if plan.uncertain || plan.ancestorChain == nil {
-				t.Fatalf("selector did not compile as an ancestor chain: %+v", plan)
-			}
-			s := sheet{limits: DefaultLimits(), index: selectorIndex{count: 1}}
-			for _, node := range elements {
-				depth := 0
-				for parent := node.Parent; parent != nil; parent = parent.Parent {
-					if parent.Type == html.ElementNode {
-						depth++
-					}
-				}
-				budget := matchBudget{limit: s.limits.MatchWork}
-				got, complete := s.matchAncestorChain(&plan, node, selectorMatchContext{depth: depth, nodes: len(elements)}, &budget)
-				if !complete {
-					t.Fatalf("bounded match exhausted for %s", node.Data)
-				}
-				if want := plan.matcher.Match(node); got != want {
-					t.Fatalf("match(%s) = %t, Cascadia = %t", node.Data, got, want)
-				}
-			}
-		})
-	}
-}
-
-func TestDescendantChainBroomRemainsBounded(t *testing.T) {
-	const (
-		depth  = 122
-		leaves = 16_000
-	)
-	var source strings.Builder
-	source.WriteString(`<style>zzz div div div{color:red}</style>`)
-	for range depth {
-		source.WriteString(`<div>`)
-	}
-	for range leaves {
-		source.WriteString(`<div>x</div>`)
-	}
-	for range depth {
-		source.WriteString(`</div>`)
-	}
-	document, err := Analyze([]byte(source.String()), DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if document.Usage.MatchWorkExhausted || document.Usage.MatchWork > 5_000_000 {
-		t.Fatalf("descendant-chain broom used unbounded matching work: %+v", document.Usage)
-	}
-}
-
-func TestAttributeHeavyBacktrackingUsesBoundedMatcher(t *testing.T) {
-	const depth = 100
-	class := "a3 a2 " + strings.Repeat("x", 20000-len("a3 a2 "))
-	var source strings.Builder
-	source.WriteString(`<style>.a1 .a2 .a3 p{display:none}</style>`)
-	for range depth {
-		source.WriteString(`<div class="`)
-		source.WriteString(class)
-		source.WriteString(`">`)
-	}
-	source.WriteString(`<p>T</p>`)
-	document, err := Analyze([]byte(source.String()), DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := findText(t, document, "T").Label; got != "visible" {
-		t.Fatalf("attribute-heavy selector result = %q, want visible", got)
-	}
-	if document.Usage.MatchWorkExhausted || document.Usage.MatchWork >= DefaultLimits().MatchWork {
-		t.Fatalf("bounded selector exhausted matching work: usage=%+v", document.Usage)
-	}
-}
-
-func TestOverComplexSelectorBecomesUncertainBeforeMatching(t *testing.T) {
-	limits := DefaultLimits()
-	limits.MatchWork = 1_000
-	s := sheet{limits: limits}
-	s.parseCSS(`a ~ b ~ p{display:none}`, false)
-	s.buildSelectorIndex(1, 100)
-	if len(s.rules) != 1 || len(s.rules[0].plans) != 1 {
-		t.Fatalf("unexpected plans: %+v", s.rules)
-	}
-	plan := s.rules[0].plans[0]
-	if plan.bound <= limits.MatchWork {
-		t.Fatalf("single-call bound %d did not exceed limit %d", plan.bound, limits.MatchWork)
-	}
-	if !plan.uncertain || plan.matcher != nil || plan.scope == nil {
-		t.Fatalf("over-complex selector was not converted to uncertainty: %+v", plan)
-	}
-}
-
 func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 	sequence := 0
-	plan := planSelectorList(`u + .body .rio-asin-container-image img`, &sequence)[0]
-	plan.makeUncertain()
+	plan := planSelectorList(`u + .body .rio-asin-container-image img`, &sequence, nil)[0]
+	plan.makeUncertain(nil)
 	if !plan.uncertain || len(plan.execution.compounds) != 2 || len(plan.execution.combinators) != 1 || plan.execution.combinators[0] != ' ' {
 		t.Fatalf("unexpected conservative plan: %+v", plan)
 	}
@@ -2321,8 +1152,8 @@ func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 
 func TestUncertainSelectorScopeDoesNotCrossFinalSiblingCombinator(t *testing.T) {
 	sequence := 0
-	plan := planSelectorList(`.product + img`, &sequence)[0]
-	plan.makeUncertain()
+	plan := planSelectorList(`.product + img`, &sequence, nil)[0]
+	plan.makeUncertain(nil)
 	if len(plan.execution.compounds) != 1 {
 		t.Fatalf("sibling selector was unsafely narrowed: %+v", plan.execution)
 	}
@@ -2334,11 +1165,11 @@ func TestUncertainSelectorScopeDoesNotCrossFinalSiblingCombinator(t *testing.T) 
 func TestConservativeSelectorScopeAlwaysHasSafeFallback(t *testing.T) {
 	node := &html.Node{Type: html.ElementNode, Data: "p"}
 	for _, prefix := range []string{"", "*", "["} {
-		if matcher := compileConservativeScope(prefix); matcher == nil || !matcher.Match(node) {
+		if matcher := compileConservativeScope(prefix, nil); matcher == nil || !matcher.Match(node) {
 			t.Fatalf("scope %q did not use a universal fallback", prefix)
 		}
 	}
-	matcher := compileConservativeScope("div")
+	matcher := compileConservativeScope("div", nil)
 	if matcher == nil || matcher.Match(node) {
 		t.Fatal("valid conservative scope lost its tag constraint")
 	}
@@ -2348,7 +1179,7 @@ func TestSelectorIndexIncludesEveryPotentialCandidate(t *testing.T) {
 	limits := DefaultLimits()
 	s := sheet{limits: limits}
 	s.parseCSS(`p{display:none}.target{opacity:0}#chosen{visibility:hidden}.ancestor *{font-size:0}[data-x]{color:red}`, false)
-	s.buildSelectorIndex(4, 20)
+	s.buildSelectorIndex()
 	ancestor := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "ancestor"}}}
 	node := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "id", Val: "chosen"}, {Key: "class", Val: "target"}, {Key: "data-x", Val: "1"}}, Parent: ancestor}
 	refs := s.candidates(node)
@@ -2366,7 +1197,7 @@ func TestSelectorIndexIncludesEveryPotentialCandidate(t *testing.T) {
 func TestDirectSelectorIndexHasNoAncestorSearch(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	s.parseCSS(`p{display:none}`, false)
-	s.buildSelectorIndex(128, 129)
+	s.buildSelectorIndex()
 	if len(s.index.ancestorTags) != 0 || len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
 		t.Fatalf("direct selector populated ancestor index: %+v", s.index)
 	}
@@ -2384,7 +1215,7 @@ func TestDirectSelectorIndexHasNoAncestorSearch(t *testing.T) {
 func TestNamespaceSelectorsRetainEveryPotentialCandidate(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	s.parseCSS(`s|text{display:none}*|text{display:none}|text{display:none}s|*{visibility:hidden}s|linearGradient{opacity:0}[s|href]{display:none}`, false)
-	s.buildSelectorIndex(2, 4)
+	s.buildSelectorIndex()
 	node := &html.Node{Type: html.ElementNode, Data: "text", Namespace: "svg"}
 	refs := s.candidates(node)
 	got := make(map[string]bool)
@@ -2456,7 +1287,7 @@ func TestMixedCaseSVGTypeSelectorsAreConservative(t *testing.T) {
 func TestMixedCaseSVGTypeSelectorIsIndexed(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	s.parseCSS(`textPath{display:none}`, false)
-	s.buildSelectorIndex(2, 2)
+	s.buildSelectorIndex()
 	node := &html.Node{Type: html.ElementNode, Data: "textPath", Namespace: "svg"}
 	refs := s.candidates(node)
 	if len(refs) != 1 {
@@ -2469,7 +1300,7 @@ func TestMixedCaseSVGTypeSelectorIsIndexed(t *testing.T) {
 
 	s = sheet{limits: DefaultLimits()}
 	s.parseCSS(`textpath{display:none}`, false)
-	s.buildSelectorIndex(2, 2)
+	s.buildSelectorIndex()
 	refs = s.candidates(node)
 	if len(refs) != 1 {
 		t.Fatalf("lowercase SVG candidates = %+v, want one candidate for authoritative matching", refs)
@@ -2483,7 +1314,7 @@ func TestMixedCaseSVGTypeSelectorIsIndexed(t *testing.T) {
 func TestSelectorIndexDoesNotReturnUnrelatedKeyedRules(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	s.parseCSS(`.wanted{display:none}#chosen{opacity:0}section{visibility:hidden}`, false)
-	s.buildSelectorIndex(1, 4)
+	s.buildSelectorIndex()
 	node := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: "other"}}}
 	if refs := s.candidates(node); len(refs) != 0 {
 		t.Fatalf("unrelated candidates = %+v", refs)
@@ -2496,7 +1327,7 @@ func TestSelectorIndexRemovesRulesWithoutRelevantDeclarations(t *testing.T) {
 	if len(s.rules) != 3 {
 		t.Fatalf("parsed rules = %d, want 3", len(s.rules))
 	}
-	s.buildSelectorIndex(1, 1)
+	s.buildSelectorIndex()
 	if len(s.rules) != 1 || len(s.rules[0].decls) != 1 {
 		t.Fatalf("indexed rules = %+v", s.rules)
 	}
@@ -2506,126 +1337,19 @@ func TestSelectorIndexRemovesRulesWithoutRelevantDeclarations(t *testing.T) {
 	}
 }
 
-func TestMatchCacheStopsAtDocumentLimit(t *testing.T) {
-	s := sheet{limits: DefaultLimits(), runtime: sheetRuntime{cacheMatches: true, matchCacheUnits: maxMatchCacheUnits - 1}}
-	s.parseCSS(`p{display:none}`, false)
-	s.buildSelectorIndex(1, 2)
-	// buildSelectorIndex resets cache accounting, so place it immediately below
-	// the ceiling before exercising two distinct entries.
-	s.runtime.cacheMatches = true
-	s.runtime.matchCacheUnits = maxMatchCacheUnits - 1
-	plan := &s.rules[0].plans[0]
-	first := &html.Node{Type: html.ElementNode, Data: "p"}
-	second := &html.Node{Type: html.ElementNode, Data: "p"}
-	s.cacheMatch(plan, first, true)
-	s.cacheMatch(plan, second, true)
-	if s.runtime.matchCacheUnits != maxMatchCacheUnits {
-		t.Fatalf("cache units = %d", s.runtime.matchCacheUnits)
-	}
-	cache := s.runtime.matchCaches[plan.sequence]
-	if cache[first] != 2 {
-		t.Fatal("entry below the ceiling was not cached")
-	}
-	if _, ok := cache[second]; ok {
-		t.Fatal("entry beyond the ceiling was cached")
-	}
-}
-
-func TestAttributeCandidateCacheSharesDocumentLimit(t *testing.T) {
-	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`.one{display:none}.two{display:none}`, false)
-	s.buildSelectorIndex(1, 2)
-	s.runtime.matchCacheUnits = maxMatchCacheUnits - 3
-	budget := matchBudget{limit: s.limits.MatchWork}
-	first := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: "one two"}}}
-	candidates, complete := s.attributeCandidateBuckets(first, &budget)
-	if !complete || len(candidates.direct) != 2 {
-		t.Fatalf("attribute candidates = %+v, complete=%t", candidates, complete)
-	}
-	if s.runtime.matchCacheUnits != maxMatchCacheUnits {
-		t.Fatalf("cache units = %d, want ceiling", s.runtime.matchCacheUnits)
-	}
-	if _, ok := s.runtime.attributeCandidates[first]; !ok {
-		t.Fatal("attribute candidates below the ceiling were not cached")
-	}
-
-	second := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: "one"}}}
-	candidates, complete = s.attributeCandidateBuckets(second, &budget)
-	if !complete || len(candidates.direct) != 1 {
-		t.Fatalf("uncached attribute candidates = %+v, complete=%t", candidates, complete)
-	}
-	if s.runtime.matchCacheUnits != maxMatchCacheUnits {
-		t.Fatalf("cache exceeded ceiling: %d", s.runtime.matchCacheUnits)
-	}
-	if _, ok := s.runtime.attributeCandidates[second]; ok {
-		t.Fatal("attribute candidates beyond the ceiling were cached")
-	}
-}
-
-func TestMatchingContinuesAfterMatchCacheIsFull(t *testing.T) {
-	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`p{display:none}`, false)
-	s.buildSelectorIndex(1, 1)
-	s.runtime.cacheMatches = true
-	s.runtime.matchCacheUnits = maxMatchCacheUnits
-	matches := matchBudget{limit: s.limits.MatchWork, used: s.planningWork}
-	expressions := expressionBudget{remaining: s.limits.ExpressionWork}
-	node := &html.Node{Type: html.ElementNode, Data: "p"}
-	for range 2 {
-		result := s.elementStyle(node, initialPtr(), initialPtr(), nil, nil, nil, mediaAt(1024), selectorMatchContext{}, &matches, &expressions)
-		if !result.style[display].Known || result.style[display].Text != "none" {
-			t.Fatalf("uncached match display = %+v", result.style[display])
-		}
-	}
-	if s.runtime.matchCaches != nil {
-		t.Fatal("full cache retained a new match")
-	}
-}
-
 func TestSelectorIndexBypassesAttributeWorkWithoutSelectors(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
-	s.buildSelectorIndex(1, 1)
+	s.buildSelectorIndex()
 	node := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: strings.Repeat("word ", 1_000)}}}
 	if refs := s.candidates(node); len(refs) != 0 {
 		t.Fatalf("candidates without selectors = %+v", refs)
 	}
 }
 
-func TestSelectorIndexDeduplicatesRepeatedAncestorBuckets(t *testing.T) {
-	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(strings.Repeat(`.wanted *{display:none}`, 1_000), false)
-	s.buildSelectorIndex(128, 129)
-	parent := &html.Node{Type: html.ElementNode, Data: "div"}
-	for range 128 {
-		parent = &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "wanted"}}, Parent: parent}
-	}
-	node := &html.Node{Type: html.ElementNode, Data: "p", Parent: parent}
-	matches := matchBudget{limit: s.limits.MatchWork}
-	refs, complete := s.collectCandidates(node, &matches)
-	if !complete || len(refs) != 1_000 {
-		t.Fatalf("repeated ancestor candidates = %+v, complete=%t", refs, complete)
-	}
-	if len(s.runtime.candidateScratch) > s.index.count {
-		t.Fatalf("candidate scratch length = %d, selector count = %d", len(s.runtime.candidateScratch), s.index.count)
-	}
-	if matches.used != 1_384 {
-		t.Fatalf("candidate work = %d, want 128 attribute scans, 128 class scans, 128 token lookups plus 1,000 bucket entries", matches.used)
-	}
-	repeated := matchBudget{limit: s.limits.MatchWork}
-	refs, complete = s.collectCandidates(node, &repeated)
-	if !complete || len(refs) != 1_000 || repeated.used != 1_000 {
-		t.Fatalf("cached ancestor candidates = %d refs, work=%d, complete=%t", len(refs), repeated.used, complete)
-	}
-	limited := matchBudget{limit: 100}
-	if _, complete := s.collectCandidates(node, &limited); complete || !limited.exhausted {
-		t.Fatalf("limited candidate collection completed: %+v", limited)
-	}
-}
-
 func TestActiveAncestorCandidatesMatchParentWalk(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	s.parseCSS(`.wanted *{display:none}#outer *{opacity:0}div *{visibility:hidden}svg *{font-size:0}linearGradient *{color:red}.absent *{display:none}p{display:block}`, false)
-	s.buildSelectorIndex(16, 16)
+	s.buildSelectorIndex()
 	root, err := html.Parse(strings.NewReader(`<div id="outer" class="wanted"><div class="wanted"><p></p></div><svg><linearGradient><rect></rect></linearGradient></svg></div>`))
 	if err != nil {
 		t.Fatal(err)
@@ -2679,62 +1403,6 @@ func TestActiveAncestorCandidatesMatchParentWalk(t *testing.T) {
 	}
 }
 
-func TestActiveAncestorCandidateActivationUsesSharedBudget(t *testing.T) {
-	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`.wanted *{display:none}`, false)
-	s.buildSelectorIndex(2, 2)
-	parent := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "wanted"}}}
-	child := &html.Node{Type: html.ElementNode, Data: "p", Parent: parent}
-	parent.FirstChild = child
-	s.runtime.activeAncestors.reset(s.index.count)
-	s.runtime.activeAncestors.enabled = true
-
-	budget := matchBudget{limit: s.limits.MatchWork}
-	activation, complete := s.activateAncestorBuckets(parent, &budget)
-	if !complete || budget.used != 3 {
-		t.Fatalf("ancestor activation budget = %+v, complete=%t", budget, complete)
-	}
-	refs, complete := s.collectCandidates(child, &budget)
-	if !complete || len(refs) != 1 || budget.used != 4 {
-		t.Fatalf("active candidates = %v, budget=%+v, complete=%t", refs, budget, complete)
-	}
-	s.deactivateAncestorBuckets(activation)
-	if len(s.runtime.activeAncestors.buckets) != 0 {
-		t.Fatal("ancestor bucket remained active")
-	}
-
-	uncached := sheet{limits: DefaultLimits()}
-	uncached.parseCSS(`.wanted *{display:none}`, false)
-	uncached.buildSelectorIndex(2, 2)
-	uncached.runtime.activeAncestors.reset(uncached.index.count)
-	uncached.runtime.activeAncestors.enabled = true
-	limited := matchBudget{limit: 2}
-	if _, complete := uncached.activateAncestorBuckets(parent, &limited); complete || !limited.exhausted || len(uncached.runtime.activeAncestors.buckets) != 0 {
-		t.Fatalf("limited activation = %+v, complete=%t, active=%d", limited, complete, len(uncached.runtime.activeAncestors.buckets))
-	}
-}
-
-func TestSelectorIndexChargesAndCachesClassTokens(t *testing.T) {
-	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`.wanted *{display:none}`, false)
-	s.buildSelectorIndex(2, 2)
-	classes := strings.Repeat("other ", 1_000)
-	parent := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: classes}}}
-	node := &html.Node{Type: html.ElementNode, Data: "p", Parent: parent}
-
-	first := matchBudget{limit: s.limits.MatchWork}
-	refs, complete := s.collectCandidates(node, &first)
-	want := int64(1 + 1 + selectorByteWork(len(classes)) + 1_000)
-	if !complete || len(refs) != 0 || first.used != want {
-		t.Fatalf("initial class candidates = %d refs, work=%d want=%d, complete=%t", len(refs), first.used, want, complete)
-	}
-	second := matchBudget{limit: s.limits.MatchWork}
-	refs, complete = s.collectCandidates(node, &second)
-	if !complete || len(refs) != 0 || second.used != 0 {
-		t.Fatalf("cached class candidates = %d refs, work=%d, complete=%t", len(refs), second.used, complete)
-	}
-}
-
 func TestTreeEvidence(t *testing.T) {
 	in := inspectHTML(t, `<p>&amp;lt;b&amp;gt;&#x200b;&lt;style&gt;hidden&lt;/style&gt;</p><script>script</script><style>p{color:red}</style><!--comment--><template>inert</template><iframe>fallback</iframe>`)
 	v := findText(t, in, "&lt;b&gt;\u200b<style>hidden</style>")
@@ -2783,53 +1451,6 @@ func TestAllFixtures(t *testing.T) {
 		})
 	}
 }
-func TestLimitSubprocess(t *testing.T) {
-	if os.Getenv("HTML_EVAL_CHILD") == "1" {
-		l := DefaultLimits()
-		name := os.Getenv("HTML_EVAL_CASE")
-		var src string
-		switch name {
-		case "depth":
-			src = strings.Repeat("<div>", 300) + "T"
-		case "attribute":
-			src = `<p title="` + strings.Repeat("x", 9<<20) + `">T</p>`
-		case "rules":
-			l.Rules = 3
-			src = `<style>` + strings.Repeat(`p{display:none}`, 10) + `</style><p>T</p>`
-		case "selectors":
-			l.Selectors = 3
-			src = `<style>p,i,b,u,div{display:none}</style><p>T</p>`
-		case "work":
-			l.MatchWork = 2
-			src = `<style>*{display:none}</style><p>T</p>`
-		case "malformed":
-			src = `<style>` + strings.Repeat(`x{bad;;;;color:;}`, 1000) + `</style><p>T</p>`
-		case "transitions":
-			src = strings.Repeat(`<p style="visibility:hidden"><span style="visibility:visible">T</span></p>`, 1000)
-		}
-		document, e := (processor{Limits: l}).process([]byte(src))
-		expected := name == "depth" || name == "attribute"
-		if expected != (e != nil) {
-			t.Fatal(name, e)
-		}
-		if (name == "rules" || name == "selectors") && findText(t, document, "T").Label != "unknown" {
-			t.Fatal(name, document)
-		}
-		return
-	}
-	for _, name := range []string{"depth", "attribute", "rules", "selectors", "work", "malformed", "transitions"} {
-		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			c := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLimitSubprocess$")
-			c.Env = append(os.Environ(), "HTML_EVAL_CHILD=1", "HTML_EVAL_CASE="+name)
-			b, e := c.CombinedOutput()
-			if e != nil {
-				t.Fatalf("%v %s", e, b)
-			}
-		})
-	}
-}
 func BenchmarkLargest(b *testing.B) {
 	src := []byte(`<style>.quiet{opacity:.005}</style><p>` + strings.Repeat(`<span class="quiet">padding</span> visible `, 24000) + `</p>`)
 	p := processor{Limits: DefaultLimits()}
@@ -2838,211 +1459,6 @@ func BenchmarkLargest(b *testing.B) {
 		if _, e := p.process(src); e != nil {
 			b.Fatal(e)
 		}
-	}
-}
-
-func BenchmarkSiblingSelectorPhases(b *testing.B) {
-	limits := DefaultLimits()
-	const (
-		stylesheet       = `<style>q ~ p{display:none}</style>`
-		fixedTokens      = 5 // style start/text/end and body start/end
-		tokensPerElement = 2 // explicit start and end tags
-		sparseParagraphs = 1000
-	)
-	elements := (limits.Nodes - fixedTokens) / tokensPerElement
-	body := strings.Repeat(`<p></p>`, elements)
-	src := []byte(stylesheet + `<body>` + body + `</body>`)
-	sparseBody := strings.Repeat(`<div></div>`, elements-sparseParagraphs) + strings.Repeat(`<p></p>`, sparseParagraphs)
-	sparse := []byte(stylesheet + `<body>` + sparseBody + `</body>`)
-	plain := []byte(`<body>` + body + `</body>`)
-	rejected := []byte(stylesheet + `<body>` + strings.Repeat(`<p></p>`, elements+1) + `</body>`)
-
-	for name, input := range map[string][]byte{"dense": src, "sparse": sparse, "plain": plain} {
-		if _, err := Analyze(input, limits); err != nil {
-			b.Fatalf("%s workload is not admitted: %v", name, err)
-		}
-	}
-	if _, err := Analyze(rejected, limits); err == nil || !strings.Contains(err.Error(), "parser nodes") {
-		b.Fatalf("oversized workload error = %v, want parser-node rejection", err)
-	}
-
-	reportAnalysis := func(b *testing.B, input []byte, requireComplete bool) {
-		b.Helper()
-		b.SetBytes(int64(len(input)))
-		var usage ResourceUsage
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			document, err := Analyze(input, limits)
-			if err != nil {
-				b.Fatal(err)
-			}
-			usage = document.Usage
-		}
-		b.StopTimer()
-		b.ReportMetric(float64(usage.MatchWork), "match-work/op")
-		b.ReportMetric(float64(usage.ExpressionWork), "expression-work/op")
-		if usage.MatchWorkExhausted {
-			b.ReportMetric(1, "match-exhausted/op")
-		} else {
-			b.ReportMetric(0, "match-exhausted/op")
-		}
-		if usage.ExpressionWorkExhausted {
-			b.ReportMetric(1, "expression-exhausted/op")
-		} else {
-			b.ReportMetric(0, "expression-exhausted/op")
-		}
-		if requireComplete && (usage.MatchWorkExhausted || usage.ExpressionWorkExhausted) {
-			b.Fatalf("analysis unexpectedly exhausted work: %+v", usage)
-		}
-	}
-
-	b.Run("tree", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			if _, err := html.ParseWithOptions(bytes.NewReader(src), html.ParseOptionEnableScripting(false)); err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-	b.Run("full-analysis", func(b *testing.B) {
-		reportAnalysis(b, src, false)
-	})
-	b.Run("full-analysis-no-selector", func(b *testing.B) {
-		reportAnalysis(b, plain, true)
-	})
-	b.Run("sparse-sibling-worst-case", func(b *testing.B) {
-		reportAnalysis(b, sparse, false)
-	})
-}
-
-func BenchmarkAncestorIndexedCandidates(b *testing.B) {
-	const selector = `<style>.wrapper *{display:none}</style>`
-	var deep strings.Builder
-	deep.WriteString(selector)
-	for range 500 {
-		for range 64 {
-			deep.WriteString(`<div class="wrapper">`)
-		}
-		for range 64 {
-			deep.WriteString(`</div>`)
-		}
-	}
-	var shallow strings.Builder
-	shallow.WriteString(selector)
-	for range 5_000 {
-		shallow.WriteString(`<div class="wrapper"><span></span><span></span><span></span><span></span><span></span></div>`)
-	}
-
-	for _, benchmark := range []struct {
-		name  string
-		input []byte
-	}{
-		{name: "deep-repeated-class", input: []byte(deep.String())},
-		{name: "shallow-template", input: []byte(shallow.String())},
-	} {
-		b.Run(benchmark.name, func(b *testing.B) {
-			limits := DefaultLimits()
-			if _, err := Analyze(benchmark.input, limits); err != nil {
-				b.Fatalf("benchmark workload is not admitted: %v", err)
-			}
-			b.SetBytes(int64(len(benchmark.input)))
-			var usage ResourceUsage
-			b.ResetTimer()
-			for range b.N {
-				document, err := Analyze(benchmark.input, limits)
-				if err != nil {
-					b.Fatal(err)
-				}
-				usage = document.Usage
-			}
-			b.StopTimer()
-			b.ReportMetric(float64(usage.MatchWork), "match-work/op")
-			if usage.MatchWorkExhausted {
-				b.ReportMetric(1, "match-exhausted/op")
-			} else {
-				b.ReportMetric(0, "match-exhausted/op")
-			}
-		})
-	}
-}
-
-func BenchmarkNeutralSiblingColourMemo(b *testing.B) {
-	const siblings = 5_000
-	style := initial()
-	neutral := paintLayer{
-		backgroundKnown: true, imageKnown: true,
-		opacity: 1, opacityKnown: true, compositionKnown: true, enhancementKnown: true,
-	}
-	node := &html.Node{Type: html.ElementNode, Data: "span"}
-	for _, benchmark := range []struct {
-		name            string
-		forceInvalidate bool
-	}{
-		{name: "retained-neutral-context"},
-		{name: "invalidated-reference", forceInvalidate: true},
-	} {
-		b.Run(benchmark.name, func(b *testing.B) {
-			b.ReportAllocs()
-			for range b.N {
-				runner := viewingCaseRunner{
-					matches: &matchBudget{limit: 1_000_000},
-					layers:  []paintLayer{neutral},
-				}
-				for range siblings {
-					changed := runner.enterPaintLayer(node, neutral)
-					if benchmark.forceInvalidate {
-						runner.layerGeneration++
-					}
-					result := runner.evaluateColour(style[color])
-					runner.leavePaintLayer(changed)
-					if benchmark.forceInvalidate {
-						runner.layerGeneration++
-					}
-					if !result.known {
-						b.Fatal(result.uncertainty)
-					}
-				}
-				if !benchmark.forceInvalidate && runner.layerGeneration != 0 {
-					b.Fatalf("neutral siblings changed colour generation to %d", runner.layerGeneration)
-				}
-			}
-		})
-	}
-}
-
-func BenchmarkLiteralVariableScope(b *testing.B) {
-	const definitions = 64
-	s := sheet{limits: DefaultLimits()}
-	literal := make(map[string]candidate, definitions)
-	graphReference := make(map[string]candidate, definitions)
-	for i := range definitions {
-		name := fmt.Sprintf("--value-%d", i)
-		declarations := s.declarations(name, fmt.Sprintf("%dpx", i))
-		d := declarations[0]
-		literal[name] = candidate{d: &d, set: true}
-		graphDeclaration := d
-		// Force the former graph machinery for an otherwise identical literal
-		// token stream, providing an in-process performance reference.
-		graphDeclaration.hasVars = true
-		graphDeclaration.dependenciesReady = true
-		graphReference[name] = candidate{d: &graphDeclaration, set: true}
-	}
-	for _, benchmark := range []struct {
-		name string
-		defs map[string]candidate
-	}{
-		{name: "literal-fast-path", defs: literal},
-		{name: "dependency-graph-reference", defs: graphReference},
-	} {
-		b.Run(benchmark.name, func(b *testing.B) {
-			b.ReportAllocs()
-			for range b.N {
-				budget := expressionBudget{remaining: 1_000_000}
-				scope := buildVariables(nil, benchmark.defs, nil, &budget)
-				if budget.exhausted || len(scope.values) != definitions {
-					b.Fatalf("scope construction failed: budget=%+v values=%d", budget, len(scope.values))
-				}
-			}
-		})
 	}
 }
 
@@ -3065,35 +1481,6 @@ func BenchmarkDeepMediaRuleStorage(b *testing.B) {
 	for range b.N {
 		if _, err := Analyze(input, limits); err != nil {
 			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkSharedMediaConditionEvaluation(b *testing.B) {
-	var conditions *conditionFrame
-	for _, condition := range []mediaCondition{
-		{{bounds: []widthBound{{min: true, value: 320}}, schemes: colourSchemeBoth}},
-		{{bounds: []widthBound{{value: 768}}, schemes: colourSchemeBoth}},
-		{{bounds: []widthBound{{min: true, value: 480}}, schemes: colourSchemeBoth}},
-		{{bounds: []widthBound{{value: 1200}}, schemes: colourSchemeBoth}},
-	} {
-		conditions = newConditionFrame(condition, conditions)
-	}
-	base := sheet{limits: DefaultLimits(), rules: make([]rule, 5_000)}
-	for i := range base.rules {
-		base.rules[i].conditions = conditions
-		base.rules[i].prepareMediaWork()
-	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
-		s := base
-		s.runtime = sheetRuntime{}
-		s.planningWork = 0
-		widths, fallback := s.viewingCases(MaxViewingCases)
-		if fallback || len(widths) == 0 {
-			b.Fatalf("shared-media workload fell back: widths=%v fallback=%t", widths, fallback)
 		}
 	}
 }
@@ -3153,7 +1540,29 @@ func TestAdditionalBoundsAndUnsupportedWinners(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := findText(t, document, "T").Label; got != "unknown" {
-		t.Fatalf("CSS nesting limit label = %q", got)
+	if got := findText(t, document, "T").Label; got != "concealed" {
+		t.Fatalf("deep CSS nesting label = %q", got)
+	}
+}
+
+func TestAnalyzeEnforcesSharedMemoryBudget(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MemoryBytes = 512
+	document, err := Analyze([]byte(`<div `+strings.Repeat(`data-x="value" `, 100)+`>text</div>`), limits)
+	if err == nil || !strings.Contains(err.Error(), "memory bytes") {
+		t.Fatalf("err=%v", err)
+	}
+	if document.Usage.MemoryBytes != limits.MemoryBytes {
+		t.Fatalf("memory usage=%d want=%d", document.Usage.MemoryBytes, limits.MemoryBytes)
+	}
+}
+
+func TestAnalyzeValidatesCurrentLimits(t *testing.T) {
+	for _, change := range []func(*Limits){func(l *Limits) { l.InputBytes = 0 }, func(l *Limits) { l.CSSBytes = 0 }, func(l *Limits) { l.MemoryBytes = 0 }} {
+		limits := DefaultLimits()
+		change(&limits)
+		if _, err := Analyze(nil, limits); err == nil {
+			t.Fatal("invalid limit accepted")
+		}
 	}
 }

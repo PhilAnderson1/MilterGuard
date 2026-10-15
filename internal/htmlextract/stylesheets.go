@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	maxImportDepth       = 8
 	maxCSSMediaTypeBytes = 1024
 )
 
@@ -53,7 +52,7 @@ func cssTypeAttributeApplies(n *html.Node) bool {
 }
 
 func (s *sheet) stylesheetLink(n *html.Node) (href, media string, applies bool) {
-	if s.cascadeIncomplete || s.workIncomplete {
+	if s.cascadeIncomplete || s.stopped {
 		return "", "", false
 	}
 	if n.Namespace != "" || n.Data != "link" || hasAttr(n, "disabled") {
@@ -83,7 +82,7 @@ func (s *sheet) parseMediaCondition(value string) mediaCondition {
 	if condition, ok := s.mediaConditions[value]; ok {
 		return condition
 	}
-	if !s.chargePlanningWork(value) {
+	if !s.checkCPU() {
 		return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
 	}
 	condition := parseMedia(value)
@@ -111,7 +110,7 @@ func (s *sheet) loadStylesheetReference(href, media string) {
 	// consume CPU and transient memory; the resulting rules would be discarded.
 	// Keep this guard at the shared boundary so it covers both link elements and
 	// nested @import rules.
-	if s.cascadeIncomplete || s.workIncomplete {
+	if s.cascadeIncomplete || s.stopped {
 		return
 	}
 	remaining := s.limits.CSSBytes - s.cssBytes
@@ -131,14 +130,8 @@ func (s *sheet) loadStylesheetReference(href, media string) {
 }
 
 func (s *sheet) parseImportedStylesheet(text, media string) {
-	if s.importDepth >= maxImportDepth {
-		s.unresolvedStylesheet = true
-		return
-	}
-	s.importDepth++
 	firstRule := len(s.rules)
 	s.parseCSS(text, false)
-	s.importDepth--
 	// Email clients disagree on whether data-URL stylesheets are applicable.
 	// Retain their possible cascade effects, but do not let them establish a
 	// definite visibility result. This also marks rules from nested imports
@@ -234,7 +227,7 @@ func decodeCSSDataURL(reference string, maxBytes int) ([]byte, bool, bool) {
 	// The payload is bounded separately by the remaining stylesheet budget.
 	// Bound metadata before mime.ParseMediaType can allocate a parameter map
 	// proportional to an otherwise multi-megabyte href value.
-	if len(metadata) > maxValueBytes {
+	if len(metadata) > maxCSSMediaTypeBytes {
 		return nil, true, false
 	}
 	base64Encoded := false

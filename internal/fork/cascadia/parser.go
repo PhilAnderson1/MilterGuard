@@ -7,13 +7,15 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // a parser for CSS selectors
 type parser struct {
-	s     string // the source text
-	i     int    // the current position
-	depth int    // current nesting depth
+	s      string // the source text
+	i      int    // the current position
+	memory *resourceguard.Memory
 
 	// if `false`, parsing a pseudo-element
 	// returns an error.
@@ -867,16 +869,11 @@ func (p *parser) parseSelector() (Sel, error) {
 	}
 }
 
-const maxParseDepth = 1000
-
 // parseSelectorGroup parses a group of selectors, separated by commas.
 func (p *parser) parseSelectorGroup() (SelectorGroup, error) {
-	if p.depth > maxParseDepth {
-		return nil, fmt.Errorf("selector nesting too deep (max %d)", maxParseDepth)
+	if p.memory != nil && !p.memory.Reserve(256) {
+		return nil, fmt.Errorf("cascadia: memory limit exceeded")
 	}
-	p.depth++
-	defer func() { p.depth-- }()
-
 	current, err := p.parseSelector()
 	if err != nil {
 		return nil, err

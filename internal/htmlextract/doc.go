@@ -6,8 +6,8 @@
 // concealed, client-dependent, or unknown using bounded evaluation intended
 // for untrusted email input.
 //
-// Parsing and analysis use explicit stacks rather than recursion. The forked
-// HTML parser enforces resource limits while tokenizing and building the tree;
-// document collection and presentation analysis then apply their own bounded
-// traversals for the state each pass needs.
+// The raw HTML and cumulative CSS sizes have independent limits. A single
+// monotonic allocation budget is shared by the forked HTML and CSS parsers,
+// selector compiler, DOM collection, cascade evaluation, and extraction.
+// CPU use is sampled cooperatively inside the same parser and traversal loops.
 package htmlextract

@@ -1,10 +1,11 @@
 # Parser source forks
 
 MilterGuard keeps the parser code that receives untrusted HTML and CSS in this
-tree so resource limits can be enforced at the operations that consume the
-resources. The HTML fork has direct tokenizer and tree-builder limits, and the
-CSS fork directly bounds token accumulation, copied values, parser depth, and
-tokenizer progress.
+tree so untrusted parsing can charge allocations and sample CPU at the
+operations that consume those resources. One monotonic allocation budget is
+shared across the HTML tokenizer/tree builder, CSS tokenizer/parser, selector
+compiler, and MilterGuard's extraction code. Raw HTML and cumulative CSS byte
+limits remain separate because they can be rejected before parsing.
 
 The imported packages are:
 

@@ -3,32 +3,20 @@ package html
 import (
 	"errors"
 	"fmt"
+	"unsafe"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // ErrResourceStopped is returned when ResourceLimits.ShouldStop asks the
 // tokenizer or tree builder to stop processing the current document.
 var ErrResourceStopped = errors.New("html: resource processing stopped")
 
-// ResourceLimits bounds allocations and recovery work performed inside the
-// tokenizer and tree builder. Zero values leave the corresponding resource
-// unlimited.
+// ResourceLimits stops parsing when the shared allocation budget or external
+// CPU guard is exhausted.
 type ResourceLimits struct {
-	Nodes              int
-	TextNodes          int
-	Attributes         int
-	Depth              int
-	TextMergeCopyBytes int64
-	ShouldStop         func() bool
-}
-
-// ResourceUsage reports parser allocations and the deepest open-element
-// stack reached while parsing.
-type ResourceUsage struct {
-	Nodes              int
-	TextNodes          int
-	Attributes         int
-	Depth              int
-	TextMergeCopyBytes int64
+	ShouldStop func() bool
+	Memory     *resourceguard.Memory
 }
 
 // ResourceLimitError identifies the parser resource that exceeded its limit.
@@ -44,9 +32,15 @@ func (e *ResourceLimitError) Error() string {
 type resourceAbort struct{ err error }
 
 type resourceGuard struct {
-	limits ResourceLimits
-	usage  *ResourceUsage
-	bytes  uint64
+	limits                     ResourceLimits
+	bytes                      uint64
+	oeCap, afeCap, templateCap int
+}
+
+func (g *resourceGuard) reserve(bytes int64) {
+	if g != nil && g.limits.Memory != nil && !g.limits.Memory.Reserve(bytes) {
+		panic(resourceAbort{&ResourceLimitError{"memory bytes", g.limits.Memory.Limit()}})
+	}
 }
 
 func (g *resourceGuard) stop() {
@@ -59,6 +53,9 @@ func (g *resourceGuard) readByte() (err error) {
 	if g == nil {
 		return nil
 	}
+	if g.limits.Memory != nil && g.limits.Memory.Exhausted() {
+		return &ResourceLimitError{"memory bytes", g.limits.Memory.Limit()}
+	}
 	g.bytes++
 	if g.bytes&1023 == 0 && g.limits.ShouldStop != nil && g.limits.ShouldStop() {
 		return ErrResourceStopped
@@ -66,30 +63,18 @@ func (g *resourceGuard) readByte() (err error) {
 	return nil
 }
 
-func (g *resourceGuard) node(nodeType NodeType) {
+func (g *resourceGuard) node(n Node) {
 	if g == nil {
 		return
 	}
-	g.usage.Nodes++
-	if g.limits.Nodes > 0 && g.usage.Nodes > g.limits.Nodes {
-		panic(resourceAbort{&ResourceLimitError{"nodes", int64(g.limits.Nodes)}})
-	}
-	if nodeType == TextNode {
-		g.usage.TextNodes++
-		if g.limits.TextNodes > 0 && g.usage.TextNodes > g.limits.TextNodes {
-			panic(resourceAbort{&ResourceLimitError{"text nodes", int64(g.limits.TextNodes)}})
-		}
-	}
+	g.reserve(int64(unsafe.Sizeof(Node{})) + int64(len(n.Data)+len(n.Namespace)))
 }
 
 func (g *resourceGuard) attributes(n int) (err error) {
 	if g == nil || n == 0 {
 		return nil
 	}
-	g.usage.Attributes += n
-	if g.limits.Attributes > 0 && g.usage.Attributes > g.limits.Attributes {
-		return &ResourceLimitError{"attributes", int64(g.limits.Attributes)}
-	}
+	g.reserve(int64(n) * int64(unsafe.Sizeof(Attribute{})))
 	return nil
 }
 
@@ -104,50 +89,43 @@ func (g *resourceGuard) stacks(p *parser) {
 		return
 	}
 	g.stop()
-	depth := len(p.oe)
-	if depth > g.usage.Depth {
-		g.usage.Depth = depth
+	if cap(p.oe) > g.oeCap {
+		g.reserve(int64(cap(p.oe)-g.oeCap) * int64(unsafe.Sizeof((*Node)(nil))))
+		g.oeCap = cap(p.oe)
 	}
-	if g.limits.Depth > 0 && (len(p.afe) > g.limits.Depth || len(p.templateStack) > g.limits.Depth) {
-		panic(resourceAbort{&ResourceLimitError{"parser stack depth", int64(g.limits.Depth)}})
+	if cap(p.afe) > g.afeCap {
+		g.reserve(int64(cap(p.afe)-g.afeCap) * int64(unsafe.Sizeof((*Node)(nil))))
+		g.afeCap = cap(p.afe)
+	}
+	if cap(p.templateStack) > g.templateCap {
+		g.reserve(int64(cap(p.templateStack)-g.templateCap) * int64(unsafe.Sizeof(insertionMode(nil))))
+		g.templateCap = cap(p.templateStack)
 	}
 }
 
 func (g *resourceGuard) openElement(p *parser, next *Node) {
-	if g == nil || g.limits.Depth <= 0 || next.parserImplied {
-		return
-	}
-	sourceDepth := 1
-	for _, n := range p.oe {
-		if n.Type == ElementNode && !n.parserImplied {
-			sourceDepth++
-		}
-	}
-	if sourceDepth > g.limits.Depth {
-		panic(resourceAbort{&ResourceLimitError{"source depth", int64(g.limits.Depth)}})
+	// Stack growth is charged by stacks. This hook remains at the construction
+	// point so upstream tree-builder changes cannot bypass the guard.
+	if g != nil {
+		g.stop()
 	}
 }
 
-func (g *resourceGuard) textMerge(oldBytes int) {
-	if g == nil || oldBytes == 0 {
+func (g *resourceGuard) textMerge(oldBytes, addedBytes int) {
+	if g == nil || addedBytes == 0 {
 		return
 	}
-	g.usage.TextMergeCopyBytes += int64(oldBytes)
-	if g.limits.TextMergeCopyBytes > 0 && g.usage.TextMergeCopyBytes > g.limits.TextMergeCopyBytes {
-		panic(resourceAbort{&ResourceLimitError{"text merge copy bytes", g.limits.TextMergeCopyBytes}})
-	}
+	g.reserve(int64(oldBytes + addedBytes))
 }
 
 // ParseOptionResourceLimits installs direct tokenizer and tree-builder limits.
 // If usage is non-nil it is updated as parsing proceeds, including on error.
-func ParseOptionResourceLimits(limits ResourceLimits, usage *ResourceUsage) ParseOption {
+func ParseOptionResourceLimits(limits ResourceLimits) ParseOption {
 	return func(p *parser) {
-		if usage == nil {
-			usage = &ResourceUsage{}
-		} else {
-			*usage = ResourceUsage{}
+		p.guard = &resourceGuard{limits: limits}
+		if limits.Memory != nil {
+			limits.Memory.Reserve(int64(cap(p.tokenizer.buf)))
 		}
-		p.guard = &resourceGuard{limits: limits, usage: usage}
 		p.tokenizer.guard = p.guard
 	}
 }

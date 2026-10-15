@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // Text describes one extractable text node. Label and ConcealmentReasons are
@@ -117,29 +119,17 @@ type parsedDocument struct {
 	extractableTextCount    int
 	extractableElementCount int
 	msoOrderUncertain       bool
-	attributeWork           selectorAttributeProfile
-	parserUsage             html.ResourceUsage
+	memory                  *resourceguard.Memory
 }
 
 type elementPreparation struct {
 	inline, legacy   []declaration
 	inlineIncomplete bool
-	selector         selectorAttributeProfile
 	hasElementChild  bool
 }
 
-// The HTML5 tree builder can insert a small fixed set of structural ancestors
-// absent from a source fragment, notably html/body. Table wrappers such as
-// tbody are not included here: the final-tree walk accounts for table wrapper
-// levels along each path separately.
-const impliedTreeDepthMargin = 4
-
-func (p selectorAttributeProfile) empty() bool {
-	return p.classes == 0 && p.ids == 0 && p.attributes == 0
-}
-
 func (p processor) parseDocument(input []byte) (parsedDocument, error) {
-	var document parsedDocument
+	document := parsedDocument{memory: p.memory}
 	if err := p.Limits.validate(); err != nil {
 		return document, err
 	}
@@ -151,13 +141,9 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	root, err := html.ParseWithOptions(bytes.NewReader(input),
 		html.ParseOptionEnableScripting(false),
 		html.ParseOptionResourceLimits(html.ResourceLimits{
-			Nodes:              p.Limits.Nodes,
-			TextNodes:          p.Limits.TextNodes,
-			Attributes:         p.Limits.Attributes,
-			Depth:              p.Limits.Depth,
-			TextMergeCopyBytes: maxHTMLTextMergeCopyBytes,
-			ShouldStop:         p.shouldStop,
-		}, &document.parserUsage),
+			ShouldStop: p.shouldStop,
+			Memory:     p.memory,
+		}),
 	)
 	if err != nil {
 		if errors.Is(err, html.ErrResourceStopped) {
@@ -176,12 +162,17 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	document.styles = sheet{
 		limits: p.Limits, shouldStop: p.shouldStop,
 		selectorControl: cascadia.NewMatchControl(p.shouldStop),
+		cpu:             p.cpu,
+		memory:          p.memory,
+	}
+	if !p.memory.Reserve(int64(unsafe.Sizeof(map[*html.Node]elementPreparation{}))) {
+		return document, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
 	}
 	document.elements = make(map[*html.Node]elementPreparation)
 	type entry struct {
-		n, next           *html.Node
-		depth, tableDepth int
-		scope             nodeScope
+		n, next *html.Node
+		depth   int
+		scope   nodeScope
 		// Styles declared below noscript are client-dependent: some email
 		// sanitizers discard the container while others retain its fallback
 		// content. Keep parsing the rules, but do not let them establish a
@@ -189,7 +180,11 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		uncertainStylesheetOrigin bool
 		entered                   bool
 	}
-	stack := make([]entry, 1, max(1, document.parserUsage.Depth+1))
+	stackCap := 64
+	if !p.memory.Reserve(int64(stackCap) * int64(unsafe.Sizeof(entry{}))) {
+		return document, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+	}
+	stack := make([]entry, 1, stackCap)
 	stack[0] = entry{n: root}
 	msoRevealedDepth := 0
 	for len(stack) > 0 {
@@ -208,8 +203,17 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 					document.elements[e.n] = prepared
 				}
 			}
+			if len(stack) == cap(stack) {
+				newCap := max(1, cap(stack)*2)
+				if !p.memory.Reserve(int64(newCap-cap(stack)) * int64(unsafe.Sizeof(entry{}))) {
+					return document, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+				}
+				grown := make([]entry, len(stack), newCap)
+				copy(grown, stack)
+				stack = grown
+			}
 			stack = append(stack, entry{
-				n: child, depth: e.depth + 1, tableDepth: e.tableDepth, scope: e.scope,
+				n: child, depth: e.depth + 1, scope: e.scope,
 				uncertainStylesheetOrigin: e.uncertainStylesheetOrigin,
 			})
 			continue
@@ -217,24 +221,6 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		e.entered = true
 		e.next = e.n.FirstChild
 		n := e.n
-		if n.Type == html.ElementNode && n.Data == "table" {
-			e.tableDepth++
-		}
-		// Use subtraction after the greater-than check rather than adding the
-		// margin to a caller-provided limit, which could overflow int.
-		if e.depth > p.Limits.Depth {
-			excess := e.depth - p.Limits.Depth
-			// A cell directly below a table makes the tree builder insert both
-			// tbody and tr. Charge the two possible implied levels separately so
-			// even caller-provided maximum integer limits cannot overflow while
-			// adding parser allowances.
-			if excess > impliedTreeDepthMargin {
-				excess -= impliedTreeDepthMargin
-				if excess > e.tableDepth && excess-e.tableDepth > e.tableDepth {
-					return document, fmt.Errorf("limit: tree depth > %d", p.Limits.Depth)
-				}
-			}
-		}
 		if e.depth > document.treeDepth {
 			document.treeDepth = e.depth
 		}
@@ -242,14 +228,8 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		if document.nodeCount&255 == 0 && p.stopped() {
 			return document, errStopped
 		}
-		if document.nodeCount > p.Limits.Nodes {
-			return document, fmt.Errorf("limit: tree nodes > %d", p.Limits.Nodes)
-		}
 		if n.Type == html.TextNode {
 			document.textCount++
-			if document.textCount > p.Limits.TextNodes {
-				return document, fmt.Errorf("limit: tree text nodes > %d", p.Limits.TextNodes)
-			}
 		}
 		if n.Type == html.CommentNode && (e.scope == scopeActive || e.scope == scopeHead) {
 			marker := msoDownlevelRevealedMarker(n.Data)
@@ -284,20 +264,13 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		}
 		if n.Type == html.ElementNode {
 			document.attributeCount += len(n.Attr)
-			if document.attributeCount > p.Limits.Attributes {
-				return document, fmt.Errorf("limit: tree attributes > %d", p.Limits.Attributes)
-			}
 			var prepared elementPreparation
-			prepared.selector.observe(n)
-			document.attributeWork.classes = max(document.attributeWork.classes, prepared.selector.classes)
-			document.attributeWork.ids = max(document.attributeWork.ids, prepared.selector.ids)
-			document.attributeWork.attributes = max(document.attributeWork.attributes, prepared.selector.attributes)
 			if href, media, applies := document.styles.stylesheetLink(n); applies && (e.scope == scopeActive || e.scope == scopeHead) {
 				document.styles.loadStylesheetReference(href, media)
 			}
 			if n.Data == "style" && cssTypeAttributeApplies(n) && (e.scope == scopeActive || e.scope == scopeHead) {
 				styles := &document.styles
-				if !styles.cascadeIncomplete && !styles.workIncomplete {
+				if !styles.cascadeIncomplete && !styles.stopped {
 					remaining := styles.limits.CSSBytes - styles.cssBytes
 					css, complete := boundedStyleText(n, remaining)
 					if !complete {
@@ -312,10 +285,13 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 				prepared.inline = result.declarations
 				prepared.inlineIncomplete = result.incomplete
 			}
-			if !document.styles.cascadeIncomplete && !document.styles.workIncomplete {
+			if !document.styles.cascadeIncomplete && !document.styles.stopped {
 				prepared.legacy = prepareDeclarations(legacyDeclarations(n))
 			}
-			if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || prepared.inlineIncomplete || !prepared.selector.empty() {
+			if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || prepared.inlineIncomplete {
+				if _, exists := document.elements[n]; !exists && !p.memory.Reserve(128) {
+					return document, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+				}
 				document.elements[n] = prepared
 			}
 			if e.scope == scopeActive && (n.Data == "img" || n.Data == "input") {
@@ -333,7 +309,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	if document.styles.stopped {
 		return document, errStopped
 	}
-	if document.styles.cascadeIncomplete || document.styles.workIncomplete {
+	if document.styles.cascadeIncomplete || document.styles.stopped {
 		// No prepared per-element CSS can be used once global style analysis is
 		// incomplete. Release declarations and selector profiles collected before
 		// the failure rather than retaining them through result traversal.

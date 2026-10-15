@@ -8,11 +8,6 @@ import (
 	"strings"
 )
 
-const (
-	maxMediaBreakpoints           = 512
-	mediaPlanningWorkLimitDivisor = 4
-)
-
 // A condition is a disjunction of alternatives; nested conditions are ANDed.
 // Unknown is deliberately not false, including in partially supported queries.
 type widthBound struct {
@@ -30,16 +25,12 @@ type mediaCondition []mediaAlternative
 // scope share the complete chain instead of copying one slice header per
 // enclosing condition into every rule.
 type conditionFrame struct {
-	condition                    mediaCondition
-	parent                       *conditionFrame
-	mediaWork, fallbackMediaWork int64
+	condition mediaCondition
+	parent    *conditionFrame
 }
 
 func newConditionFrame(condition mediaCondition, parent *conditionFrame) *conditionFrame {
-	frame := &conditionFrame{condition: condition, parent: parent}
-	frame.mediaWork = conditionFrameWork(frame, false)
-	frame.fallbackMediaWork = conditionFrameWork(frame, true)
-	return frame
+	return &conditionFrame{condition: condition, parent: parent}
 }
 
 const (
@@ -197,98 +188,40 @@ func intersectMediaState(left, right int) int {
 	return mediaYes
 }
 
-// mediaStateWork is a conservative structural cost for one mediaState call.
-// It reflects the rule, condition, alternative and bound loops rather than a
-// fixed multiplier that can underestimate a dense comma-separated query.
-func calculatedMediaStateWork(r rule, fallback bool) int64 {
-	return 1 + conditionFrameWork(r.conditions, fallback)
-}
-
-func conditionFrameWork(frame *conditionFrame, fallback bool) int64 {
-	if frame == nil {
-		return 0
-	}
-	if fallback && frame.fallbackMediaWork != 0 {
-		return frame.fallbackMediaWork
-	}
-	if !fallback && frame.mediaWork != 0 {
-		return frame.mediaWork
-	}
-	work := int64(1)
-	for _, alternative := range frame.condition {
-		work += 1 + int64(len(alternative.bounds))
-	}
-	if fallback {
-		work += int64(len(frame.condition))
-	}
-	return work + conditionFrameWork(frame.parent, fallback)
-}
-
-func (r *rule) prepareMediaWork() {
-	r.mediaWork = calculatedMediaStateWork(*r, false)
-	r.fallbackMediaWork = calculatedMediaStateWork(*r, true)
-}
-
-func (r rule) mediaStateWork(fallback bool) int64 {
-	if fallback {
-		if r.fallbackMediaWork != 0 {
-			return r.fallbackMediaWork
-		}
-	} else if r.mediaWork != 0 {
-		return r.mediaWork
-	}
-	// Tests and other internal callers may construct a rule literal directly.
-	return calculatedMediaStateWork(r, fallback)
-}
-
 // Width-independent property values make activation vectors sufficient. Exact
 // endpoints are separate from open intervals, so a one-point rule is covered.
-func (s *sheet) viewingCases(cap int) ([]float64, bool) {
+func (s *sheet) viewingCases() ([]float64, bool) {
 	// No media decision can make an unusable cascade trustworthy. Retain one
 	// traversal so text and elements are still extracted and labelled unknown,
 	// but do not spend more work constructing activation vectors.
-	if s.cascadeIncomplete || s.workIncomplete {
+	if s.cascadeIncomplete || s.stopped {
 		return []float64{1024}, true
 	}
 	var bounds []float64
 	unique := map[float64]bool{}
 	seenFrames := map[*conditionFrame]bool{}
-	var planningWork int64
-	charge := func(cost int64) bool {
-		// Breakpoint discovery is admission-control work, so reserve at most a
-		// fixed fraction of the total selector/matching budget for it. Check
-		// this phase-local allowance before the shared ceiling: reaching the
-		// former selects conservative media fallback, while reaching the latter
-		// makes all subsequent style evaluation unresolved.
-		limit := s.limits.MatchWork / mediaPlanningWorkLimitDivisor
-		if cost < 1 || planningWork > limit || cost > limit-planningWork {
-			return false
-		}
-		if !s.chargePlanningCost(cost) {
-			return false
-		}
-		planningWork += cost
-		return true
-	}
+	charge := func() bool { return s.checkCPU() }
 	for _, r := range s.rules {
-		// Gathering breakpoints traverses the same condition structure once.
-		if !charge(r.mediaStateWork(false)) {
+		if !charge() {
 			return []float64{1024}, true
 		}
 		for frame := r.conditions; frame != nil; frame = frame.parent {
 			if seenFrames[frame] {
 				continue
 			}
+			if !s.memory.Reserve(32) {
+				return []float64{1024}, true
+			}
 			seenFrames[frame] = true
 			c := frame.condition
 			for _, a := range c {
 				for _, b := range a.bounds {
 					if !unique[b.value] {
-						unique[b.value] = true
-						bounds = append(bounds, b.value)
-						if len(bounds) > maxMediaBreakpoints {
+						if !s.memory.Reserve(24) {
 							return []float64{1024}, true
 						}
+						unique[b.value] = true
+						bounds = append(bounds, b.value)
 					}
 				}
 			}
@@ -296,13 +229,16 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 	}
 	var candidates []float64
 	if len(bounds) == 0 {
+		if !s.memory.Reserve(int64(len(s.rules)) + int64(len(seenFrames))*32 + 128) {
+			return []float64{1024}, true
+		}
 		states := make([]uint8, 0, len(s.rules))
 		var frameStates map[*conditionFrame]conditionFrameState
 		if len(seenFrames) > 0 {
 			frameStates = make(map[*conditionFrame]conditionFrameState, len(seenFrames))
 		}
 		for _, r := range s.rules {
-			if !charge(r.mediaStateWork(false)) {
+			if !charge() {
 				return []float64{1024}, true
 			}
 			light, dark := evaluateConditionFrame(r.conditions, 1024, false, frameStates)
@@ -311,6 +247,9 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 		s.runtime.mediaCache = map[mediaCacheKey][]uint8{{width: 1024}: states}
 		return []float64{1024}, false
 	} else {
+		if !s.memory.Reserve(int64(len(bounds)*2+2) * 8) {
+			return []float64{1024}, true
+		}
 		sort.Float64s(bounds)
 		candidates = []float64{0}
 		prev := 0.0
@@ -324,9 +263,11 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 			candidates = append(candidates, after)
 		}
 	}
-	// Each activation vector becomes one string key. Candidate generation is
-	// bounded by maxMediaBreakpoints, so these short-lived allocations cannot
-	// grow with an unbounded number of media-query endpoints.
+	// Each activation vector becomes one string key. The shared memory budget
+	// accounts for candidates, state vectors, and retained cache entries.
+	if !s.memory.Reserve(int64(len(seenFrames))*32 + 256) {
+		return []float64{1024}, true
+	}
 	seen := map[string]bool{}
 	var widths []float64
 	s.runtime.mediaCache = make(map[mediaCacheKey][]uint8)
@@ -336,9 +277,12 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 	}
 	for _, w := range candidates {
 		clear(frameStates)
+		if !s.memory.Reserve(int64(len(s.rules))*2 + 48) {
+			return []float64{1024}, true
+		}
 		states := make([]uint8, 0, len(s.rules))
 		for _, r := range s.rules {
-			if !charge(r.mediaStateWork(false)) {
+			if !charge() {
 				return []float64{1024}, true
 			}
 			light, dark := evaluateConditionFrame(r.conditions, w, false, frameStates)
@@ -350,9 +294,6 @@ func (s *sheet) viewingCases(cap int) ([]float64, bool) {
 		}
 		seen[k] = true
 		widths = append(widths, w)
-		if len(widths) > cap {
-			return []float64{1024}, true
-		}
 		s.runtime.mediaCache[mediaCacheKey{width: w}] = states
 	}
 	return widths, false

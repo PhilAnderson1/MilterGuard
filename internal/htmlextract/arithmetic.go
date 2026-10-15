@@ -16,7 +16,7 @@ type mathParser struct {
 	at, depth, prop int
 	status          valueStatus
 	parent, root    *Style
-	budget          *expressionBudget
+	budget          *cpuGuard
 }
 
 func isMath(s string) bool {
@@ -28,11 +28,11 @@ func isMath(s string) bool {
 	}
 	return false
 }
-func evalMath(prop int, src string, parent, root *Style, budget *expressionBudget) (Value, valueStatus) {
+func evalMath(prop int, src string, parent, root *Style, budget *cpuGuard) (Value, valueStatus) {
 	// Substituted values do not have a reusable token stream. Charge their byte
 	// scan before invoking the lexer so an exhausted budget cannot repeatedly
 	// allocate tokens for values it will subsequently reject.
-	if !budget.charge(len(src)) {
+	if !budget.check() {
 		return Value{Text: src}, valueUnsupported
 	}
 	ts, status := lexValue(src)
@@ -42,8 +42,8 @@ func evalMath(prop int, src string, parent, root *Style, budget *expressionBudge
 	return evalMathTokens(prop, src, ts, parent, root, budget)
 }
 
-func evalMathTokens(prop int, src string, ts []valueToken, parent, root *Style, budget *expressionBudget) (Value, valueStatus) {
-	if !budget.charge(len(ts)) {
+func evalMathTokens(prop int, src string, ts []valueToken, parent, root *Style, budget *cpuGuard) (Value, valueStatus) {
+	if !budget.check() {
 		return Value{Text: src}, valueUnsupported
 	}
 	// Binary + and - require whitespace on both sides (comments alone do not suffice).
@@ -135,8 +135,7 @@ func (p *mathParser) atom() quantity {
 		p.status = valueInvalid
 		return quantity{}
 	}
-	if p.depth >= maxExpressionDepth {
-		p.budget.rejectDepth()
+	if !p.budget.check() {
 		p.status = valueUnsupported
 		return quantity{}
 	}

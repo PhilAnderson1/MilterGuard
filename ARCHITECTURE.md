@@ -29,7 +29,7 @@ path.
 | `internal/ai` | Builds chat-completions requests, applies endpoint retries, and validates AI decisions. |
 | `internal/attachment` | Detects prohibited executable attachments and inspects supported archives. |
 | `internal/config` | Loads defaults, strictly decodes YAML, and validates cross-setting requirements. |
-| `internal/htmlextract` | Applies direct HTML and CSS parser limits, then derives presentation and visibility evidence from the parsed document. |
+| `internal/htmlextract` | Applies shared allocation and CPU budgets inside the forked parsers, then derives presentation and visibility evidence from the parsed document. |
 | `internal/fork` | Holds the source forks of the HTML tree builder, CSS parser, and selector engine used by `internal/htmlextract`, together with upstream provenance and tests. |
 | `internal/mailaddr` | Provides canonical mailbox parsing and normalization shared by message processing, policy, administration, and persistence. |
 | `internal/mailauth` | Owns provider-neutral authentication evidence, the verifier boundary, trusted-header compatibility parsing, alignment, and exact-message storage. |
@@ -132,29 +132,25 @@ scripts or fetch external resources. Processing proceeds through these stages:
 
 1. Validate limits and bound input bytes. Build the HTML tree with scripting
    disabled using the local `x/net/html` fork in `internal/fork/xnethtml`.
-   A shared in-parser guard counts attributes before tokenizer allocation,
-   counts nodes and recovery clones where the tree builder creates them,
-   bounds open-element, formatting, and template stacks, and limits cumulative
-   string copying when successive text tokens merge. It samples cooperative
-   cancellation during tokenization and tree recovery, so adversarial input is
-   stopped at the operations consuming CPU and memory.
-2. Traverse the completed tree with an
-   explicit stack. Recheck actual node, text, attribute, and depth limits,
-   allowing for parser-generated ancestors. Collect applicable stylesheets,
+   The parser charges node, attribute, tokenizer-buffer, parser-stack, and
+   text-merge allocations to the document's shared monotonic memory budget.
+   It samples cooperative cancellation during tokenization and tree recovery.
+2. Traverse the completed tree with an explicit stack charged to the same
+   budget. Collect applicable stylesheets,
    inline styles, legacy presentation attributes, and selector profiles while
    distinguishing active, head, and inert content.
 3. Enforce a cumulative CSS byte limit, then parse each source with the local
-   `tdewolff` fork in `internal/fork/tdewolffparse/css`. A small in-parser guard
-   bounds bytes and tokens where constructs are retained, bounds component and
-   parser-state depth where those stacks grow, rejects closing delimiters that
-   would corrupt recovery state, and samples cooperative cancellation during
-   tokenization. The limits apply to style elements, style attributes,
+   `tdewolff` fork in `internal/fork/tdewolffparse/css`. Its guard charges
+   retained tokens and parser-state growth to the shared memory budget, rejects
+   closing delimiters that would corrupt recovery state, and samples
+   cooperative cancellation during tokenization. The limits apply to style elements, style attributes,
    conditional-comment styles, and decoded data-URL stylesheets, including
    nested imports.
-4. Prepare declarations and build a selector index, then evaluate a bounded
-   set of viewport cases. Resolve the cascade, inheritance, custom properties,
-   expressions, layout, clipping, opacity, and colours with shared matching
-   and expression-work budgets. Aggregate the cases into visible, concealed,
+4. Prepare declarations and build a selector index, then evaluate the distinct
+   viewport cases found in the stylesheet. Resolve the cascade, inheritance,
+   custom properties, expressions, layout, clipping, opacity, and colours while
+   sampling the CPU guard and charging retained and amplified allocations to
+   the same memory budget. Aggregate the cases into visible, concealed,
    client-dependent, or unknown results, retaining concealment evidence and
    resource usage. Layout uncertainty includes zero line boxes clipped by
    overflow, positioned descendants of clipped ancestors, and applicable
@@ -170,23 +166,16 @@ run both the fork tests and application tests, and compare processed output
 against the saved email corpus.
 
 The HTML parser, tree collection, and presentation analysis use separate
-explicit stacks because each pass tracks different state and limits. CSS
-source limits apply across parser inputs within a document; `internal/message`
-carries the remaining extraction budgets across HTML MIME parts. Splitting
-input across style elements or message parts must not reset those budgets.
+stacks because each pass tracks different state. CSS source and memory limits
+apply across parser inputs within a document; `internal/message` carries the
+remaining byte and allocation budgets across HTML MIME parts. Splitting input
+across style elements or message parts must not reset those budgets.
 
 Elements with no indexed selector candidates or local declarations take an
 inheritance-only path that preserves computed inherited values and variables.
-This path has a smaller fixed work charge and skips cascade and layout
-resolution. Candidate discovery remains budgeted even when no selector can
-apply; elements requiring resolution retain the full fixed charge.
-
-Selector-evaluation caches share a 100,000-unit per-document retention limit.
-These are weighted logical units rather than bytes: simple match records cost
-one unit, while cached attribute candidates also charge retained bucket slice
-headers. Depending on the cache mix and Go runtime map overhead, the limit
-represents several to low tens of MiB, plus outer tables bounded by the selector
-limit. Evaluation continues without retaining new cache records after the limit.
+This path skips cascade and layout resolution. Candidate discovery and any
+selector-evaluation caches use the CPU and memory guards. Optional caches stop
+growing when their allocation cannot be reserved.
 
 Unsupported or exhausted style analysis preserves uncertainty rather than
 trusting a partial cascade. Malformed inline styles can make an element and
@@ -194,9 +183,9 @@ its descendants uncertain; unusable global CSS invalidates the shared cascade.
 Applicable external or unsupported stylesheet references are reported through
 `UnresolvedStylesheet`. Bounded data-URL stylesheets can be analysed, but their
 effects remain client-dependent. No network stylesheet is fetched.
-CSS parser-limit, selector-work, and expression-work exhaustion are propagated
-to `internal/message` as incomplete CSS analysis. They remove visible-text
-confidence and produce an explicit limitation in the analysis prompt.
+CSS byte-limit, memory-budget, and CPU exhaustion are propagated to
+`internal/message` as incomplete analysis. They remove visible-text confidence
+and produce an explicit limitation in the analysis prompt.
 
 CSS nesting is detected but relative nested selectors are not resolved. Since
 nested selectors can reach descendants, siblings, or ancestors of the parent
@@ -217,7 +206,8 @@ fallback vision analysis; an unresolved stylesheet removes that confidence.
 Analysis errors or cooperative stops switch extraction to a bounded lexical
 fallback, with fallback and completeness information carried into the prompt.
 Conditional Outlook comment fragments use the same directly bounded HTML
-parser, with scripting disabled and smaller fragment limits.
+parser and the remaining shared allocation budget, with scripting disabled and
+a smaller raw fragment-byte limit.
 If fragment parsing or extraction exceeds a limit, a fixed omission marker and
 `ExtractionIncomplete` disclose the gap; partial fragment text and links are
 discarded. The marker is excluded from recipient-visible text and confidence

@@ -256,7 +256,7 @@ func animationTimingFunction(tokens []valueToken, start int) (int, bool) {
 	return end, true
 }
 
-func (s *sheet) potentiallyActiveAnimation(c candidate, context evaluationContext, matches *matchBudget) bool {
+func (s *sheet) potentiallyActiveAnimation(c candidate, context evaluationContext, matches *cpuGuard) bool {
 	if !c.set || (len(s.keyframeNames) == 0 && !s.unresolvedStylesheet) {
 		return false
 	}
@@ -269,7 +269,7 @@ func (s *sheet) potentiallyActiveAnimation(c candidate, context evaluationContex
 		if resolved.status == valueInvalid {
 			return false
 		}
-		if resolved.status != valueResolved || !context.budget.charge(len(resolved.text)+1) {
+		if resolved.status != valueResolved || !context.budget.check() {
 			return true
 		}
 		parsed := parseAnimationValue(resolved.text, c.d.animationShorthand)
@@ -279,7 +279,7 @@ func (s *sheet) potentiallyActiveAnimation(c candidate, context evaluationContex
 		return true
 	}
 	for _, name := range value.names {
-		if !matches.spend(1 + selectorByteWork(len(name))) {
+		if !matches.check() {
 			return true
 		}
 		if _, found := s.keyframeNames[name]; found || s.unresolvedStylesheet {

@@ -252,6 +252,7 @@ func (z *Tokenizer) readByte() byte {
 		d := z.raw.end - z.raw.start
 		var buf1 []byte
 		if 2*d > c {
+			z.guard.reserve(int64(2 * c))
 			buf1 = make([]byte, d, 2*c)
 		} else {
 			buf1 = z.buf[:d]

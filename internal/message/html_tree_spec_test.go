@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
-
-	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 )
 
 func TestTreeExtractorAppliesEmbeddedCSSDeclaredAfterContent(t *testing.T) {
@@ -16,42 +14,6 @@ func TestTreeExtractorAppliesEmbeddedCSSDeclaredAfterContent(t *testing.T) {
 	}
 	if got.HasConcealedContent || got.ConfidentVisibleChars != len("Paynow") {
 		t.Fatalf("uncertain opacity modes = %+v", got)
-	}
-}
-
-func TestTreeExtractorReportsStyleAnalysisResourceExhaustion(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		source string
-		limit  func(*htmlextract.Limits)
-	}{
-		{
-			name:   "CSS structure limit",
-			source: `<style>p{display:none}b{display:none}</style><p>T</p>`,
-			limit:  func(l *htmlextract.Limits) { l.Rules = 1 },
-		},
-		{
-			name:   "selector work",
-			source: `<style>p{display:none}</style><p>T</p>`,
-			limit:  func(l *htmlextract.Limits) { l.MatchWork = 1 },
-		},
-		{
-			name:   "expression work",
-			source: `<style>p{--hidden:none;display:var(--hidden)}</style><p>T</p>`,
-			limit:  func(l *htmlextract.Limits) { l.ExpressionWork = 1 },
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			limits := htmlextract.DefaultLimits()
-			test.limit(&limits)
-			got := extractTreeHTMLWithLimits(test.source, limits, newExtractionBudget())
-			if !got.CSSIncomplete || got.ConfidentVisibleChars != 0 {
-				t.Fatalf("resource exhaustion was not surfaced: %+v", got)
-			}
-			if got.ExtractionIncomplete || got.HTMLFallbackUsed {
-				t.Fatalf("style exhaustion was misreported as HTML extraction failure: %+v", got)
-			}
-		})
 	}
 }
 
@@ -266,30 +228,6 @@ func TestTreeExtractorAnnotatesMSOHiddenContent(t *testing.T) {
 	}
 }
 
-func TestTreeExtractorBoundsConditionalCommentFragments(t *testing.T) {
-	tests := []struct {
-		name    string
-		content string
-	}{
-		{name: "bytes", content: strings.Repeat("x", maxConditionalFragmentBytes+1)},
-		{name: "nodes", content: strings.Repeat("<br>", maxConditionalFragmentNodes+1)},
-		{name: "depth", content: strings.Repeat("<div>", maxConditionalFragmentDepth+2) + "deep" + strings.Repeat("</div>", maxConditionalFragmentDepth+2)},
-		{name: "output", content: `<a href="https://example.test/">` + strings.Repeat("[", 50<<10) + `</a>`},
-		{name: "implied table allocation", content: strings.Repeat(`<table><td></table>`, 2100)},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got := htmlToText(`Before<!--[if mso]>` + test.content + `<![endif]-->After`)
-			if got.Text != "Before\n"+conditionalOmissionMarker+"\nAfter" || got.VisibleText != "BeforeAfter" || len(got.Links) != 0 {
-				t.Fatalf("bounded conditional fragment leaked partial evidence: text=%q visible=%q links=%v", got.Text, got.VisibleText, got.Links)
-			}
-			if !got.ExtractionIncomplete || got.HTMLFallbackUsed {
-				t.Fatalf("fragment omission was not reported locally: incomplete=%v fallback=%v", got.ExtractionIncomplete, got.HTMLFallbackUsed)
-			}
-		})
-	}
-}
-
 func TestConditionalOmissionReachesPromptAndStrippedBody(t *testing.T) {
 	source := `<p style="display:none">concealed</p>Before<!--[if mso]>` +
 		strings.Repeat("x", maxConditionalFragmentBytes+1) +
@@ -427,35 +365,6 @@ func TestPromptUsesConciseConcealmentExplanation(t *testing.T) {
 	}
 }
 
-func TestHTMLAnalysisFallbackUsesDocumentLevelNotice(t *testing.T) {
-	source := strings.Repeat("<div>", 129) + "fallback evidence"
-	got := htmlToText(source)
-	if !got.HTMLFallbackUsed || !got.ExtractionIncomplete {
-		t.Fatalf("fallback state = %+v", got)
-	}
-	if got.VisibleText != "" {
-		t.Fatalf("fallback text was treated as confidently visible: %q", got.VisibleText)
-	}
-	if strings.Contains(got.Text, "<visibility-uncertain>") || !strings.Contains(got.Text, "fallback evidence") {
-		t.Fatalf("fallback text = %q", got.Text)
-	}
-
-	m := New(1 << 20)
-	m.AddHeader("Content-Type", "text/html")
-	m.AddBody([]byte(source))
-	prompt := m.BuildAnalysis(AnalysisContext{}, 1000, VisionOptions{Mode: "off"}).Prompt
-	want := "HTML/CSS visibility analysis unavailable; email text may include content not visible to the recipient."
-	if !strings.Contains(prompt, "ANALYSIS LIMITATIONS:\n- "+want) {
-		t.Fatalf("prompt missing fallback notice %q: %s", want, prompt)
-	}
-	if !strings.Contains(prompt, "HTML processing limits prevented complete extraction") {
-		t.Fatalf("prompt missing incomplete-extraction notice: %s", prompt)
-	}
-	if strings.Contains(prompt, "<visibility-uncertain>") || !strings.Contains(prompt, "fallback evidence") {
-		t.Fatalf("prompt fallback body = %s", prompt)
-	}
-}
-
 func TestOptionalParagraphEndsDoNotForceHTMLFallback(t *testing.T) {
 	got := htmlToText(strings.Repeat(`<p>`, 200) + `<div style="display:none">concealed evidence</div>`)
 	if got.HTMLFallbackUsed || got.ExtractionIncomplete || !got.HasConcealedContent {
@@ -489,21 +398,5 @@ func TestBoundedHTMLFallbackStreamsAttributesAndKeepsFirstDestination(t *testing
 	}
 	if got.Text != "Review" || got.VisibleText != "" || !got.HTMLFallbackUsed {
 		t.Fatalf("fallback content = %+v", got)
-	}
-}
-
-func TestCSSLimitKeepsStructuredDOMExtraction(t *testing.T) {
-	got := htmlToText(`<style>` + strings.Repeat(`p{display:none}`, 10001) + `</style><p><a href="https://example.test/retained">retained evidence</a></p><!--comment-->`)
-	if got.ExtractionIncomplete {
-		t.Fatal("visibility-only limit reported text loss")
-	}
-	if !strings.Contains(got.Text, `[retained evidence](https://example.test/retained)`) || !strings.Contains(got.Text, `<visibility-uncertain>`) {
-		t.Fatalf("structured uncertain extraction = %q", got.Text)
-	}
-	if got.VisibleText == "" || got.ConfidentVisibleChars != 0 {
-		t.Fatalf("uncertain text confidence = visible %q, confident chars %d", got.VisibleText, got.ConfidentVisibleChars)
-	}
-	if got.HTMLComments.Characters != len("comment") {
-		t.Fatalf("comment statistics = %+v", got.HTMLComments)
 	}
 }

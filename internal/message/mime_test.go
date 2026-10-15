@@ -3,10 +3,9 @@ package message
 import (
 	"encoding/base64"
 	"fmt"
+	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 	"strings"
 	"testing"
-
-	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 )
 
 func TestPromptDecodesMultipart(t *testing.T) {
@@ -358,40 +357,6 @@ func TestHTMLPartLimitAppliesAcrossAlternatives(t *testing.T) {
 	}
 }
 
-func TestHTMLWorkBudgetIsSharedAcrossParts(t *testing.T) {
-	budget := newExtractionBudget()
-	budget.matchWorkRemaining = 1
-	first := htmlToTextWithBudget(`<p>first</p>`, budget)
-	if first.HTMLFallbackUsed {
-		t.Fatal("first HTML part unexpectedly used lexical fallback")
-	}
-	if budget.matchWorkRemaining != 0 {
-		t.Fatalf("remaining match work = %d, want 0", budget.matchWorkRemaining)
-	}
-	second := htmlToTextWithBudget(`<p>second</p>`, budget)
-	if !second.HTMLFallbackUsed || !second.ExtractionIncomplete || second.VisibleText != "" {
-		t.Fatalf("second HTML part did not use incomplete visibility-neutral fallback: %+v", second)
-	}
-}
-
-func TestDeepHTMLPartConsumesSharedWorkBudget(t *testing.T) {
-	budget := newExtractionBudget()
-	before := budget.matchWorkRemaining
-	source := `<style>p{display:none}</style>` + strings.Repeat(`<table><td>`, htmlextract.DefaultLimits().Depth/2) + `fallback evidence`
-	deep := htmlToTextWithBudget(source, budget)
-	if deep.HTMLFallbackUsed || !strings.Contains(deep.Text, "fallback evidence") {
-		t.Fatalf("bounded implied table wrappers did not complete analysis: %+v", deep)
-	}
-	if budget.matchWorkRemaining >= before {
-		t.Fatalf("deep HTML part consumed no shared work: before=%d after=%d", before, budget.matchWorkRemaining)
-	}
-	afterDeepPart := budget.matchWorkRemaining
-	second := htmlToTextWithBudget(`<p>second</p>`, budget)
-	if second.HTMLFallbackUsed || budget.matchWorkRemaining >= afterDeepPart {
-		t.Fatalf("subsequent part did not inherit reduced budget: content=%+v before=%d after=%d", second, afterDeepPart, budget.matchWorkRemaining)
-	}
-}
-
 func TestHTMLByteBudgetIsSharedAcrossParts(t *testing.T) {
 	budget := newExtractionBudget()
 	firstSource := `<p>first</p>`
@@ -403,24 +368,6 @@ func TestHTMLByteBudgetIsSharedAcrossParts(t *testing.T) {
 	second := htmlToTextWithBudget(`<p>second</p>`, budget)
 	if !second.HTMLFallbackUsed || !second.ExtractionIncomplete {
 		t.Fatalf("cumulative HTML byte limit was not enforced: %+v", second)
-	}
-}
-
-func TestHTMLAdditiveLimitsAreSharedAcrossParts(t *testing.T) {
-	budget := newExtractionBudget()
-	usage := htmlextract.ResourceUsage{
-		Nodes: 11, TextNodes: 7, Attributes: 5, CSSBytes: 13, Rules: 3, Selectors: 4,
-	}
-	budget.consumeHTML(usage)
-	limits, ok := budget.htmlLimits(len(`<p>T</p>`))
-	if !ok {
-		t.Fatal("remaining additive budget was rejected")
-	}
-	defaults := htmlextract.DefaultLimits()
-	if limits.Nodes != defaults.Nodes-usage.Nodes || limits.TextNodes != defaults.TextNodes-usage.TextNodes ||
-		limits.Attributes != defaults.Attributes-usage.Attributes || limits.CSSBytes != defaults.CSSBytes-usage.CSSBytes ||
-		limits.Rules != defaults.Rules-usage.Rules || limits.Selectors != defaults.Selectors-usage.Selectors {
-		t.Fatalf("additive limits were not propagated: %+v", limits)
 	}
 }
 
@@ -472,5 +419,22 @@ func TestMultipartAlternativeAppliesLimitAfterSelection(t *testing.T) {
 	prompt := m.Prompt(30)
 	if !strings.Contains(prompt, "short HTML body") || strings.Contains(prompt, "[body truncated]") {
 		t.Fatalf("limit was not applied after selecting the HTML alternative: %s", prompt)
+	}
+}
+
+func TestHTMLMemoryBudgetIsSharedAcrossParts(t *testing.T) {
+	budget := newExtractionBudget()
+	initial := budget.memoryBytesRemaining
+	budget.consumeHTML(htmlextract.ResourceUsage{MemoryBytes: initial / 3})
+	limits, ok := budget.htmlLimits(1)
+	if !ok {
+		t.Fatal("remaining shared memory budget rejected")
+	}
+	if limits.MemoryBytes != initial-initial/3 {
+		t.Fatalf("remaining memory=%d want=%d", limits.MemoryBytes, initial-initial/3)
+	}
+	budget.consumeHTML(htmlextract.ResourceUsage{MemoryBytes: limits.MemoryBytes})
+	if _, ok := budget.htmlLimits(1); ok {
+		t.Fatal("exhausted shared memory budget accepted")
 	}
 }

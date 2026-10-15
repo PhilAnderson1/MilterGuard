@@ -105,8 +105,8 @@ func NewParser(r *parse.Input, isInline bool) *Parser {
 
 // NewParserWithLimits returns a parser with limits enforced at the operations
 // that retain construct tokens, copy custom-property values, and grow stacks.
-func NewParserWithLimits(r *parse.Input, isInline bool, limits ResourceLimits, usage *ResourceUsage) *Parser {
-	guard := newResourceGuard(limits, usage)
+func NewParserWithLimits(r *parse.Input, isInline bool, limits ResourceLimits) *Parser {
+	guard := newResourceGuard(limits)
 	if limits.ShouldStop != nil {
 		r.SetProgressCheck(func() error {
 			if limits.ShouldStop() {
@@ -208,7 +208,6 @@ func (p *Parser) popToken(allowComment bool) (TokenType, []byte) {
 
 func (p *Parser) initBuf() {
 	p.buf = p.buf[:0]
-	p.guard.resetConstruct()
 }
 
 func (p *Parser) pushBuf(tt TokenType, data []byte) {
@@ -232,16 +231,13 @@ func (p *Parser) abort(err error) {
 }
 
 func (p *Parser) pushState(state State) {
-	if err := p.guard.depth(len(p.state)); err != nil {
+	p.state = append(p.state, state)
+	if err := p.guard.states(cap(p.state)); err != nil {
 		p.abort(err)
 	}
-	p.state = append(p.state, state)
 }
 
 func (p *Parser) openComponent() {
-	if err := p.guard.depth(p.level + 1); err != nil {
-		p.abort(err)
-	}
 	p.level++
 }
 
@@ -577,7 +573,6 @@ func (p *Parser) parseDeclaration() GrammarType {
 		p.pushBuf(tt, data)
 		if !valueStarted && tt == ColonToken && p.level == 0 {
 			// The property name is no longer retained as part of the value work.
-			p.guard.resetConstruct()
 			valueStarted = true
 		}
 		if offset == 0 {
@@ -624,7 +619,6 @@ func (p *Parser) parseCustomProperty() GrammarType {
 		p.l.r.Move(len(data))
 		return ErrorGrammar
 	}
-	p.guard.resetConstruct()
 	val := []byte{}
 	for {
 		tt, data := p.rawToken()

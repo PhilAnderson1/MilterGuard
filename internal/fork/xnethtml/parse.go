@@ -239,9 +239,6 @@ func (p *parser) insertOpenElement(n *Node) {
 	p.guard.openElement(p, n)
 	p.oe = append(p.oe, n)
 	p.guard.stacks(p)
-	if len(p.oe) > 512 {
-		panic("html: open stack of elements exceeds 512 nodes")
-	}
 }
 
 // shouldFosterParent returns whether the next node to be added should be
@@ -297,7 +294,7 @@ func (p *parser) fosterParent(n *Node) {
 		prev = parent.LastChild
 	}
 	if prev != nil && prev.Type == TextNode && n.Type == TextNode {
-		p.guard.textMerge(len(prev.Data))
+		p.guard.textMerge(len(prev.Data), len(n.Data))
 		prev.Data += n.Data
 		return
 	}
@@ -322,7 +319,7 @@ func (p *parser) addText(text string) {
 
 	t := p.top()
 	if n := t.LastChild; n != nil && n.Type == TextNode {
-		p.guard.textMerge(len(n.Data))
+		p.guard.textMerge(len(n.Data), len(text))
 		n.Data += text
 		return
 	}
@@ -352,12 +349,12 @@ func (p *parser) addElement() {
 }
 
 func (p *parser) newNode(n Node) *Node {
-	p.guard.node(n.Type)
+	p.guard.node(n)
 	return &n
 }
 
 func (p *parser) cloneNode(n *Node) *Node {
-	p.guard.node(n.Type)
+	p.guard.node(*n)
 	p.guard.mustAttributes(len(n.Attr))
 	clone := n.clone()
 	clone.parserImplied = true
@@ -541,7 +538,7 @@ func initialIM(p *parser) bool {
 		}))
 		return true
 	case DoctypeToken:
-		p.guard.node(DoctypeNode)
+		p.guard.node(Node{Type: DoctypeNode, Data: p.tok.Data})
 		n, quirks := parseDoctype(p.tok.Data)
 		p.doc.AppendChild(n)
 		p.quirks = quirks
@@ -2315,7 +2312,16 @@ func ParseOptionEnableScripting(enable bool) ParseOption {
 }
 
 // ParseWithOptions is like Parse, with options.
-func ParseWithOptions(r io.Reader, opts ...ParseOption) (*Node, error) {
+func ParseWithOptions(r io.Reader, opts ...ParseOption) (node *Node, err error) {
+	defer func() {
+		if panicErr := recover(); panicErr != nil {
+			if abort, ok := panicErr.(resourceAbort); ok {
+				node, err = nil, abort.err
+				return
+			}
+			panic(panicErr)
+		}
+	}()
 	p := &parser{
 		tokenizer:  NewTokenizer(r),
 		scripting:  true,
@@ -2335,7 +2341,16 @@ func ParseWithOptions(r io.Reader, opts ...ParseOption) (*Node, error) {
 }
 
 // ParseFragmentWithOptions is like ParseFragment, with options.
-func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) ([]*Node, error) {
+func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) (nodes []*Node, err error) {
+	defer func() {
+		if panicErr := recover(); panicErr != nil {
+			if abort, ok := panicErr.(resourceAbort); ok {
+				nodes, err = nil, abort.err
+				return
+			}
+			panic(panicErr)
+		}
+	}()
 	contextTag := ""
 	if context != nil {
 		if context.Type != ElementNode {

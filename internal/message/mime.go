@@ -12,8 +12,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/charset"
+	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 )
 
 const (
@@ -22,21 +22,15 @@ const (
 )
 
 type extractionBudget struct {
-	parts                   int
-	htmlParts               int
-	htmlBytesRemaining      int
-	nodesRemaining          int
-	textNodesRemaining      int
-	attributesRemaining     int
-	cssBytesRemaining       int
-	rulesRemaining          int
-	selectorsRemaining      int
-	matchWorkRemaining      int64
-	expressionWorkRemaining int64
-	shouldFallback          func() bool
-	forceFallback           bool
-	cpuLimitExceeded        bool
-	compactURLs             bool
+	parts                int
+	htmlParts            int
+	htmlBytesRemaining   int
+	cssBytesRemaining    int
+	memoryBytesRemaining int64
+	shouldFallback       func() bool
+	forceFallback        bool
+	cpuLimitExceeded     bool
+	compactURLs          bool
 }
 
 func newExtractionBudget() *extractionBudget {
@@ -46,18 +40,12 @@ func newExtractionBudget() *extractionBudget {
 func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBudget {
 	limits := htmlextract.DefaultLimits()
 	return &extractionBudget{
-		htmlBytesRemaining:      limits.InputBytes,
-		nodesRemaining:          limits.Nodes,
-		textNodesRemaining:      limits.TextNodes,
-		attributesRemaining:     limits.Attributes,
-		cssBytesRemaining:       limits.CSSBytes,
-		rulesRemaining:          limits.Rules,
-		selectorsRemaining:      limits.Selectors,
-		matchWorkRemaining:      limits.MatchWork,
-		expressionWorkRemaining: limits.ExpressionWork,
-		shouldFallback:          control.ShouldFallback,
-		forceFallback:           control.ForceFallback,
-		compactURLs:             !control.DisableURLCompaction,
+		htmlBytesRemaining:   limits.InputBytes,
+		cssBytesRemaining:    limits.CSSBytes,
+		memoryBytesRemaining: limits.MemoryBytes,
+		shouldFallback:       control.ShouldFallback,
+		forceFallback:        control.ForceFallback,
+		compactURLs:          !control.DisableURLCompaction,
 	}
 }
 
@@ -81,40 +69,27 @@ func (b *extractionBudget) takePart() bool {
 }
 
 func (b *extractionBudget) htmlLimits(bytes int) (htmlextract.Limits, bool) {
-	if b.htmlParts > maxHTMLParts || bytes > b.htmlBytesRemaining || b.nodesRemaining <= 0 || b.textNodesRemaining <= 0 || b.attributesRemaining <= 0 || b.cssBytesRemaining <= 0 || b.matchWorkRemaining <= 0 || b.expressionWorkRemaining <= 0 {
+	if b.htmlParts > maxHTMLParts || bytes > b.htmlBytesRemaining || b.cssBytesRemaining <= 0 || b.memoryBytesRemaining <= 0 {
 		b.htmlBytesRemaining = 0
 		return htmlextract.Limits{}, false
 	}
 	b.htmlBytesRemaining -= bytes
 	limits := htmlextract.DefaultLimits()
-	limits.Nodes = b.nodesRemaining
-	limits.TextNodes = b.textNodesRemaining
-	limits.Attributes = b.attributesRemaining
 	limits.CSSBytes = b.cssBytesRemaining
-	limits.Rules = b.rulesRemaining
-	limits.Selectors = b.selectorsRemaining
-	limits.MatchWork = b.matchWorkRemaining
-	limits.ExpressionWork = b.expressionWorkRemaining
+	limits.MemoryBytes = b.memoryBytesRemaining
 	return limits, true
 }
 
 func (b *extractionBudget) consumeHTML(usage htmlextract.ResourceUsage) {
-	b.nodesRemaining = remainingInt(b.nodesRemaining, usage.Nodes)
-	b.textNodesRemaining = remainingInt(b.textNodesRemaining, usage.TextNodes)
-	b.attributesRemaining = remainingInt(b.attributesRemaining, usage.Attributes)
 	b.cssBytesRemaining = remainingInt(b.cssBytesRemaining, usage.CSSBytes)
-	b.rulesRemaining = remainingInt(b.rulesRemaining, usage.Rules)
-	b.selectorsRemaining = remainingInt(b.selectorsRemaining, usage.Selectors)
-	if usage.MatchWorkExhausted || usage.MatchWork >= b.matchWorkRemaining {
-		b.matchWorkRemaining = 0
-	} else {
-		b.matchWorkRemaining -= usage.MatchWork
+	b.memoryBytesRemaining = remainingInt64(b.memoryBytesRemaining, usage.MemoryBytes)
+}
+
+func remainingInt64(remaining, used int64) int64 {
+	if used >= remaining {
+		return 0
 	}
-	if usage.ExpressionWorkExhausted || usage.ExpressionWork >= b.expressionWorkRemaining {
-		b.expressionWorkRemaining = 0
-	} else {
-		b.expressionWorkRemaining -= usage.ExpressionWork
-	}
+	return remaining - used
 }
 
 func remainingInt(remaining, used int) int {

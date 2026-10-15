@@ -11,6 +11,7 @@ import (
 
 	xhtml "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 type HTMLExtractionMode uint8
@@ -22,9 +23,6 @@ const (
 
 const (
 	maxConditionalFragmentBytes = 64 << 10
-	maxConditionalFragmentNodes = 8192
-	maxConditionalFragmentDepth = 128
-	maxConditionalOutputWork    = 128 << 10
 	conditionalOmissionMarker   = "[conditional Outlook content omitted: processing limit]"
 )
 
@@ -48,6 +46,7 @@ type htmlExtraction struct {
 	anchorDepth          int
 	compactURLs          bool
 	shouldStop           func() bool
+	memory               *resourceguard.Memory
 	extractionIncomplete bool
 }
 
@@ -245,6 +244,13 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		content.ExtractionIncomplete = true
 		return content
 	}
+	memory := resourceguard.NewMemory(budget.memoryBytesRemaining)
+	mapBytes := int64(len(inspection.Text)+len(inspection.Elements))*64 + 256
+	if !memory.Reserve(mapBytes) {
+		content := extractBoundedHTMLFallback(source, budget.compactURLs)
+		content.ExtractionIncomplete = true
+		return content
+	}
 	e := htmlExtraction{
 		inspection:  inspection,
 		states:      make(map[*xhtml.Node]*htmlextract.Text, len(inspection.Text)),
@@ -252,6 +258,7 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		compactURLs: budget.compactURLs,
 		links:       linkCollector{compactURLs: budget.compactURLs},
 		shouldStop:  budget.useFallback,
+		memory:      memory,
 	}
 	for i := range inspection.Text {
 		state := &inspection.Text[i]
@@ -269,14 +276,14 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		stripped = e.render(StripHidden).text
 	}
 	confidentChars := confidentVisibleCharacters(inspection.Text)
-	cssIncomplete := inspection.UnresolvedStylesheet || inspection.Usage.CSSLimitExceeded ||
-		inspection.Usage.MatchWorkExhausted || inspection.Usage.ExpressionWorkExhausted
+	cssIncomplete := inspection.UnresolvedStylesheet || inspection.Usage.CSSLimitExceeded
 	if cssIncomplete {
 		// Unevaluated or resource-limited CSS can alter any element in this
 		// HTML part, so none of its text is sufficiently certain to suppress
 		// image analysis.
 		confidentChars = 0
 	}
+	budget.memoryBytesRemaining = remainingInt64(budget.memoryBytesRemaining, memory.Used())
 	return extractedContent{
 		Text: tagged.text, VisibleText: tagged.visible, ConfidentVisibleChars: confidentChars, StrippedText: stripped,
 		Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
@@ -534,20 +541,16 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 	fragment, err := xhtml.ParseFragmentWithOptions(strings.NewReader(raw), nil,
 		xhtml.ParseOptionEnableScripting(false),
 		xhtml.ParseOptionResourceLimits(xhtml.ResourceLimits{
-			Nodes:              maxConditionalFragmentNodes,
-			TextNodes:          maxConditionalFragmentNodes,
-			Attributes:         maxConditionalFragmentNodes,
-			Depth:              maxConditionalFragmentDepth,
-			TextMergeCopyBytes: maxConditionalFragmentBytes,
-			ShouldStop:         e.shouldStop,
-		}, nil),
+			ShouldStop: e.shouldStop,
+			Memory:     e.memory,
+		}),
 	)
 	if err != nil || (e.shouldStop != nil && e.shouldStop()) {
 		e.omitConditionalComment(out)
 		return
 	}
 	var content strings.Builder
-	walk := conditionalWalk{links: linkCollector{compactURLs: e.compactURLs}}
+	walk := conditionalWalk{links: linkCollector{compactURLs: e.compactURLs}, memory: e.memory, shouldStop: e.shouldStop}
 	for _, node := range fragment {
 		if !e.walkConditionalNode(node, &content, &walk, 0) {
 			e.omitConditionalComment(out)
@@ -601,24 +604,27 @@ func lastIndexASCIIFold(value, marker string) int {
 
 type conditionalWalk struct {
 	nodes       int
-	outputWork  int
 	links       linkCollector
 	anchorDepth int
+	memory      *resourceguard.Memory
+	shouldStop  func() bool
 }
 
 func (w *conditionalWalk) enter(depth int) bool {
-	if depth > maxConditionalFragmentDepth || w.nodes >= maxConditionalFragmentNodes {
+	if !w.memory.Reserve(64) {
 		return false
 	}
 	w.nodes++
+	if w.nodes&255 == 0 && w.shouldStop != nil && w.shouldStop() {
+		return false
+	}
 	return true
 }
 
 func (w *conditionalWalk) writeString(out *strings.Builder, value string) bool {
-	if len(value) > maxConditionalOutputWork-w.outputWork {
+	if !w.memory.Reserve(int64(len(value))) {
 		return false
 	}
-	w.outputWork += len(value)
 	out.WriteString(value)
 	return true
 }

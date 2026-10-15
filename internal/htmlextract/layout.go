@@ -119,7 +119,7 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 	tinyZoom := nearZeroZoom(resolveLayoutCandidate(&wins[zoom-properties], context))
 	offsetX := positionedWithinClip && (nonzeroOffset(offsetResults[0]) || nonzeroOffset(offsetResults[2]))
 	offsetY := positionedWithinClip && (nonzeroOffset(offsetResults[1]) || nonzeroOffset(offsetResults[3]))
-	if context.budget.exhausted {
+	if context.budget.stopped {
 		return layoutVisibilityResult{uncertain: true}
 	}
 	uncertain := uncertainOrigin || zeroBox || zeroLineHeight || positioned && extremeOffset || extremeIndent || extremeSpacing || extremeMargin || tinyZoom

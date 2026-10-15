@@ -197,9 +197,6 @@ func backgroundImageSyntax(value string) bool {
 
 func legacyDimension(value string) (string, bool) {
 	value = strings.TrimSpace(value)
-	if len(value) > maxValueBytes {
-		return "", false
-	}
 	percentage := strings.HasSuffix(value, "%")
 	if percentage {
 		value = strings.TrimSuffix(value, "%")
@@ -406,14 +403,14 @@ func (c colourResult) inspection() colourInspection {
 // with no glyph. Paint groups are folded from inside to outside. An opaque white default
 // canvas is supplied after known layers; unresolved layers remain unknown. No sibling/layout/image
 // sampling, antialiasing, blending or filter model is implied.
-func evaluateColour(foreground Value, layers []paintLayer, work *matchBudget) colourResult {
+func evaluateColour(foreground Value, layers []paintLayer, work *cpuGuard) colourResult {
 	if !chargeColourEvaluation(foreground, layers, work) {
-		return colourResult{uncertainty: "style-analysis work limit"}
+		return colourResult{uncertainty: "style-analysis CPU limit"}
 	}
 	return evaluateColourUncharged(foreground, layers)
 }
 
-func chargeColourEvaluation(foreground Value, layers []paintLayer, work *matchBudget) bool {
+func chargeColourEvaluation(foreground Value, layers []paintLayer, work *cpuGuard) bool {
 	// Account for the fixed conversion/distance work and, when the foreground
 	// is usable, every ancestor layer the evaluator may inspect. Reserve the
 	// complete cost before starting so exhaustion cannot leave a partially
@@ -422,7 +419,7 @@ func chargeColourEvaluation(foreground Value, layers []paintLayer, work *matchBu
 	if foreground.Known {
 		cost += int64(len(layers))
 	}
-	if work != nil && !work.spend(cost) {
+	if work != nil && !work.check() {
 		return false
 	}
 	return true
