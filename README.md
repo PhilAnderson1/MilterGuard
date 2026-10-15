@@ -8,25 +8,49 @@
 
 [![CI](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml)
 
-MilterGuard is an AI-powered mail filter for identifying and rejecting unwanted
-spam and scam email. It has been tested with Postfix and is designed to work
-with any MTA that supports the Sendmail Milter protocol.
+MilterGuard is an AI-first spam and scam filter for Postfix, built from the
+ground up to assess email through its meaning, intent and context. It combines
+message content with connection details, verified sender authentication and
+HTML visibility evidence to help an AI model judge whether the contact is
+legitimate or unwanted. Run it with a local model or a compatible hosted AI
+service. It is also designed to work with other MTAs that support the Sendmail
+Milter protocol.
 
 [Quick start](QUICKSTART.md) · [Operating guide](OPERATING_GUIDE.md) · [Latest release](https://github.com/PhilAnderson1/MilterGuard/releases/latest)
 
 ## Why MilterGuard?
 
-- Uses multilingual semantic analysis to detect unwanted email by meaning and intent, not just keywords or signatures.
-- Performs forensic AI analysis of message headers, body content, and hyperlink destinations.
-- Reads text embedded in images to detect scams that evade conventional text-based filters.
-- Blocks executable attachments, including files disguised or concealed inside compressed archives.
-- Smart correspondent allowlisting learns trusted relationships and recurring legitimate senders, reducing false positives and unnecessary AI scans.
-- Automatically builds persistent IP reputation to block repeat offenders without repeated AI analysis.
-- Manage allowlists and review rejected mail remotely by email.
-- Works with locally hosted AI models and popular AI API services.
-- Provides a safe accept mode that logs and tags classifications without blocking email.
-- Installs as a single, statically linked binary with no runtime dependencies.
-- Includes native packages and install and uninstall scripts for painless installation and removal.
+A convincing scam or unsolicited sales pitch can arrive from an authenticated
+sender, contain no known malicious links, and look like ordinary
+correspondence. Identifying it requires examining what the sender is asking,
+what relationship they claim, and what responding could lead to.
+
+MilterGuard prepares the evidence for that assessment. It brings together
+sender identity, authentication, message content and link destinations, while
+preserving clues about hidden or obscured HTML text. With a vision-capable
+model, it can also examine messages embedded in images.
+
+Its classification prompt examines identity, context, purpose and likely
+continuation, weighing evidence of unwanted contact against legitimate
+explanations—including genuine first contact. No locally trained classifier or
+history of your email is required.
+
+Built for everyday mail-server operation, MilterGuard learns trusted
+correspondents and blocks repeat offenders to reduce unnecessary AI scans. It
+installs as a single executable, lets you manage sender lists and review
+rejected messages by email, and provides an accept mode for evaluating its
+decisions before enabling rejection.
+
+## Who is MilterGuard for?
+
+MilterGuard is designed for administrators who run their own mail servers and
+want AI-first spam and scam filtering integrated with their existing setup.
+Postfix is the tested and documented platform.
+
+It suits operators who want control over their classification model and
+filtering policy, with the option to keep message analysis on their own
+hardware. You can evaluate decisions in accept mode and test alternative models
+or prompts against saved email before enabling rejection.
 
 ## Requirements
 
