@@ -1,7 +1,8 @@
 # MilterGuard Quick Start
 
 This guide takes you from downloading MilterGuard to a working Postfix
-integration in accept mode. See the Operating Guide for detailed
+integration in accept mode, which logs filtering decisions without rejecting
+mail. See the Operating Guide for detailed
 configuration, security, testing, and maintenance information.
 
 1. Download the appropriate installation file from the latest MilterGuard
@@ -90,22 +91,24 @@ configuration, security, testing, and maintenance information.
    sudo postfix reload
    ```
 
-MilterGuard should now be processing mail through Postfix. It initially runs in
-`accept` mode, so it analyses each message and logs its decision without
-rejecting anything. Review its decisions by looking at the MilterGuard-added
-headers in received emails or with:
+   MilterGuard should now be processing mail through Postfix. It initially runs in
+   `accept` mode, so it analyses each message and logs its decision without
+   rejecting anything. Review its decisions by looking at the MilterGuard-added
+   headers in received emails or with:
 
-```sh
-sudo journalctl -u milterguard --since yesterday --no-pager -o cat
-```
+   ```sh
+   sudo journalctl -u milterguard --since yesterday --no-pager -o cat
+   ```
 
-When its decisions have proved reliable, change `mode: accept` to
-`mode: enforce` in `/etc/milterguard/milterguard.yaml`, then activate
-filtering with:
+8. Enable rejection:
 
-```sh
-sudo systemctl restart milterguard
-```
+   When its decisions have proved reliable, change `mode: accept` to
+   `mode: enforce` in `/etc/milterguard/milterguard.yaml`, then activate
+   filtering with:
+
+   ```sh
+   sudo systemctl restart milterguard
+   ```
 
 See the [Operating Guide](OPERATING_GUIDE.md) for detailed configuration,
 testing, security, and maintenance information.
