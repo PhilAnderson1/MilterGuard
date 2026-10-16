@@ -62,7 +62,7 @@ func TestHTMLCPUProtectionSkipsAIAndRespectsMode(t *testing.T) {
 				MaxHTMLParseCPUMilliseconds: 1000, HTMLParseCPULimitAction: "dos-reject", HTMLDoSRejectMessage: rejectMessage, VisionMode: "off",
 			}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 			service.threadCPUTime = func() (time.Duration, bool) {
-				value := readings[reading]
+				value := readings[min(reading, len(readings)-1)]
 				reading++
 				return value, true
 			}

@@ -198,7 +198,7 @@ func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl)
 func normalizeExtractedUTF8(content *extractedContent, budget *extractionBudget) {
 	fields := []*string{&content.Text, &content.VisibleText, &content.StrippedText}
 	for i, field := range fields {
-		if budget.useFallback() {
+		if budget.outputShouldStop() {
 			for _, remaining := range fields[i:] {
 				*remaining = ""
 			}
@@ -208,7 +208,7 @@ func normalizeExtractedUTF8(content *extractedContent, budget *extractionBudget)
 		*field = strings.ToValidUTF8(*field, "�")
 	}
 	// Detect a limit crossed during the final indivisible scan.
-	if budget.useFallback() {
+	if budget.outputShouldStop() {
 		content.ExtractionIncomplete = true
 	}
 }

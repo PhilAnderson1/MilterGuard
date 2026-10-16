@@ -65,6 +65,17 @@ func (b *extractionBudget) useFallback() bool {
 	return false
 }
 
+// outputShouldStop selects the active CPU window for final string work. Once
+// primary processing has switched to lexical fallback, completed fallback
+// output is governed by the fallback callback rather than being rejected just
+// because the primary window remains exhausted.
+func (b *extractionBudget) outputShouldStop() bool {
+	if !b.cpuLimitExceeded {
+		return b.useFallback()
+	}
+	return b.fallbackShouldStop != nil && b.fallbackShouldStop()
+}
+
 func (b *extractionBudget) takePart() bool {
 	if b.parts >= maxMIMEParts {
 		return false
@@ -328,7 +339,7 @@ func joinExtractedText(parts []string, separator string, budget *extractionBudge
 	// strings.Join is one indivisible copy. Check immediately before it so a
 	// limit crossed by the preceding combine phase cannot start another full
 	// output pass.
-	if budget.useFallback() {
+	if budget.outputShouldStop() {
 		return "", false
 	}
 	total := int64(len(separator)) * int64(len(parts)-1)
