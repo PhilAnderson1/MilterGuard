@@ -1239,7 +1239,10 @@ func (z *Tokenizer) TagName() (name []byte, hasAttr bool) {
 	if z.data.start < z.data.end {
 		switch z.tt {
 		case StartTagToken, EndTagToken, SelfClosingTagToken:
-			s := bytes.ReplaceAll(z.buf[z.data.start:z.data.end], nul, replacement)
+			s := z.buf[z.data.start:z.data.end]
+			if bytes.Contains(s, nul) {
+				s = bytes.ReplaceAll(s, nul, replacement)
+			}
 			z.data.start = z.raw.end
 			z.data.end = z.raw.end
 			return lower(s), z.nAttrReturned < len(z.attr)
@@ -1257,8 +1260,14 @@ func (z *Tokenizer) TagAttr() (key, val []byte, moreAttr bool) {
 		case StartTagToken, SelfClosingTagToken:
 			x := z.attr[z.nAttrReturned]
 			z.nAttrReturned++
-			key = bytes.ReplaceAll(z.buf[x[0].start:x[0].end], nul, replacement)
-			val = bytes.ReplaceAll(z.buf[x[1].start:x[1].end], nul, replacement)
+			key = z.buf[x[0].start:x[0].end]
+			if bytes.Contains(key, nul) {
+				key = bytes.ReplaceAll(key, nul, replacement)
+			}
+			val = z.buf[x[1].start:x[1].end]
+			if bytes.Contains(val, nul) {
+				val = bytes.ReplaceAll(val, nul, replacement)
+			}
 			return lower(key), unescape(convertNewlines(val), true), z.nAttrReturned < len(z.attr)
 		}
 	}

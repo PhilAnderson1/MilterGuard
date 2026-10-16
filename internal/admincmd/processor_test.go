@@ -189,9 +189,9 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	for _, want := range []string{
 		"MilterGuard is running in accept mode", "This period also contains rejections recorded in enforce mode",
 		"Activity: past week", "Retention: 365 days",
-		"Service uptime: 1 hour", "Total rejected: 29", "  AI classification: 20", "  HTML processing CPU limit: 4", "  HTML/CSS DoS protection: 3", "  IP reputation: 2",
+		"Service uptime: 1 hour", "Total rejected: 29", "  AI classification: 20", "  Content processing CPU limit: 4", "  Content processing DoS protection: 3", "  IP reputation: 2",
 		"  Attachment policy: 0", "  Protected sender-domain policy: 0",
-		"Total accepted: 14", "  AI classification: 10", "  HTML processing CPU limit (accept mode): 1", "  HTML/CSS DoS protection (accept mode): 2", "  Correspondent whitelist: 1", "  Trusted sender domain: 0",
+		"Total accepted: 14", "  AI classification: 10", "  Content processing CPU limit (accept mode): 1", "  Content processing DoS protection (accept mode): 2", "  Correspondent whitelist: 1", "  Trusted sender domain: 0",
 		"Total AI scans: 30", "AI evaluations failed: 1",
 		"Token costs are estimates based on endpoint-reported usage and configured prices.",
 		"Total token cost: USD 0.0197", "Average cost per message scanned: USD 0.000657",
@@ -203,11 +203,11 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	if strings.Contains(response.Text, "Period:") {
 		t.Errorf("activity response contains redundant exact period:\n%s", response.Text)
 	}
-	if strings.Index(response.Text, "  HTML/CSS DoS protection: 3") < strings.Index(response.Text, "  Sender blocklist: 0") {
-		t.Errorf("HTML/CSS DoS rejection count is not last in its list:\n%s", response.Text)
+	if strings.Index(response.Text, "  Content processing DoS protection: 3") < strings.Index(response.Text, "  Sender blocklist: 0") {
+		t.Errorf("content-processing DoS rejection count is not last in its list:\n%s", response.Text)
 	}
-	if strings.Index(response.Text, "  HTML/CSS DoS protection (accept mode): 2") < strings.Index(response.Text, "  Trusted sender domain: 0") {
-		t.Errorf("HTML/CSS DoS accepted count is not last in its list:\n%s", response.Text)
+	if strings.Index(response.Text, "  Content processing DoS protection (accept mode): 2") < strings.Index(response.Text, "  Trusted sender domain: 0") {
+		t.Errorf("content-processing DoS accepted count is not last in its list:\n%s", response.Text)
 	}
 }
 

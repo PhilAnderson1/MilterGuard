@@ -63,7 +63,12 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		return s.analysisFailure(ctx.Err(), started, mode, aiErrorAction)
 	}
 
-	prepared, htmlCPUTime, cpuMeasured, htmlCPUExceeded := s.buildAnalysis(msg, analysisContext)
+	prepared, htmlCPUTime, cpuMeasured, htmlCPUExceeded := s.buildAnalysis(ctx, msg, analysisContext)
+	if err := ctx.Err(); err != nil {
+		failure := s.analysisFailure(err, started, mode, aiErrorAction)
+		failure.htmlCPUTime = htmlCPUTime
+		return failure
+	}
 	maximumHTMLCPU := time.Duration(s.ai.MaxHTMLParseCPUMilliseconds) * time.Millisecond
 	actionOnHTMLLimit := s.ai.HTMLParseCPULimitAction
 	if actionOnHTMLLimit == "" {
@@ -71,7 +76,7 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		// which predate the explicit action setting.
 		actionOnHTMLLimit = "dos-reject"
 	}
-	if prepared.HasHTML && cpuMeasured && (htmlCPUExceeded || htmlCPUTime > maximumHTMLCPU) && actionOnHTMLLimit != "fallback" {
+	if cpuMeasured && (htmlCPUExceeded || htmlCPUTime > maximumHTMLCPU) && actionOnHTMLLimit != "fallback" {
 		proposed := actionReject
 		rejectMessage := ""
 		classification := ai.Classification("")
@@ -84,7 +89,7 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		return evaluationResult{
 			proposed: proposed, selected: selectActionForMode(proposed, mode),
 			classification: classification, score: score,
-			reasons:     []string{"HTML processing exceeded the configured CPU-time limit"},
+			reasons:     []string{"Message content processing exceeded the configured CPU-time limit"},
 			htmlCPUTime: htmlCPUTime, htmlCPUExceeded: true, htmlCPUAction: actionOnHTMLLimit, rejectMessage: rejectMessage,
 			latency: time.Since(started),
 		}
@@ -110,7 +115,7 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		failure.visionImages = len(input.Images)
 		failure.tokenCost = tokenCost
 		failure.htmlCPUTime = htmlCPUTime
-		failure.htmlCPUExceeded = prepared.HasHTML && htmlCPUExceeded
+		failure.htmlCPUExceeded = htmlCPUExceeded
 		failure.htmlCPUAction = actionOnHTMLLimit
 		return failure
 	}
@@ -126,13 +131,13 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		visionImages:    len(input.Images),
 		tokenCost:       tokenCost,
 		htmlCPUTime:     htmlCPUTime,
-		htmlCPUExceeded: prepared.HasHTML && htmlCPUExceeded,
+		htmlCPUExceeded: htmlCPUExceeded,
 		htmlCPUAction:   actionOnHTMLLimit,
 		latency:         time.Since(started),
 	}
 }
 
-func (s *analysisService) buildAnalysis(msg *message.Message, analysisContext message.AnalysisContext) (message.Analysis, time.Duration, bool, bool) {
+func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Message, analysisContext message.AnalysisContext) (message.Analysis, time.Duration, bool, bool) {
 	vision := message.VisionOptions{
 		Mode:         s.ai.VisionMode,
 		MinTextChars: s.ai.VisionMinTextChars,
@@ -141,7 +146,10 @@ func (s *analysisService) buildAnalysis(msg *message.Message, analysisContext me
 		MaxPixels:    s.ai.MaxImagePixels,
 	}
 	control := message.HTMLProcessingControl{DisableURLCompaction: !s.ai.CompactPromptURLs}
+	contextStopped := func() bool { return ctx.Err() != nil }
 	if s.ai.MaxHTMLParseCPUMilliseconds == 0 {
+		control.ShouldFallback = contextStopped
+		control.FallbackShouldStop = contextStopped
 		return msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control), 0, false, false
 	}
 	clock := threadcpu.Now
@@ -154,6 +162,9 @@ func (s *analysisService) buildAnalysis(msg *message.Message, analysisContext me
 	maximum := time.Duration(s.ai.MaxHTMLParseCPUMilliseconds) * time.Millisecond
 	exceeded := false
 	shouldFallback := func() bool {
+		if contextStopped() {
+			return true
+		}
 		if exceeded || !startedOK {
 			return exceeded
 		}
@@ -168,6 +179,9 @@ func (s *analysisService) buildAnalysis(msg *message.Message, analysisContext me
 	fallbackStartedOK := false
 	fallbackExceeded := false
 	control.FallbackShouldStop = func() bool {
+		if contextStopped() {
+			return true
+		}
 		if fallbackExceeded {
 			return true
 		}

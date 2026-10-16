@@ -157,7 +157,7 @@ func TestHTMLCPULimitRejectDoesNotAddIPReputationStrike(t *testing.T) {
 	}
 }
 
-func TestHTMLCPUProtectionDoesNotRejectPlainText(t *testing.T) {
+func TestContentCPUProtectionRejectsOverBudgetPlainText(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 	reading := 0
 	service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
@@ -172,7 +172,7 @@ func TestHTMLCPUProtectionDoesNotRejectPlainText(t *testing.T) {
 	msg.AddHeader("Content-Type", "text/plain")
 	msg.AddBody([]byte("ordinary message"))
 	result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
-	if result.selected != actionAccept || result.htmlCPUExceeded || analyzer.calls.Load() != 1 {
+	if result.selected != actionReject || !result.htmlCPUExceeded || analyzer.calls.Load() != 0 {
 		t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
 	}
 }
@@ -191,6 +191,46 @@ func TestHTMLCPUProtectionCanBeDisabled(t *testing.T) {
 	msg.AddBody([]byte("<p>ordinary message</p>"))
 	result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
 	if result.selected != actionAccept || result.htmlCPUExceeded || analyzer.calls.Load() != 1 {
+		t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
+	}
+}
+
+func TestContentPreparationObservesCancellationWithCPUProtectionDisabled(t *testing.T) {
+	service := &analysisService{ai: config.AIConfig{
+		MaxBodyChars: 1024, MaxHTMLParseCPUMilliseconds: 0, VisionMode: "off",
+	}}
+	service.threadCPUTime = func() (time.Duration, bool) {
+		panic("disabled CPU protection read the thread clock")
+	}
+	msg := message.New(16 << 10)
+	msg.AddHeader("Content-Type", "text/html")
+	msg.AddBody([]byte(`<p>` + strings.Repeat("ordinary message ", 512) + `</p>`))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	prepared, _, measured, exceeded := service.buildAnalysis(ctx, msg, message.AnalysisContext{})
+	if measured || exceeded {
+		t.Fatalf("CPU result measured=%t exceeded=%t, want context cancellation only", measured, exceeded)
+	}
+	if !prepared.HTMLCPULimitExceeded {
+		t.Fatal("content preparation did not observe context cancellation")
+	}
+}
+
+func TestCancelledAnalysisDoesNotCallAnalyzer(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+	service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
+		Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
+		MaxHTMLParseCPUMilliseconds: 250, VisionMode: "off",
+	}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	msg := message.New(1024)
+	msg.AddHeader("Content-Type", "text/html")
+	msg.AddBody([]byte("<p>ordinary message</p>"))
+
+	result := service.evaluate(ctx, msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
+	if !errors.Is(result.err, context.Canceled) || analyzer.calls.Load() != 0 {
 		t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
 	}
 }
@@ -218,10 +258,10 @@ func TestHTMLCPUProtectionAppearsInRejectionHistory(t *testing.T) {
 		message: msg, authenticated: true, envelopeRecipients: []string{"recipient@example.com"},
 	}, evaluationResult{
 		selected: actionReject, classification: ai.ClassificationUnwanted,
-		reasons: []string{"HTML processing exceeded the configured CPU-time limit"}, htmlCPUExceeded: true, htmlCPUAction: "dos-reject",
+		reasons: []string{"Message content processing exceeded the configured CPU-time limit"}, htmlCPUExceeded: true, htmlCPUAction: "dos-reject",
 	}, inboundEvidence{}, .9)
 	if len(history.inputs) != 1 || len(history.inputs[0].Reasons) != 1 ||
-		history.inputs[0].Reasons[0] != "HTML processing exceeded the configured CPU-time limit" {
+		history.inputs[0].Reasons[0] != "Message content processing exceeded the configured CPU-time limit" {
 		t.Fatalf("rejection history inputs = %+v", history.inputs)
 	}
 }

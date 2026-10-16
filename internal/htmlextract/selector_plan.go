@@ -306,8 +306,7 @@ type selectorIndex struct {
 	ancestorCount   int
 }
 
-func planSelectorList(source string, nextSequence *int, memory *resourceguard.Memory) []selectorPlan {
-	var plans []selectorPlan
+func planSelectorList(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int) (plans []selectorPlan, branches int, exceeded bool) {
 	start, brackets, parens := 0, 0, 0
 	var quote byte
 	appendBranch := func(end int) {
@@ -315,12 +314,17 @@ func planSelectorList(source string, nextSequence *int, memory *resourceguard.Me
 		if branch == "" {
 			return
 		}
+		if branches >= remainingBranches {
+			exceeded = true
+			return
+		}
+		branches++
 		if plan, keep := planSelectorBranch(branch, *nextSequence, memory); keep {
 			plans = append(plans, plan)
 			(*nextSequence)++
 		}
 	}
-	for i := 0; i < len(source); i++ {
+	for i := 0; i < len(source) && !exceeded; i++ {
 		c := source[i]
 		if c == '\\' {
 			i++
@@ -358,8 +362,10 @@ func planSelectorList(source string, nextSequence *int, memory *resourceguard.Me
 			}
 		}
 	}
-	appendBranch(len(source))
-	return plans
+	if !exceeded {
+		appendBranch(len(source))
+	}
+	return plans, branches, exceeded
 }
 
 func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memory) (selectorPlan, bool) {

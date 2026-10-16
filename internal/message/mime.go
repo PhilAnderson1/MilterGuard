@@ -147,8 +147,13 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		reader := multipart.NewReader(bytes.NewReader(decoded), boundary)
 		var parts []extractedContent
 		var alternativeHTML, alternativePlain extractedContent
-		var mimeIncomplete, nestedTransferIncomplete bool
+		var mimeIncomplete, nestedTransferIncomplete, processingStopped bool
 		for {
+			if budget.useFallback() {
+				mimeIncomplete = true
+				processingStopped = true
+				break
+			}
 			part, err := reader.NextPart()
 			if err == io.EOF {
 				break
@@ -201,6 +206,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 				selected = parts[len(parts)-1]
 			}
 			selected.MIMEIncomplete = mimeIncomplete
+			selected.ExtractionIncomplete = selected.ExtractionIncomplete || processingStopped
 			selected.TransferIncomplete = transferIncomplete || nestedTransferIncomplete
 			selected.HTML = selected.HTML || budget.htmlParts > 0
 			selected.HTMLCPULimitExceeded = selected.HTMLCPULimitExceeded || budget.cpuLimitExceeded
@@ -208,16 +214,25 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		}
 		var combined extractedContent
 		var imageRefs imageRefCollector
-		var textParts, visibleTextParts []string
+		links := linkCollector{compactURLs: budget.compactURLs}
+		var textParts, visibleTextParts, strippedTextParts []string
 		for _, part := range parts {
+			if budget.useFallback() {
+				processingStopped = true
+				break
+			}
 			textParts = append(textParts, part.Text)
 			visibleTextParts = append(visibleTextParts, part.VisibleText)
 			stripped := part.StrippedText
 			if stripped == "" && !part.HasConcealedContent {
 				stripped = part.Text
 			}
-			combined.StrippedText = joinContent(combined.StrippedText, stripped)
-			combined.Links = append(combined.Links, part.Links...)
+			if stripped != "" {
+				strippedTextParts = append(strippedTextParts, stripped)
+			}
+			for _, destination := range part.Links {
+				links.AddDestination(destination)
+			}
 			imageRefs.AddAll(part.ImageRefs)
 			combined.Images = append(combined.Images, part.Images...)
 			combined.HTML = combined.HTML || part.HTML
@@ -230,9 +245,16 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 			combined.HTMLComments.add(part.HTMLComments)
 		}
 		combined.ImageRefs = imageRefs.refs
+		combined.Links = links.links
 		combined.Text = strings.Join(textParts, "\n\n")
-		combined.VisibleText = strings.Join(visibleTextParts, "\n\n")
+		combined.StrippedText = strings.Join(strippedTextParts, "\n\n")
+		if budget.useFallback() {
+			processingStopped = true
+		} else {
+			combined.VisibleText = strings.Join(visibleTextParts, "\n\n")
+		}
 		combined.MIMEIncomplete = mimeIncomplete
+		combined.ExtractionIncomplete = combined.ExtractionIncomplete || processingStopped
 		combined.TransferIncomplete = transferIncomplete || nestedTransferIncomplete
 		combined.HTML = combined.HTML || budget.htmlParts > 0
 		combined.HTMLCPULimitExceeded = combined.HTMLCPULimitExceeded || budget.cpuLimitExceeded
@@ -258,6 +280,12 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		return content
 	}
 	text := decodeCharset(params["charset"], decoded)
+	if budget.useFallback() {
+		return extractedContent{
+			Text: text, VisibleText: text, ConfidentVisibleChars: confidentTextCharacters(text),
+			TransferIncomplete: transferIncomplete, ExtractionIncomplete: true, HTMLCPULimitExceeded: true,
+		}
+	}
 	links := linkCollector{compactURLs: budget.compactURLs}
 	promptText := rewritePlainTextURLs(text, budget.compactURLs, &links)
 	return extractedContent{
@@ -265,16 +293,6 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		ConfidentVisibleChars: confidentTextCharacters(text),
 		Links:                 links.links, TransferIncomplete: transferIncomplete,
 	}
-}
-
-func joinContent(left, right string) string {
-	if left == "" {
-		return right
-	}
-	if right == "" {
-		return left
-	}
-	return left + "\n\n" + right
 }
 
 func extractAttachedMessage(data []byte, depth int, budget *extractionBudget) extractedContent {

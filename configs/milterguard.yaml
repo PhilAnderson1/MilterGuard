@@ -125,17 +125,19 @@ ai:
   # domains, parameter names, and the complete URL internally.
   compact_prompt_urls: true
 
-  # Maximum CPU time, in milliseconds, for primary HTML processing. If bounded
-  # fallback extraction is needed, its tokenizer receives a separate allowance
-  # of the same size, so total HTML CPU can approach twice this value. CPU time
-  # excludes time waiting to be scheduled. Set to 0 to disable the limit.
+  # Maximum CPU time, in milliseconds, for preparing message content for
+  # analysis, including MIME, plain-text, HTML and CSS processing. If bounded
+  # HTML fallback extraction is needed, its tokenizer receives a separate
+  # allowance of the same size, so total processing CPU can approach twice this
+  # value. CPU time excludes time waiting to be scheduled. Set to 0 to disable
+  # the limit.
   max_html_parse_cpu_ms: 250
 
-  # Action when the HTML CPU limit is reached: fallback continues with bounded
-  # text extraction and AI analysis; reject rejects without treating the event
-  # as an attack or changing IP reputation; dos-reject rejects and applies the
-  # normal HTML/CSS DoS reputation blocking and escalation. The default is
-  # dos-reject.
+  # Action when the content-processing CPU limit is reached: fallback continues
+  # with bounded or partial extraction and AI analysis; reject rejects without
+  # treating the event as an attack or changing IP reputation; dos-reject
+  # rejects and applies normal content-processing DoS reputation blocking and
+  # escalation. The default is dos-reject.
   html_parse_cpu_limit_action: dos-reject
 
   # Text returned with SMTP status 550 5.7.1 for dos-reject. Keep this on one

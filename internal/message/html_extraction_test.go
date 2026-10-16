@@ -924,6 +924,16 @@ func TestBoundedLinksRecognizesBackslashEscapedMarkdownURL(t *testing.T) {
 	}
 }
 
+func TestMissingLinkSearchBoundsMergedCandidatesFirst(t *testing.T) {
+	candidates := make([]string, 1_000)
+	for i := range candidates {
+		candidates[i] = "https://example.test/" + strconv.Itoa(i)
+	}
+	if got := boundedLinksMissingFromBody(candidates, ""); len(got) != maxExtractedLinks {
+		t.Fatalf("missing links=%d, want %d", len(got), maxExtractedLinks)
+	}
+}
+
 func TestLongURLsAreRepresentedRatherThanDiscarded(t *testing.T) {
 	link := "https://tracker.example/click/" + strings.Repeat("a", 700) + "?campaign=notice&signature=END"
 	displayed := promptURL(link, true)

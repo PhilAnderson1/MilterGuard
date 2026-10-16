@@ -166,6 +166,37 @@ func TestCSSByteLimitAppliesAcrossParserInputs(t *testing.T) {
 	}
 }
 
+func TestSelectorBranchLimitAbandonsCascade(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.parseCSS(strings.Repeat("a,", maxSelectorBranches)+"a{display:none}", false)
+	if !s.cascadeIncomplete {
+		t.Fatal("selector branch limit did not abandon the cascade")
+	}
+	if len(s.rules) != 0 {
+		t.Fatalf("abandoned cascade retained %d rules", len(s.rules))
+	}
+}
+
+func TestMatchCacheStopsGrowingAtEntryLimit(t *testing.T) {
+	s := sheet{memory: resourceguard.NewMemory(1 << 20), index: selectorIndex{count: 1}}
+	s.runtime.cacheMatches = true
+	s.runtime.matchCacheEntries = maxMatchCacheEntries - 1
+	plan := selectorPlan{sequence: 0}
+	first := &html.Node{Type: html.ElementNode, Data: "p"}
+	s.cacheMatch(&plan, first, true)
+	if s.runtime.matchCacheEntries != maxMatchCacheEntries || s.runtime.matchCaches[0][first] != 2 {
+		t.Fatalf("last cache entry was not retained: runtime=%+v", s.runtime)
+	}
+	second := &html.Node{Type: html.ElementNode, Data: "p"}
+	s.cacheMatch(&plan, second, true)
+	if s.runtime.matchCacheEntries != maxMatchCacheEntries {
+		t.Fatalf("cache entries=%d, want %d", s.runtime.matchCacheEntries, maxMatchCacheEntries)
+	}
+	if _, exists := s.runtime.matchCaches[0][second]; exists {
+		t.Fatal("cache grew beyond its entry limit")
+	}
+}
+
 func TestCSSByteLimitAppliesBeforeStyleTextCollection(t *testing.T) {
 	limits := DefaultLimits()
 	limits.CSSBytes = len(`p{display:none}`)
@@ -1141,7 +1172,8 @@ func TestAnalyzeReportsUnsupportedColourFunctions(t *testing.T) {
 
 func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 	sequence := 0
-	plan := planSelectorList(`u + .body .rio-asin-container-image img`, &sequence, nil)[0]
+	plans, _, _ := planSelectorList(`u + .body .rio-asin-container-image img`, &sequence, nil, maxSelectorBranches)
+	plan := plans[0]
 	plan.makeUncertain(nil)
 	if !plan.uncertain || len(plan.execution.compounds) != 2 || len(plan.execution.combinators) != 1 || plan.execution.combinators[0] != ' ' {
 		t.Fatalf("unexpected conservative plan: %+v", plan)
@@ -1161,7 +1193,8 @@ func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 
 func TestUncertainSelectorScopeDoesNotCrossFinalSiblingCombinator(t *testing.T) {
 	sequence := 0
-	plan := planSelectorList(`.product + img`, &sequence, nil)[0]
+	plans, _, _ := planSelectorList(`.product + img`, &sequence, nil, maxSelectorBranches)
+	plan := plans[0]
 	plan.makeUncertain(nil)
 	if len(plan.execution.compounds) != 1 {
 		t.Fatalf("sibling selector was unsafely narrowed: %+v", plan.execution)

@@ -105,10 +105,11 @@ type Analysis struct {
 	HTMLCPULimitExceeded                  bool
 }
 
-// HTMLProcessingControl lets the caller switch HTML parts to the bounded
-// lexical fallback when an external resource budget has expired. ShouldFallback
-// controls full analysis; FallbackShouldStop provides the fallback tokenizer's
-// separate budget. Both callbacks must be inexpensive.
+// HTMLProcessingControl carries the historical HTML CPU-limit controls through
+// all message-content preparation. ShouldFallback stops MIME and plain-text
+// work and switches HTML parts to bounded lexical fallback when the external
+// budget expires. FallbackShouldStop provides the fallback tokenizer's separate
+// budget. Both callbacks must be inexpensive.
 type HTMLProcessingControl struct {
 	ShouldFallback       func() bool
 	FallbackShouldStop   func() bool

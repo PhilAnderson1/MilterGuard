@@ -2,6 +2,7 @@ package htmlextract
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"strings"
 
@@ -12,6 +13,9 @@ import (
 // Microsoft Office conditional comment. These rules apply only in some mail
 // clients, so their origin is always uncertain.
 func (s *sheet) parseMSOConditionalStyles(data string) {
+	if !s.checkCPU() {
+		return
+	}
 	fragment, ok := msoConditionalFragment(data)
 	if !ok || s.cascadeIncomplete || s.stopped {
 		return
@@ -26,7 +30,7 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 	if !s.checkCPU() {
 		return
 	}
-	z := html.NewTokenizer(strings.NewReader(fragment))
+	z := html.NewTokenizerWithStop(strings.NewReader(fragment), s.shouldStop)
 	var style strings.Builder
 	var styleNode html.Node
 	inStyle := false
@@ -47,6 +51,10 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 		tokenType := z.Next()
 		switch tokenType {
 		case html.ErrorToken:
+			if errors.Is(z.Err(), html.ErrResourceStopped) {
+				s.stopped = true
+				return
+			}
 			if z.Err() != nil && z.Err() != io.EOF {
 				s.abandonCascade()
 				return

@@ -240,7 +240,7 @@ func (p *parser) insertOpenElement(n *Node) {
 	p.oe = append(p.oe, n)
 	p.guard.stacks(p)
 	if len(p.oe) > 512 {
-		panic("html: open stack of elements exceeds 512 nodes")
+		panic(resourceAbort{&ResourceLimitError{Resource: "open elements", Limit: 512}})
 	}
 }
 

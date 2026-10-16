@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	xhtml "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 )
 
 func TestTreeExtractorAppliesEmbeddedCSSDeclaredAfterContent(t *testing.T) {
@@ -269,6 +272,22 @@ func TestConditionalFragmentReportsCooperativeStop(t *testing.T) {
 		if !e.extractionIncomplete || !budget.cpuLimitExceeded || !strings.Contains(out.String(), conditionalOmissionMarker) || visible.Len() != 0 {
 			t.Fatalf("stop at check %d was not reported: output=%q visible=%q", stopAt, out.String(), visible.String())
 		}
+	}
+}
+
+func TestRenderReportsCooperativeStop(t *testing.T) {
+	root := &xhtml.Node{Type: xhtml.DocumentNode}
+	for range 1_000 {
+		root.AppendChild(&xhtml.Node{Type: xhtml.ElementNode, Data: "div"})
+	}
+	checks := 0
+	e := htmlExtraction{inspection: htmlextract.Document{Root: root}, shouldStop: func() bool {
+		checks++
+		return checks == 2
+	}}
+	e.render(TagHidden)
+	if !e.stopped || !e.extractionIncomplete || checks != 2 {
+		t.Fatalf("stopped=%v incomplete=%v checks=%d, want true/true/2", e.stopped, e.extractionIncomplete, checks)
 	}
 }
 

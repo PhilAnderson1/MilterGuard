@@ -14,9 +14,12 @@ Local changes:
 - Memory reservations cover tokenizer-buffer growth, nodes, parser stacks,
   text merging, attribute structures, and attribute key/value bytes. Resource
   aborts are returned as errors from the option-aware parsing APIs.
+- Tag and attribute access replaces NUL bytes only when they are present,
+  avoiding upstream's unconditional copies for ordinary tokens.
 - The upstream 512-open-element limit and its boundary tests are retained
   because HTML tree-builder algorithms can grow quadratically with nesting
-  depth.
+  depth. Exceeding it returns the same typed resource error as the fork's
+  other intentional limits instead of using an untyped panic.
 - `NewTokenizerWithStop` exposes cooperative cancellation for the standalone
   tokenizer used by bounded lexical fallback.
 

@@ -15,6 +15,14 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
+// These structural bounds prevent tiny CSS constructs from amplifying into
+// unbounded numbers of retained selector and cache objects. They deliberately
+// count stable application concepts rather than Go allocator bytes.
+const (
+	maxSelectorBranches  = 4_096
+	maxMatchCacheEntries = 65_536
+)
+
 const (
 	display = iota
 	visibility
@@ -241,6 +249,7 @@ type sheetRuntime struct {
 	mediaCache          map[mediaCacheKey][]uint8
 	cacheMatches        bool
 	matchCaches         []map[*html.Node]uint8
+	matchCacheEntries   int
 	attributeCandidates map[*html.Node]selectorAttributeCandidates
 	candidateScratch    []selectorRef
 	candidateMarks      []uint32
@@ -259,6 +268,7 @@ type sheet struct {
 	limits               Limits
 	cascadeIncomplete    bool
 	planCount            int
+	selectorBranches     int
 	index                selectorIndex
 	cssBytes             int
 	mediaConditions      map[string]mediaCondition
@@ -316,6 +326,7 @@ func (s *sheet) abandonCascade() {
 	s.rules = nil
 	s.keyframeNames = nil
 	s.planCount = 0
+	s.selectorBranches = 0
 	s.index = selectorIndex{}
 	s.runtime = sheetRuntime{}
 }
@@ -1112,7 +1123,12 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			if !s.checkCPU() {
 				return cssParseResult{declarations: out}
 			}
-			plans := planSelectorList(selector, &s.planCount, s.memory)
+			plans, branches, exceeded := planSelectorList(selector, &s.planCount, s.memory, maxSelectorBranches-s.selectorBranches)
+			s.selectorBranches += branches
+			if exceeded {
+				s.abandonCascade()
+				return cssParseResult{declarations: out}
+			}
 			if len(plans) == 0 {
 				continue
 			}

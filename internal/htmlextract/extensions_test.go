@@ -818,6 +818,24 @@ func TestMSOConditionalStyleRetainsOnlyConsumedAttributes(t *testing.T) {
 	}
 }
 
+func TestMSOConditionalStyleTokenizerSamplesCooperativeStop(t *testing.T) {
+	calls := 0
+	s := sheet{
+		limits: DefaultLimits(),
+		shouldStop: func() bool {
+			calls++
+			return true
+		},
+	}
+	s.parseMSOConditionalStyles(`[if mso]><style>` + strings.Repeat("x", 8<<10) + `</style><![endif]`)
+	if !s.stopped {
+		t.Fatal("conditional-style tokenization did not report the cooperative stop")
+	}
+	if calls == 0 {
+		t.Fatal("stop callback was not sampled")
+	}
+}
+
 func TestVariables(t *testing.T) {
 	cases := []struct{ name, src, want string }{
 		{"root", `<style>:root{--Hidden:none}p{display:var(--Hidden)}</style><p>T</p>`, "concealed"},

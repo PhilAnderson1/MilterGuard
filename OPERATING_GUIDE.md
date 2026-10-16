@@ -84,15 +84,18 @@ names. Set it to `false` to give the model complete URLs; this preserves more
 forensic evidence at the cost of additional input tokens and potentially
 earlier body truncation.
 
-`ai.max_html_parse_cpu_ms` limits the CPU time used to convert an HTML message
-into its analysis prompt. The default is 250 milliseconds; `0` disables the
-limit. CPU time excludes time spent descheduled, so unrelated server load does
-not by itself consume the allowance. `ai.html_parse_cpu_limit_action` controls
-what happens at the limit: `fallback` switches to bounded lexical extraction
-and continues AI analysis, `reject` rejects without changing IP reputation, and
+`ai.max_html_parse_cpu_ms` limits the CPU time used to prepare message content
+for the analysis prompt, including MIME, plain-text, HTML and CSS processing.
+The option retains its historical HTML-specific name for configuration
+compatibility. The default is 250 milliseconds; `0` disables the limit. CPU
+time excludes time spent descheduled, so unrelated server load does not by
+itself consume the allowance. `ai.html_parse_cpu_limit_action` controls what
+happens at the limit: `fallback` uses bounded or partial extraction and
+continues AI analysis, `reject` rejects without changing IP reputation, and
 `dos-reject` (the default) rejects and applies the usual sending-IP reputation
-block and repeat-offender escalation. IP and reverse-DNS allowlists still apply.
-`ai.html_dos_reject_message` sets the dedicated SMTP text for `dos-reject`.
+block and repeat-offender escalation. IP and reverse-DNS allowlists still
+apply. `ai.html_dos_reject_message` sets the dedicated SMTP text for
+`dos-reject`.
 
 Set `ai.incomplete_body_action` to `scan` (the default) to classify the retained
 body with an explicit limitation notice. Set it to `reject` to record a

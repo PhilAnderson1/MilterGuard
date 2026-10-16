@@ -18,6 +18,17 @@ func TestSharedMemoryBudgetStopsTokenizerAndTreeBuilder(t *testing.T) {
 	}
 }
 
+func TestOpenElementDepthLimitIsResourceError(t *testing.T) {
+	_, err := Parse(strings.NewReader(strings.Repeat("<dl>", 511)))
+	var limitErr *ResourceLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("err=%v, want ResourceLimitError", err)
+	}
+	if limitErr.Resource != "open elements" || limitErr.Limit != 512 {
+		t.Fatalf("limit error = %+v", limitErr)
+	}
+}
+
 func TestResourceStopDuringLargeToken(t *testing.T) {
 	checks := 0
 	_, err := ParseWithOptions(strings.NewReader(`<!--`+strings.Repeat("x", 5000)+`-->`), ParseOptionResourceLimits(ResourceLimits{ShouldStop: func() bool { checks++; return checks > 1 }}))
@@ -83,5 +94,25 @@ func TestUniqueAttributeStructuralMemoryIsCharged(t *testing.T) {
 	withAttributes := used(source.String())
 	if difference := withAttributes - withoutAttributes; difference < 100*64 {
 		t.Fatalf("100 unique attributes added %d charged bytes, want at least %d", difference, 100*64)
+	}
+}
+
+func TestTagAccessAvoidsCopiesWithoutNUL(t *testing.T) {
+	z := NewTokenizer(strings.NewReader(`<DIV KEY=value>`))
+	if token := z.Next(); token != StartTagToken {
+		t.Fatalf("token=%v, want %v", token, StartTagToken)
+	}
+	nameStart := z.data.start
+	name, hasAttr := z.TagName()
+	if !hasAttr || string(name) != "div" || &name[0] != &z.buf[nameStart] {
+		t.Fatalf("name=%q hasAttr=%v; ordinary tag name was copied", name, hasAttr)
+	}
+	keyStart, valueStart := z.attr[0][0].start, z.attr[0][1].start
+	key, value, more := z.TagAttr()
+	if more || string(key) != "key" || string(value) != "value" {
+		t.Fatalf("key=%q value=%q more=%v", key, value, more)
+	}
+	if &key[0] != &z.buf[keyStart] || &value[0] != &z.buf[valueStart] {
+		t.Fatal("ordinary attribute key or value was copied")
 	}
 }

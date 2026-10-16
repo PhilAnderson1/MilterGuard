@@ -34,7 +34,8 @@ func (m *Message) BuildAnalysis(context AnalysisContext, maxChars int, vision Vi
 }
 
 // BuildAnalysisWithHTMLControl is BuildAnalysis with an optional externally
-// measured HTML-processing limit. It is used by the Milter's thread-CPU guard.
+// measured content-processing limit. The historical name is retained for API
+// compatibility. It is used by the Milter's thread-CPU guard.
 func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars int, vision VisionOptions, control HTMLProcessingControl) Analysis {
 	keys := make([]string, 0, len(m.headers))
 	for key := range m.headers {
@@ -605,6 +606,9 @@ func boundedLinks(candidates []string) []string {
 }
 
 func boundedLinksMissingFromBody(candidates []string, body string) []string {
+	// MIME parts each enforce the link limit, but callers may still provide a
+	// merged list. Bound it before repeatedly searching the sampled body.
+	candidates = boundedLinks(candidates)
 	missing := make([]string, 0, len(candidates))
 	for _, link := range candidates {
 		link = strings.TrimSpace(link)
@@ -612,5 +616,5 @@ func boundedLinksMissingFromBody(candidates []string, body string) []string {
 			missing = append(missing, link)
 		}
 	}
-	return boundedLinks(missing)
+	return missing
 }

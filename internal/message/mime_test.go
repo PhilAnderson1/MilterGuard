@@ -438,3 +438,27 @@ func TestHTMLMemoryBudgetIsSharedAcrossParts(t *testing.T) {
 		t.Fatal("exhausted shared memory budget accepted")
 	}
 }
+
+func TestMultipartExtractionStopsAtContentCPULimit(t *testing.T) {
+	calls := 0
+	budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool {
+		calls++
+		return calls >= 2
+	}})
+	body := []byte("--x\r\nContent-Type: text/plain\r\n\r\nfirst\r\n" +
+		"--x\r\nContent-Type: text/plain\r\n\r\nsecond\r\n--x--\r\n")
+	got := extractMIMEWithBudget(`multipart/mixed; boundary="x"`, "", "", body, 0, budget)
+	if !got.ExtractionIncomplete || !got.HTMLCPULimitExceeded || !budget.cpuLimitExceeded {
+		t.Fatalf("CPU-limited multipart extraction = %+v budget=%+v", got, budget)
+	}
+}
+
+func TestMultipartStrippedTextIsJoinedOnceWithoutEmptySeparators(t *testing.T) {
+	body := []byte("--x\r\nContent-Type: text/plain\r\n\r\nfirst\r\n" +
+		"--x\r\nContent-Type: text/plain\r\n\r\n\r\n" +
+		"--x\r\nContent-Type: text/plain\r\n\r\nsecond\r\n--x--\r\n")
+	got := extractMIME(`multipart/mixed; boundary="x"`, "", "", body, 0)
+	if got.StrippedText != "first\n\nsecond" {
+		t.Fatalf("stripped text=%q, want %q", got.StrippedText, "first\\n\\nsecond")
+	}
+}

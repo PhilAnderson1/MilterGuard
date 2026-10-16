@@ -138,7 +138,9 @@ scripts or fetch external resources. Processing proceeds through these stages:
 2. Traverse the completed tree with an explicit stack charged to the same
    budget. Collect applicable stylesheets,
    inline styles, legacy presentation attributes, and selector profiles while
-   distinguishing active, head, and inert content.
+   distinguishing active, head, and inert content. The standalone tokenizer
+   used for Outlook conditional-comment styles samples the same cooperative
+   stop callback while consuming the fragment.
 3. Enforce a cumulative CSS byte limit, then parse each source with the local
    `tdewolff` fork in `internal/fork/tdewolffparse/css`. Its guard charges
    retained tokens and parser-state growth to the shared memory budget, rejects
@@ -186,6 +188,10 @@ effects remain client-dependent. No network stylesheet is fetched.
 CSS byte-limit, memory-budget, and CPU exhaustion are propagated to
 `internal/message` as incomplete analysis. They remove visible-text confidence
 and produce an explicit limitation in the analysis prompt.
+Selector compilation is also capped at 4,096 branches per document. Selector
+match caching retains at most 65,536 node/selector results; after that, matches
+continue without adding cache entries. These structural limits bound the two
+largest CSS allocation amplifiers independently of Go allocator details.
 
 CSS nesting is detected but relative nested selectors are not resolved. Since
 nested selectors can reach descendants, siblings, or ancestors of the parent
@@ -219,11 +225,16 @@ predicate true throughout the supported Outlook range preserves confident
 visibility, while variable, malformed, or unsupported predicates remain
 uncertain.
 
-The Milter analysis service additionally measures HTML processing CPU time and
-supplies the cooperative stop callback. The configured limit action selects
-fallback, rejection, or denial-of-service rejection, subject to operating mode.
-The HTML fork samples the callback while tokenizing and building the tree; the
-remaining bounded analysis stages sample it during their own traversals.
+The Milter analysis service additionally measures the CPU time used to prepare
+message content and supplies a cooperative stop callback. The historical
+`max_html_parse_cpu_ms` option covers MIME and plain-text processing as well as
+HTML and CSS. The configured limit action selects fallback, rejection, or
+denial-of-service rejection, subject to operating mode. The parser forks sample
+the callback while tokenizing and building their representations; subsequent
+message-side traversals and MIME-part processing sample the same callback. The
+request context is also included in the normal and fallback callbacks, so a
+client disconnect, shutdown, or analysis deadline stops content preparation at
+the next cooperative checkpoint even when the CPU limit is disabled.
 
 ## AI analysis
 

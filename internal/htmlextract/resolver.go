@@ -66,6 +66,22 @@ func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
 	if !s.runtime.cacheMatches {
 		return
 	}
+	if s.runtime.matchCaches != nil {
+		cache := s.runtime.matchCaches[plan.sequence]
+		if state, exists := cache[n]; exists {
+			if matched {
+				cache[n] = 2
+			} else if state == 0 {
+				cache[n] = 1
+			}
+			return
+		}
+	}
+	// A full cache remains useful for its existing entries. New combinations
+	// are evaluated normally instead of growing attacker-controlled maps.
+	if s.runtime.matchCacheEntries >= maxMatchCacheEntries {
+		return
+	}
 	if s.runtime.matchCaches == nil {
 		if !s.memory.Reserve(int64(s.index.count) * int64(unsafe.Sizeof(map[*html.Node]uint8{}))) {
 			return
@@ -80,13 +96,14 @@ func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
 		cache = make(map[*html.Node]uint8)
 		s.runtime.matchCaches[plan.sequence] = cache
 	}
-	if _, exists := cache[n]; !exists && !s.memory.Reserve(32) {
+	if !s.memory.Reserve(32) {
 		return
 	}
 	cache[n] = 1
 	if matched {
 		cache[n] = 2
 	}
+	s.runtime.matchCacheEntries++
 }
 
 type candidate struct {
