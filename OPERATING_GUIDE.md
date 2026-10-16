@@ -21,7 +21,7 @@ For initial installation and activation, follow the
 1. [Configure the AI service](#configure-the-ai-service)
 2. [Configure email authentication](#configure-email-authentication)
 3. [Connect Postfix to MilterGuard](#connect-postfix-to-milterguard)
-4. [Start MilterGuard in accept mode](#start-milterguard-in-accept-mode)
+4. [Running MilterGuard in accept mode](#running-milterguard-in-accept-mode)
 5. [Enable enforcement](#enable-enforcement)
 6. [Use result headers](#use-result-headers)
 7. [Basic virus protection](#basic-virus-protection)
@@ -323,7 +323,7 @@ sudo postfix check
 sudo postfix reload
 ```
 
-## Start MilterGuard in accept mode
+## Running MilterGuard in accept mode
 
 The default `accept` mode analyses email and logs the action MilterGuard
 would recommend, but allows the message through. Leave it in this mode while you
