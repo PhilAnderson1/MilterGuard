@@ -18,7 +18,8 @@ immediately effective.
 
 MilterGuard is built from the ground up to use the reasoning and deductive
 capabilities of modern AI to identify spam and scams through the meaning, intent
-and context of each email.
+and context of each email. Unwanted mail can be rejected during SMTP delivery,
+before it reaches the recipient’s inbox.
 
 It gathers connection details, checks sender authentication through SPF, DKIM
 and DMARC, and looks up domain age to give the AI context beyond the message
@@ -43,10 +44,12 @@ supports the Sendmail Milter protocol.
 ## Features
 
 - **Simple installation:** a single executable with no separate database service.
-- **Model choice:** use a hosted AI service or run a model locally.
+- **AI model choice:** use a hosted AI service, or keep message analysis on your
+  own hardware with a local model.
 - **No spam/ham training required:** start filtering without assembling a
   training dataset.
-- **Automatic adaptation:** learns trusted senders and blocks repeat offenders.
+- **Automatic whitelisting and blacklisting:** learns trusted senders and blocks
+  repeat offenders.
 - **Email administration:** manage sender lists and review rejected messages by
   email.
 - **Safe evaluation:** review decisions in accept mode before enabling rejection.
