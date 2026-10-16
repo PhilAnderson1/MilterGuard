@@ -48,7 +48,9 @@ func (p *Processor) rejectionDetail(entry stores.Rejection) Response {
 
 func (p *Processor) archivedVisibleBody(archived *message.Message) string {
 	if p.maxHTMLParseCPUMilliseconds <= 0 {
-		return archived.VisibleBody(MaxRejectionBodyRunes)
+		return archived.VisibleBodyWithHTMLControl(MaxRejectionBodyRunes, message.HTMLProcessingControl{
+			MemoryBytes: p.maxHTMLParseMemoryBytes,
+		})
 	}
 	clock := threadcpu.Now
 	if p.threadCPUTime != nil {
@@ -58,7 +60,9 @@ func (p *Processor) archivedVisibleBody(archived *message.Message) string {
 	defer runtime.UnlockOSThread()
 	started, ok := clock()
 	if !ok {
-		return archived.VisibleBody(MaxRejectionBodyRunes)
+		return archived.VisibleBodyWithHTMLControl(MaxRejectionBodyRunes, message.HTMLProcessingControl{
+			MemoryBytes: p.maxHTMLParseMemoryBytes,
+		})
 	}
 	maximum := time.Duration(p.maxHTMLParseCPUMilliseconds) * time.Millisecond
 	primaryExceeded := false
@@ -95,5 +99,6 @@ func (p *Processor) archivedVisibleBody(archived *message.Message) string {
 	}
 	return archived.VisibleBodyWithHTMLControl(MaxRejectionBodyRunes, message.HTMLProcessingControl{
 		ShouldFallback: shouldFallback, FallbackShouldStop: fallbackShouldStop,
+		MemoryBytes: p.maxHTMLParseMemoryBytes,
 	})
 }

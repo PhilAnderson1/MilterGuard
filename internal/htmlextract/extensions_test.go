@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	xhtml "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 func TestCanonicalLightColourSchemeVisibility(t *testing.T) {
@@ -745,6 +746,7 @@ func TestMSODownlevelRevealedConditionEvaluation(t *testing.T) {
 		{"unbalanced", `(mso`, false},
 		{"over byte limit", strings.Repeat("!", maxMSOConditionBytes) + `mso`, false},
 		{"deep nesting", strings.Repeat("(", 100) + `mso` + strings.Repeat(")", 100), true},
+		{"over nesting limit", strings.Repeat("(", maxMSOConditionDepth+1) + `mso` + strings.Repeat(")", maxMSOConditionDepth+1), false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := msoConditionAlwaysTrue(test.condition); got != test.universal {
@@ -950,7 +952,7 @@ func TestVariableFunctionValidation(t *testing.T) {
 		{"malformed nested in function", `calc(var(name))`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			tokens, status := lexValue(test.value)
+			tokens, status := lexValue(test.value, nil)
 			if status != valueResolved {
 				t.Fatalf("lexing status = %d", status)
 			}
@@ -972,7 +974,7 @@ func TestMalformedValueSuffixIsNotTruncated(t *testing.T) {
 		t.Fatalf("unterminated string was truncated to concealed content")
 	}
 
-	tokens, status := lexValue(`var(--x)<junk>`)
+	tokens, status := lexValue(`var(--x)<junk>`, nil)
 	if status != valueResolved || tokenText(tokens) != `var(--x)<junk>` {
 		t.Fatalf("tokens = %+v, status = %d", tokens, status)
 	}
@@ -1047,6 +1049,62 @@ func TestVariableExpansionUsesSharedMemoryBudget(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MemoryBytes = 1 << 20
 	document, err := (processor{Limits: limits}).process([]byte(b.String()))
+	if err == nil || !strings.Contains(err.Error(), "memory bytes") {
+		t.Fatalf("document=%+v err=%v", document, err)
+	}
+	if document.Usage.MemoryBytes != limits.MemoryBytes {
+		t.Fatalf("memory usage=%d want=%d", document.Usage.MemoryBytes, limits.MemoryBytes)
+	}
+}
+
+func TestExpandedValueLexingUsesSharedResourceBudget(t *testing.T) {
+	memory := resourceguard.NewMemory(8 << 10)
+	budget := &cpuGuard{memory: memory}
+	if _, status := lexValue(strings.Repeat("()", 1_000), budget); status != valueUnsupported {
+		t.Fatalf("status=%v, want valueUnsupported", status)
+	}
+	if !memory.Exhausted() {
+		t.Fatal("token-dense value did not exhaust the shared memory budget")
+	}
+
+	stops := 0
+	budget = &cpuGuard{shouldStop: func() bool {
+		stops++
+		return true
+	}}
+	if _, status := lexValue(strings.Repeat("()", 1_000), budget); status != valueUnsupported {
+		t.Fatalf("CPU-stopped status=%v, want valueUnsupported", status)
+	}
+	if stops == 0 || !budget.stopped {
+		t.Fatalf("CPU stop callback calls=%d stopped=%v", stops, budget.stopped)
+	}
+}
+
+func TestCSSValueRecursionLimits(t *testing.T) {
+	mathValue := strings.Repeat("calc(", maxCSSValueDepth+1) + "1px" + strings.Repeat(")", maxCSSValueDepth+1)
+	if _, status := evalMath(fontSize, mathValue, &initialStyle, &initialStyle, &cpuGuard{}); status != valueUnsupported {
+		t.Fatalf("deep math status=%v, want valueUnsupported", status)
+	}
+	if value := substituteTokens(nil, nil, &cpuGuard{}, maxCSSValueDepth); value.status != valueUnsupported {
+		t.Fatalf("deep variable substitution status=%v, want valueUnsupported", value.status)
+	}
+}
+
+func TestVariableExpandedShorthandLexingCannotEscapeMemoryBudget(t *testing.T) {
+	var cssText strings.Builder
+	cssText.WriteString(`div{--v0:`)
+	cssText.WriteString(strings.Repeat("(", 64))
+	cssText.WriteString(`red`)
+	cssText.WriteString(strings.Repeat(")", 64))
+	cssText.WriteByte(';')
+	for i := 1; i <= 10; i++ {
+		fmt.Fprintf(&cssText, "--v%d:var(--v%d) var(--v%d);", i, i-1, i-1)
+	}
+	fmt.Fprintf(&cssText, "background:var(--v10)}")
+	input := []byte(`<style>` + cssText.String() + `</style><div>T</div>`)
+	limits := DefaultLimits()
+	limits.MemoryBytes = 4 << 20
+	document, err := (processor{Limits: limits}).process(input)
 	if err == nil || !strings.Contains(err.Error(), "memory bytes") {
 		t.Fatalf("document=%+v err=%v", document, err)
 	}

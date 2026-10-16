@@ -29,6 +29,9 @@ type Sel interface {
 // Parse parses a selector. Use `ParseWithPseudoElement`
 // if you need support for pseudo-elements.
 func Parse(sel string) (Sel, error) {
+	if err := validateSelectorInput(sel); err != nil {
+		return nil, err
+	}
 	p := &parser{s: sel}
 	compiled, err := p.parseSelector()
 	if err != nil {
@@ -45,6 +48,9 @@ func Parse(sel string) (Sel, error) {
 // ParseWithPseudoElement parses a single selector,
 // with support for pseudo-element.
 func ParseWithPseudoElement(sel string) (Sel, error) {
+	if err := validateSelectorInput(sel); err != nil {
+		return nil, err
+	}
 	p := &parser{s: sel, acceptPseudoElements: true}
 	compiled, err := p.parseSelector()
 	if err != nil {
@@ -65,15 +71,17 @@ func ParseGroup(sel string) (SelectorGroup, error) {
 	return ParseGroupWithMemory(sel, nil)
 }
 
-// ParseGroupWithMemory parses a selector and charges a conservative allowance
-// for the strings, selector objects and slices retained or
-// temporarily allocated while compiling it.
+// ParseGroupWithMemory parses a selector and charges its retained source-sized
+// data. Explicit byte, component, group and nesting limits bound structural
+// amplification independently of Go allocator details.
 func ParseGroupWithMemory(sel string, memory *resourceguard.Memory) (SelectorGroup, error) {
-	const selectorAllocationFactor = 32
-	if memory != nil && !memory.Reserve(int64(len(sel)*selectorAllocationFactor+64)) {
+	if err := validateSelectorInput(sel); err != nil {
+		return nil, err
+	}
+	if memory != nil && !memory.Reserve(int64(len(sel))) {
 		return nil, fmt.Errorf("cascadia: memory limit exceeded")
 	}
-	p := &parser{s: sel, memory: memory}
+	p := &parser{s: sel}
 	compiled, err := p.parseSelectorGroup()
 	if err != nil {
 		return nil, err
@@ -89,6 +97,9 @@ func ParseGroupWithMemory(sel string, memory *resourceguard.Memory) (SelectorGro
 // ParseGroupWithPseudoElements parses a selector, or a group of selectors separated by commas.
 // It supports pseudo-elements.
 func ParseGroupWithPseudoElements(sel string) (SelectorGroup, error) {
+	if err := validateSelectorInput(sel); err != nil {
+		return nil, err
+	}
 	p := &parser{s: sel, acceptPseudoElements: true}
 	compiled, err := p.parseSelectorGroup()
 	if err != nil {

@@ -22,8 +22,8 @@ const colourThreshold = .005
 // backgroundDeclarations supports colour-only/none shorthand (optionally both),
 // plus CSS-wide keywords. It resets image as well as colour. Other syntax wins
 // as unresolved for both components; a later colour alone cannot reset an image.
-func backgroundDeclarations(value string, important bool, order int) []declaration {
-	tokens, status := lexValue(value)
+func backgroundDeclarations(value string, important bool, order int, budget *cpuGuard) []declaration {
+	tokens, status := lexValue(value, budget)
 	return backgroundDeclarationsTokens(value, tokens, status, important, order)
 }
 

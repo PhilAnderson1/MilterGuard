@@ -286,7 +286,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 				prepared.inlineIncomplete = result.incomplete
 			}
 			if !document.styles.cascadeIncomplete && !document.styles.stopped {
-				prepared.legacy = prepareDeclarations(legacyDeclarations(n))
+				prepared.legacy = prepareDeclarations(legacyDeclarations(n), p.cpu)
 			}
 			if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || prepared.inlineIncomplete {
 				if _, exists := document.elements[n]; !exists && !p.memory.Reserve(128) {

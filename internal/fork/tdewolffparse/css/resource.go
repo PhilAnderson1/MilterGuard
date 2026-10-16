@@ -3,6 +3,7 @@ package css
 import (
 	"errors"
 	"fmt"
+	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
@@ -40,8 +41,6 @@ type resourceGuard struct {
 	steps    uint32
 }
 
-const accountedTokenBytes = 32
-
 func (g *resourceGuard) reserve(bytes int64) error {
 	if g != nil && g.limits.Memory != nil && !g.limits.Memory.Reserve(bytes) {
 		return &ResourceLimitError{"memory bytes", int(g.limits.Memory.Limit())}
@@ -61,7 +60,7 @@ func (g *resourceGuard) token(data []byte) error {
 	if g.limits.ShouldStop != nil && (g.steps == 1 || g.steps&255 == 0) && g.limits.ShouldStop() {
 		return ErrResourceStopped
 	}
-	if err := g.reserve(int64(accountedTokenBytes + len(data))); err != nil {
+	if err := g.reserve(int64(unsafe.Sizeof(Token{})) + int64(len(data))); err != nil {
 		return err
 	}
 	return nil
@@ -71,7 +70,7 @@ func (g *resourceGuard) states(capacity int) error {
 	if g == nil || capacity <= g.stateCap {
 		return nil
 	}
-	err := g.reserve(int64(capacity-g.stateCap) * 16)
+	err := g.reserve(int64(capacity-g.stateCap) * int64(unsafe.Sizeof(State(nil))))
 	g.stateCap = capacity
 	return err
 }

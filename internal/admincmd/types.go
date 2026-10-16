@@ -60,6 +60,7 @@ type Dependencies struct {
 	IPResolver                  IPHostnameResolver
 	MaxMessageSize              int64
 	MaxHTMLParseCPUMilliseconds int
+	MaxHTMLParseMemoryBytes     int64
 	DatabaseTimeout             time.Duration
 	ActivityExpiry              time.Duration
 	Now                         func() time.Time
@@ -79,6 +80,7 @@ type Processor struct {
 	ipResolver                  IPHostnameResolver
 	maxMessageSize              int64
 	maxHTMLParseCPUMilliseconds int
+	maxHTMLParseMemoryBytes     int64
 	databaseTimeout             time.Duration
 	activityExpiry              time.Duration
 	now                         func() time.Time
@@ -104,7 +106,8 @@ func New(deps Dependencies) *Processor {
 		commandHistory:  deps.CommandHistory,
 		ipResolver:      deps.IPResolver,
 		maxMessageSize:  deps.MaxMessageSize, maxHTMLParseCPUMilliseconds: deps.MaxHTMLParseCPUMilliseconds,
-		databaseTimeout: deps.DatabaseTimeout, activityExpiry: deps.ActivityExpiry,
+		maxHTMLParseMemoryBytes: deps.MaxHTMLParseMemoryBytes,
+		databaseTimeout:         deps.DatabaseTimeout, activityExpiry: deps.ActivityExpiry,
 		now: deps.Now, threadCPUTime: deps.ThreadCPUTime, log: deps.Logger,
 	}
 }

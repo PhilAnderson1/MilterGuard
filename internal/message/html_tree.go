@@ -50,6 +50,7 @@ type htmlExtraction struct {
 	extractionIncomplete bool
 	workSteps            uint32
 	stopped              bool
+	memoryExhausted      bool
 }
 
 type outputAnnotation struct {
@@ -65,15 +66,27 @@ type outputChunk struct {
 // complete. This lets equal effective visibility states flow across element
 // boundaries, layout whitespace, and generated Markdown such as links.
 type annotatedOutput struct {
-	data   []byte
+	data   guardedBuilder
 	chunks []outputChunk
+	memory *resourceguard.Memory
+	failed bool
+}
+
+func newAnnotatedOutput(memory *resourceguard.Memory) annotatedOutput {
+	return annotatedOutput{data: newGuardedBuilder(memory), memory: memory}
 }
 
 func (o *annotatedOutput) WriteString(value string) { o.write(outputAnnotation{}, value) }
 func (o *annotatedOutput) WriteByte(value byte) error {
-	start := len(o.data)
-	o.data = append(o.data, value)
+	start := o.data.Len()
+	if !o.data.appendByte(value) {
+		o.failed = true
+		return errOutputMemoryLimit
+	}
 	o.extendChunk(outputAnnotation{}, start)
+	if o.failed {
+		return errOutputMemoryLimit
+	}
 	return nil
 }
 
@@ -81,8 +94,11 @@ func (o *annotatedOutput) write(annotation outputAnnotation, value string) {
 	if value == "" {
 		return
 	}
-	start := len(o.data)
-	o.data = append(o.data, value...)
+	start := o.data.Len()
+	if !o.data.WriteString(value) {
+		o.failed = true
+		return
+	}
 	o.extendChunk(annotation, start)
 }
 
@@ -90,25 +106,36 @@ func (o *annotatedOutput) writeBytes(annotation outputAnnotation, value []byte) 
 	if len(value) == 0 {
 		return
 	}
-	start := len(o.data)
-	o.data = append(o.data, value...)
+	start := o.data.Len()
+	if _, err := o.data.Write(value); err != nil {
+		o.failed = true
+		return
+	}
 	o.extendChunk(annotation, start)
 }
 
 func (o *annotatedOutput) extendChunk(annotation outputAnnotation, start int) {
 	if len(o.chunks) > 0 && o.chunks[len(o.chunks)-1].annotation == annotation {
-		o.chunks[len(o.chunks)-1].end = len(o.data)
+		o.chunks[len(o.chunks)-1].end = o.data.Len()
 		return
 	}
-	o.chunks = append(o.chunks, outputChunk{start: start, end: len(o.data), annotation: annotation})
+	if len(o.chunks) == cap(o.chunks) {
+		grown, ok := growGuardedSlice(o.chunks, len(o.chunks)+1, o.memory)
+		if !ok {
+			o.failed = true
+			return
+		}
+		o.chunks = grown
+	}
+	o.chunks = append(o.chunks, outputChunk{start: start, end: o.data.Len(), annotation: annotation})
 }
 
 func (o *annotatedOutput) chunkBytes(chunk outputChunk) []byte {
-	return o.data[chunk.start:chunk.end]
+	return o.data.Bytes()[chunk.start:chunk.end]
 }
 
 func (o *annotatedOutput) plainText() string {
-	return string(o.data)
+	return o.data.String()
 }
 
 func (o *annotatedOutput) uniformAnnotation() (outputAnnotation, bool) {
@@ -130,8 +157,9 @@ func (o *annotatedOutput) uniformAnnotation() (outputAnnotation, bool) {
 	return found, haveContent
 }
 
-func (o *annotatedOutput) String() string {
-	var out, pending strings.Builder
+func (o *annotatedOutput) String() (string, bool) {
+	out := newGuardedBuilder(o.memory)
+	pending := newGuardedBuilder(o.memory)
 	var active outputAnnotation
 	haveActive := false
 	closeActive := func() {
@@ -151,11 +179,15 @@ func (o *annotatedOutput) String() string {
 	open := func(annotation outputAnnotation) {
 		switch annotation.kind {
 		case "concealed":
-			fmt.Fprintf(&out, `<invisible reason="%s"`, annotation.reason)
+			out.WriteString(`<invisible reason="`)
+			out.WriteString(annotation.reason)
+			out.appendByte('"')
 			if annotation.value != "" {
-				fmt.Fprintf(&out, ` value="%s"`, annotation.value)
+				out.WriteString(` value="`)
+				out.WriteString(annotation.value)
+				out.appendByte('"')
 			}
-			out.WriteByte('>')
+			out.appendByte('>')
 		case "client-dependent":
 			out.WriteString("<visibility-varies-by-viewport-size>")
 		case "unknown":
@@ -166,14 +198,17 @@ func (o *annotatedOutput) String() string {
 	}
 	lastWasStripped := false
 	for _, chunk := range o.chunks {
+		if out.Failed() || pending.Failed() {
+			return "", false
+		}
 		value := o.chunkBytes(chunk)
 		if annotationWhitespaceOnlyBytes(value) {
-			pending.Write(value)
+			_, _ = pending.Write(value)
 			continue
 		}
 		if chunk.annotation.kind == "stripped" {
 			closeActive()
-			out.WriteString(pending.String())
+			_, _ = out.Write(pending.Bytes())
 			pending.Reset()
 			if !lastWasStripped {
 				open(chunk.annotation)
@@ -184,27 +219,30 @@ func (o *annotatedOutput) String() string {
 		lastWasStripped = false
 		if chunk.annotation.kind == "" {
 			closeActive()
-			out.WriteString(pending.String())
+			_, _ = out.Write(pending.Bytes())
 			pending.Reset()
-			out.Write(value)
+			_, _ = out.Write(value)
 			continue
 		}
 		if !haveActive || active != chunk.annotation {
 			closeActive()
-			out.WriteString(pending.String())
+			_, _ = out.Write(pending.Bytes())
 			pending.Reset()
 			open(chunk.annotation)
 			active = chunk.annotation
 			haveActive = true
 		} else {
-			out.WriteString(pending.String())
+			_, _ = out.Write(pending.Bytes())
 			pending.Reset()
 		}
-		out.Write(value)
+		_, _ = out.Write(value)
 	}
 	closeActive()
-	out.WriteString(pending.String())
-	return out.String()
+	_, _ = out.Write(pending.Bytes())
+	if o.failed || out.Failed() || pending.Failed() {
+		return "", false
+	}
+	return out.String(), true
 }
 
 func htmlToText(source string) extractedContent {
@@ -278,10 +316,22 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 	comments := e.collectHTMLCommentStats(inspection.Root)
 	tagged := e.render(TagHidden)
 	stripped := ""
-	if tagged.hasConcealed {
+	if tagged.hasConcealed && !e.memoryExhausted {
 		stripped = e.render(StripHidden).text
 	}
-	confidentChars := e.confidentVisibleCharacters(inspection.Text)
+	confidentChars := 0
+	if !e.memoryExhausted {
+		confidentChars = e.confidentVisibleCharacters(inspection.Text)
+	}
+	if e.memoryExhausted {
+		budget.memoryBytesRemaining = remainingInt64(budget.memoryBytesRemaining, memory.Used())
+		return extractedContent{
+			Text: tagged.text, VisibleText: tagged.visible, StrippedText: stripped,
+			Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
+			HTMLComments: comments, CSSIncomplete: inspection.UnresolvedStylesheet || inspection.Usage.CSSLimitExceeded,
+			ExtractionIncomplete: true,
+		}
+	}
 	if e.stopped || budget.useFallback() {
 		budget.memoryBytesRemaining = remainingInt64(budget.memoryBytesRemaining, memory.Used())
 		return extractCPUFallback(source, budget)
@@ -394,20 +444,36 @@ type renderedHTML struct {
 }
 
 func (e *htmlExtraction) render(mode HTMLExtractionMode) renderedHTML {
-	var body annotatedOutput
-	var visible strings.Builder
+	body := newAnnotatedOutput(e.memory)
+	visible := newGuardedBuilder(e.memory)
 	if !e.walk(e.inspection.Root, mode, &body, &visible) {
 		return renderedHTML{}
 	}
-	rawText := body.String()
+	if body.failed || visible.Failed() {
+		e.stopForMemory()
+		return renderedHTML{}
+	}
+	rawText, ok := body.String()
+	if !ok {
+		e.stopForMemory()
+		return renderedHTML{}
+	}
 	if e.stopNow() {
 		return renderedHTML{}
 	}
-	text := normalizeHTMLText(rawText)
+	text, ok := normalizeHTMLTextGuarded(rawText, e.memory)
+	if !ok {
+		e.stopForMemory()
+		return renderedHTML{}
+	}
 	if e.stopNow() {
 		return renderedHTML{}
 	}
-	visibleText := normalizeHTMLText(visible.String())
+	visibleText, ok := normalizeHTMLTextGuarded(visible.String(), e.memory)
+	if !ok {
+		e.stopForMemory()
+		return renderedHTML{}
+	}
 	if e.stopNow() {
 		return renderedHTML{}
 	}
@@ -418,11 +484,21 @@ func (e *htmlExtraction) stopRequested() bool {
 	if e.stopped {
 		return true
 	}
+	if e.memory.Exhausted() {
+		e.stopForMemory()
+		return true
+	}
 	e.workSteps++
 	if e.workSteps == 1 || e.workSteps&255 == 0 {
 		return e.stopNow()
 	}
 	return false
+}
+
+func (e *htmlExtraction) stopForMemory() {
+	e.stopped = true
+	e.memoryExhausted = true
+	e.extractionIncomplete = true
 }
 
 func (e *htmlExtraction) stopNow() bool {
@@ -459,7 +535,7 @@ func (e *htmlExtraction) hasConcealed() bool {
 	return false
 }
 
-func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) bool {
+func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *guardedBuilder) bool {
 	if n == nil || e.stopRequested() {
 		return !e.stopped
 	}
@@ -492,7 +568,7 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 	}
 	if isBlockElement(name) || name == "br" || name == "hr" {
 		out.WriteByte('\n')
-		visible.WriteByte('\n')
+		visible.appendByte('\n')
 	}
 	if name == "blockquote" {
 		marker := "[quoted content begins]\n"
@@ -503,8 +579,8 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 		visible.WriteString("[quoted content begins]\n")
 	}
 	if name == "a" {
-		var label annotatedOutput
-		var visibleLabel strings.Builder
+		label := newAnnotatedOutput(e.memory)
+		visibleLabel := newGuardedBuilder(e.memory)
 		e.anchorDepth++
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
 			if !e.walk(child, mode, &label, &visibleLabel) {
@@ -513,6 +589,10 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 			}
 		}
 		e.anchorDepth--
+		if label.failed || visibleLabel.Failed() {
+			e.stopForMemory()
+			return false
+		}
 		destination, ok := e.destination(firstAttr(n, "href"))
 		if ok {
 			destination = e.links.AddDestination(destination)
@@ -520,14 +600,22 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 			if plain == "" {
 				plain = "link"
 			}
-			rendered := "[" + plain + "](" + markdownURL(destination) + ")"
 			if annotation, uniform := label.uniformAnnotation(); uniform {
-				out.write(annotation, rendered)
+				out.write(annotation, "[")
+				out.write(annotation, plain)
+				out.write(annotation, "](")
+				out.write(annotation, markdownURL(destination))
+				out.write(annotation, ")")
 			} else {
 				// Preserve distinct child annotations when a label crosses a real
 				// visibility boundary.
 				out.WriteByte('[')
-				out.WriteString(strings.TrimSpace(label.String()))
+				annotatedLabel, complete := label.String()
+				if !complete {
+					e.stopForMemory()
+					return false
+				}
+				out.WriteString(strings.TrimSpace(annotatedLabel))
 				out.WriteString("](")
 				out.WriteString(markdownURL(destination))
 				out.WriteByte(')')
@@ -555,12 +643,12 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 	}
 	if isBlockElement(name) {
 		out.WriteByte('\n')
-		visible.WriteByte('\n')
+		visible.appendByte('\n')
 	}
 	return true
 }
 
-func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {
+func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode HTMLExtractionMode, out *annotatedOutput, visible *guardedBuilder) {
 	if content == "" {
 		return
 	}
@@ -591,7 +679,7 @@ func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode
 	}
 }
 
-func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutput, visible *strings.Builder) {
+func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutput, visible *guardedBuilder) {
 	trimmed := strings.TrimSpace(data)
 	if !conditionalHTMLComment(trimmed) {
 		return
@@ -617,7 +705,7 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 		e.omitConditionalComment(out)
 		return
 	}
-	var content strings.Builder
+	content := newGuardedBuilder(e.memory)
 	walk := conditionalWalk{links: linkCollector{compactURLs: e.compactURLs}, memory: e.memory, shouldStop: e.shouldStop}
 	for _, node := range fragment {
 		if !e.walkConditionalNode(node, &content, &walk, 0) {
@@ -625,7 +713,11 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 			return
 		}
 	}
-	value := normalizeHTMLText(content.String())
+	value, ok := normalizeHTMLTextGuarded(content.String(), e.memory)
+	if !ok {
+		e.stopForMemory()
+		return
+	}
 	if value == "" || annotationWhitespaceOnly(value) {
 		return
 	}
@@ -689,15 +781,11 @@ func (w *conditionalWalk) enter(depth int) bool {
 	return true
 }
 
-func (w *conditionalWalk) writeString(out *strings.Builder, value string) bool {
-	if !w.memory.Reserve(int64(len(value))) {
-		return false
-	}
-	out.WriteString(value)
-	return true
+func (w *conditionalWalk) writeString(out *guardedBuilder, value string) bool {
+	return out.WriteString(value)
 }
 
-func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *strings.Builder, walk *conditionalWalk, depth int) bool {
+func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *guardedBuilder, walk *conditionalWalk, depth int) bool {
 	if !walk.enter(depth) {
 		return false
 	}
@@ -721,7 +809,7 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *strings.Builder
 		return true
 	}
 	if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, "a") {
-		var label strings.Builder
+		label := newGuardedBuilder(walk.memory)
 		walk.anchorDepth++
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
 			if !e.walkConditionalNode(child, &label, walk, depth+1) {
@@ -732,8 +820,11 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *strings.Builder
 		walk.anchorDepth--
 		if destination, ok := e.destination(firstAttr(n, "href")); ok {
 			destination = walk.links.AddDestination(destination)
-			rendered := fmt.Sprintf("[%s](%s)", markdownLabelText(strings.TrimSpace(label.String())), markdownURL(destination))
-			if !walk.writeString(out, rendered) {
+			if !walk.writeString(out, "[") ||
+				!walk.writeString(out, markdownLabelText(strings.TrimSpace(label.String()))) ||
+				!walk.writeString(out, "](") ||
+				!walk.writeString(out, markdownURL(destination)) ||
+				!walk.writeString(out, ")") {
 				return false
 			}
 		} else {
@@ -761,7 +852,7 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *strings.Builder
 	return true
 }
 
-func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {
+func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *guardedBuilder) {
 	text := compactFormattingPadding(sanitizeSenderText(n.Data))
 	if text == "" {
 		return
@@ -988,14 +1079,14 @@ func concealmentReason(state *htmlextract.Text) (string, string) {
 	return "display:none", ""
 }
 
-func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *strings.Builder) {
+func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *guardedBuilder) {
 	if explicitTrackingPixel(n) {
 		return
 	}
 	raw := strings.TrimSpace(firstAttr(n, "src"))
 	alt := sanitizeSenderText(firstAttr(n, "alt"))
 	alt = rewritePlainTextURLs(alt, e.compactURLs, nil)
-	var rendered string
+	var destination string
 	if strings.HasPrefix(strings.ToLower(raw), "cid:") {
 		id := normalizeContentID(raw[4:])
 		if id == "" {
@@ -1004,38 +1095,39 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 		if alt == "" {
 			alt = "embedded image"
 		}
-		rendered = fmt.Sprintf(" ![%s](cid:%s) ", markdownLabelText(alt), markdownURL(id))
+		destination = "cid:" + markdownURL(id)
 		e.images.Add(id)
-	} else if destination, ok := e.destination(raw); ok && (strings.HasPrefix(destination, "http://") || strings.HasPrefix(destination, "https://")) {
+	} else if resolved, ok := e.destination(raw); ok && (strings.HasPrefix(resolved, "http://") || strings.HasPrefix(resolved, "https://")) {
 		if alt == "" {
 			alt = "image"
 		}
-		destination = e.links.AddDestination(destination)
-		rendered = fmt.Sprintf(" ![%s](%s) ", markdownLabelText(alt), markdownURL(destination))
+		destination = markdownURL(e.links.AddDestination(resolved))
 	}
-	if rendered == "" {
+	if destination == "" {
 		return
 	}
+	annotation := outputAnnotation{}
 	state := e.elements[n]
-	if state == nil {
-		out.WriteString(rendered)
-		return
-	}
-	switch state.Label {
-	case "concealed":
-		if mode == StripHidden {
-			out.write(outputAnnotation{kind: "stripped"}, rendered)
-			return
+	if state != nil {
+		switch state.Label {
+		case "concealed":
+			if mode == StripHidden {
+				annotation = outputAnnotation{kind: "stripped"}
+			} else {
+				reason, value := elementConcealmentReason(state)
+				annotation = outputAnnotation{kind: "concealed", reason: reason, value: value}
+			}
+		case "client-dependent":
+			annotation = outputAnnotation{kind: "client-dependent"}
+		case "unknown":
+			annotation = outputAnnotation{kind: "unknown"}
 		}
-		reason, value := elementConcealmentReason(state)
-		out.write(outputAnnotation{kind: "concealed", reason: reason, value: value}, rendered)
-	case "client-dependent":
-		out.write(outputAnnotation{kind: "client-dependent"}, rendered)
-	case "unknown":
-		out.write(outputAnnotation{kind: "unknown"}, rendered)
-	default:
-		out.WriteString(rendered)
 	}
+	out.write(annotation, " ![")
+	out.write(annotation, markdownLabelText(alt))
+	out.write(annotation, "](")
+	out.write(annotation, destination)
+	out.write(annotation, ") ")
 }
 
 func explicitTrackingPixel(n *xhtml.Node) bool {
@@ -1183,33 +1275,55 @@ func sanitizeSenderText(value string) string {
 }
 
 func normalizeHTMLText(value string) string {
-	value = strings.ToValidUTF8(value, "�")
-	var b strings.Builder
-	b.Grow(len(value))
+	result, _ := normalizeHTMLTextGuarded(value, nil)
+	return result
+}
+
+func normalizeHTMLTextGuarded(value string, memory *resourceguard.Memory) (string, bool) {
+	b := newGuardedBuilder(memory)
+	if !b.Grow(len(value)) {
+		return "", false
+	}
 	space, newlines := false, 0
-	for _, r := range value {
+	for offset := 0; offset < len(value); {
+		r, size := utf8.DecodeRuneInString(value[offset:])
+		offset += size
+		if r == utf8.RuneError && size == 1 {
+			// Match strings.ToValidUTF8 by replacing each consecutive run of
+			// invalid bytes with one replacement rune.
+			for offset < len(value) {
+				nextRune, nextSize := utf8.DecodeRuneInString(value[offset:])
+				if nextRune != utf8.RuneError || nextSize != 1 {
+					break
+				}
+				offset++
+			}
+		}
 		switch r {
 		case ' ', '\t', '\f':
 			space = true
 		case '\r', '\n':
 			space = false
 			if b.Len() > 0 && newlines < 2 {
-				b.WriteByte('\n')
+				b.appendByte('\n')
 				newlines++
 			}
 		default:
 			if space && b.Len() > 0 && newlines == 0 {
-				b.WriteByte(' ')
+				b.appendByte(' ')
 			}
 			space, newlines = false, 0
 			if r < utf8.RuneSelf {
-				b.WriteByte(byte(r))
+				b.appendByte(byte(r))
 			} else {
-				b.WriteRune(r)
+				b.appendRune(r)
 			}
 		}
 	}
-	return strings.Trim(b.String(), " \t\r\n\f")
+	if b.Failed() {
+		return "", false
+	}
+	return strings.Trim(b.String(), " \t\r\n\f"), true
 }
 
 func (collector *linkCollector) AddDestination(candidate string) string {

@@ -14,7 +14,7 @@ func parseColor(s string) (string, valueStatus) {
 // background layer. Colour functions nested inside gradients are deliberately
 // ignored. CSS permits a background colour only in the final layer.
 func backgroundFallbackColour(value string) (string, valueStatus, bool) {
-	tokens, status := lexValue(value)
+	tokens, status := lexValue(value, nil)
 	if status != valueResolved {
 		return value, valueUnsupported, true
 	}

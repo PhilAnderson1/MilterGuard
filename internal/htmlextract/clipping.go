@@ -9,11 +9,11 @@ import (
 
 // Empty basic shapes do not require box dimensions. Nonempty shapes are not
 // evidence of visibility: their relationship to text needs layout.
-func resolveClip(p int, s string) (Value, valueStatus) {
+func resolveClip(p int, s string, budget *cpuGuard) (Value, valueStatus) {
 	if p == clipPath && s == "none" || p == clip && s == "auto" {
 		return Value{Text: s, Known: true}, valueResolved
 	}
-	ts, status := lexValue(s)
+	ts, status := lexValue(s, budget)
 	if status != valueResolved {
 		return Value{Text: s}, status
 	}

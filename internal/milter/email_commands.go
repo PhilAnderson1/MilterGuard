@@ -2,8 +2,10 @@ package milter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"mime"
+	"runtime"
 	"strings"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
+	"github.com/PhilAnderson1/MilterGuard/internal/threadcpu"
 )
 
 const internalMessageHeader = "X-MilterGuard-Internal"
@@ -70,8 +73,14 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 		return true, ss.rejectEmailCommand(ctx, "authenticated envelope sender is invalid")
 	}
 
-	lines, err := commandMessageLines(ss.message, cfg.MaxMessageBytes)
+	lines, err := commandMessageLinesWithResourceLimits(ctx, ss.message, cfg.MaxMessageBytes,
+		ss.deps.commands.maxHTMLParseMemoryBytes, ss.deps.commands.maxHTMLParseCPUMillis,
+		ss.deps.commands.threadCPUTime)
 	if err != nil {
+		var processingErr *commandBodyProcessingError
+		if errors.As(err, &processingErr) {
+			return true, ss.completeFailedEmailCommand(ctx, identity, replyTo, processingErr.Error())
+		}
 		return true, ss.completeInvalidEmailCommand(ctx, identity, replyTo, err.Error())
 	}
 	actor := admincmd.Actor{Administrator: admin, DefaultRecipient: replyTo}
@@ -143,6 +152,10 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 }
 
 func commandMessageLines(m *message.Message, maxBytes int64) ([]string, error) {
+	return commandMessageLinesWithHTMLControl(m, maxBytes, message.HTMLProcessingControl{})
+}
+
+func commandMessageLinesWithHTMLControl(m *message.Message, maxBytes int64, control message.HTMLProcessingControl) ([]string, error) {
 	// Any Content-Disposition occurrence disqualifies a command message. This
 	// is an existence check rather than MIME parsing, so retaining all values
 	// prevents a later duplicate from hiding an attachment declaration.
@@ -160,7 +173,7 @@ func commandMessageLines(m *message.Message, maxBytes int64) ([]string, error) {
 	if mediaType != "text/plain" && mediaType != "text/html" && mediaType != "multipart/alternative" {
 		return nil, fmt.Errorf("command email must contain plain text or HTML without attachments")
 	}
-	text := m.CommandText(maxBytes)
+	text := m.CommandTextWithHTMLControl(maxBytes, control)
 	if strings.ContainsRune(text, '\x00') {
 		return nil, fmt.Errorf("command body contains invalid characters")
 	}
@@ -176,9 +189,80 @@ func commandMessageLines(m *message.Message, maxBytes int64) ([]string, error) {
 	return lines, nil
 }
 
+// commandMessageLinesWithResourceLimits applies the same pinned-thread CPU
+// measurement used by ordinary analysis. Normal and fallback extraction share
+// one deadline, and no commands are returned after an interrupted extraction.
+type commandBodyProcessingError struct{ reason string }
+
+func (e *commandBodyProcessingError) Error() string { return e.reason }
+
+func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Message, maxBytes, memoryBytes int64, maxCPUMilliseconds int, clock func() (time.Duration, bool)) ([]string, error) {
+	control := message.HTMLProcessingControl{MemoryBytes: memoryBytes}
+	if maxCPUMilliseconds <= 0 {
+		stopped := func() bool { return ctx.Err() != nil }
+		control.ShouldFallback = stopped
+		control.FallbackShouldStop = stopped
+		lines, err := commandMessageLinesWithHTMLControl(m, maxBytes, control)
+		if ctx.Err() != nil {
+			return nil, &commandBodyProcessingError{reason: "command body processing was interrupted"}
+		}
+		return lines, err
+	}
+	if clock == nil {
+		clock = threadcpu.Now
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	started, ok := clock()
+	if !ok {
+		return nil, &commandBodyProcessingError{reason: "command body CPU measurement is unavailable"}
+	}
+	maximum := time.Duration(maxCPUMilliseconds) * time.Millisecond
+	exceeded := false
+	clockFailed := false
+	interrupted := false
+	shouldStop := func() bool {
+		if ctx.Err() != nil {
+			interrupted = true
+			return true
+		}
+		if exceeded || clockFailed {
+			return true
+		}
+		current, currentOK := clock()
+		if !currentOK || current < started {
+			clockFailed = true
+			return true
+		}
+		if current-started > maximum {
+			exceeded = true
+		}
+		return exceeded
+	}
+	control.ShouldFallback = shouldStop
+	control.FallbackShouldStop = shouldStop
+	lines, err := commandMessageLinesWithHTMLControl(m, maxBytes, control)
+	shouldStop() // Catch a limit crossed after the final extraction checkpoint.
+	switch {
+	case interrupted:
+		return nil, &commandBodyProcessingError{reason: "command body processing was interrupted"}
+	case clockFailed:
+		return nil, &commandBodyProcessingError{reason: "command body CPU measurement failed"}
+	case exceeded:
+		return nil, &commandBodyProcessingError{reason: "command body processing exceeded the configured CPU limit"}
+	default:
+		return lines, err
+	}
+}
+
 func (ss *session) completeInvalidEmailCommand(ctx context.Context, identity, replyTo, reason string) bool {
 	queued := ss.deps.commands.queueReply(replyTo, "MilterGuard command rejected", reason+".\n\n"+admincmd.Help(ss.isCommandAdministrator(identity), false))
 	return ss.discardEmailCommand(ctx, identity, "invalid", reason, replyTo, "", queued)
+}
+
+func (ss *session) completeFailedEmailCommand(ctx context.Context, identity, replyTo, reason string) bool {
+	queued := ss.deps.commands.queueReply(replyTo, "MilterGuard command failed", "The command could not be executed: "+reason+".\n")
+	return ss.discardEmailCommand(ctx, identity, "failed", reason, replyTo, "", queued)
 }
 
 func (ss *session) isCommandAdministrator(identity string) bool {
@@ -204,7 +288,7 @@ func (ss *session) rejectEmailCommand(ctx context.Context, reason string) bool {
 func (ss *session) discardEmailCommand(ctx context.Context, identity, command, result, sender, recipient string, confirmationQueued bool) bool {
 	err := writeFrame(ss.conn, []byte{responseDiscard})
 	attrs := []any{"message_id", ss.message.Header("Message-ID"), "authenticated_identity", identity, "command", command, "sender", sender, "recipient", recipient, "result", result, "discarded", err == nil, "confirmation_queued", confirmationQueued, "response_sent", err == nil}
-	if command == "invalid" {
+	if command == "invalid" || command == "failed" {
 		ss.deps.log.WarnContext(ctx, "email command processed", attrs...)
 	} else {
 		ss.deps.log.InfoContext(ctx, "email command processed", attrs...)

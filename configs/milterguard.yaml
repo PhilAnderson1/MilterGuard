@@ -12,9 +12,7 @@
 mode: accept
 
 milter:
-  # Listener address. The default is a loopback-only TCP listener. Change the
-  # port if it conflicts locally; do not expose it on a public interface.
-  # A Unix socket may be used instead: unix:/run/milterguard/milterguard.sock
+  # Listener address. IPv4 and IPv6 addresses and Unix sockets are accepted.
   socket: tcp:127.0.0.1:8895
 
   # Maximum time allowed for an in-progress Milter protocol frame. Completely
@@ -129,9 +127,18 @@ ai:
   # analysis, including MIME, plain-text, HTML and CSS processing. If bounded
   # HTML fallback extraction is needed, its tokenizer receives a separate
   # allowance of the same size, so total processing CPU can approach twice this
-  # value. CPU time excludes time waiting to be scheduled. Set to 0 to disable
-  # the limit.
+  # value. CPU time excludes time waiting to be scheduled. The value must be
+  # positive. Exceeding it applies html_parse_cpu_limit_action below;
+  # dos-reject treats the event as a suspected attack and updates IP reputation.
   max_html_parse_cpu_ms: 250
+
+  # Cumulative per-message allocation budget for HTML/CSS parsing, rendering,
+  # normalization, and combining extracted MIME parts. This is an integer byte
+  # count. The default is 67108864 (64 MiB); allowed range is 8-512 MiB. When
+  # exhausted, extraction stops and incomplete_body_action below determines
+  # whether retained content is scanned or the message is rejected. Memory
+  # exhaustion does not add an IP-reputation strike.
+  max_html_parse_memory_bytes: 67108864
 
   # Action when the content-processing CPU limit is reached: fallback continues
   # with bounded or partial extraction and AI analysis; reject rejects without
@@ -234,16 +241,52 @@ attachments:
     - jar
     - lnk
     - iso
-    # 7z, RAR, and Unix compress archives are blocked because MilterGuard
-    # cannot decompress and inspect their contents, not because the formats
-    # are executable.
+    # Additional Windows launchers, scripts, installers, and application
+    # packages that can execute code or alter system configuration.
+    - cpl
+    - hta
+    - htc
+    - chm
+    - sct
+    - scf
+    - wsf
+    - wsh
+    - wsc
+    - ws
+    - vb
+    - vbe
+    - reg
+    - url
+    - website
+    - jnlp
+    - application
+    - appref-ms
+    - xbap
+    - msp
+    - mst
+    - msu
+    - app
+    - appx
+    - msix
+    - msixbundle
+    - apk
+    # Containers and disk images that MilterGuard cannot fully inspect.
+    - cab
+    - img
+    - vhd
+    - vhdx
+    - dmg
+    - one
+    - onepkg
+    # 7z, RAR, and Unix compress archives are likewise blocked because
+    # MilterGuard cannot decompress and inspect their contents.
     - 7z
     - rar
     - z
 
-  # Detect Windows PE, ELF, Mach-O and executable scripts by content. RAR, 7z
-  # and Unix compress signatures are also detected when their corresponding
-  # rar, 7z or z extension remains in blocked_extensions.
+  # Detect executable and selected container formats by content. Detection for
+  # configurable container formats is enabled only while its corresponding
+  # extension remains in blocked_extensions.
   inspect_file_signatures: true
 
   # Inspect the contents of ZIP, TAR, GZIP, and BZIP2 attachments.
@@ -298,7 +341,8 @@ email_commands:
 
   # Send a reply confirmation email when a command email is received.
   send_replies: true
-  # SMTP server used to send command results. Include the port.
+  # SMTP server used to send command results. Include the port. IPv6 literals
+  # must be bracketed, for example [::1]:25.
   smtp_host: 127.0.0.1:25
 
   # SMTP transport encryption: off, opportunistic, or required. Opportunistic

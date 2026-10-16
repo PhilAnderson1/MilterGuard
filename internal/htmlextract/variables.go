@@ -5,18 +5,33 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
+
+const maxCSSValueDepth = 256
 
 type valueToken struct {
 	kind css.TokenType
 	raw  string
 }
 
-func lexValue(s string) ([]valueToken, valueStatus) {
-	l := css.NewLexer(parse.NewInputString(s))
+func lexValue(s string, budget *cpuGuard) ([]valueToken, valueStatus) {
+	// NewInputString copies the immutable string to a byte buffer and may grow
+	// that buffer once to append its terminal NUL. Reserve the conservative
+	// worst case before either allocation occurs.
+	if budget != nil && !budget.reserve(int64(len(s))*2) {
+		return nil, valueUnsupported
+	}
+	limits := css.ResourceLimits{}
+	if budget != nil {
+		limits.Memory = budget.memory
+		limits.ShouldStop = func() bool { return budget.stopNow(true) }
+	}
+	l := css.NewLexerWithLimits(parse.NewInputString(s), limits)
 	var ts []valueToken
 	for {
 		k, v := l.Next()
@@ -28,6 +43,19 @@ func lexValue(s string) ([]valueToken, valueStatus) {
 		}
 		if k == css.BadStringToken || k == css.BadURLToken {
 			return nil, valueInvalid
+		}
+		if len(ts) == cap(ts) {
+			capacity := 16
+			if len(ts) != 0 {
+				capacity = len(ts) * 2
+			}
+			allocation := int64(capacity) * int64(unsafe.Sizeof(valueToken{}))
+			if budget != nil && !budget.reserve(allocation) {
+				return nil, valueUnsupported
+			}
+			next := make([]valueToken, len(ts), capacity)
+			copy(next, ts)
+			ts = next
 		}
 		ts = append(ts, valueToken{k, string(v)})
 	}
@@ -127,11 +155,16 @@ type cssParserCompatibility struct {
 	stopped                         bool
 }
 
-func parserCompatibleCSS(text string, shouldStop func() bool) cssParserCompatibility {
+func parserCompatibleCSS(text string, shouldStop func() bool, memory *resourceguard.Memory) cssParserCompatibility {
 	hasComments := strings.Contains(text, "/*")
 	needsDelimiterCompatibility := containsFold(text, "var(") && strings.Contains(text, ")") && (strings.Contains(text, "[") || strings.Contains(text, "{"))
 	if !hasComments && !needsDelimiterCompatibility {
 		return cssParserCompatibility{text: text}
+	}
+	// This compatibility-only lexer needs its own mutable input copy in
+	// addition to the main parser input charged by admitCSS.
+	if !memory.Reserve(int64(len(text)) + 1) {
+		return cssParserCompatibility{text: text, stopped: true}
 	}
 	input := parse.NewInputString(text)
 	if shouldStop != nil {
@@ -162,6 +195,9 @@ func parserCompatibleCSS(text string, shouldStop func() bool) cssParserCompatibi
 		}
 		if kind == css.CommentToken {
 			if !changed {
+				if !memory.Reserve(int64(len(text)) + 1) {
+					return cssParserCompatibility{text: text, stopped: true}
+				}
 				b.Grow(len(text) + 1)
 				b.WriteString(text[:offset])
 				changed = true
@@ -177,6 +213,9 @@ func parserCompatibleCSS(text string, shouldStop func() bool) cssParserCompatibi
 		}
 		if kind == css.RightParenthesisToken && len(stack) > 0 && stack[len(stack)-1] != kind && parenthesisBlocks > 0 {
 			if !changed {
+				if !memory.Reserve(int64(len(text)) + 1) {
+					return cssParserCompatibility{text: text, stopped: true}
+				}
 				b.Grow(len(text) + 1)
 				b.WriteString(text[:offset])
 				changed = true
@@ -585,6 +624,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	cyclic := map[string]bool{}
 	states := map[string]uint8{}
 	var path []string
+	depthExceeded := false
 	for _, name := range ordered {
 		definition := defs[name]
 		d := definition.d
@@ -596,6 +636,10 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	}
 	var visit func(string, int)
 	visit = func(n string, depth int) {
+		if depth >= maxCSSValueDepth {
+			depthExceeded = true
+			return
+		}
 		if states[n] == 2 {
 			return
 		}
@@ -631,7 +675,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	}
 	for _, n := range ordered {
 		visit(n, 0)
-		if budget.stopped {
+		if budget.stopped || depthExceeded {
 			return unresolvedVariableScope(parent)
 		}
 	}
@@ -640,6 +684,9 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	}
 	var resolveName func(string, int) variableValue
 	resolveName = func(n string, depth int) variableValue {
+		if depth >= maxCSSValueDepth {
+			return variableValue{status: valueUnsupported}
+		}
 		if v, ok := s.values[n]; ok {
 			return v
 		}
@@ -677,6 +724,9 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	var dependencyState = make(map[string]uint8, len(defs))
 	var dependsOnColourScheme func(string, int) bool
 	dependsOnColourScheme = func(name string, depth int) bool {
+		if depth >= maxCSSValueDepth {
+			return true
+		}
 		if dependencyState[name] == 2 {
 			return s.colourDependent[name]
 		}
@@ -739,7 +789,7 @@ func substitute(d *declaration, vars *variableScope, budget *cpuGuard) variableV
 }
 
 func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget *cpuGuard, depth int) variableValue {
-	if !budget.check() {
+	if depth >= maxCSSValueDepth {
 		return variableValue{status: valueUnsupported}
 	}
 	if !budget.check() {

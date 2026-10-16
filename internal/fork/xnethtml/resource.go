@@ -82,12 +82,10 @@ func (g *resourceGuard) tokenizerAttribute(keyBytes, valueBytes int) (err error)
 	if g == nil {
 		return nil
 	}
-	// In addition to the retained key and value strings, each source attribute
-	// grows the tokenizer's span slice, its name-deduplication map, or the
-	// token's Attribute slice. Charge duplicate attributes too: their temporary
-	// key allocations still contribute to the monotonic allocation budget.
-	const structuralBytes = 64
-	g.reserve(int64(keyBytes) + int64(valueBytes) + structuralBytes)
+	// Charge the copied source strings. The per-tag source-attribute cap bounds
+	// tokenizer spans and duplicate-detection entries independently of their Go
+	// allocator representation.
+	g.reserve(int64(keyBytes) + int64(valueBytes))
 	return nil
 }
 

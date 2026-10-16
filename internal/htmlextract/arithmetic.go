@@ -35,7 +35,7 @@ func evalMath(prop int, src string, parent, root *Style, budget *cpuGuard) (Valu
 	if !budget.check() {
 		return Value{Text: src}, valueUnsupported
 	}
-	ts, status := lexValue(src)
+	ts, status := lexValue(src, budget)
 	if status != valueResolved {
 		return Value{Text: src}, status
 	}
@@ -151,6 +151,11 @@ func (p *mathParser) atom() quantity {
 			return quantity{}
 		}
 		p.depth++
+		if p.depth > maxCSSValueDepth {
+			p.depth--
+			p.status = valueUnsupported
+			return quantity{}
+		}
 		var args []quantity
 		for {
 			args = append(args, p.expr(0))

@@ -37,6 +37,11 @@ const (
 // ErrBufferExceeded means that the buffering limit was exceeded.
 var ErrBufferExceeded = errors.New("max buffer exceeded")
 
+// maxAttributesPerTag bounds tokenizer slices, duplicate-detection state, and
+// transient strings for a single hostile tag. Real-world HTML stays several
+// orders of magnitude below this limit.
+const maxAttributesPerTag = 4096
+
 // String returns a string representation of the TokenType.
 func (t TokenType) String() string {
 	switch t {
@@ -893,6 +898,7 @@ func (z *Tokenizer) readTag(saveAttr bool) {
 	z.attr = z.attr[:0]
 	z.nAttrReturned = 0
 	clear(z.attrNames)
+	attributeCount := 0
 	// Read the tag name and attribute key/value pairs.
 	z.readTagName()
 	if z.skipWhiteSpace(); z.err != nil {
@@ -907,6 +913,11 @@ func (z *Tokenizer) readTag(saveAttr bool) {
 		z.readTagAttrKey()
 		z.readTagAttrVal()
 		if z.err != nil {
+			break
+		}
+		attributeCount++
+		if attributeCount > maxAttributesPerTag {
+			z.err = &ResourceLimitError{Resource: "attributes per tag", Limit: maxAttributesPerTag}
 			break
 		}
 		keyBytes := z.pendingAttr[0].end - z.pendingAttr[0].start

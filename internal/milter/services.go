@@ -74,14 +74,17 @@ type attachmentPolicyService struct {
 }
 
 type emailCommandService struct {
-	cfg            config.EmailCommandsConfig
-	processor      *admincmd.Processor
-	recipient      string
-	internalToken  string
-	replySlots     chan struct{}
-	sender         smtpreply.Sender
-	log            *slog.Logger
-	maxMessageSize int64
+	cfg                     config.EmailCommandsConfig
+	processor               *admincmd.Processor
+	recipient               string
+	internalToken           string
+	replySlots              chan struct{}
+	sender                  smtpreply.Sender
+	log                     *slog.Logger
+	maxMessageSize          int64
+	maxHTMLParseMemoryBytes int64
+	maxHTMLParseCPUMillis   int
+	threadCPUTime           func() (time.Duration, bool)
 }
 
 type connectionDNSService struct {

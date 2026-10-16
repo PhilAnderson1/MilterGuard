@@ -134,6 +134,8 @@ scripts or fetch external resources. Processing proceeds through these stages:
    disabled using the local `x/net/html` fork in `internal/fork/xnethtml`.
    The parser charges node, attribute, tokenizer-buffer, parser-stack, and
    text-merge allocations to the document's shared monotonic memory budget.
+   Structural caps independently bound document nodes, open-element depth,
+   and source attributes per tag.
    It samples cooperative cancellation during tokenization and tree recovery.
 2. Traverse the completed tree with an explicit stack charged to the same
    budget. Collect applicable stylesheets,
@@ -145,7 +147,8 @@ scripts or fetch external resources. Processing proceeds through these stages:
    `tdewolff` fork in `internal/fork/tdewolffparse/css`. Its guard charges
    retained tokens and parser-state growth to the shared memory budget, rejects
    closing delimiters that would corrupt recovery state, and samples
-   cooperative cancellation during tokenization. The limits apply to style elements, style attributes,
+   cooperative cancellation during tokenization. Token count and parser
+   nesting also have fixed structural caps. The limits apply to style elements, style attributes,
    conditional-comment styles, and decoded data-URL stylesheets, including
    nested imports.
 4. Prepare declarations and build a selector index, then evaluate the distinct
@@ -188,8 +191,10 @@ effects remain client-dependent. No network stylesheet is fetched.
 CSS byte-limit, memory-budget, and CPU exhaustion are propagated to
 `internal/message` as incomplete analysis. They remove visible-text confidence
 and produce an explicit limitation in the analysis prompt.
-Selector compilation is also capped at 4,096 branches per document. Selector
-match caching retains at most 65,536 node/selector results; after that, matches
+Selector compilation is also capped by source bytes, components, nesting, and
+4,096 branches per document. Retained CSS declarations are capped at 32,768.
+CSS value evaluation and Outlook condition parsing have recursion limits.
+Selector match caching retains at most 65,536 node/selector results; after that, matches
 continue without adding cache entries. These structural limits bound the two
 largest CSS allocation amplifiers independently of Go allocator details.
 
@@ -234,7 +239,13 @@ the callback while tokenizing and building their representations; subsequent
 message-side traversals and MIME-part processing sample the same callback. The
 request context is also included in the normal and fallback callbacks, so a
 client disconnect, shutdown, or analysis deadline stops content preparation at
-the next cooperative checkpoint even when the CPU limit is disabled.
+the next cooperative checkpoint. Configuration requires a positive CPU limit.
+
+`max_html_parse_memory_bytes` supplies one cumulative allocation budget for all
+HTML parts in a message. Parser and CSS structures, extraction maps, rendered
+and normalized output, and multipart output combination all consume the same
+budget. Superseded backing arrays remain charged because Go may retain them
+until a later garbage collection.
 
 ## AI analysis
 
@@ -320,6 +331,10 @@ rendering. It is used by:
 
 - Interactive or piped command mode in `cmd/milterguard`.
 - Authenticated email commands handled by the Milter session.
+
+HTML command bodies use the configured HTML memory and pinned-thread CPU
+limits. Normal and lexical-fallback extraction share one CPU window; exhaustion
+returns a command-failed reply and cannot execute a partially extracted command.
 
 `REJECTION <id>` defers archive reading and MIME processing until the response
 is rendered. For email commands this keeps archive parsing off the Milter

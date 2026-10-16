@@ -332,7 +332,7 @@ func TestBackgroundLayersAndResets(t *testing.T) {
 }
 
 func TestBackgroundShorthandRejectsUnmatchedClosingParenthesis(t *testing.T) {
-	if declarations := backgroundDeclarations(`) none`, false, 0); len(declarations) != 0 {
+	if declarations := backgroundDeclarations(`) none`, false, 0, nil); len(declarations) != 0 {
 		t.Fatalf("unmatched closing parenthesis produced declarations: %+v", declarations)
 	}
 }

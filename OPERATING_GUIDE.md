@@ -87,15 +87,29 @@ earlier body truncation.
 `ai.max_html_parse_cpu_ms` limits the CPU time used to prepare message content
 for the analysis prompt, including MIME, plain-text, HTML and CSS processing.
 The option retains its historical HTML-specific name for configuration
-compatibility. The default is 250 milliseconds; `0` disables the limit. CPU
-time excludes time spent descheduled, so unrelated server load does not by
-itself consume the allowance. `ai.html_parse_cpu_limit_action` controls what
-happens at the limit: `fallback` uses bounded or partial extraction and
-continues AI analysis, `reject` rejects without changing IP reputation, and
-`dos-reject` (the default) rejects and applies the usual sending-IP reputation
-block and repeat-offender escalation. IP and reverse-DNS allowlists still
-apply. `ai.html_dos_reject_message` sets the dedicated SMTP text for
-`dos-reject`.
+compatibility. The default is 250 milliseconds and the configured value must
+be positive. CPU time excludes time spent descheduled, so unrelated server load
+does not by itself consume the allowance. `ai.html_parse_cpu_limit_action`
+controls what happens at the limit: `fallback` uses bounded or partial
+extraction and continues AI analysis, `reject` rejects without changing IP
+reputation, and `dos-reject` (the default) treats the event as a suspected
+attack, rejects it, and applies the usual sending-IP reputation block and
+repeat-offender escalation. IP and reverse-DNS allowlists still apply.
+`ai.html_dos_reject_message` sets the dedicated SMTP text for `dos-reject`.
+MilterGuard refuses to start if its operating environment does not provide the
+per-thread CPU clock required to enforce this limit.
+
+`ai.max_html_parse_memory_bytes` sets the cumulative per-message allocation
+budget used by HTML/CSS parsing, extraction rendering, normalization, and MIME
+output combination. The default is 67108864 bytes (64 MiB), and the accepted
+range is 8-512 MiB. The budget is shared across every HTML part in a message;
+raising it increases the memory available to both legitimate and hostile mail.
+When sizing a host, allow approximately this value multiplied by
+`ai.max_concurrent`, plus normal application memory and allocations outside the
+guard. Exhaustion stops extraction and marks the body incomplete;
+`ai.incomplete_body_action` then determines whether retained content is scanned
+or the message is rejected. Memory exhaustion does not add an IP-reputation
+strike.
 
 Set `ai.incomplete_body_action` to `scan` (the default) to classify the retained
 body with an explicit limitation notice. Set it to `reject` to record a
@@ -328,7 +342,8 @@ sudo postfix reload
 The default `accept` mode analyses email and logs the action MilterGuard
 would recommend, but allows the message through. Leave it in this mode while you
 send representative test messages and observe real mail traffic. Accept mode
-does not update correspondent allowlists or IP reputation.
+does not automatically learn correspondents or update IP reputation from mail
+decisions.
 
 Review the journal regularly:
 
@@ -491,6 +506,14 @@ files onto disk. The supplied configuration also blocks 7z and RAR attachments
 because MilterGuard cannot inspect their contents. Attachment size, archive
 depth, file-count, and total uncompressed-size limits protect the service from
 oversized files and archive bombs.
+
+The supplied blocklist also rejects uncommon Windows launchers and scripts,
+application installers, OneNote packages, and disk-image formats that are
+unsafe or cannot be fully inspected. Reliable signatures for Windows shell
+links, CAB, CHM, ISO, VHD/VHDX, DMG, OneNote, and Android DEX content are
+recognized even after renaming. Each of these content checks follows its
+corresponding `blocked_extensions` entry, so removing an extension deliberately
+also permits that format's signature.
 
 The `attachments` configuration controls what happens when an archive is
 encrypted or content cannot be completely inspected. Each condition may be
@@ -731,7 +754,9 @@ sudo milterguard --command-mode < commands.txt
 ### Email commands
 
 The optional email command interface supports the same commands and sends the
-results back by email. `ACTIVITY` and IP commands are administrator-only. For
+results back by email. HTML command bodies use the configured HTML CPU and
+memory limits; a processing-limit failure executes no commands and produces a
+command-failed reply. `ACTIVITY` and IP commands are administrator-only. For
 ordinary authenticated users, the local recipient address is inferred from the
 authenticated envelope sender, so it is omitted
 from `WHITELIST`, `BLOCKLIST`, and `REJECTIONS` commands. Administrators may specify another

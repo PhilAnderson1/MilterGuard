@@ -29,6 +29,18 @@ func TestPersistentStateStartupErrorMessage(t *testing.T) {
 	}
 }
 
+func TestCheckThreadCPUClock(t *testing.T) {
+	if err := checkThreadCPUClock(func() (time.Duration, bool) { return time.Millisecond, true }); err != nil {
+		t.Fatalf("available clock rejected: %v", err)
+	}
+	if err := checkThreadCPUClock(func() (time.Duration, bool) { return 0, false }); err == nil {
+		t.Fatal("unavailable clock accepted")
+	}
+	if err := checkThreadCPUClock(nil); err == nil {
+		t.Fatal("nil clock accepted")
+	}
+}
+
 func TestCommandModeLoggerEmitsWarningsButNotRoutineLogs(t *testing.T) {
 	var output strings.Builder
 	logger := commandModeLogger(&output)

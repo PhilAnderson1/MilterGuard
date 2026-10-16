@@ -226,7 +226,7 @@ func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, con
 				return Value{Text: value}, valueUnsupported
 			}
 		} else {
-			ds := backgroundDeclarations(value, d.important, d.order)
+			ds := backgroundDeclarations(value, d.important, d.order, context.budget)
 			for _, x := range ds {
 				if x.prop == property {
 					value = x.value
@@ -246,7 +246,7 @@ func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, con
 			out, status = evalMath(property, value, context.parent, context.root, context.budget)
 		}
 	} else {
-		out, status = resolve(property, value, context.parent, context.root)
+		out, status = resolveWithBudget(property, value, context.parent, context.root, context.budget)
 	}
 	if status == valueInvalid && hadVar {
 		return resolve(property, "unset", context.parent, context.root)

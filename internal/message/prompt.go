@@ -182,11 +182,35 @@ func (m *Message) processedContent() extractedContent {
 func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl) extractedContent {
 	budget := newExtractionBudgetWithControl(control)
 	content := extractMIMEWithBudget(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", m.BodyBytes(), 0, budget)
+	if control.ObserveMemoryUsage != nil {
+		limit := budget.memoryBytesLimit
+		control.ObserveMemoryUsage(limit-budget.memoryBytesRemaining, limit)
+	}
 	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
-	content.Text = strings.ToValidUTF8(content.Text, "�")
-	content.VisibleText = strings.ToValidUTF8(content.VisibleText, "�")
-	content.StrippedText = strings.ToValidUTF8(content.StrippedText, "�")
+	normalizeExtractedUTF8(&content, budget)
+	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
 	return content
+}
+
+// normalizeExtractedUTF8 checks the shared CPU control before each complete
+// string scan. Once the limit trips, fields which have not been normalized are
+// discarded rather than allowing invalid UTF-8 into later prompt processing.
+func normalizeExtractedUTF8(content *extractedContent, budget *extractionBudget) {
+	fields := []*string{&content.Text, &content.VisibleText, &content.StrippedText}
+	for i, field := range fields {
+		if budget.useFallback() {
+			for _, remaining := range fields[i:] {
+				*remaining = ""
+			}
+			content.ExtractionIncomplete = true
+			return
+		}
+		*field = strings.ToValidUTF8(*field, "�")
+	}
+	// Detect a limit crossed during the final indivisible scan.
+	if budget.useFallback() {
+		content.ExtractionIncomplete = true
+	}
 }
 
 func writeDomainRegistrationEvidence(b *strings.Builder, info DomainRegistrationInfo) {

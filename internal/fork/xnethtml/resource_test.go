@@ -2,7 +2,6 @@ package html
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -27,6 +26,39 @@ func TestOpenElementDepthLimitIsResourceError(t *testing.T) {
 	if limitErr.Resource != "open elements" || limitErr.Limit != 512 {
 		t.Fatalf("limit error = %+v", limitErr)
 	}
+}
+
+func TestAttributeCountLimitIsResourceError(t *testing.T) {
+	source := "<div " + strings.Repeat("a=x ", maxAttributesPerTag+1) + "></div>"
+	_, err := Parse(strings.NewReader(source))
+	var limitErr *ResourceLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("err=%v, want ResourceLimitError", err)
+	}
+	if limitErr.Resource != "attributes per tag" || limitErr.Limit != maxAttributesPerTag {
+		t.Fatalf("limit error = %+v", limitErr)
+	}
+
+	withinLimit := "<div " + strings.Repeat("a=x ", maxAttributesPerTag) + "></div>"
+	if _, err := Parse(strings.NewReader(withinLimit)); err != nil {
+		t.Fatalf("tag at attribute limit rejected: %v", err)
+	}
+}
+
+func TestDocumentNodeLimitIsResourceError(t *testing.T) {
+	p := parser{nodeCount: maxDocumentNodes}
+	defer func() {
+		recovered := recover()
+		abort, ok := recovered.(resourceAbort)
+		if !ok {
+			t.Fatalf("panic=%v, want resourceAbort", recovered)
+		}
+		var limitErr *ResourceLimitError
+		if !errors.As(abort.err, &limitErr) || limitErr.Resource != "document nodes" || limitErr.Limit != maxDocumentNodes {
+			t.Fatalf("limit error = %v", abort.err)
+		}
+	}()
+	p.newNode(Node{Type: ElementNode, Data: "div"})
 }
 
 func TestResourceStopDuringLargeToken(t *testing.T) {
@@ -68,32 +100,6 @@ func TestAttributeContentIsChargedToMemoryBudget(t *testing.T) {
 	long := used(strings.Repeat("x", 2048))
 	if difference := long - short; difference < 2047 {
 		t.Fatalf("long attribute added %d charged bytes, want at least 2047", difference)
-	}
-}
-
-func TestUniqueAttributeStructuralMemoryIsCharged(t *testing.T) {
-	used := func(source string) int64 {
-		t.Helper()
-		memory := resourceguard.NewMemory(1 << 20)
-		if _, err := ParseWithOptions(strings.NewReader(source), ParseOptionResourceLimits(ResourceLimits{Memory: memory})); err != nil {
-			t.Fatal(err)
-		}
-		return memory.Used()
-	}
-
-	var source strings.Builder
-	source.WriteString("<div ")
-	for i := range 100 {
-		source.WriteString("data-")
-		source.WriteString(strconv.Itoa(i))
-		source.WriteString("=x ")
-	}
-	source.WriteString("></div>")
-
-	withoutAttributes := used("<div></div>")
-	withAttributes := used(source.String())
-	if difference := withAttributes - withoutAttributes; difference < 100*64 {
-		t.Fatalf("100 unique attributes added %d charged bytes, want at least %d", difference, 100*64)
 	}
 }
 

@@ -177,6 +177,18 @@ func TestSelectorBranchLimitAbandonsCascade(t *testing.T) {
 	}
 }
 
+func TestDeclarationLimitAbandonsCascade(t *testing.T) {
+	s := sheet{limits: DefaultLimits()}
+	s.declarationCount = maxCSSDeclarations
+	s.parseCSS(`a{color:red}`, false)
+	if !s.cascadeIncomplete {
+		t.Fatal("declaration limit did not abandon the cascade")
+	}
+	if len(s.rules) != 0 {
+		t.Fatalf("abandoned cascade retained %d rules", len(s.rules))
+	}
+}
+
 func TestMatchCacheStopsGrowingAtEntryLimit(t *testing.T) {
 	s := sheet{memory: resourceguard.NewMemory(1 << 20), index: selectorIndex{count: 1}}
 	s.runtime.cacheMatches = true

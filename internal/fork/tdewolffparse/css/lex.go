@@ -137,8 +137,13 @@ func (tt TokenType) String() string {
 
 // Lexer is the state for the lexer.
 type Lexer struct {
-	r *parse.Input
+	r           *parse.Input
+	guard       *resourceGuard
+	resourceErr error
+	tokens      int
 }
+
+const maxCSSTokens = 131_072
 
 // NewLexer returns a new Lexer for a given io.Reader.
 func NewLexer(r *parse.Input) *Lexer {
@@ -147,13 +152,48 @@ func NewLexer(r *parse.Input) *Lexer {
 	}
 }
 
+// NewLexerWithLimits returns a lexer that charges each emitted token to the
+// shared allocation budget and cooperatively stops while advancing its input.
+func NewLexerWithLimits(r *parse.Input, limits ResourceLimits) *Lexer {
+	if limits.ShouldStop != nil {
+		r.SetProgressCheck(func() error {
+			if limits.ShouldStop() {
+				return ErrResourceStopped
+			}
+			return nil
+		})
+	}
+	return &Lexer{r: r, guard: newResourceGuard(limits)}
+}
+
 // Err returns the error encountered during lexing, this is often io.EOF but also other errors can be returned.
 func (l *Lexer) Err() error {
+	if l.resourceErr != nil {
+		return l.resourceErr
+	}
 	return l.r.Err()
 }
 
 // Next returns the next Token. It returns ErrorToken when an error was encountered. Using Err() one can retrieve the error message.
-func (l *Lexer) Next() (TokenType, []byte) {
+func (l *Lexer) Next() (tt TokenType, data []byte) {
+	if l.resourceErr != nil {
+		return ErrorToken, nil
+	}
+	defer func() {
+		if tt == ErrorToken {
+			return
+		}
+		l.tokens++
+		if l.tokens > maxCSSTokens {
+			l.resourceErr = &ResourceLimitError{Resource: "tokens", Limit: maxCSSTokens}
+			tt, data = ErrorToken, nil
+			return
+		}
+		if err := l.guard.token(data); err != nil {
+			l.resourceErr = err
+			tt, data = ErrorToken, nil
+		}
+	}()
 	switch l.r.Peek(0) {
 	case ' ', '\t', '\n', '\r', '\f':
 		l.r.Move(1)

@@ -35,6 +35,7 @@ ai:
   prompt_file: /tmp/test-prompt
   max_concurrent: 3
   compact_prompt_urls: false
+  max_html_parse_memory_bytes: 33554432
 filtering:
   reject_score: 0.8
   legitimate_low_confidence_score: 0.7
@@ -68,7 +69,7 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Authentication.Mode != AuthenticationModeInternal || cfg.Authentication.Timeout.Value() != 7*time.Second || cfg.Authentication.MaxConcurrent != 3 || cfg.Authentication.MessageStorage != "file" || cfg.Authentication.MemoryMessageLimit != 5 || cfg.AI.MaxConcurrent != 3 || cfg.AI.CompactPromptURLs || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || !reflect.DeepEqual(cfg.Filtering.AuthenticatedOnlySenderDomains, []string{"example.com"}) || cfg.Attachments.BlockExecutables || !cfg.Attachments.AddIPReputationStrike || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
+	if cfg.Authentication.Mode != AuthenticationModeInternal || cfg.Authentication.Timeout.Value() != 7*time.Second || cfg.Authentication.MaxConcurrent != 3 || cfg.Authentication.MessageStorage != "file" || cfg.Authentication.MemoryMessageLimit != 5 || cfg.AI.MaxConcurrent != 3 || cfg.AI.CompactPromptURLs || cfg.AI.MaxHTMLParseMemoryBytes != 33554432 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || !reflect.DeepEqual(cfg.Filtering.AuthenticatedOnlySenderDomains, []string{"example.com"}) || cfg.Attachments.BlockExecutables || !cfg.Attachments.AddIPReputationStrike || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
@@ -477,17 +478,19 @@ func TestValidateMaximumHTMLParseCPU(t *testing.T) {
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "html_parse_cpu_limit_action") {
 		t.Fatalf("invalid html_parse_cpu_limit_action error = %v", err)
 	}
-	for _, milliseconds := range []int{0, 1, 1000} {
+	for _, milliseconds := range []int{1, 250, 1000} {
 		cfg := validConfig()
 		cfg.AI.MaxHTMLParseCPUMilliseconds = milliseconds
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("valid max_html_parse_cpu_ms %d rejected: %v", milliseconds, err)
 		}
 	}
-	cfg = validConfig()
-	cfg.AI.MaxHTMLParseCPUMilliseconds = -1
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_html_parse_cpu_ms") {
-		t.Fatalf("invalid max_html_parse_cpu_ms error = %v", err)
+	for _, milliseconds := range []int{0, -1} {
+		cfg = validConfig()
+		cfg.AI.MaxHTMLParseCPUMilliseconds = milliseconds
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_html_parse_cpu_ms") {
+			t.Fatalf("invalid max_html_parse_cpu_ms %d error = %v", milliseconds, err)
+		}
 	}
 	const wantRejectMessage = "Message rejected due to suspected HTML/CSS denial-of-service attack"
 	if got := defaults().AI.HTMLDoSRejectMessage; got != wantRejectMessage {
@@ -504,6 +507,26 @@ func TestValidateMaximumHTMLParseCPU(t *testing.T) {
 		cfg.AI.HTMLDoSRejectMessage = " "
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("unused blank html_dos_reject_message rejected for %s: %v", action, err)
+		}
+	}
+}
+
+func TestValidateMaximumHTMLParseMemory(t *testing.T) {
+	if got := defaults().AI.MaxHTMLParseMemoryBytes; got != 64<<20 {
+		t.Fatalf("maximum HTML parse memory default = %d, want %d", got, 64<<20)
+	}
+	for _, bytes := range []int64{8 << 20, 64 << 20, 512 << 20} {
+		cfg := validConfig()
+		cfg.AI.MaxHTMLParseMemoryBytes = bytes
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid max_html_parse_memory_bytes %d rejected: %v", bytes, err)
+		}
+	}
+	for _, bytes := range []int64{0, 8<<20 - 1, 512<<20 + 1} {
+		cfg := validConfig()
+		cfg.AI.MaxHTMLParseMemoryBytes = bytes
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_html_parse_memory_bytes") {
+			t.Fatalf("invalid max_html_parse_memory_bytes %d error = %v", bytes, err)
 		}
 	}
 }

@@ -56,8 +56,8 @@ func (s *sheet) recordKeyframeName(tokens []css.Token) {
 	}
 }
 
-func parseAnimationValue(value string, shorthand bool) animationValue {
-	tokens, status := lexValue(value)
+func parseAnimationValue(value string, shorthand bool, budget *cpuGuard) animationValue {
+	tokens, status := lexValue(value, budget)
 	if status != valueResolved {
 		return animationValue{unresolved: true}
 	}
@@ -272,7 +272,7 @@ func (s *sheet) potentiallyActiveAnimation(c candidate, context evaluationContex
 		if resolved.status != valueResolved || !context.budget.check() {
 			return true
 		}
-		parsed := parseAnimationValue(resolved.text, c.d.animationShorthand)
+		parsed := parseAnimationValue(resolved.text, c.d.animationShorthand, context.budget)
 		value = &parsed
 	}
 	if value.unresolved {

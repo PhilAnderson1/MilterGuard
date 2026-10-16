@@ -35,7 +35,8 @@ func commandProcessor(cfg config.Config, correspondents stores.CorrespondentAdmi
 		MessageSource:   commandArchiveSource{archive}, IPResolver: &commandIPResolver{resolver: resolver,
 			timeout: cfg.Milter.ConnectionDNSTimeout.Value(), log: log},
 		MaxMessageSize: cfg.Milter.MaxMessageSize, MaxHTMLParseCPUMilliseconds: cfg.AI.MaxHTMLParseCPUMilliseconds,
-		DatabaseTimeout: commandDatabaseTimeout, ActivityExpiry: cfg.Activity.Expiry.Value(),
+		MaxHTMLParseMemoryBytes: cfg.AI.MaxHTMLParseMemoryBytes,
+		DatabaseTimeout:         commandDatabaseTimeout, ActivityExpiry: cfg.Activity.Expiry.Value(),
 		Logger: log,
 	})
 }

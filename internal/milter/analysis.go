@@ -145,7 +145,10 @@ func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Messag
 		MaxBytes:     s.ai.MaxImageBytes,
 		MaxPixels:    s.ai.MaxImagePixels,
 	}
-	control := message.HTMLProcessingControl{DisableURLCompaction: !s.ai.CompactPromptURLs}
+	control := message.HTMLProcessingControl{
+		DisableURLCompaction: !s.ai.CompactPromptURLs,
+		MemoryBytes:          s.ai.MaxHTMLParseMemoryBytes,
+	}
 	contextStopped := func() bool { return ctx.Err() != nil }
 	if s.ai.MaxHTMLParseCPUMilliseconds == 0 {
 		control.ShouldFallback = contextStopped
@@ -206,18 +209,6 @@ func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Messag
 	}
 	duration := finished - started
 	exceeded = exceeded || prepared.HTMLCPULimitExceeded || duration > maximum
-	if exceeded && prepared.HasHTML && s.ai.HTMLParseCPULimitAction == "fallback" && !prepared.HTMLCPULimitExceeded {
-		// The final prompt-building phase crossed the limit after the last HTML
-		// checkpoint. Rebuild cheaply so fallback mode never submits a fully
-		// processed over-budget representation.
-		control.ShouldFallback = nil
-		control.ForceFallback = true
-		prepared = msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control)
-		last, ok := clock()
-		if ok && last >= started {
-			duration = last - started
-		}
-	}
 	return prepared, duration, true, exceeded
 }
 

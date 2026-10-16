@@ -106,6 +106,53 @@ func TestHTMLCPULimitFallbackContinuesAIWithBoundedExtraction(t *testing.T) {
 	}
 }
 
+func TestHTMLCPULimitFallbackRetainsCompletedMultipartAnalysis(t *testing.T) {
+	newService := func() *analysisService {
+		return &analysisService{ai: config.AIConfig{
+			MaxBodyChars: 4096, MaxHTMLParseCPUMilliseconds: 250,
+			HTMLParseCPULimitAction: "fallback", VisionMode: "off",
+		}}
+	}
+	msg := message.New(8192)
+	msg.AddHeader("Content-Type", `multipart/mixed; boundary="late-limit"`)
+	msg.AddBody([]byte("--late-limit\r\nContent-Type: text/plain\r\n\r\nplain evidence\r\n" +
+		"--late-limit\r\nContent-Type: text/html\r\n\r\n<p>HTML evidence</p>\r\n" +
+		"--late-limit--\r\n"))
+
+	// First count the deterministic clock samples for a completed extraction.
+	baselineCalls := 0
+	baseline := newService()
+	baseline.threadCPUTime = func() (time.Duration, bool) {
+		baselineCalls++
+		return time.Second, true
+	}
+	_, _, measured, exceeded := baseline.buildAnalysis(context.Background(), msg, message.AnalysisContext{})
+	if !measured || exceeded || baselineCalls < 2 {
+		t.Fatalf("baseline clock: measured=%v exceeded=%v calls=%d", measured, exceeded, baselineCalls)
+	}
+
+	// Cross the limit only at the final, post-extraction clock sample. The
+	// already completed analysis must be retained rather than rebuilt.
+	calls := 0
+	service := newService()
+	service.threadCPUTime = func() (time.Duration, bool) {
+		calls++
+		if calls == baselineCalls {
+			return time.Second + 251*time.Millisecond, true
+		}
+		return time.Second, true
+	}
+	prepared, duration, measured, exceeded := service.buildAnalysis(context.Background(), msg, message.AnalysisContext{})
+	if !measured || !exceeded || duration != 251*time.Millisecond || calls != baselineCalls {
+		t.Fatalf("late limit: measured=%v exceeded=%v duration=%v calls=%d want calls=%d",
+			measured, exceeded, duration, calls, baselineCalls)
+	}
+	if prepared.BodyExtractionIncomplete || !prepared.HasHTML ||
+		!strings.Contains(prepared.Prompt, "plain evidence") || !strings.Contains(prepared.Prompt, "HTML evidence") {
+		t.Fatalf("completed multipart analysis was not retained: %+v", prepared)
+	}
+}
+
 func TestHTMLCPULimitRejectIsNotDoSActivity(t *testing.T) {
 	repository := &recordingActivity{}
 	service := &activityService{repository: repository}

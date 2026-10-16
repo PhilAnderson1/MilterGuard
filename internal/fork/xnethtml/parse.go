@@ -28,6 +28,7 @@ type parser struct {
 	// Self-closing tags like <hr/> are treated as start tags, except that
 	// hasSelfClosingToken is set while they are being processed.
 	hasSelfClosingToken bool
+	nodeCount           int
 	// doc is the document root element.
 	doc *Node
 	// The stack of open elements (section 12.2.4.2) and active formatting
@@ -55,6 +56,8 @@ type parser struct {
 	// (section 12.4).
 	context *Node
 }
+
+const maxDocumentNodes = 262_144
 
 func (p *parser) top() *Node {
 	if n := p.oe.top(); n != nil {
@@ -352,16 +355,25 @@ func (p *parser) addElement() {
 }
 
 func (p *parser) newNode(n Node) *Node {
+	p.takeNode()
 	p.guard.node(n)
 	return &n
 }
 
 func (p *parser) cloneNode(n *Node) *Node {
+	p.takeNode()
 	p.guard.node(*n)
 	p.guard.mustAttributes(len(n.Attr))
 	clone := n.clone()
 	clone.parserImplied = true
 	return clone
+}
+
+func (p *parser) takeNode() {
+	p.nodeCount++
+	if p.nodeCount > maxDocumentNodes {
+		panic(resourceAbort{&ResourceLimitError{Resource: "document nodes", Limit: maxDocumentNodes}})
+	}
 }
 
 // Section 12.2.4.3.
@@ -541,6 +553,7 @@ func initialIM(p *parser) bool {
 		}))
 		return true
 	case DoctypeToken:
+		p.takeNode()
 		p.guard.node(Node{Type: DoctypeNode, Data: p.tok.Data})
 		n, quirks := parseDoctype(p.tok.Data)
 		p.doc.AppendChild(n)

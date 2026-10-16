@@ -684,7 +684,7 @@ func explicitAttachment(contentDisposition string) bool {
 }
 
 func (s *Scanner) disguisedBinaryContent(data []byte) bool {
-	if s.options.InspectSignatures && (binaryExecutableSignature(data) != "" || s.prohibitedArchiveSignature(data) != "") {
+	if s.options.InspectSignatures && (binaryExecutableSignature(data) != "" || s.configuredFormatSignature(data) != "") {
 		return true
 	}
 	return s.options.InspectArchives && archiveFormat("", "", data) != ""
@@ -782,13 +782,48 @@ func archiveFormat(filename, mediaType string, data []byte) string {
 }
 
 func (s *Scanner) prohibitedSignature(data []byte) string {
-	if signature := s.prohibitedArchiveSignature(data); signature != "" {
+	if signature := s.configuredFormatSignature(data); signature != "" {
 		return signature
 	}
 	return executableSignature(data)
 }
 
-func (s *Scanner) prohibitedArchiveSignature(data []byte) string {
+func (s *Scanner) configuredFormatSignature(data []byte) string {
+	if s.blocksAny("lnk") && hasPrefix(data, []byte{
+		0x4c, 0x00, 0x00, 0x00,
+		0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+	}) {
+		return "Windows shell link signature"
+	}
+	if s.blocksAny("cab", "onepkg") && hasPrefix(data, []byte("MSCF")) {
+		return "Microsoft cabinet signature"
+	}
+	if s.blocksAny("chm") && hasPrefix(data, []byte("ITSF")) {
+		return "compiled HTML Help signature"
+	}
+	if s.blocksAny("iso", "img") && len(data) >= 32774 && string(data[32769:32774]) == "CD001" {
+		return "ISO disk image signature"
+	}
+	if s.blocksAny("vhdx") && hasPrefix(data, []byte("vhdxfile")) {
+		return "VHDX disk image signature"
+	}
+	if s.blocksAny("vhd") && (hasPrefix(data, []byte("conectix")) ||
+		len(data) >= 512 && string(data[len(data)-512:len(data)-504]) == "conectix") {
+		return "VHD disk image signature"
+	}
+	if s.blocksAny("dmg") && len(data) >= 512 && string(data[len(data)-512:len(data)-508]) == "koly" {
+		return "Apple disk image signature"
+	}
+	if s.blocksAny("one", "onepkg") && hasPrefix(data, []byte{
+		0xe4, 0x52, 0x5c, 0x7b, 0x8c, 0xd8, 0xa7, 0x4d,
+		0xae, 0xb1, 0x53, 0x78, 0xd0, 0x29, 0x96, 0xd3,
+	}) {
+		return "Microsoft OneNote signature"
+	}
+	if s.blocksAny("apk") && len(data) >= 8 && string(data[:4]) == "dex\n" && data[7] == 0 {
+		return "Android DEX executable signature"
+	}
 	_, blockCompress := s.blocked["z"]
 	if blockCompress && len(data) >= 3 && hasPrefix(data, []byte{0x1f, 0x9d}) {
 		flags, maxBits := data[2], data[2]&0x1f
@@ -807,6 +842,15 @@ func (s *Scanner) prohibitedArchiveSignature(data []byte) string {
 	default:
 		return ""
 	}
+}
+
+func (s *Scanner) blocksAny(extensions ...string) bool {
+	for _, extension := range extensions {
+		if _, blocked := s.blocked[extension]; blocked {
+			return true
+		}
+	}
+	return false
 }
 
 func executableSignature(data []byte) string {

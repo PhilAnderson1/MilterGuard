@@ -1,6 +1,7 @@
 package message
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
@@ -192,8 +193,23 @@ func TestUTF8CharsetDecodingPreservesValidTextAndHandlesMalformedInput(t *testin
 	if got := decodeCharset("utf-8", []byte{'a', 0xff, 'b'}); got != "a�b" {
 		t.Fatalf("malformed UTF-8 = %q, want replacement character", got)
 	}
-	if got := decodeHTMLCharset("utf-8", append([]byte("\xef\xbb\xbf"), valid...)); got != string(valid) {
+	if got := decodeHTMLCharset("utf-8", append([]byte("\xef\xbb\xbf"), valid...), 100); got != string(valid) {
 		t.Fatalf("BOM-prefixed HTML UTF-8 = %q, want %q", got, valid)
+	}
+}
+
+func TestHTMLCharsetDecodingIsBoundedAfterExpansion(t *testing.T) {
+	const limit = 8
+	got := decodeHTMLCharset("windows-1252", bytes.Repeat([]byte{0x92}, 100), limit)
+	if len(got) != limit+1 {
+		t.Fatalf("expanded HTML length = %d, want %d", len(got), limit+1)
+	}
+
+	budget := newExtractionBudget()
+	budget.htmlBytesRemaining = limit
+	content := extractMIMEWithBudget("text/html; charset=windows-1252", "", "", bytes.Repeat([]byte{0x92}, 100), 0, budget)
+	if !content.ExtractionIncomplete || !content.HTMLFallbackUsed {
+		t.Fatalf("oversized decoded HTML was not handled as incomplete fallback: %+v", content)
 	}
 }
 
@@ -436,6 +452,80 @@ func TestHTMLMemoryBudgetIsSharedAcrossParts(t *testing.T) {
 	budget.consumeHTML(htmlextract.ResourceUsage{MemoryBytes: limits.MemoryBytes})
 	if _, ok := budget.htmlLimits(1); ok {
 		t.Fatal("exhausted shared memory budget accepted")
+	}
+}
+
+func TestMultipartJoinReservesOutputBeforeAllocation(t *testing.T) {
+	budget := newExtractionBudget()
+	initial := budget.memoryBytesRemaining
+	joined, complete := joinExtractedText([]string{"only"}, "\n\n", budget)
+	if !complete || joined != "only" || budget.memoryBytesRemaining != initial {
+		t.Fatalf("single-part join: joined=%q complete=%v remaining=%d", joined, complete, budget.memoryBytesRemaining)
+	}
+
+	budget.memoryBytesRemaining = 5
+	joined, complete = joinExtractedText([]string{"ab", "cd"}, "\n\n", budget)
+	if complete || joined != "" || budget.memoryBytesRemaining != 0 {
+		t.Fatalf("over-budget join: joined=%q complete=%v remaining=%d", joined, complete, budget.memoryBytesRemaining)
+	}
+
+	budget.memoryBytesRemaining = 6
+	joined, complete = joinExtractedText([]string{"ab", "cd"}, "\n\n", budget)
+	if !complete || joined != "ab\n\ncd" || budget.memoryBytesRemaining != 0 {
+		t.Fatalf("bounded join: joined=%q complete=%v remaining=%d", joined, complete, budget.memoryBytesRemaining)
+	}
+}
+
+func TestMultipartJoinsCheckCPUBetweenCopies(t *testing.T) {
+	calls := 0
+	budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool {
+		calls++
+		return calls >= 2
+	}})
+	if joined, complete := joinExtractedText([]string{"a", "b"}, "", budget); !complete || joined != "ab" {
+		t.Fatalf("first join: joined=%q complete=%v", joined, complete)
+	}
+	if joined, complete := joinExtractedText([]string{"c", "d"}, "", budget); complete || joined != "" {
+		t.Fatalf("post-limit join: joined=%q complete=%v", joined, complete)
+	}
+	if !budget.cpuLimitExceeded {
+		t.Fatal("post-limit join did not record CPU exhaustion")
+	}
+}
+
+func TestUTF8NormalisationChecksCPUBetweenScans(t *testing.T) {
+	calls := 0
+	budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool {
+		calls++
+		return calls >= 2
+	}})
+	content := extractedContent{
+		Text:         string([]byte{'a', 0xff}),
+		VisibleText:  string([]byte{'b', 0xff}),
+		StrippedText: string([]byte{'c', 0xff}),
+	}
+	normalizeExtractedUTF8(&content, budget)
+	if content.Text != "a�" || content.VisibleText != "" || content.StrippedText != "" {
+		t.Fatalf("normalized content = %+v", content)
+	}
+	if !content.ExtractionIncomplete || !budget.cpuLimitExceeded {
+		t.Fatalf("normalization limit not reported: content=%+v budget=%+v", content, budget)
+	}
+}
+
+func TestHTMLProcessingReportsMemoryUsage(t *testing.T) {
+	m := New(10_000)
+	m.AddHeader("Content-Type", "text/html")
+	m.AddBody([]byte("<p>reported memory</p>"))
+	var used, limit int64
+	analysis := m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 1_000, VisionOptions{Mode: "off"}, HTMLProcessingControl{
+		MemoryBytes: 8 << 20,
+		ObserveMemoryUsage: func(observedUsed, observedLimit int64) {
+			used, limit = observedUsed, observedLimit
+		},
+	})
+	if analysis.BodyExtractionIncomplete || used <= 0 || limit != 8<<20 || used >= limit {
+		t.Fatalf("reported memory: used=%d limit=%d analysis=%+v", used, limit, analysis)
 	}
 }
 

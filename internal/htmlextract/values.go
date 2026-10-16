@@ -108,6 +108,10 @@ const (
 )
 
 func resolve(p int, s string, parent, root *Style) (Value, valueStatus) {
+	return resolveWithBudget(p, s, parent, root, nil)
+}
+
+func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (Value, valueStatus) {
 	s = normalizeCSSKeyword(s)
 	if p >= properties {
 		return resolveLayoutProperty(p, s)
@@ -133,7 +137,7 @@ func resolve(p int, s string, parent, root *Style) (Value, valueStatus) {
 		return Value{Text: s}, valueUnsupported
 	}
 	if p == clip || p == clipPath {
-		return resolveClip(p, s)
+		return resolveClip(p, s, budget)
 	}
 	if p != color && p != background && strings.Contains(s, "(") {
 		return Value{Text: s}, valueUnsupported

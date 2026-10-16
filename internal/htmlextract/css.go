@@ -21,6 +21,7 @@ import (
 const (
 	maxSelectorBranches  = 4_096
 	maxMatchCacheEntries = 65_536
+	maxCSSDeclarations   = 32_768
 )
 
 const (
@@ -154,7 +155,7 @@ func contextualDeclaration(d declaration) bool {
 // prepareDeclaration performs the context-independent work for a declaration
 // once. Cascade candidates retain pointers to prepared declarations, so the
 // declaration and any retained valueTokens must remain immutable afterward.
-func prepareDeclaration(d declaration) declaration {
+func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 	if d.prepared != nil {
 		return d
 	}
@@ -167,7 +168,7 @@ func prepareDeclaration(d declaration) declaration {
 		d.keyword = normalizeCSSKeyword(d.value)
 	}
 	if (d.custom != "" || d.hasVars) && !d.tokensReady {
-		d.valueTokens, d.valueStatus = lexValue(d.value)
+		d.valueTokens, d.valueStatus = lexValue(d.value, budget)
 		d.tokensReady = true
 	}
 	if d.hasVars && d.tokensReady && d.valueStatus == valueResolved {
@@ -178,7 +179,7 @@ func prepareDeclaration(d declaration) declaration {
 		// Cache context-independent name parsing, including escaped identifiers
 		// that the conservative hasVars fast path initially treated as dynamic.
 		if !d.hasVars || (d.tokensReady && !tokensHaveVariables(d.valueTokens)) {
-			value := parseAnimationValue(d.value, d.animationShorthand)
+			value := parseAnimationValue(d.value, d.animationShorthand, budget)
 			d.animation = &value
 		}
 		return d
@@ -189,7 +190,7 @@ func prepareDeclaration(d declaration) declaration {
 			prepared.value = Value{Text: d.value}
 			prepared.status = valueUnsupported
 		} else {
-			prepared.value, prepared.status = resolve(d.prop, d.value, &initialStyle, &initialStyle)
+			prepared.value, prepared.status = resolveWithBudget(d.prop, d.value, &initialStyle, &initialStyle, budget)
 		}
 		d.prepared = &prepared
 		d.validity, d.validityReady = prepared.status, true
@@ -203,16 +204,16 @@ func prepareDeclaration(d declaration) declaration {
 			budget := cpuGuard{}
 			_, d.validity = evalMathTokens(d.prop, value, d.valueTokens, &initialStyle, &initialStyle, &budget)
 		} else {
-			_, d.validity = resolve(d.prop, value, &initialStyle, &initialStyle)
+			_, d.validity = resolveWithBudget(d.prop, value, &initialStyle, &initialStyle, budget)
 		}
 		d.validityReady = true
 	}
 	return d
 }
 
-func prepareDeclarations(ds []declaration) []declaration {
+func prepareDeclarations(ds []declaration, budget *cpuGuard) []declaration {
 	for i := range ds {
-		ds[i] = prepareDeclaration(ds[i])
+		ds[i] = prepareDeclaration(ds[i], budget)
 	}
 	return ds
 }
@@ -225,7 +226,7 @@ func (s *sheet) prepareDeclaration(d declaration) declaration {
 		d.dependenciesReady = false
 		return d
 	}
-	d = prepareDeclaration(d)
+	d = prepareDeclaration(d, s.cpu)
 	return d
 }
 
@@ -269,6 +270,7 @@ type sheet struct {
 	cascadeIncomplete    bool
 	planCount            int
 	selectorBranches     int
+	declarationCount     int
 	index                selectorIndex
 	cssBytes             int
 	mediaConditions      map[string]mediaCondition
@@ -294,10 +296,10 @@ func (s *sheet) admitCSS(text string) bool {
 		s.abandonCascade()
 		return false
 	}
-	// Cover extractor-owned token strings, declarations, condition frames and
-	// parser compatibility copies. The forked parser and selector compiler
-	// additionally charge their allocations at their actual insertion points.
-	if !s.memory.Reserve(int64(len(text))*64 + 256) {
+	// NewInputString makes the parser's mutable input copy. Tokens, parser
+	// states, selectors and retained application objects are bounded or charged
+	// at the points where they are created.
+	if !s.memory.Reserve(int64(len(text)) + 1) {
 		s.abandonCascade()
 		return false
 	}
@@ -588,7 +590,7 @@ func parseUnretainedCSSTokens(ts []css.Token, fallback string) parsedDeclaration
 // particular, an escaped '!' remains part of an identifier and cannot become
 // an !important delimiter, and an escaped space cannot disappear through
 // string trimming.
-func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string) parsedDeclarationValue {
+func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string, budget *cpuGuard) parsedDeclarationValue {
 	if status != valueResolved {
 		return parsedDeclarationValue{text: trimCSSWhitespace(fallback), tokens: ts, status: status, unsupportedColours: countUnsupportedColourFunctions(ts)}
 	}
@@ -636,7 +638,7 @@ func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string
 		raw := t.raw
 		if (t.kind == css.IdentToken || t.kind == css.FunctionToken) && strings.Contains(raw, "\\") {
 			decoded := cssUnescape(raw)
-			decodedTokens, decodedStatus := lexValue(decoded)
+			decodedTokens, decodedStatus := lexValue(decoded, budget)
 			sameIdentifierClass := t.kind == css.IdentToken && len(decodedTokens) == 1 && decodedTokens[0].kind == css.CustomPropertyNameToken
 			if decodedStatus == valueResolved && len(decodedTokens) == 1 && (decodedTokens[0].kind == t.kind || sameIdentifierClass) {
 				raw = decoded
@@ -660,7 +662,7 @@ func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string
 }
 
 func (s *sheet) declarations(prop, value string) []declaration {
-	tokens, status := lexValue(value)
+	tokens, status := lexValue(value, s.cpu)
 	return s.declarationsFromTokens(prop, tokens, status, value)
 }
 
@@ -739,7 +741,7 @@ func relevantNormalizedDeclarationProperty(prop string) bool {
 
 func (s *sheet) declarationsFromTokens(prop string, tokens []valueToken, status valueStatus, fallback string) []declaration {
 	prop = normalizeDeclarationProperty(prop)
-	parsed := parseDeclarationTokens(tokens, status, fallback)
+	parsed := parseDeclarationTokens(tokens, status, fallback, s.cpu)
 	return s.declarationsFromParsed(prop, parsed, true)
 }
 
@@ -780,7 +782,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 		properties := [...]int{marginTop, marginRight, marginBottom, marginLeft}
 		out := make([]declaration, 0, len(properties))
 		for i, property := range properties {
-			componentTokens, componentStatus := lexValue(values[i])
+			componentTokens, componentStatus := lexValue(values[i], s.cpu)
 			d := declaration{
 				prop: property, value: values[i], important: imp, order: s.order,
 				unsupported: uncertain || parsed.status == valueUnsupported || parsed.unsafeIdentifier,
@@ -954,9 +956,17 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 	if !s.admitCSS(text) {
 		return cssParseResult{}
 	}
-	compatibility := parserCompatibleCSS(text, s.shouldStop)
+	compatibility := parserCompatibleCSS(text, s.shouldStop, s.memory)
 	if compatibility.stopped {
+		if s.memory.Exhausted() {
+			s.abandonCascade()
+			return cssParseResult{}
+		}
 		s.stopped = true
+		return cssParseResult{}
+	}
+	if len(compatibility.text) > len(text) && !s.memory.Reserve(int64(len(compatibility.text)-len(text))) {
+		s.abandonCascade()
 		return cssParseResult{}
 	}
 	p := css.NewParserWithLimits(parse.NewInputString(compatibility.text), inline, css.ResourceLimits{
@@ -1183,18 +1193,18 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 				// Parser output could not be aligned with the rewritten source.
 				// Retain the declaration as uncertain rather than evaluating bytes
 				// that may differ from the author's value.
-				valueTokens, _ := lexValue(vals)
+				valueTokens, _ := lexValue(vals, s.cpu)
 				declarations = s.declarationsFromTokens(prop, valueTokens, valueUnsupported, vals)
 			} else if compatibilityRestored {
 				// Re-tokenize after restoring only the delimiters inserted by the
 				// compatibility pass. Author-written escapes remain untouched.
-				valueTokens, valueStatus := lexValue(vals)
+				valueTokens, valueStatus := lexValue(vals, s.cpu)
 				declarations = s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)
 			} else if g == css.CustomPropertyGrammar {
 				// tdewolff deliberately exposes a custom-property value as one
 				// opaque CustomPropertyValue token. Lex that payload once here so
 				// var() dependencies and !important retain their CSS token boundaries.
-				valueTokens, valueStatus := lexValue(vals)
+				valueTokens, valueStatus := lexValue(vals, s.cpu)
 				declarations = s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)
 			} else if cssTokensNeedRetention(prop, values) {
 				valueTokens, valueStatus := ownedValueTokens(values, vals)
@@ -1202,6 +1212,15 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 			} else {
 				declarations = s.declarationsFromParsed(prop, parseUnretainedCSSTokens(values, vals), false)
 			}
+			if len(declarations) > maxCSSDeclarations-s.declarationCount {
+				s.abandonCascade()
+				return cssParseResult{declarations: out}
+			}
+			if !s.memory.Reserve(int64(len(declarations)) * int64(unsafe.Sizeof(declaration{}))) {
+				s.abandonCascade()
+				return cssParseResult{declarations: out}
+			}
+			s.declarationCount += len(declarations)
 			// A style attribute is a declaration list, not a stylesheet. Some
 			// recoverable parsers nevertheless expose declarations nested in an
 			// invalid at-rule. Such declarations have no unconditional inline

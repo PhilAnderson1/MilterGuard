@@ -235,11 +235,16 @@ func (p *Parser) abort(err error) {
 }
 
 func (p *Parser) pushState(state State) {
+	if len(p.state) >= maxCSSParserStates {
+		p.abort(&ResourceLimitError{Resource: "parser nesting", Limit: maxCSSParserStates})
+	}
 	p.state = append(p.state, state)
 	if err := p.guard.states(cap(p.state)); err != nil {
 		p.abort(err)
 	}
 }
+
+const maxCSSParserStates = 256
 
 func (p *Parser) openComponent() {
 	p.level++
@@ -334,7 +339,7 @@ func (p *Parser) parseAtRule() GrammarType {
 	}
 	p.data = parse.ToLower(parse.Copy(p.data))
 	atRuleName := p.data
-	if len(atRuleName) > 0 && atRuleName[1] == '-' {
+	if len(atRuleName) > 1 && atRuleName[1] == '-' {
 		if i := bytes.IndexByte(atRuleName[2:], '-'); i != -1 {
 			atRuleName = atRuleName[i+2:] // skip vendor specific prefix
 		}

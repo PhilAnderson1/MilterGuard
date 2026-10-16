@@ -118,6 +118,74 @@ func TestProhibitedArchiveMagicRequiresBlockedExtension(t *testing.T) {
 	}
 }
 
+func TestConfiguredDangerousFormatDetectedByMagicWithDisguisedFilename(t *testing.T) {
+	shellLink := []byte{
+		0x4c, 0x00, 0x00, 0x00,
+		0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+	}
+	iso := make([]byte, 32774)
+	copy(iso[32769:], "CD001")
+	vhd := make([]byte, 512)
+	copy(vhd, "conectix")
+	dmg := make([]byte, 512)
+	copy(dmg, "koly")
+	oneNote := []byte{
+		0xe4, 0x52, 0x5c, 0x7b, 0x8c, 0xd8, 0xa7, 0x4d,
+		0xae, 0xb1, 0x53, 0x78, 0xd0, 0x29, 0x96, 0xd3,
+	}
+	tests := []struct {
+		name      string
+		extension string
+		data      []byte
+		detection string
+	}{
+		{name: "shell link", extension: "lnk", data: shellLink, detection: "Windows shell link signature"},
+		{name: "cabinet", extension: "cab", data: []byte("MSCFpayload"), detection: "Microsoft cabinet signature"},
+		{name: "compiled HTML Help", extension: "chm", data: []byte("ITSFpayload"), detection: "compiled HTML Help signature"},
+		{name: "ISO", extension: "iso", data: iso, detection: "ISO disk image signature"},
+		{name: "VHD", extension: "vhd", data: vhd, detection: "VHD disk image signature"},
+		{name: "VHDX", extension: "vhdx", data: []byte("vhdxfilepayload"), detection: "VHDX disk image signature"},
+		{name: "DMG", extension: "dmg", data: dmg, detection: "Apple disk image signature"},
+		{name: "OneNote", extension: "one", data: oneNote, detection: "Microsoft OneNote signature"},
+		{name: "Android DEX", extension: "apk", data: []byte("dex\n035\x00payload"), detection: "Android DEX executable signature"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options := testScanner().options
+			options.BlockedExtensions = append(options.BlockedExtensions, test.extension)
+			finding, err := New(options).Scan(
+				"application/octet-stream", "", `attachment; filename="payload.dat"`, test.data,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finding == nil || finding.Detection != test.detection {
+				t.Fatalf("finding = %#v, want detection %q", finding, test.detection)
+			}
+		})
+	}
+}
+
+func TestDangerousFormatMagicRequiresBlockedExtension(t *testing.T) {
+	tests := [][]byte{
+		{0x4c, 0x00, 0x00, 0x00, 0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46},
+		[]byte("MSCFpayload"),
+		[]byte("ITSFpayload"),
+		[]byte("vhdxfilepayload"),
+		{0xe4, 0x52, 0x5c, 0x7b, 0x8c, 0xd8, 0xa7, 0x4d, 0xae, 0xb1, 0x53, 0x78, 0xd0, 0x29, 0x96, 0xd3},
+		[]byte("dex\n035\x00payload"),
+	}
+	for _, data := range tests {
+		finding, err := testScanner().Scan(
+			"application/octet-stream", "", `attachment; filename="payload.dat"`, data,
+		)
+		if err != nil || finding != nil {
+			t.Fatalf("data %x: finding = %#v, error = %v", data, finding, err)
+		}
+	}
+}
+
 func TestInvalidUnixCompressFlagsDoNotTriggerSignature(t *testing.T) {
 	finding, err := testScanner().Scan(
 		"application/octet-stream", "", `attachment; filename="data.bin"`, []byte{0x1f, 0x9d, 0x08},

@@ -109,11 +109,14 @@ type Analysis struct {
 // all message-content preparation. ShouldFallback stops MIME and plain-text
 // work and switches HTML parts to bounded lexical fallback when the external
 // budget expires. FallbackShouldStop provides the fallback tokenizer's separate
-// budget. Both callbacks must be inexpensive.
+// budget. ObserveMemoryUsage is an optional diagnostic callback invoked once
+// extraction has completed. A positive MemoryBytes overrides the default
+// cumulative allocation budget. All callbacks must be inexpensive.
 type HTMLProcessingControl struct {
 	ShouldFallback       func() bool
 	FallbackShouldStop   func() bool
-	ForceFallback        bool
+	ObserveMemoryUsage   func(usedBytes, limitBytes int64)
+	MemoryBytes          int64
 	DisableURLCompaction bool
 }
 
@@ -305,10 +308,16 @@ func (m *Message) BodyBytes() []byte { return m.body.Bytes() }
 // authenticated command message. Callers separately constrain the accepted
 // top-level MIME types.
 func (m *Message) CommandText(maxBytes int64) string {
+	return m.CommandTextWithHTMLControl(maxBytes, HTMLProcessingControl{})
+}
+
+// CommandTextWithHTMLControl applies explicit HTML resource controls while
+// extracting an authenticated command message.
+func (m *Message) CommandTextWithHTMLControl(maxBytes int64, control HTMLProcessingControl) string {
 	body := m.BodyBytes()
 	if maxBytes >= 0 && int64(len(body)) > maxBytes {
 		body = body[:maxBytes]
 	}
-	content := extractMIME(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", body, 0)
+	content := extractMIMEWithBudget(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", body, 0, newExtractionBudgetWithControl(control))
 	return stripInvisibleFormatting(content.VisibleText)
 }

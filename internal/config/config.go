@@ -147,6 +147,7 @@ type AIConfig struct {
 	MaxBodyChars                int      `yaml:"max_body_chars"`
 	CompactPromptURLs           bool     `yaml:"compact_prompt_urls"`
 	MaxHTMLParseCPUMilliseconds int      `yaml:"max_html_parse_cpu_ms"`
+	MaxHTMLParseMemoryBytes     int64    `yaml:"max_html_parse_memory_bytes"`
 	HTMLParseCPULimitAction     string   `yaml:"html_parse_cpu_limit_action"`
 	HTMLDoSRejectMessage        string   `yaml:"html_dos_reject_message"`
 	IncompleteBodyAction        string   `yaml:"incomplete_body_action"`
@@ -269,7 +270,8 @@ func defaults() Config {
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
 			DisableThinking: true,
 			PromptFile:      "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
-			Retries: 2, MaxConcurrent: 8, MaxBodyChars: 50000, CompactPromptURLs: true, MaxHTMLParseCPUMilliseconds: 250,
+			Retries: 2, MaxConcurrent: 8, MaxBodyChars: 50000, CompactPromptURLs: true,
+			MaxHTMLParseCPUMilliseconds: 250, MaxHTMLParseMemoryBytes: 64 << 20,
 			HTMLParseCPULimitAction: "dos-reject",
 			HTMLDoSRejectMessage:    "Message rejected due to suspected HTML/CSS denial-of-service attack", IncompleteBodyAction: "scan",
 			VisionMode: "fallback", VisionMinTextChars: 500,
@@ -283,7 +285,12 @@ func defaults() Config {
 		},
 		Attachments: AttachmentsConfig{
 			BlockExecutables: true, AddIPReputationStrike: false,
-			BlockedExtensions: []string{"exe", "com", "scr", "pif", "bat", "cmd", "ps1", "vbs", "js", "jse", "msi", "dll", "jar", "lnk", "iso", "7z", "rar", "z"},
+			BlockedExtensions: []string{
+				"exe", "com", "scr", "pif", "bat", "cmd", "ps1", "vbs", "js", "jse", "msi", "dll", "jar", "lnk", "iso",
+				"cpl", "hta", "htc", "chm", "sct", "scf", "wsf", "wsh", "wsc", "ws", "vb", "vbe", "reg", "url", "website",
+				"jnlp", "application", "appref-ms", "xbap", "msp", "mst", "msu", "app", "appx", "msix", "msixbundle", "apk",
+				"cab", "img", "vhd", "vhdx", "dmg", "one", "onepkg", "7z", "rar", "z",
+			},
 			InspectSignatures: true, InspectArchives: true, MaxAttachmentBytes: 10 << 20,
 			MaxArchiveDepth: 2, MaxArchiveFiles: 100, MaxArchiveUncompressedBytes: 50 << 20,
 			EncryptedArchiveAction: "reject", UnscannableAction: "accept", InvalidMIMEAction: "reject",

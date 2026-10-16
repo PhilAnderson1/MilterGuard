@@ -1,10 +1,24 @@
 package cascadia
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
+
+func TestSelectorStructuralLimits(t *testing.T) {
+	if _, err := ParseGroup(strings.Repeat("a", maxSelectorBytes+1)); err == nil {
+		t.Fatal("oversized selector accepted")
+	}
+	if _, err := ParseGroup(strings.Repeat(".a", maxSelectorComponents+1)); err == nil {
+		t.Fatal("selector with excessive components accepted")
+	}
+	nested := strings.Repeat(":not(", maxSelectorDepth+1) + "a" + strings.Repeat(")", maxSelectorDepth+1)
+	if _, err := ParseGroup(nested); err == nil {
+		t.Fatal("excessively nested selector accepted")
+	}
+}
 
 func TestMatchWithStopInterruptsDescendantSearch(t *testing.T) {
 	selector, err := ParseGroup(`div:has(span)`)

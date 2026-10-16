@@ -27,9 +27,9 @@ type extractionBudget struct {
 	htmlBytesRemaining   int
 	cssBytesRemaining    int
 	memoryBytesRemaining int64
+	memoryBytesLimit     int64
 	shouldFallback       func() bool
 	fallbackShouldStop   func() bool
-	forceFallback        bool
 	cpuLimitExceeded     bool
 	compactURLs          bool
 }
@@ -40,13 +40,16 @@ func newExtractionBudget() *extractionBudget {
 
 func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBudget {
 	limits := htmlextract.DefaultLimits()
+	if control.MemoryBytes > 0 {
+		limits.MemoryBytes = control.MemoryBytes
+	}
 	return &extractionBudget{
 		htmlBytesRemaining:   limits.InputBytes,
 		cssBytesRemaining:    limits.CSSBytes,
 		memoryBytesRemaining: limits.MemoryBytes,
+		memoryBytesLimit:     limits.MemoryBytes,
 		shouldFallback:       control.ShouldFallback,
 		fallbackShouldStop:   control.FallbackShouldStop,
-		forceFallback:        control.ForceFallback,
 		compactURLs:          !control.DisableURLCompaction,
 	}
 }
@@ -55,7 +58,7 @@ func (b *extractionBudget) useFallback() bool {
 	if b.cpuLimitExceeded {
 		return true
 	}
-	if b.forceFallback || (b.shouldFallback != nil && b.shouldFallback()) {
+	if b.shouldFallback != nil && b.shouldFallback() {
 		b.cpuLimitExceeded = true
 		return true
 	}
@@ -85,6 +88,18 @@ func (b *extractionBudget) htmlLimits(bytes int) (htmlextract.Limits, bool) {
 func (b *extractionBudget) consumeHTML(usage htmlextract.ResourceUsage) {
 	b.cssBytesRemaining = remainingInt(b.cssBytesRemaining, usage.CSSBytes)
 	b.memoryBytesRemaining = remainingInt64(b.memoryBytesRemaining, usage.MemoryBytes)
+}
+
+func (b *extractionBudget) reserveOutputMemory(bytes int64) bool {
+	if bytes <= 0 {
+		return true
+	}
+	if bytes > b.memoryBytesRemaining {
+		b.memoryBytesRemaining = 0
+		return false
+	}
+	b.memoryBytesRemaining -= bytes
+	return true
 }
 
 func remainingInt64(remaining, used int64) int64 {
@@ -246,12 +261,20 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		}
 		combined.ImageRefs = imageRefs.refs
 		combined.Links = links.links
-		combined.Text = strings.Join(textParts, "\n\n")
-		combined.StrippedText = strings.Join(strippedTextParts, "\n\n")
-		if budget.useFallback() {
+		var complete bool
+		combined.Text, complete = joinExtractedText(textParts, "\n\n", budget)
+		processingStopped = processingStopped || !complete
+		if complete {
+			combined.StrippedText, complete = joinExtractedText(strippedTextParts, "\n\n", budget)
+			processingStopped = processingStopped || !complete
+		}
+		if !complete {
+			processingStopped = true
+		} else if budget.useFallback() {
 			processingStopped = true
 		} else {
-			combined.VisibleText = strings.Join(visibleTextParts, "\n\n")
+			combined.VisibleText, complete = joinExtractedText(visibleTextParts, "\n\n", budget)
+			processingStopped = processingStopped || !complete
 		}
 		combined.MIMEIncomplete = mimeIncomplete
 		combined.ExtractionIncomplete = combined.ExtractionIncomplete || processingStopped
@@ -273,7 +296,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		return content
 	}
 	if mediaType == "text/html" {
-		text := decodeHTMLCharset(params["charset"], decoded)
+		text := decodeHTMLCharset(params["charset"], decoded, budget.htmlBytesRemaining)
 		content := htmlToTextWithBudget(text, budget)
 		content.HTML = true
 		content.TransferIncomplete = transferIncomplete
@@ -293,6 +316,34 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		ConfidentVisibleChars: confidentTextCharacters(text),
 		Links:                 links.links, TransferIncomplete: transferIncomplete,
 	}
+}
+
+func joinExtractedText(parts []string, separator string, budget *extractionBudget) (string, bool) {
+	if len(parts) == 0 {
+		return "", true
+	}
+	if len(parts) == 1 {
+		return parts[0], true
+	}
+	// strings.Join is one indivisible copy. Check immediately before it so a
+	// limit crossed by the preceding combine phase cannot start another full
+	// output pass.
+	if budget.useFallback() {
+		return "", false
+	}
+	total := int64(len(separator)) * int64(len(parts)-1)
+	const maxInt64 = int64(^uint64(0) >> 1)
+	for _, part := range parts {
+		if int64(len(part)) > maxInt64-total {
+			budget.memoryBytesRemaining = 0
+			return "", false
+		}
+		total += int64(len(part))
+	}
+	if !budget.reserveOutputMemory(total) {
+		return "", false
+	}
+	return strings.Join(parts, separator), true
 }
 
 func extractAttachedMessage(data []byte, depth int, budget *extractionBudget) extractedContent {
@@ -342,22 +393,45 @@ func decodeCharset(label string, data []byte) string {
 // decodeHTMLCharset keeps a usable MIME declaration authoritative. Without
 // one, HTML's own BOM or early meta declaration can identify its encoding;
 // this does not parse the document or change the HTML extractor.
-func decodeHTMLCharset(label string, data []byte) string {
+func decodeHTMLCharset(label string, data []byte, maxBytes int) string {
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
+	// Retain one byte beyond the allowance so htmlLimits can distinguish an
+	// oversized decoded body from one which exactly fits. Allow room for a
+	// UTF-8 BOM while reading; it is removed before enforcing the bound.
+	outputLimit := maxBytes + 1
+	readLimit := int64(outputLimit + len("\ufeff"))
+	bounded := func(value []byte) string {
+		value = bytes.TrimPrefix(value, []byte("\ufeff"))
+		if len(value) > outputLimit {
+			return string(value[:outputLimit])
+		}
+		return string(value)
+	}
 	if encoding, canonical := charset.Lookup(strings.TrimSpace(label)); encoding != nil {
 		if canonical == "utf-8" && utf8.Valid(data) {
-			return strings.TrimPrefix(string(data), "\ufeff")
+			return bounded(data)
 		}
-		return strings.TrimPrefix(decodeCharset(label, data), "\ufeff")
+		reader, err := charset.NewReaderLabel(label, bytes.NewReader(data))
+		if err != nil {
+			return bounded(data)
+		}
+		decoded, err := io.ReadAll(io.LimitReader(reader, readLimit))
+		if err != nil {
+			return bounded(data)
+		}
+		return bounded(decoded)
 	}
 	reader, err := charset.NewReader(bytes.NewReader(data), "text/html")
 	if err != nil {
-		return string(data)
+		return bounded(data)
 	}
-	decoded, err := io.ReadAll(reader)
+	decoded, err := io.ReadAll(io.LimitReader(reader, readLimit))
 	if err != nil {
-		return string(data)
+		return bounded(data)
 	}
-	return strings.TrimPrefix(string(decoded), "\ufeff")
+	return bounded(decoded)
 }
 
 func hasExtractedContent(content extractedContent) bool {

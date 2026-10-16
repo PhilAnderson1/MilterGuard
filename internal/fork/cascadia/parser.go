@@ -6,19 +6,39 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // a parser for CSS selectors
 type parser struct {
-	s      string // the source text
-	i      int    // the current position
-	memory *resourceguard.Memory
+	s          string // the source text
+	i          int    // the current position
+	components int
+	depth      int
 
 	// if `false`, parsing a pseudo-element
 	// returns an error.
 	acceptPseudoElements bool
+}
+
+const (
+	maxSelectorBytes      = 16 << 10
+	maxSelectorComponents = 1_024
+	maxSelectorDepth      = 64
+)
+
+func validateSelectorInput(selector string) error {
+	if len(selector) > maxSelectorBytes {
+		return fmt.Errorf("selector exceeds %d bytes", maxSelectorBytes)
+	}
+	return nil
+}
+
+func (p *parser) takeComponent() error {
+	p.components++
+	if p.components > maxSelectorComponents {
+		return fmt.Errorf("selector exceeds %d components", maxSelectorComponents)
+	}
+	return nil
 }
 
 // parseEscape parses a backslash escape.
@@ -724,9 +744,11 @@ func (p *parser) parseSimpleSelectorSequence() (Sel, error) {
 	if p.i >= len(p.s) {
 		return nil, errors.New("expected selector, found EOF instead")
 	}
-
 	switch p.s[p.i] {
 	case '*':
+		if err := p.takeComponent(); err != nil {
+			return nil, err
+		}
 		// It's the universal selector. Just skip over it, since it doesn't affect the meaning.
 		p.i++
 		if p.i+2 < len(p.s) && p.s[p.i:p.i+2] == "|*" { // other version of universal selector
@@ -735,6 +757,9 @@ func (p *parser) parseSimpleSelectorSequence() (Sel, error) {
 	case '#', '.', '[', ':':
 		// There's no type selector. Wait to process the other till the main loop.
 	default:
+		if err := p.takeComponent(); err != nil {
+			return nil, err
+		}
 		r, err := p.parseTypeSelector()
 		if err != nil {
 			return nil, err
@@ -752,12 +777,24 @@ loop:
 		)
 		switch p.s[p.i] {
 		case '#':
+			if err = p.takeComponent(); err != nil {
+				return nil, err
+			}
 			ns, err = p.parseIDSelector()
 		case '.':
+			if err = p.takeComponent(); err != nil {
+				return nil, err
+			}
 			ns, err = p.parseClassSelector()
 		case '[':
+			if err = p.takeComponent(); err != nil {
+				return nil, err
+			}
 			ns, err = p.parseAttributeSelector()
 		case ':':
+			if err = p.takeComponent(); err != nil {
+				return nil, err
+			}
 			ns, newPseudoElement, err = p.parsePseudoclassSelector()
 		default:
 			break loop
@@ -835,9 +872,12 @@ func (p *parser) parseSelector() (Sel, error) {
 
 // parseSelectorGroup parses a group of selectors, separated by commas.
 func (p *parser) parseSelectorGroup() (SelectorGroup, error) {
-	if p.memory != nil && !p.memory.Reserve(256) {
-		return nil, fmt.Errorf("cascadia: memory limit exceeded")
+	p.depth++
+	if p.depth > maxSelectorDepth {
+		p.depth--
+		return nil, fmt.Errorf("selector exceeds nesting depth %d", maxSelectorDepth)
 	}
+	defer func() { p.depth-- }()
 	current, err := p.parseSelector()
 	if err != nil {
 		return nil, err

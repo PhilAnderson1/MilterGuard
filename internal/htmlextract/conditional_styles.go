@@ -133,6 +133,7 @@ const (
 
 const (
 	maxMSOConditionBytes = 1024
+	maxMSOConditionDepth = 128
 	minMSOVersion        = 9
 	maxMSOVersion        = 16
 )
@@ -206,6 +207,10 @@ func (p *msoConditionParser) parseAnd(depth int) uint32 {
 }
 
 func (p *msoConditionParser) parseUnary(depth int) uint32 {
+	if depth >= maxMSOConditionDepth {
+		p.failed = true
+		return 0
+	}
 	if p.take('!') {
 		return msoConditionUniverse ^ p.parseUnary(depth+1)
 	}

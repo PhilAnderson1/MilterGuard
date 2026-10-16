@@ -152,8 +152,11 @@ func validateAI(c AIConfig) error {
 	if c.Timeout.Value() <= 0 || c.MaxConcurrent < 1 || c.MaxBodyChars < 1 {
 		return fmt.Errorf("invalid ai timeout, max_concurrent, or max_body_chars")
 	}
-	if c.MaxHTMLParseCPUMilliseconds < 0 || int64(c.MaxHTMLParseCPUMilliseconds) > int64(math.MaxInt64/time.Millisecond) {
-		return fmt.Errorf("ai.max_html_parse_cpu_ms must be a nonnegative duration in milliseconds")
+	if c.MaxHTMLParseCPUMilliseconds <= 0 || int64(c.MaxHTMLParseCPUMilliseconds) > int64(math.MaxInt64/time.Millisecond) {
+		return fmt.Errorf("ai.max_html_parse_cpu_ms must be a positive duration in milliseconds")
+	}
+	if c.MaxHTMLParseMemoryBytes < 8<<20 || c.MaxHTMLParseMemoryBytes > 512<<20 {
+		return fmt.Errorf("ai.max_html_parse_memory_bytes must be between %d and %d bytes", 8<<20, 512<<20)
 	}
 	if c.HTMLParseCPULimitAction != "fallback" && c.HTMLParseCPULimitAction != "reject" && c.HTMLParseCPULimitAction != "dos-reject" {
 		return fmt.Errorf("ai.html_parse_cpu_limit_action must be fallback, reject, or dos-reject")
@@ -215,8 +218,9 @@ func validateAttachments(c AttachmentsConfig) error {
 		if extension == "" {
 			return fmt.Errorf("attachments.blocked_extensions contains an empty extension")
 		}
-		for _, char := range extension {
-			if (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+		for index, char := range extension {
+			internalHyphen := char == '-' && index > 0 && index < len(extension)-1
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && !internalHyphen {
 				return fmt.Errorf("invalid attachments.blocked_extensions entry %q", extension)
 			}
 		}

@@ -546,6 +546,28 @@ func TestCommandMessageRequiresSmallPlainTextBody(t *testing.T) {
 	}
 }
 
+func TestCommandMessageCPUExhaustionReturnsExecutionFailure(t *testing.T) {
+	msg := message.New(4096)
+	msg.AddHeader("Content-Type", "text/html; charset=UTF-8")
+	msg.AddBody([]byte("<p>WHITELIST ADD news@example.net</p>"))
+	calls := 0
+	clock := func() (time.Duration, bool) {
+		calls++
+		if calls == 1 {
+			return 0, true
+		}
+		return 2 * time.Millisecond, true
+	}
+	lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 4096, 8<<20, 1, clock)
+	if len(lines) != 0 {
+		t.Fatalf("partial commands returned after CPU exhaustion: %q", lines)
+	}
+	var processingErr *commandBodyProcessingError
+	if !errors.As(err, &processingErr) || !strings.Contains(err.Error(), "CPU limit") {
+		t.Fatalf("error=%v, want command execution failure", err)
+	}
+}
+
 func TestCommandMessageTrimsOversizedReplyInsteadOfRejecting(t *testing.T) {
 	msg := message.New(96)
 	msg.AddHeader("Content-Type", "text/plain; charset=UTF-8")

@@ -16,17 +16,28 @@ func (g *cpuGuard) check() bool {
 	if g == nil {
 		return true
 	}
-	if g.stopped {
-		return false
-	}
-	if g.memory != nil && g.memory.Exhausted() {
+	if g.stopNow(false) {
 		return false
 	}
 	g.steps++
-	if g.steps == 1 || g.steps&255 == 0 {
-		g.stopped = g.shouldStop != nil && g.shouldStop()
+	return !g.stopNow(g.steps == 1 || g.steps&255 == 0)
+}
+
+// stopNow is used directly by forked loops that already provide their own
+// sampling interval. sampleExternal controls whether this call reads the
+// thread-CPU callback; exhausted memory and a previously observed stop are
+// always reported immediately.
+func (g *cpuGuard) stopNow(sampleExternal bool) bool {
+	if g == nil {
+		return false
 	}
-	return !g.stopped
+	if g.stopped || g.memory != nil && g.memory.Exhausted() {
+		return true
+	}
+	if sampleExternal && g.shouldStop != nil && g.shouldStop() {
+		g.stopped = true
+	}
+	return g.stopped
 }
 
 func (g *cpuGuard) reserve(bytes int64) bool {

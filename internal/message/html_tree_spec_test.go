@@ -61,10 +61,10 @@ func TestAnnotatedOutputAppendsEquivalentRunsWithoutFragmenting(t *testing.T) {
 	for range 4096 {
 		output.write(annotation, "x")
 	}
-	if len(output.chunks) != 1 || len(output.data) != 4096 {
-		t.Fatalf("buffer shape = %d chunks, %d bytes", len(output.chunks), len(output.data))
+	if len(output.chunks) != 1 || output.data.Len() != 4096 {
+		t.Fatalf("buffer shape = %d chunks, %d bytes", len(output.chunks), output.data.Len())
 	}
-	if got := output.String(); got != `<invisible reason="display:none">`+strings.Repeat("x", 4096)+`</invisible>` {
+	if got, complete := output.String(); !complete || got != `<invisible reason="display:none">`+strings.Repeat("x", 4096)+`</invisible>` {
 		t.Fatalf("rendered append-only output = %q", got)
 	}
 }
@@ -266,11 +266,12 @@ func TestConditionalFragmentReportsCooperativeStop(t *testing.T) {
 			return calls >= stopAt
 		}})
 		var out annotatedOutput
-		var visible strings.Builder
+		var visible guardedBuilder
 		e := htmlExtraction{shouldStop: budget.useFallback}
 		e.writeConditionalComment(`[if mso]><p>notice</p><![endif]`, &out, &visible)
-		if !e.extractionIncomplete || !budget.cpuLimitExceeded || !strings.Contains(out.String(), conditionalOmissionMarker) || visible.Len() != 0 {
-			t.Fatalf("stop at check %d was not reported: output=%q visible=%q", stopAt, out.String(), visible.String())
+		rendered, _ := out.String()
+		if !e.extractionIncomplete || !budget.cpuLimitExceeded || !strings.Contains(rendered, conditionalOmissionMarker) || visible.Len() != 0 {
+			t.Fatalf("stop at check %d was not reported: output=%q visible=%q", stopAt, rendered, visible.String())
 		}
 	}
 }
