@@ -20,7 +20,10 @@ callback while advancing through long inputs. A lexer accepts at most 131,072
 tokens and the syntax parser at most 256 nested states. MilterGuard uses the
 guarded lexer when tokenizing values produced by CSS custom-property
 substitution, so a short stylesheet cannot expand into an unaccounted
-token-dense value.
+token-dense value. The parser itself preserves comment token boundaries,
+tracks matching component-value delimiters, and exposes original declaration
+name spelling; HTML extraction therefore passes the original stylesheet to it
+without a compatibility rewrite.
 
 The HTML fork charges tokenizer and tree-builder allocations, polls the CPU
 callback while consuming input, limits open-element nesting to 512 entries and

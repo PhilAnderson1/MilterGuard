@@ -111,6 +111,22 @@ func TestCSSParserNestingLimit(t *testing.T) {
 	p.pushState((*Parser).parseStylesheet)
 }
 
+func TestCSSComponentNestingLimit(t *testing.T) {
+	p := NewParser(parse.NewInputString(""), false)
+	p.level = len(p.componentClosers)
+	defer func() {
+		recovered := recover()
+		if _, ok := recovered.(resourceAbort); !ok {
+			t.Fatalf("panic=%v, want resourceAbort", recovered)
+		}
+		var limitErr *ResourceLimitError
+		if !errors.As(p.resourceErr, &limitErr) || limitErr.Resource != "component nesting" || limitErr.Limit != maxCSSParserStates {
+			t.Fatalf("limit error = %v", p.resourceErr)
+		}
+	}()
+	p.openComponentToken(LeftParenthesisToken)
+}
+
 func TestOneByteAtKeywordDoesNotPanic(t *testing.T) {
 	p := NewParser(parse.NewInputString(""), false)
 	p.data = []byte{'@'}

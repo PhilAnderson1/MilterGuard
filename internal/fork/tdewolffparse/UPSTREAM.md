@@ -21,6 +21,18 @@ Local compatibility changes:
   parser buffer instead of advancing the slice's base pointer. This preserves
   buffer capacity across declarations and avoids repeated allocations without
   changing the emitted grammar events or values.
+- Comments discarded between selector and at-rule tokens emit a separating
+  whitespace token, preserving the token boundary that MilterGuard previously
+  supplied with a separate stylesheet rewrite. Copied custom-property values
+  replace comments with equal-width whitespace for the same reason and retain
+  exact construct-byte accounting.
+- Component-value nesting records the expected closing delimiter. A mismatched
+  closer remains data inside the current block instead of prematurely closing
+  it, matching CSS component-value recovery and removing MilterGuard's former
+  inserted-escape workaround.
+- `Parser.OriginalData` exposes the source spelling of declaration names so
+  escaped, case-sensitive custom-property names can be normalized by the
+  caller without re-lexing parser-offset spans.
 - `Input` can sample an optional progress callback as bytes are consumed. The
   CSS parser uses it for cooperative cancellation while scanning large tokens.
 - The CSS parser has an opt-in resource guard that charges retained tokens and

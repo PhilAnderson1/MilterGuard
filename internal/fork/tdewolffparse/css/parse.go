@@ -84,12 +84,14 @@ type Parser struct {
 	err    string
 	errPos int
 
-	buf         []Token
-	level       int
-	guard       *resourceGuard
-	resourceErr error
+	buf              []Token
+	level            int
+	componentClosers [maxCSSParserStates]uint8
+	guard            *resourceGuard
+	resourceErr      error
 
 	data         []byte
+	originalData []byte
 	tt           TokenType
 	keepWS       bool
 	prevWS       bool
@@ -171,6 +173,7 @@ func (p *Parser) Next() (gt GrammarType, tt TokenType, data []byte) {
 		}
 	}()
 	p.err = ""
+	p.originalData = nil
 
 	if p.prevEnd {
 		p.tt, p.data = RightBraceToken, endBytes
@@ -190,6 +193,13 @@ func (p *Parser) Offset() int {
 // Values returns a slice of Tokens for the last Grammar. Only AtRuleGrammar, BeginAtRuleGrammar, BeginRulesetGrammar and Declaration will return the at-rule components, ruleset selector and declaration values respectively.
 func (p *Parser) Values() []Token {
 	return p.buf
+}
+
+// OriginalData returns the source spelling of the name emitted for the last
+// declaration. Unlike Next's data result it is not ASCII-lowercased. The
+// returned bytes remain valid until the next call to Next.
+func (p *Parser) OriginalData() []byte {
+	return p.originalData
 }
 
 func (p *Parser) popToken(allowComment bool) (TokenType, []byte) {
@@ -246,15 +256,30 @@ func (p *Parser) pushState(state State) {
 
 const maxCSSParserStates = 256
 
-func (p *Parser) openComponent() {
+func (p *Parser) openComponentToken(tt TokenType) {
+	if p.level >= len(p.componentClosers) {
+		p.abort(&ResourceLimitError{Resource: "component nesting", Limit: len(p.componentClosers)})
+	}
+	switch tt {
+	case FunctionToken, LeftParenthesisToken:
+		p.componentClosers[p.level] = uint8(RightParenthesisToken)
+	case LeftBracketToken:
+		p.componentClosers[p.level] = uint8(RightBracketToken)
+	case LeftBraceToken:
+		p.componentClosers[p.level] = uint8(RightBraceToken)
+	default:
+		p.abort(fmt.Errorf("css: invalid component opener %s", tt))
+	}
 	p.level++
 }
 
-func (p *Parser) closeComponent() {
+func (p *Parser) closeComponent(tt TokenType) {
 	if p.level == 0 {
 		p.abort(ErrUnsafeDelimiter)
 	}
-	p.level--
+	if TokenType(p.componentClosers[p.level-1]) == tt {
+		p.level--
+	}
 }
 
 func (p *Parser) rejectUnsafeDelimiter(tt TokenType) {
@@ -268,6 +293,16 @@ func (p *Parser) appendCustomValue(value, data []byte) []byte {
 		p.abort(err)
 	}
 	return append(value, data...)
+}
+
+func (p *Parser) appendCustomCommentSpace(value, comment []byte) []byte {
+	if err := p.guard.token(comment); err != nil {
+		p.abort(err)
+	}
+	for range comment {
+		value = append(value, ' ')
+	}
+	return value
 }
 
 ////////////////////////////////////////////////////////////////
@@ -363,7 +398,7 @@ func (p *Parser) parseAtRule() GrammarType {
 			p.prevEnd = (tt == RightBraceToken)
 			return AtRuleGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
-			p.openComponent()
+			p.openComponentToken(tt)
 		} else if tt == RightParenthesisToken || tt == RightBraceToken || tt == RightBracketToken {
 			if p.level == 0 {
 				p.rejectUnsafeDelimiter(tt)
@@ -375,7 +410,7 @@ func (p *Parser) parseAtRule() GrammarType {
 				p.err, p.errPos = "unexpected ending in at rule", p.l.r.Offset()
 				return ErrorGrammar
 			}
-			p.closeComponent()
+			p.closeComponent(tt)
 		}
 		if first {
 			if tt == LeftParenthesisToken || tt == LeftBracketToken {
@@ -385,7 +420,7 @@ func (p *Parser) parseAtRule() GrammarType {
 		}
 		if len(data) == 1 && (data[0] == ',' || data[0] == ':') {
 			skipWS = true
-		} else if p.prevWS && !skipWS && tt != RightParenthesisToken {
+		} else if (p.prevWS || p.prevComment) && !skipWS && tt != RightParenthesisToken {
 			p.pushBuf(WhitespaceToken, wsBytes)
 		} else {
 			skipWS = false
@@ -427,9 +462,9 @@ func (p *Parser) parseAtRuleUnknown() GrammarType {
 		return EndAtRuleGrammar
 	}
 	if p.tt == LeftParenthesisToken || p.tt == LeftBraceToken || p.tt == LeftBracketToken || p.tt == FunctionToken {
-		p.openComponent()
+		p.openComponentToken(p.tt)
 	} else if p.tt == RightParenthesisToken || p.tt == RightBraceToken || p.tt == RightBracketToken {
-		p.closeComponent()
+		p.closeComponent(p.tt)
 	}
 	return TokenGrammar
 }
@@ -457,7 +492,7 @@ func (p *Parser) parseQualifiedRule() GrammarType {
 			p.err, p.errPos = "unexpected ending in qualified rule", p.l.r.Offset()
 			return ErrorGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
-			p.openComponent()
+			p.openComponentToken(tt)
 		} else if tt == RightParenthesisToken || tt == RightBraceToken || tt == RightBracketToken {
 			if p.level == 0 {
 				p.rejectUnsafeDelimiter(tt)
@@ -469,11 +504,11 @@ func (p *Parser) parseQualifiedRule() GrammarType {
 				p.err, p.errPos = "unexpected ending in qualified rule", p.l.r.Offset()
 				return ErrorGrammar
 			}
-			p.closeComponent()
+			p.closeComponent(tt)
 		}
 		if len(data) == 1 && (data[0] == ',' || data[0] == '>' || data[0] == '+' || data[0] == '~') {
 			skipWS = true
-		} else if p.prevWS && !skipWS && !inAttrSel {
+		} else if (p.prevWS || p.prevComment) && !skipWS && !inAttrSel {
 			p.pushBuf(WhitespaceToken, wsBytes)
 		} else {
 			skipWS = false
@@ -558,6 +593,7 @@ func (p *Parser) parseDeclaration() GrammarType {
 				i++
 			}
 			p.buf = p.buf[:j]
+			p.originalData = p.data
 			p.data = parse.ToLower(parse.Copy(p.data))
 			p.prevEnd = (tt == RightBraceToken)
 			return DeclarationGrammar
@@ -568,13 +604,13 @@ func (p *Parser) parseDeclaration() GrammarType {
 			p.pushState((*Parser).parseQualifiedRuleDeclarationList)
 			return BeginRulesetGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
-			p.openComponent()
+			p.openComponentToken(tt)
 		} else if tt == RightParenthesisToken || tt == RightBraceToken || tt == RightBracketToken {
 			if p.level == 0 {
 				p.err, p.errPos = "unexpected ending in declaration", p.l.r.Offset()
 				return p.parseDeclarationError(tt, data)
 			}
-			p.closeComponent()
+			p.closeComponent(tt)
 		}
 		if (p.prevWS || p.prevComment) && p.buf[len(p.buf)-1].TokenType != WhitespaceToken {
 			p.pushBuf(WhitespaceToken, wsBytes)
@@ -601,12 +637,12 @@ func (p *Parser) parseDeclarationError(tt TokenType, data []byte) GrammarType {
 			}
 			return ErrorGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
-			p.openComponent()
+			p.openComponentToken(tt)
 		} else if tt == RightParenthesisToken || tt == RightBraceToken || tt == RightBracketToken {
-			p.closeComponent()
+			p.closeComponent(tt)
 		}
 
-		if p.prevWS {
+		if p.prevWS || p.prevComment {
 			p.pushBuf(WhitespaceToken, wsBytes)
 		}
 		p.pushBuf(tt, data)
@@ -616,6 +652,7 @@ func (p *Parser) parseDeclarationError(tt TokenType, data []byte) GrammarType {
 }
 
 func (p *Parser) parseCustomProperty() GrammarType {
+	p.originalData = p.data
 	p.initBuf()
 	// The property name is exposed separately from the copied value, but must
 	// still be bounded before the caller turns it into an owned string.
@@ -636,7 +673,7 @@ func (p *Parser) parseCustomProperty() GrammarType {
 			p.buf = append(p.buf, Token{CustomPropertyValueToken, val})
 			return CustomPropertyGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
-			p.openComponent()
+			p.openComponentToken(tt)
 		} else if tt == RightParenthesisToken || tt == RightBraceToken || tt == RightBracketToken {
 			if p.level == 0 {
 				p.rejectUnsafeDelimiter(tt)
@@ -645,8 +682,15 @@ func (p *Parser) parseCustomProperty() GrammarType {
 				p.err, p.errPos = "unexpected ending in custom property", p.l.r.Offset()
 				return ErrorGrammar
 			}
-			p.closeComponent()
+			p.closeComponent(tt)
 		}
-		val = p.appendCustomValue(val, data)
+		if tt == CommentToken {
+			// CSS comments separate adjacent tokens. Preserve their source width
+			// so construct-byte accounting remains exact while exposing ordinary
+			// whitespace to callers that re-tokenize custom-property values.
+			val = p.appendCustomCommentSpace(val, data)
+		} else {
+			val = p.appendCustomValue(val, data)
+		}
 	}
 }

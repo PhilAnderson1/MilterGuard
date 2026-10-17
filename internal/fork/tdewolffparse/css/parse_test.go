@@ -69,7 +69,7 @@ func TestParse(t *testing.T) {
 		// {false, "{x:y;}", "{x:y;}"},
 		{false, "a{}", "a{}"},
 		{false, "a,.b/*comment*/ {x:y;}", "a,.b{x:y;}"},
-		{false, "a,.b/*comment*/.c {x:y;}", "a,.b.c{x:y;}"},
+		{false, "a,.b/*comment*/.c {x:y;}", "a,.b .c{x:y;}"},
 		{false, "a{x:; z:q;}", "a{x:;z:q;}"},
 		{false, "@font-face { x:y; }", "@font-face{x:y;}"},
 		{false, "a:not([controls]){x:y;}", "a:not([controls]){x:y;}"},

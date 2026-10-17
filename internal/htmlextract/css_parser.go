@@ -12,12 +12,11 @@ import (
 // stylesheet or style attribute. Retained rules and cumulative limits remain
 // on sheet.
 type cssParseSession struct {
-	parser        *css.Parser
-	compatibility cssParserCompatibility
-	inline        bool
-	finished      bool
-	incomplete    bool
-	out           []declaration
+	parser     *css.Parser
+	inline     bool
+	finished   bool
+	incomplete bool
+	out        []declaration
 
 	conditions         *conditionFrame
 	enclosingRules     []int
@@ -27,7 +26,6 @@ type cssParseSession struct {
 	defaultNamespace   bool
 	current            int
 	importsAllowed     bool
-	grammarEnd         int
 }
 
 func newCSSParseSession(s *sheet, text string, mode cssParseMode) cssParseSession {
@@ -44,22 +42,7 @@ func newCSSParseSession(s *sheet, text string, mode cssParseMode) cssParseSessio
 		session.finished = true
 		return session
 	}
-	session.compatibility = parserCompatibleCSS(text, s.shouldStop, s.memory)
-	if session.compatibility.stopped {
-		if s.memory.Exhausted() {
-			s.abandonCascade()
-		} else {
-			s.stopped = true
-		}
-		session.finished = true
-		return session
-	}
-	if len(session.compatibility.text) > len(text) && !s.memory.Reserve(int64(len(session.compatibility.text)-len(text))) {
-		s.abandonCascade()
-		session.finished = true
-		return session
-	}
-	session.parser = css.NewParserWithLimits(parse.NewInputString(session.compatibility.text), inline, css.ResourceLimits{
+	session.parser = css.NewParserWithLimits(parse.NewInputString(text), inline, css.ResourceLimits{
 		ShouldStop: s.shouldStop,
 		Memory:     s.memory,
 	})
@@ -78,9 +61,7 @@ func (p *cssParseSession) run(s *sheet) cssParseResult {
 		if s.cascadeIncomplete || s.stopped {
 			return p.result()
 		}
-		grammarStart := p.grammarEnd
 		grammar, tokenType, data := p.parser.Next()
-		p.grammarEnd = p.parser.Offset()
 		values := p.parser.Values()
 		var stop bool
 		switch grammar {
@@ -97,7 +78,7 @@ func (p *cssParseSession) run(s *sheet) cssParseResult {
 		case css.EndRulesetGrammar:
 			p.endRuleset()
 		case css.DeclarationGrammar, css.CustomPropertyGrammar:
-			stop = p.declaration(s, grammar, string(data), values, grammarStart, p.grammarEnd)
+			stop = p.declaration(s, grammar, string(data), values)
 		case css.QualifiedRuleGrammar, css.TokenGrammar:
 		}
 		if stop {
@@ -262,11 +243,14 @@ func (p *cssParseSession) endRuleset() {
 	}
 }
 
-func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, property string, values []css.Token, grammarStart, grammarEnd int) bool {
+func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, property string, values []css.Token) bool {
 	if !s.checkCPU() {
 		return true
 	}
-	property, propertySafe := p.compatibility.declarationProperty(property, grammarStart, grammarEnd)
+	if original := p.parser.OriginalData(); len(original) != 0 {
+		property = string(original)
+	}
+	property = normalizeDeclarationProperty(property)
 	insideNestedGroup := len(p.nestedGroups) > 0 && p.nestedGroups[len(p.nestedGroups)-1]
 	if !p.inline && p.rulesetDepth > 0 && grammar != css.CustomPropertyGrammar &&
 		(hasTopLevelCSSBlock(values) || (p.current < 0 && insideNestedGroup)) {
@@ -277,20 +261,9 @@ func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, propert
 	if !applicable || !relevantNormalizedDeclarationProperty(property) {
 		return false
 	}
-	if !propertySafe {
-		p.incomplete = true
-		return true
-	}
 	value := rawTokenString(values)
-	value, restored, safe := p.compatibility.restoreDeclarationValue(value, grammarStart, grammarEnd)
 	var declarations []declaration
-	if !safe {
-		valueTokens, _ := lexValue(value, s.cpu)
-		declarations = s.declarationsFromTokens(property, valueTokens, valueUnsupported, value)
-	} else if restored {
-		valueTokens, status := lexValue(value, s.cpu)
-		declarations = s.declarationsFromTokens(property, valueTokens, status, value)
-	} else if grammar == css.CustomPropertyGrammar {
+	if grammar == css.CustomPropertyGrammar {
 		valueTokens, status := lexValue(value, s.cpu)
 		declarations = s.declarationsFromTokens(property, valueTokens, status, value)
 	} else if cssTokensNeedRetention(property, values) {
