@@ -11,6 +11,8 @@ import (
 	xhtml "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
+const fallbackTextBytes = 1 << 20
+
 var markdownURLReplacer = strings.NewReplacer(
 	"\\", "%5C", " ", "%20", "(", "%28", ")", "%29", "<", "%3C", ">", "%3E",
 )
@@ -188,7 +190,6 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, shouldStop func
 	var base *url.URL
 	baseSeen, suppressed := false, 0
 	complete := true
-	const fallbackTextBytes = 1 << 20
 	for text.Len() < fallbackTextBytes {
 		token := z.Next()
 		if token == xhtml.ErrorToken {
@@ -259,7 +260,14 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, shouldStop func
 			if suppressed > 0 {
 				continue
 			}
-			text.Write(z.Text())
+			value := z.Text()
+			remaining := fallbackTextBytes - text.Len()
+			if len(value) >= remaining {
+				text.Write(value[:remaining])
+				complete = false
+				continue
+			}
+			text.Write(value)
 			text.WriteByte(' ')
 		}
 	}

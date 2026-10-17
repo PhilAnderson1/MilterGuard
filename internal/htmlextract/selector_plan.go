@@ -32,6 +32,9 @@ type selectorComplexity struct {
 
 type compoundComplexity = cascadia.CompoundMetadata
 
+// Ancestor matching records one compound per bit in ancestorChainState.
+const maxAncestorChainCompounds = 64
+
 // selectorAttributeCandidates records the non-empty selector-index buckets
 // selected by an element's immutable id and class attributes. Building this
 // once avoids re-tokenizing an ancestor's class value for every descendant and
@@ -375,6 +378,9 @@ func planCompiledSelector(branch string, sequence int, selector cascadia.Sel, me
 		return plan
 	}
 	plan.ancestorChain = compileAncestorChain(complexity)
+	if len(plan.ancestorChain) > maxAncestorChainCompounds {
+		plan.makeUncertain(memory)
+	}
 	return plan
 }
 

@@ -318,6 +318,12 @@ func (m *Message) CommandTextWithHTMLControl(maxBytes int64, control HTMLProcess
 	if maxBytes >= 0 && int64(len(body)) > maxBytes {
 		body = body[:maxBytes]
 	}
-	content := extractMIMEWithBudget(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", body, 0, newExtractionBudgetWithControl(control))
+	budget := newExtractionBudgetWithControl(control)
+	textLimit := m.maxBytes
+	if maxBytes >= 0 && maxBytes < textLimit {
+		textLimit = maxBytes
+	}
+	budget.setDecodedTextByteLimit(textLimit)
+	content := extractMIMEWithBudget(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", body, 0, budget)
 	return stripInvisibleFormatting(content.VisibleText)
 }

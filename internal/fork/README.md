@@ -26,10 +26,12 @@ name spelling; HTML extraction therefore passes the original stylesheet to it
 without a compatibility rewrite.
 
 The HTML fork charges tokenizer and tree-builder allocations, polls the CPU
-callback while consuming input, limits open-element nesting to 512 entries and
-the document to 262,144 nodes, and rejects more than 4,096 source attributes on
-one tag or 65,536 across one document. The attribute limits count duplicates
-because they still consume tokenizer memory before HTML duplicate removal.
+callback while consuming input, and samples tree-builder checkpoints once per
+256 operations to avoid making a thread-clock system call for every element.
+It limits open-element nesting to 512 entries and the document to 262,144 nodes,
+and rejects more than 4,096 source attributes on one tag or 65,536 across one
+document. The attribute limits count duplicates because they still consume
+tokenizer memory before HTML duplicate removal.
 
 The Cascadia fork rejects selector inputs above 16 KiB, more than 1,024 simple
 selector components, or more than 64 nested selector groups. Its nonstandard

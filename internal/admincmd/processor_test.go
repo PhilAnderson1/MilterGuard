@@ -278,7 +278,7 @@ func TestRejectionDetailUsesBoundedHTMLFallback(t *testing.T) {
 	if !strings.Contains(response.Text, "Visible notice") || !strings.Contains(response.Text, "Unverified hidden text") {
 		t.Fatalf("bounded fallback text missing: %q", response.Text)
 	}
-	if !strings.Contains(response.Text, "HTML extraction incomplete") {
+	if !strings.Contains(response.Text, "Content extraction incomplete") {
 		t.Fatalf("bounded fallback limitation missing: %q", response.Text)
 	}
 }

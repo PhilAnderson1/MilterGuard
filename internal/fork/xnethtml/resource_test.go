@@ -86,6 +86,40 @@ func TestResourceStopDuringLargeToken(t *testing.T) {
 	}
 }
 
+func TestTreeBuilderStopCheckIsSampled(t *testing.T) {
+	checks := 0
+	guard := resourceGuard{limits: ResourceLimits{ShouldStop: func() bool {
+		checks++
+		return false
+	}}}
+	for range 512 {
+		guard.stop()
+	}
+	if checks != 3 {
+		t.Fatalf("external stop checks = %d, want 3", checks)
+	}
+}
+
+func TestTreeBuilderStopChecksExhaustedMemoryImmediately(t *testing.T) {
+	memory := resourceguard.NewMemory(1)
+	if memory.Reserve(2) {
+		t.Fatal("memory budget did not become exhausted")
+	}
+	guard := resourceGuard{limits: ResourceLimits{Memory: memory}}
+	defer func() {
+		recovered := recover()
+		abort, ok := recovered.(resourceAbort)
+		if !ok {
+			t.Fatalf("panic = %v, want resourceAbort", recovered)
+		}
+		var limitErr *ResourceLimitError
+		if !errors.As(abort.err, &limitErr) || limitErr.Resource != "memory bytes" {
+			t.Fatalf("limit error = %v", abort.err)
+		}
+	}()
+	guard.stop()
+}
+
 func TestStandaloneTokenizerResourceStop(t *testing.T) {
 	checks := 0
 	z := NewTokenizerWithStop(strings.NewReader(`<!--`+strings.Repeat("x", 5000)+`-->`), func() bool {

@@ -22,16 +22,17 @@ const (
 )
 
 type extractionBudget struct {
-	parts                int
-	htmlParts            int
-	htmlBytesRemaining   int
-	cssBytesRemaining    int
-	memoryBytesRemaining int64
-	memoryBytesLimit     int64
-	shouldFallback       func() bool
-	fallbackShouldStop   func() bool
-	cpuLimitExceeded     bool
-	compactURLs          bool
+	parts                     int
+	htmlParts                 int
+	htmlBytesRemaining        int
+	decodedTextBytesRemaining int64
+	cssBytesRemaining         int
+	memoryBytesRemaining      int64
+	memoryBytesLimit          int64
+	shouldFallback            func() bool
+	fallbackShouldStop        func() bool
+	cpuLimitExceeded          bool
+	compactURLs               bool
 }
 
 func newExtractionBudget() *extractionBudget {
@@ -44,14 +45,22 @@ func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBu
 		limits.MemoryBytes = control.MemoryBytes
 	}
 	return &extractionBudget{
-		htmlBytesRemaining:   limits.InputBytes,
-		cssBytesRemaining:    limits.CSSBytes,
-		memoryBytesRemaining: limits.MemoryBytes,
-		memoryBytesLimit:     limits.MemoryBytes,
-		shouldFallback:       control.ShouldFallback,
-		fallbackShouldStop:   control.FallbackShouldStop,
-		compactURLs:          !control.DisableURLCompaction,
+		htmlBytesRemaining:        limits.InputBytes,
+		decodedTextBytesRemaining: int64(limits.InputBytes),
+		cssBytesRemaining:         limits.CSSBytes,
+		memoryBytesRemaining:      limits.MemoryBytes,
+		memoryBytesLimit:          limits.MemoryBytes,
+		shouldFallback:            control.ShouldFallback,
+		fallbackShouldStop:        control.FallbackShouldStop,
+		compactURLs:               !control.DisableURLCompaction,
 	}
+}
+
+func (b *extractionBudget) setDecodedTextByteLimit(bytes int64) {
+	if bytes < 0 {
+		bytes = 0
+	}
+	b.decodedTextBytesRemaining = bytes
 }
 
 func (b *extractionBudget) useFallback() bool {
@@ -313,7 +322,8 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		content.TransferIncomplete = transferIncomplete
 		return content
 	}
-	text := decodeCharset(params["charset"], decoded)
+	text, complete := decodeCharset(params["charset"], decoded, budget.decodedTextBytesRemaining)
+	budget.decodedTextBytesRemaining -= int64(len(text))
 	if budget.useFallback() {
 		return extractedContent{
 			Text: text, VisibleText: text, ConfidentVisibleChars: confidentTextCharacters(text),
@@ -325,7 +335,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 	return extractedContent{
 		Text: promptText, VisibleText: text,
 		ConfidentVisibleChars: confidentTextCharacters(text),
-		Links:                 links.links, TransferIncomplete: transferIncomplete,
+		Links:                 links.links, TransferIncomplete: transferIncomplete, ExtractionIncomplete: !complete,
 	}
 }
 
@@ -379,26 +389,44 @@ func extractAttachedMessage(data []byte, depth int, budget *extractionBudget) ex
 // decodeCharset converts MIME text bodies to UTF-8 after their transfer
 // encoding has been decoded. Unknown labels and malformed encoded text retain
 // the original content so that a bad charset declaration cannot erase the
-// message body.
-func decodeCharset(label string, data []byte) string {
+// message body. The boolean reports whether the complete decoded value fit in
+// maxBytes; truncation always ends at a UTF-8 boundary.
+func decodeCharset(label string, data []byte, maxBytes int64) (string, bool) {
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
+	bounded := func(value []byte) (string, bool) {
+		text := string(value)
+		if !utf8.ValidString(text) {
+			text = strings.ToValidUTF8(text, "�")
+		}
+		if int64(len(text)) <= maxBytes {
+			return text, true
+		}
+		end := int(maxBytes)
+		for end > 0 && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		return text[:end], false
+	}
 	label = strings.TrimSpace(label)
 	if label == "" {
-		return string(data)
+		return bounded(data)
 	}
 	if utf8.Valid(data) {
 		if _, canonical := charset.Lookup(label); canonical == "utf-8" {
-			return string(data)
+			return bounded(data)
 		}
 	}
 	reader, err := charset.NewReaderLabel(label, bytes.NewReader(data))
 	if err != nil {
-		return string(data)
+		return bounded(data)
 	}
-	decoded, err := io.ReadAll(reader)
+	decoded, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
 	if err != nil {
-		return string(data)
+		return bounded(data)
 	}
-	return string(decoded)
+	return bounded(decoded)
 }
 
 // decodeHTMLCharset keeps a usable MIME declaration authoritative. Without

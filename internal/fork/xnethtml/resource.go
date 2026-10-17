@@ -34,6 +34,7 @@ type resourceAbort struct{ err error }
 type resourceGuard struct {
 	limits                     ResourceLimits
 	bytes                      uint64
+	stopChecks                 uint32
 	oeCap, afeCap, templateCap int
 }
 
@@ -44,7 +45,17 @@ func (g *resourceGuard) reserve(bytes int64) {
 }
 
 func (g *resourceGuard) stop() {
-	if g != nil && g.limits.ShouldStop != nil && g.limits.ShouldStop() {
+	if g == nil {
+		return
+	}
+	if g.limits.Memory != nil && g.limits.Memory.Exhausted() {
+		panic(resourceAbort{&ResourceLimitError{"memory bytes", g.limits.Memory.Limit()}})
+	}
+	g.stopChecks++
+	if g.stopChecks != 1 && g.stopChecks&255 != 0 {
+		return
+	}
+	if g.limits.ShouldStop != nil && g.limits.ShouldStop() {
 		panic(resourceAbort{ErrResourceStopped})
 	}
 }

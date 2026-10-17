@@ -1121,6 +1121,32 @@ func TestPlainURLHarvestingPreservesBalancedDelimiters(t *testing.T) {
 	}
 }
 
+func TestNextHTTPPrefixScansCaseInsensitively(t *testing.T) {
+	text := "highway HAZE hTtPs://mixed.example then HTTP://upper.example"
+	first := strings.Index(text, "hTtPs://")
+	if got := nextHTTPPrefix(text, 0); got != first {
+		t.Fatalf("first prefix = %d, want %d", got, first)
+	}
+	second := strings.Index(text, "HTTP://")
+	if got := nextHTTPPrefix(text, first+1); got != second {
+		t.Fatalf("second prefix = %d, want %d", got, second)
+	}
+	if got := nextHTTPPrefix(strings.Repeat("highway haze ", 4096), 0); got != -1 {
+		t.Fatalf("non-URL text matched at %d", got)
+	}
+}
+
+func BenchmarkNextHTTPPrefixDenseNoMatch(b *testing.B) {
+	text := strings.Repeat("highway haze ", 1<<16)
+	b.SetBytes(int64(len(text)))
+	b.ResetTimer()
+	for range b.N {
+		if nextHTTPPrefix(text, 0) != -1 {
+			b.Fatal("unexpected URL match")
+		}
+	}
+}
+
 func TestExtractedLinksPreserveInvisibleFormatting(t *testing.T) {
 	const normalized = "https://paypal.example/account"
 	const encoded = "https://pay%E2%80%8Bpal.example/acc%E2%81%A0ount"

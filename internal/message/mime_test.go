@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
-	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 )
 
 func TestPromptDecodesMultipart(t *testing.T) {
@@ -186,15 +188,34 @@ func TestMIMEExtractionDecodesDeclaredBodyCharset(t *testing.T) {
 func TestUTF8CharsetDecodingPreservesValidTextAndHandlesMalformedInput(t *testing.T) {
 	valid := []byte("café")
 	for _, label := range []string{"utf-8", "UTF8", "unicode-1-1-utf-8"} {
-		if got := decodeCharset(label, valid); got != string(valid) {
+		got, complete := decodeCharset(label, valid, 100)
+		if !complete || got != string(valid) {
 			t.Errorf("decodeCharset(%q) = %q, want %q", label, got, valid)
 		}
 	}
-	if got := decodeCharset("utf-8", []byte{'a', 0xff, 'b'}); got != "a�b" {
+	if got, complete := decodeCharset("utf-8", []byte{'a', 0xff, 'b'}, 100); !complete || got != "a�b" {
 		t.Fatalf("malformed UTF-8 = %q, want replacement character", got)
 	}
 	if got := decodeHTMLCharset("utf-8", append([]byte("\xef\xbb\xbf"), valid...), 100); got != string(valid) {
 		t.Fatalf("BOM-prefixed HTML UTF-8 = %q, want %q", got, valid)
+	}
+}
+
+func TestPlainTextCharsetDecodingIsBoundedAfterExpansion(t *testing.T) {
+	const limit = 8
+	got, complete := decodeCharset("windows-1252", bytes.Repeat([]byte{0x92}, 100), limit)
+	if complete {
+		t.Fatal("oversized charset conversion reported complete")
+	}
+	if len(got) > limit || !utf8.ValidString(got) {
+		t.Fatalf("bounded decoded text = %q (%d bytes)", got, len(got))
+	}
+
+	budget := newExtractionBudget()
+	budget.setDecodedTextByteLimit(limit)
+	content := extractMIMEWithBudget("text/plain; charset=windows-1252", "", "", bytes.Repeat([]byte{0x92}, 100), 0, budget)
+	if !content.ExtractionIncomplete || len(content.Text) > limit {
+		t.Fatalf("oversized plain text was not bounded: %+v", content)
 	}
 }
 

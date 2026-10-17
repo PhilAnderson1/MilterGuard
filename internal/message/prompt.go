@@ -90,7 +90,7 @@ func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars
 			b.WriteString("- The processed body exceeded its character limit; the remainder was omitted.\n")
 		}
 		if content.ExtractionIncomplete {
-			b.WriteString("- HTML processing limits prevented complete extraction; only available content is included.\n")
+			b.WriteString("- Content processing limits prevented complete extraction; only available content is included.\n")
 		}
 	}
 	if links := boundedLinksMissingFromBody(content.Links, body); len(links) > 0 {
@@ -170,7 +170,7 @@ func (m *Message) VisibleBodyWithHTMLControl(maxChars int, control HTMLProcessin
 		body = sampleBody(body, maxChars)
 	}
 	if content.ExtractionIncomplete || content.HTMLCPULimitExceeded {
-		body += "\n[HTML extraction incomplete; processing limits prevented extraction of the remainder]"
+		body += "\n[Content extraction incomplete; processing limits prevented extraction of the remainder]"
 	}
 	return body
 }
@@ -181,6 +181,7 @@ func (m *Message) processedContent() extractedContent {
 
 func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl) extractedContent {
 	budget := newExtractionBudgetWithControl(control)
+	budget.setDecodedTextByteLimit(m.maxBytes)
 	content := extractMIMEWithBudget(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", m.BodyBytes(), 0, budget)
 	if control.ObserveMemoryUsage != nil {
 		limit := budget.memoryBytesLimit
@@ -542,23 +543,10 @@ func walkPlainHTTPURLs(text string, limit int, visit func(link string, start, en
 }
 
 func nextHTTPPrefix(text string, start int) int {
-	for start < len(text) {
-		lower := strings.IndexByte(text[start:], 'h')
-		upper := strings.IndexByte(text[start:], 'H')
-		switch {
-		case lower < 0:
-			lower = upper
-		case upper >= 0 && upper < lower:
-			lower = upper
-		}
-		if lower < 0 {
-			return -1
-		}
-		candidate := start + lower
-		if hasHTTPPrefix(text[candidate:]) {
+	for candidate := start; candidate < len(text); candidate++ {
+		if (text[candidate] == 'h' || text[candidate] == 'H') && hasHTTPPrefix(text[candidate:]) {
 			return candidate
 		}
-		start = candidate + 1
 	}
 	return -1
 }

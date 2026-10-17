@@ -246,7 +246,7 @@ func TestConditionalOmissionReachesPromptAndStrippedBody(t *testing.T) {
 	m.AddHeader("Content-Type", "text/html")
 	m.AddBody([]byte(source))
 	analysis := m.BuildAnalysis(AnalysisContext{}, 1000, VisionOptions{Mode: "off"})
-	if !analysis.BodyExtractionIncomplete || !strings.Contains(analysis.Prompt, "HTML processing limits prevented complete extraction") || !strings.Contains(analysis.Prompt, conditionalOmissionMarker) {
+	if !analysis.BodyExtractionIncomplete || !strings.Contains(analysis.Prompt, "Content processing limits prevented complete extraction") || !strings.Contains(analysis.Prompt, conditionalOmissionMarker) {
 		t.Fatalf("prompt did not report omitted conditional content: %s", analysis.Prompt)
 	}
 }
@@ -259,6 +259,7 @@ func TestConditionalFragmentUsesScriptingDisabledBoundedParser(t *testing.T) {
 }
 
 func TestConditionalFragmentReportsCooperativeStop(t *testing.T) {
+	fragment := `[if mso]>` + strings.Repeat(`<p>notice</p>`, 300) + `<![endif]`
 	for _, stopAt := range []int{1, 3} {
 		calls := 0
 		budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool {
@@ -268,7 +269,7 @@ func TestConditionalFragmentReportsCooperativeStop(t *testing.T) {
 		var out annotatedOutput
 		var visible guardedBuilder
 		e := htmlExtraction{shouldStop: budget.useFallback}
-		e.writeConditionalComment(`[if mso]><p>notice</p><![endif]`, &out, &visible)
+		e.writeConditionalComment(fragment, &out, &visible)
 		rendered, _ := out.String()
 		if !e.extractionIncomplete || !budget.cpuLimitExceeded || !strings.Contains(rendered, conditionalOmissionMarker) || visible.Len() != 0 {
 			t.Fatalf("stop at check %d was not reported: output=%q visible=%q", stopAt, rendered, visible.String())
@@ -432,5 +433,18 @@ func TestFallbackTokenizerHonoursSeparateCPUStop(t *testing.T) {
 	}
 	if checks < 2 {
 		t.Fatalf("fallback stop checks = %d, want at least 2", checks)
+	}
+}
+
+func TestBoundedHTMLFallbackCapsSingleTextToken(t *testing.T) {
+	got := extractBoundedHTMLFallback(strings.Repeat("x", fallbackTextBytes*2)+"sentinel", true, nil)
+	if len(got.Text) != fallbackTextBytes {
+		t.Fatalf("fallback text length = %d, want %d", len(got.Text), fallbackTextBytes)
+	}
+	if strings.Contains(got.Text, "sentinel") {
+		t.Fatal("fallback retained text beyond its limit")
+	}
+	if !got.ExtractionIncomplete || !got.HTMLFallbackUsed {
+		t.Fatalf("fallback flags = %+v", got)
 	}
 }

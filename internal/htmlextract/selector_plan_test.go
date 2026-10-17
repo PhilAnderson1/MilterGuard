@@ -34,6 +34,24 @@ func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 	}
 }
 
+func TestAncestorChainBeyondBitsetCapacityIsUncertain(t *testing.T) {
+	selector := strings.Repeat("div ", maxAncestorChainCompounds) + ".target"
+	sequence := 0
+	plans, _, exceeded := planSelectorList(selector, &sequence, nil, maxSelectorBranches)
+	if exceeded || len(plans) != 1 {
+		t.Fatalf("selector plans = %d, exceeded = %t", len(plans), exceeded)
+	}
+	if !plans[0].uncertain || len(plans[0].ancestorChain) != 0 {
+		t.Fatalf("oversized ancestor plan was not made uncertain: %+v", plans[0])
+	}
+
+	body := strings.Repeat("<div>", maxAncestorChainCompounds) + `<span class="target">T</span>` + strings.Repeat("</div>", maxAncestorChainCompounds)
+	document := inspectHTML(t, `<style>`+selector+`{display:none}</style>`+body)
+	if got := findText(t, document, "T").Label; got != "unknown" {
+		t.Fatalf("oversized ancestor selector label = %q, want unknown", got)
+	}
+}
+
 func TestPreparedMathDeclarationUsesCPUControl(t *testing.T) {
 	value := `calc(1px + 1px)`
 	tokens, status := lexValue(value, nil)
