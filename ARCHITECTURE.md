@@ -147,9 +147,10 @@ scripts or fetch external resources. Processing proceeds through these stages:
    short-lived `cssParseSession` using the local
    `tdewolff` fork in `internal/fork/tdewolffparse/css`. Its guard charges
    retained tokens and parser-state growth to the shared memory budget, rejects
-   closing delimiters that would corrupt recovery state, and samples
-   cooperative cancellation during tokenization. Token count and parser
-   nesting also have fixed structural caps. The limits apply to style elements, style attributes,
+   unsafe top-level closing delimiters, preserves comment token boundaries,
+   tracks matching component-value delimiters during recovery, and samples
+   cooperative cancellation during tokenization. Token count, parser nesting,
+   and component-value nesting also have fixed structural caps. The limits apply to style elements, style attributes,
    conditional-comment styles, and decoded data-URL stylesheets, including
    nested imports.
 4. Prepare declarations and build a selector index, then use
@@ -165,7 +166,10 @@ scripts or fetch external resources. Processing proceeds through these stages:
    layout.
 
 Selector compilation and matching use the local Cascadia fork in
-`internal/fork/cascadia`. All three forks retain their upstream tests and an
+`internal/fork/cascadia`. Cascadia splits selector lists and exposes compiled
+compound metadata used for candidate indexing and bounded ancestor matching;
+`internal/htmlextract` does not independently parse valid selector grammar.
+All three forks retain their upstream tests and an
 `UPSTREAM.md` file recording the source tag and commit. Their imports point at
 one another where necessary so the HTML tree and selector engine share the
 same node and atom types. Upstream updates must preserve that package graph,

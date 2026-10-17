@@ -27,9 +27,10 @@ Local changes:
   compound matchers, candidate keys, original type spelling, attribute
   sensitivity, and the deliberately small selector subset evaluated exactly
   for static email.
-- Metadata's newly serialized compound strings are charged to the shared
-  memory budget. Component object counts remain bounded by the parser's
-  structural component limit.
+- Metadata reuses compiled compound matchers without serializing them back to
+  selector text. Metadata object counts remain bounded by the parser's
+  structural component limit, while source-sized storage is covered by the
+  selector compilation charge.
 - `ConservativeFallback` recovers only a safe rightmost positive candidate
   from rejected syntax, keeping malformed and unsupported branches local
   without adding selector parsing to the caller.

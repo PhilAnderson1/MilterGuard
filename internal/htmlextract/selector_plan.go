@@ -30,12 +30,7 @@ type selectorComplexity struct {
 	combinators []byte
 }
 
-type compoundComplexity struct {
-	source             string
-	positiveSource     string
-	matcher            cascadia.Matcher
-	attributeSensitive bool
-}
+type compoundComplexity = cascadia.CompoundMetadata
 
 // selectorAttributeCandidates records the non-empty selector-index buckets
 // selected by an element's immutable id and class attributes. Building this
@@ -113,7 +108,7 @@ func (a *activeAncestorBuckets) remove(bucket []selectorRef) {
 
 func (c selectorComplexity) attributeSensitive() bool {
 	for _, compound := range c.compounds {
-		if compound.attributeSensitive {
+		if compound.AttributeSensitive {
 			return true
 		}
 	}
@@ -135,6 +130,7 @@ type selectorPlan struct {
 	uncertain       bool
 	generatedPseudo bool
 	foreignCaseType bool
+	foreignTypeName string
 }
 
 func (p *selectorPlan) makeUncertain(memory *resourceguard.Memory) {
@@ -156,7 +152,11 @@ func (p *selectorPlan) makeForeignCaseUncertain(memory *resourceguard.Memory) {
 	// with HTML/foreign namespace case rules instead of Cascadia's lowercase
 	// type matcher.
 	p.execution = scopeSelectorComplexity(p.scopePrefix)
-	if name, ok := canonicalSVGTypeSelector(p.scopePrefix); ok {
+	name := p.foreignTypeName
+	if name == "" {
+		name, _ = canonicalSVGTypeSelector(p.scopePrefix)
+	}
+	if name != "" {
 		lower := asciiLower(name)
 		p.scope = cascadia.Selector(func(n *html.Node) bool {
 			if n.Type != html.ElementNode {
@@ -178,30 +178,34 @@ func (p *selectorPlan) makeForeignCaseUncertain(memory *resourceguard.Memory) {
 // the selector has to be abandoned. This prevents a rule such as
 // "u + .body .product img" from degrading all the way to every img element.
 func (p *selectorPlan) conservativeScope(memory *resourceguard.Memory) (cascadia.Matcher, selectorComplexity) {
-	fallback := scopeSelectorComplexity(p.scopePrefix)
-	if p.scopePrefix == "" || p.scopePrefix == "*" || len(p.complexity.compounds) < 2 {
-		return compileConservativeScope(p.scopePrefix, memory), fallback
+	rightmost := p.complexity.compounds[len(p.complexity.compounds)-1]
+	rightMatcher := rightmost.PositiveMatcher
+	if rightMatcher == nil {
+		rightMatcher = compileConservativeScope(p.scopePrefix, memory)
+	}
+	fallback := selectorComplexity{compounds: []compoundComplexity{{
+		Matcher:            rightMatcher,
+		PositiveMatcher:    rightMatcher,
+		FullyPositive:      true,
+		AttributeSensitive: rightmost.AttributeSensitive,
+	}}}
+	if len(p.complexity.compounds) < 2 {
+		return rightMatcher, fallback
 	}
 	last := len(p.complexity.compounds) - 1
 	combinator := p.complexity.combinators[last-1]
 	if combinator != ' ' && combinator != '>' {
-		return compileConservativeScope(p.scopePrefix, memory), fallback
+		return rightMatcher, fallback
 	}
-	right := trimCSSWhitespace(p.complexity.compounds[last].source)
-	left := trimCSSWhitespace(p.complexity.compounds[last-1].source)
-	if right != p.scopePrefix || left == "" || left == "*" || p.complexity.compounds[last-1].positiveSource != left {
-		return compileConservativeScope(p.scopePrefix, memory), fallback
+	left := p.complexity.compounds[last-1]
+	if !rightmost.FullyPositive || !left.FullyPositive || left.PositiveMatcher == nil {
+		return rightMatcher, fallback
 	}
-	separator := " "
-	if combinator == '>' {
-		separator = ">"
+	scope := cascadia.CombinePositiveMatchers(left.PositiveMatcher, rightMatcher, combinator)
+	if scope == nil {
+		return rightMatcher, fallback
 	}
-	scope := left + separator + right
-	group, err := cascadia.ParseGroupWithMemory(scope, memory)
-	if err != nil || len(group) != 1 {
-		return compileConservativeScope(p.scopePrefix, memory), fallback
-	}
-	return group[0], selectorComplexity{
+	return scope, selectorComplexity{
 		compounds:   []compoundComplexity{p.complexity.compounds[last-1], p.complexity.compounds[last]},
 		combinators: []byte{combinator},
 	}
@@ -212,7 +216,7 @@ func (p *selectorPlan) conservativeScope(memory *resourceguard.Memory) (cascadia
 // Cascadia remains authoritative for each compound; evaluating relationships
 // ourselves avoids recursive backtracking and lets work be charged against the
 // attributes of each node actually inspected.
-func compileAncestorChain(complexity selectorComplexity, memory *resourceguard.Memory) []cascadia.Matcher {
+func compileAncestorChain(complexity selectorComplexity) []cascadia.Matcher {
 	if len(complexity.combinators) == 0 {
 		return nil
 	}
@@ -232,30 +236,16 @@ func compileAncestorChain(complexity selectorComplexity, memory *resourceguard.M
 	}
 	matchers := make([]cascadia.Matcher, len(complexity.compounds))
 	for i, compound := range complexity.compounds {
-		if compound.matcher != nil {
-			matchers[i] = compound.matcher
-			continue
-		}
-		group, err := cascadia.ParseGroupWithMemory(compound.source, memory)
-		if err != nil || len(group) != 1 {
+		if compound.Matcher == nil {
 			return nil
 		}
-		matchers[i] = group[0]
+		matchers[i] = compound.Matcher
 	}
 	return matchers
 }
 
 func selectorComplexityFromMetadata(metadata cascadia.SelectorMetadata) selectorComplexity {
-	complexity := selectorComplexity{combinators: append([]byte(nil), metadata.Combinators...)}
-	for _, compound := range metadata.Compounds {
-		complexity.compounds = append(complexity.compounds, compoundComplexity{
-			source:             compound.Source,
-			positiveSource:     compound.PositiveSource,
-			matcher:            compound.Matcher,
-			attributeSensitive: compound.AttributeSensitive,
-		})
-	}
-	return complexity
+	return selectorComplexity{compounds: metadata.Compounds, combinators: metadata.Combinators}
 }
 
 func localSelectorKey(key cascadia.IndexKey) selectorKey {
@@ -293,8 +283,16 @@ type selectorIndex struct {
 }
 
 func planSelectorList(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int) (plans []selectorPlan, branches int, exceeded bool) {
-	selectorBranches, exceeded := cascadia.SplitSelectorList(source, remainingBranches)
-	for _, branch := range selectorBranches {
+	iterator := cascadia.NewSelectorListIterator(source)
+	for {
+		branch, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		if branches >= remainingBranches {
+			exceeded = true
+			break
+		}
 		branches++
 		if plan, keep := planSelectorBranch(branch, *nextSequence, memory); keep {
 			plans = append(plans, plan)
@@ -307,10 +305,7 @@ func planSelectorList(source string, nextSequence *int, memory *resourceguard.Me
 func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memory) (selectorPlan, bool) {
 	group, err := cascadia.ParseGroupWithPseudoElementsAndMemory(branch, memory)
 	if err == nil && len(group) == 1 {
-		metadata, metadataErr := cascadia.MetadataWithMemory(group[0], memory)
-		if metadataErr != nil {
-			return selectorPlan{}, false
-		}
+		metadata := cascadia.Metadata(group[0])
 		if metadata.Inactive {
 			return selectorPlan{}, false
 		}
@@ -322,10 +317,7 @@ func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memor
 	}
 
 	fallback := cascadia.ConservativeFallback(branch)
-	compound := compoundComplexity{
-		source:         fallback.PositiveSource,
-		positiveSource: fallback.PositiveSource,
-	}
+	compound := compoundComplexity{FullyPositive: true}
 	plan := selectorPlan{
 		source:          branch,
 		complexity:      selectorComplexity{compounds: []compoundComplexity{compound}},
@@ -354,7 +346,6 @@ func planCompiledSelector(branch string, sequence int, selector cascadia.Sel, me
 		complexity:      complexity,
 		execution:       complexity,
 		key:             localSelectorKey(rightmost.Key),
-		scopePrefix:     rightmost.PositiveSource,
 		sequence:        sequence,
 		generatedPseudo: metadata.PseudoElement != "",
 	}
@@ -375,6 +366,7 @@ func planCompiledSelector(branch string, sequence int, selector cascadia.Sel, me
 	for _, compound := range metadata.Compounds {
 		if _, ok := canonicalSVGTagNames[compound.OriginalTypeName]; ok {
 			plan.foreignCaseType = true
+			plan.foreignTypeName = compound.OriginalTypeName
 			break
 		}
 	}
@@ -382,7 +374,7 @@ func planCompiledSelector(branch string, sequence int, selector cascadia.Sel, me
 		plan.makeForeignCaseUncertain(memory)
 		return plan
 	}
-	plan.ancestorChain = compileAncestorChain(complexity, memory)
+	plan.ancestorChain = compileAncestorChain(complexity)
 	return plan
 }
 
@@ -414,7 +406,7 @@ func canonicalSVGTypeSelector(prefix string) (string, bool) {
 }
 
 func scopeSelectorComplexity(prefix string) selectorComplexity {
-	return selectorComplexity{compounds: []compoundComplexity{{source: prefix, positiveSource: prefix}}}
+	return selectorComplexity{compounds: []compoundComplexity{{FullyPositive: true}}}
 }
 
 func ancestorSelectorKey(key selectorKey) selectorKey {

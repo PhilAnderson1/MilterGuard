@@ -86,7 +86,7 @@ type Parser struct {
 
 	buf              []Token
 	level            int
-	componentClosers [maxCSSParserStates]uint8
+	componentClosers [maxCSSParserStates / 32]uint64
 	guard            *resourceGuard
 	resourceErr      error
 
@@ -257,19 +257,22 @@ func (p *Parser) pushState(state State) {
 const maxCSSParserStates = 256
 
 func (p *Parser) openComponentToken(tt TokenType) {
-	if p.level >= len(p.componentClosers) {
-		p.abort(&ResourceLimitError{Resource: "component nesting", Limit: len(p.componentClosers)})
+	if p.level >= maxCSSParserStates {
+		p.abort(&ResourceLimitError{Resource: "component nesting", Limit: maxCSSParserStates})
 	}
+	var closer uint64
 	switch tt {
 	case FunctionToken, LeftParenthesisToken:
-		p.componentClosers[p.level] = uint8(RightParenthesisToken)
+		closer = 1
 	case LeftBracketToken:
-		p.componentClosers[p.level] = uint8(RightBracketToken)
+		closer = 2
 	case LeftBraceToken:
-		p.componentClosers[p.level] = uint8(RightBraceToken)
+		closer = 3
 	default:
 		p.abort(fmt.Errorf("css: invalid component opener %s", tt))
 	}
+	word, shift := p.level/32, uint(p.level%32*2)
+	p.componentClosers[word] = p.componentClosers[word]&^(uint64(3)<<shift) | closer<<shift
 	p.level++
 }
 
@@ -277,7 +280,19 @@ func (p *Parser) closeComponent(tt TokenType) {
 	if p.level == 0 {
 		p.abort(ErrUnsafeDelimiter)
 	}
-	if TokenType(p.componentClosers[p.level-1]) == tt {
+	index := p.level - 1
+	word, shift := index/32, uint(index%32*2)
+	closer := p.componentClosers[word] >> shift & 3
+	var want uint64
+	switch tt {
+	case RightParenthesisToken:
+		want = 1
+	case RightBracketToken:
+		want = 2
+	case RightBraceToken:
+		want = 3
+	}
+	if closer == want {
 		p.level--
 	}
 }

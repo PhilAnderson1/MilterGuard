@@ -752,23 +752,23 @@ func TestNestingDetectionDoesNotFlagOrdinaryBraceValuesOrEmptyAtRules(t *testing
 	}
 }
 
-func TestParserCompatibilityPreservesAuthorEscapedParentheses(t *testing.T) {
+func TestCSSParserPreservesAuthorEscapesDuringDelimiterRecovery(t *testing.T) {
 	for _, test := range []struct {
 		name, css  string
 		inline     bool
 		wantColour string
 	}{
 		{
-			name: "comment rewrite",
+			name: "comment separation",
 			css:  `p{/* separator */--literal:"\)";--url:url(x\))}`,
 		},
 		{
-			name:       "delimiter rewrite",
+			name:       "delimiter recovery",
 			css:        `p{--literal:"\)";--url:url(x\));--mixed:var(--missing,"\)",[unused)]);--mixed-after:var(--missing,[unused)]),"\)";color:var(--missing,[unused)])}`,
 			wantColour: `var(--missing,[unused)])`,
 		},
 		{
-			name:       "inline delimiter rewrite",
+			name:       "inline delimiter recovery",
 			css:        `--literal:"\)";--url:url(x\));--mixed:var(--missing,"\)",[unused)]);--mixed-after:var(--missing,[unused)]),"\)";color:var(--missing,[unused)])`,
 			inline:     true,
 			wantColour: `var(--missing,[unused)])`,
@@ -801,13 +801,13 @@ func TestParserCompatibilityPreservesAuthorEscapedParentheses(t *testing.T) {
 				t.Fatalf("escaped URL = %q, want author value", got)
 			}
 			if test.wantColour != "" && values["--mixed"] != `var(--missing,"\)",[unused)])` {
-				t.Fatalf("mixed compatibility value = %q, want author escape and restored delimiter", values["--mixed"])
+				t.Fatalf("mixed value = %q, want author escape and recovered delimiter", values["--mixed"])
 			}
 			if test.wantColour != "" && values["--mixed-after"] != `var(--missing,[unused)]),"\)"` {
 				t.Fatalf("trailing author escape = %q, want restored delimiter and author escape", values["--mixed-after"])
 			}
 			if test.wantColour != "" && values["color"] != test.wantColour {
-				t.Fatalf("restored compatibility value = %q, want %q", values["color"], test.wantColour)
+				t.Fatalf("recovered value = %q, want %q", values["color"], test.wantColour)
 			}
 		})
 	}

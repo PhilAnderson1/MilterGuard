@@ -1,11 +1,5 @@
 package cascadia
 
-import (
-	"fmt"
-
-	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
-)
-
 // IndexKeyKind identifies a positive selector that can narrow candidate
 // elements without changing selector semantics.
 type IndexKeyKind uint8
@@ -26,9 +20,8 @@ type IndexKey struct {
 // Matcher is the exact matcher already produced by the authoritative parse.
 type CompoundMetadata struct {
 	Matcher            Matcher
-	Source             string
-	PositiveSource     string
 	PositiveMatcher    Matcher
+	FullyPositive      bool
 	Key                IndexKey
 	OriginalTypeName   string
 	AttributeSensitive bool
@@ -47,7 +40,13 @@ type SelectorMetadata struct {
 
 // Metadata derives structural information from an already compiled selector.
 func Metadata(selector Sel) SelectorMetadata {
-	var metadata SelectorMetadata
+	compoundCount := selectorCompoundCount(selector)
+	metadata := SelectorMetadata{
+		Compounds: make([]CompoundMetadata, 0, compoundCount),
+	}
+	if compoundCount > 1 {
+		metadata.Combinators = make([]byte, 0, compoundCount-1)
+	}
 	appendSelectorMetadata(selector, &metadata)
 	metadata.Inactive = selectorNeverMatches(selector)
 	metadata.PseudoElement = selector.PseudoElement()
@@ -55,19 +54,11 @@ func Metadata(selector Sel) SelectorMetadata {
 	return metadata
 }
 
-// MetadataWithMemory derives selector metadata and charges newly retained
-// serialized compound strings. Per-component object growth is independently
-// bounded by the parser's component limit.
-func MetadataWithMemory(selector Sel, memory *resourceguard.Memory) (SelectorMetadata, error) {
-	metadata := Metadata(selector)
-	var retained int64
-	for _, compound := range metadata.Compounds {
-		retained += int64(len(compound.Source) + len(compound.PositiveSource))
+func selectorCompoundCount(selector Sel) int {
+	if combined, ok := selector.(combinedSelector); ok {
+		return selectorCompoundCount(combined.first) + 1
 	}
-	if memory != nil && !memory.Reserve(retained) {
-		return SelectorMetadata{}, fmt.Errorf("cascadia: memory limit exceeded")
-	}
-	return metadata, nil
+	return 1
 }
 
 func appendSelectorMetadata(selector Sel, metadata *SelectorMetadata) {
@@ -83,47 +74,73 @@ func appendSelectorMetadata(selector Sel, metadata *SelectorMetadata) {
 func describeCompound(selector Sel) CompoundMetadata {
 	metadata := CompoundMetadata{
 		Matcher:            selector,
-		Source:             selector.String(),
 		AttributeSensitive: selectorUsesAttributes(selector),
 	}
-	var tag, originalTag, id, class string
-	var positive []Sel
-	visitDirectSimpleSelectors(selector, func(simple Sel) {
-		switch value := simple.(type) {
-		case tagSelector:
-			tag = value.tag
-			originalTag = value.original
-			positive = append(positive, simple)
-		case idSelector:
-			id = value.id
-			positive = append(positive, simple)
-		case classSelector:
-			if class == "" {
-				class = value.class
+	state := compoundMetadataState{}
+	if compound, ok := selector.(compoundSelector); ok {
+		for _, simple := range compound.selectors {
+			state.add(simple)
+		}
+	} else {
+		state.add(selector)
+	}
+	metadata.FullyPositive = state.positiveCount == state.simpleCount && selector.PseudoElement() == ""
+	if metadata.FullyPositive {
+		metadata.PositiveMatcher = selector
+	} else if state.positiveCount == 1 {
+		metadata.PositiveMatcher = state.firstPositive
+	} else if state.positiveCount > 1 {
+		positive := make([]Sel, 0, state.positiveCount)
+		compound := selector.(compoundSelector)
+		for _, simple := range compound.selectors {
+			switch simple.(type) {
+			case tagSelector, idSelector, classSelector:
+				positive = append(positive, simple)
 			}
-			positive = append(positive, simple)
 		}
-	})
-	if len(positive) != 0 {
-		var matcher Sel
-		if len(positive) == 1 {
-			matcher = positive[0]
-		} else {
-			matcher = compoundSelector{selectors: positive}
-		}
-		metadata.PositiveMatcher = matcher
-		metadata.PositiveSource = matcher.String()
+		metadata.PositiveMatcher = compoundSelector{selectors: positive}
 	}
 	switch {
-	case id != "":
-		metadata.Key = IndexKey{Kind: IndexID, Value: id}
-	case class != "":
-		metadata.Key = IndexKey{Kind: IndexClass, Value: class}
-	case tag != "":
-		metadata.Key = IndexKey{Kind: IndexTag, Value: tag}
+	case state.id != "":
+		metadata.Key = IndexKey{Kind: IndexID, Value: state.id}
+	case state.class != "":
+		metadata.Key = IndexKey{Kind: IndexClass, Value: state.class}
+	case state.tag != "":
+		metadata.Key = IndexKey{Kind: IndexTag, Value: state.tag}
 	}
-	metadata.OriginalTypeName = originalTag
+	metadata.OriginalTypeName = state.originalTag
 	return metadata
+}
+
+type compoundMetadataState struct {
+	tag, originalTag, id, class string
+	firstPositive               Sel
+	positiveCount, simpleCount  int
+}
+
+func (s *compoundMetadataState) add(simple Sel) {
+	s.simpleCount++
+	switch value := simple.(type) {
+	case tagSelector:
+		s.tag = value.tag
+		s.originalTag = value.original
+		s.firstPositive = simple
+		s.positiveCount++
+	case idSelector:
+		s.id = value.id
+		if s.firstPositive == nil {
+			s.firstPositive = simple
+		}
+		s.positiveCount++
+	case classSelector:
+		if s.class == "" {
+			s.class = value.class
+		}
+		if s.firstPositive == nil {
+			s.firstPositive = simple
+		}
+		s.positiveCount++
+	}
 }
 
 func selectorSupportedForEmail(selector Sel) bool {
@@ -168,16 +185,6 @@ func simpleNegationSelector(selector Sel) bool {
 	default:
 		return false
 	}
-}
-
-func visitDirectSimpleSelectors(selector Sel, visit func(Sel)) {
-	if compound, ok := selector.(compoundSelector); ok {
-		for _, simple := range compound.selectors {
-			visit(simple)
-		}
-		return
-	}
-	visit(selector)
 }
 
 func selectorUsesAttributes(selector Sel) bool {

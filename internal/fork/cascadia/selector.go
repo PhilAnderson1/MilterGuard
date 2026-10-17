@@ -116,6 +116,17 @@ func ParseGroupWithPseudoElements(sel string) (SelectorGroup, error) {
 // more idiomatic interfaces Sel and Matcher.
 type Selector func(*html.Node) bool
 
+// CombinePositiveMatchers combines already compiled positive compounds for a
+// conservative descendant or child scope.
+func CombinePositiveMatchers(left, right Matcher, combinator byte) Matcher {
+	leftSelector, leftOK := left.(Sel)
+	rightSelector, rightOK := right.(Sel)
+	if !leftOK || !rightOK || combinator != ' ' && combinator != '>' {
+		return nil
+	}
+	return combinedSelector{first: leftSelector, combinator: combinator, second: rightSelector}
+}
+
 // Compile parses a selector and returns, if successful, a Selector object
 // that can be used to match against html.Node objects.
 func Compile(sel string) (Selector, error) {

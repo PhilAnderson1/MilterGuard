@@ -113,7 +113,7 @@ func TestCSSParserNestingLimit(t *testing.T) {
 
 func TestCSSComponentNestingLimit(t *testing.T) {
 	p := NewParser(parse.NewInputString(""), false)
-	p.level = len(p.componentClosers)
+	p.level = maxCSSParserStates
 	defer func() {
 		recovered := recover()
 		if _, ok := recovered.(resourceAbort); !ok {
