@@ -18,7 +18,7 @@ func backgroundFallbackColour(value string) (string, valueStatus, bool) {
 	if status != valueResolved {
 		return value, valueUnsupported, true
 	}
-	return backgroundFallbackColourTokens(tokens)
+	return backgroundFallbackColourTokens(tokens, nil)
 }
 
 func labelBit(label string) visibilityLabel {

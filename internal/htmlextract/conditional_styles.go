@@ -26,7 +26,7 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 		return
 	}
 	// Tokenizing the conditional markup is work in addition to parsing any CSS
-	// it contains. Charge that scan before starting it.
+	// it contains. Sample before starting; the tokenizer samples during its scan.
 	if !s.checkCPU() {
 		return
 	}
@@ -128,6 +128,7 @@ type msoRevealedMarker int8
 const (
 	msoRevealedNone msoRevealedMarker = iota
 	msoRevealedStart
+	msoRevealedUniversalStart
 	msoRevealedEnd
 )
 
@@ -167,7 +168,7 @@ func msoDownlevelRevealedMarker(data string) msoRevealedMarker {
 	if msoConditionAlwaysTrue(condition) {
 		// This downlevel-revealed wrapper does not create a client-dependent
 		// region when every supported Word/IE environment includes its body.
-		return msoRevealedNone
+		return msoRevealedUniversalStart
 	}
 	// False, version-dependent, unsupported, and malformed predicates all mean
 	// that the ordinary-client body cannot be called confidently visible.
@@ -385,4 +386,36 @@ func lastASCIIFoldIndex(value, target string) int {
 		}
 	}
 	return -1
+}
+
+// Every opener participates in pairing, even if its predicate is universally
+// true. Only uncertain entries contribute to the presentation uncertainty.
+type msoRevealedState struct {
+	stack     []bool
+	uncertain int
+}
+
+func (s *msoRevealedState) update(marker msoRevealedMarker, budget *cpuGuard) bool {
+	switch marker {
+	case msoRevealedStart, msoRevealedUniversalStart:
+		var ok bool
+		s.stack, ok = growSlice(s.stack, 1, budget.allocationMemory())
+		if !ok {
+			return false
+		}
+		uncertain := marker == msoRevealedStart
+		s.stack = append(s.stack, uncertain)
+		if uncertain {
+			s.uncertain++
+		}
+	case msoRevealedEnd:
+		if len(s.stack) > 0 {
+			last := len(s.stack) - 1
+			if s.stack[last] {
+				s.uncertain--
+			}
+			s.stack = s.stack[:last]
+		}
+	}
+	return true
 }

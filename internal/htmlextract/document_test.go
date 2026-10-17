@@ -1245,7 +1245,7 @@ func BenchmarkDeepMediaRuleStorage(b *testing.B) {
 	for range 127 {
 		source.WriteString(`@media all{`)
 	}
-	for range 9_000 {
+	for range 2_048 {
 		source.WriteString(`p{display:none}`)
 	}
 	for range 127 {
@@ -1257,8 +1257,10 @@ func BenchmarkDeepMediaRuleStorage(b *testing.B) {
 	b.SetBytes(int64(len(input)))
 	b.ResetTimer()
 	for range b.N {
-		if _, err := Analyze(input, limits); err != nil {
+		if document, err := Analyze(input, limits); err != nil {
 			b.Fatal(err)
+		} else if document.Usage.CSSLimitExceeded {
+			b.Fatal("cascade abandoned")
 		}
 	}
 }

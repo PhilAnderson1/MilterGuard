@@ -34,6 +34,9 @@ func (s *sheet) matchSelector(m cascadia.Matcher, n *html.Node) (bool, bool) {
 }
 
 func (s *sheet) mediaStates(width float64, fallback bool, work *cpuGuard) ([]uint8, bool) {
+	if !s.prepareMediaGroups() {
+		return nil, false
+	}
 	key := mediaCacheKey{width: width, fallback: fallback}
 	if states := s.runtime.mediaCache[key]; states != nil {
 		return states, true
@@ -44,24 +47,42 @@ func (s *sheet) mediaStates(width float64, fallback bool, work *cpuGuard) ([]uin
 		}
 		s.runtime.mediaCache = make(map[mediaCacheKey][]uint8)
 	}
-	hasConditions := false
-	for i := range s.rules {
-		hasConditions = hasConditions || s.rules[i].conditions != nil
-	}
 	if work != nil && !work.check() {
 		return nil, false
 	}
-	if !s.memory.Reserve(int64(len(s.rules)) + mediaStateSliceOverhead) {
+	if !s.memory.Reserve(int64(len(s.runtime.mediaGroups)) + mediaStateSliceOverhead) {
 		return nil, false
 	}
-	states := make([]uint8, len(s.rules))
+	states := make([]uint8, len(s.runtime.mediaGroups))
 	var frameStates map[*conditionFrame]conditionFrameState
-	if hasConditions {
+	if len(s.runtime.mediaGroups) > 1 {
+		if !s.memory.Reserve(mediaFrameStateMapBytes) {
+			return nil, false
+		}
 		frameStates = make(map[*conditionFrame]conditionFrameState)
+		// Reserve each distinct frame before evaluation can populate the map.
+		for _, group := range s.runtime.mediaGroups {
+			for f := group; f != nil; f = f.parent {
+				if _, seen := frameStates[f]; seen {
+					break
+				}
+				if !work.check() || !s.memory.Reserve(mediaFrameSetEntryBytes) {
+					return nil, false
+				}
+				frameStates[f] = conditionFrameState{}
+			}
+		}
+		clear(frameStates)
 	}
-	for i := range s.rules {
-		light, dark := evaluateConditionFrame(s.rules[i].conditions, width, fallback, frameStates)
+	for i, group := range s.runtime.mediaGroups {
+		if !work.check() {
+			return nil, false
+		}
+		light, dark := evaluateConditionFrame(group, width, fallback, frameStates, work)
 		states[i] = uint8(combinedMediaState(light, dark))
+	}
+	if work.stopNow(false) {
+		return nil, false
 	}
 	s.runtime.mediaCache[key] = states
 	return states, true
@@ -282,9 +303,8 @@ func (c evaluationContext) substitute(d *declaration) variableValue {
 	return memo.substitution
 }
 
-// collectCascade identifies the declarations that win the CSS cascade for one
-// element. It reserves each declaration list's complete cost before mutating
-// the result so an exhausted work budget can never expose partial winners.
+// collectCascade identifies winning declarations privately. Interrupted scans
+// discard partial winners rather than exposing a partially trusted cascade.
 func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, work *cpuGuard, context evaluationContext) (cascadeWinners, bool) {
 	var winners cascadeWinners
 	type cascadeSource struct {
@@ -298,9 +318,7 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 	// evaluation. Winners retain references plus per-use property/uncertainty
 	// metadata instead of copying and modifying complete declarations.
 	apply := func(ds []declaration, source cascadeSource) bool {
-		// Reserve the complete declaration-list cost before changing the
-		// cascade. A failed reservation must not leave a partially applied
-		// style that appears trustworthy.
+		// Check before and during the list; partial winners remain private.
 		if len(ds) > 0 && !work.check() {
 			return false
 		}
@@ -324,6 +342,9 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 			}
 		}
 		for declarationIndex := range ds {
+			if !work.check() {
+				return false
+			}
 			d := &ds[declarationIndex]
 			if d.custom == "" && !d.unsupported {
 				if d.validityReady && d.validity == valueInvalid {
@@ -339,7 +360,13 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 			if source.colourSchemeDependent {
 				if d.custom != "" {
 					if winners.alternateColourSchemeVars == nil {
+						if !s.memory.Reserve(128) {
+							return false
+						}
 						winners.alternateColourSchemeVars = make(map[string]bool)
+					}
+					if !winners.alternateColourSchemeVars[d.custom] && !s.memory.Reserve(variableAlternateEntryBytes) {
+						return false
 					}
 					winners.alternateColourSchemeVars[d.custom] = true
 				} else {
@@ -353,6 +380,9 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 				c := candidate{d: d, property: d.prop, set: true, inline: source.inline, uncertainOrigin: source.uncertain, spec: source.specificity}
 				if winners.variables == nil {
 					if s.runtime.variableScratch == nil {
+						if !s.memory.Reserve(128) {
+							return false
+						}
 						s.runtime.variableScratch = make(map[string]candidate)
 					} else {
 						clear(s.runtime.variableScratch)
@@ -360,6 +390,12 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 					winners.variables = s.runtime.variableScratch
 				}
 				if c.beats(winners.variables[d.custom]) {
+					if _, exists := winners.variables[d.custom]; !exists && len(winners.variables) >= s.runtime.variableScratchCapacity {
+						if !s.memory.Reserve(96) {
+							return false
+						}
+						s.runtime.variableScratchCapacity++
+					}
 					winners.variables[d.custom] = c
 				}
 			} else if d.prop == allShorthandProperty {
@@ -380,9 +416,12 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 		return cascadeWinners{}, false
 	}
 	for _, ref := range refs {
+		if !work.check() {
+			return cascadeWinners{}, false
+		}
 		r := &s.rules[ref.rule]
 		plan := &r.plans[ref.branch]
-		state := int(mediaStates[ref.rule])
+		state := int(mediaStates[r.mediaGroup])
 		if state == mediaNo {
 			continue
 		}

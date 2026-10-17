@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"unsafe"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // Conservative estimates for the temporary and retained maps built while
@@ -40,7 +42,10 @@ type conditionFrame struct {
 	parent    *conditionFrame
 }
 
-func newConditionFrame(condition mediaCondition, parent *conditionFrame) *conditionFrame {
+func newConditionFrame(condition mediaCondition, parent *conditionFrame, memory *resourceguard.Memory) *conditionFrame {
+	if !memory.Reserve(int64(unsafe.Sizeof(conditionFrame{}))) {
+		return nil
+	}
 	return &conditionFrame{condition: condition, parent: parent}
 }
 
@@ -151,14 +156,17 @@ type conditionFrameState struct {
 
 // evaluateConditionFrame derives a frame from its parent. A cache shared by
 // all rules at one width evaluates every immutable frame at most once.
-func evaluateConditionFrame(frame *conditionFrame, width float64, fallback bool, cache map[*conditionFrame]conditionFrameState) (light, dark int) {
+func evaluateConditionFrame(frame *conditionFrame, width float64, fallback bool, cache map[*conditionFrame]conditionFrameState, budget *cpuGuard) (light, dark int) {
+	if !budget.check() {
+		return mediaUnknown, mediaUnknown
+	}
 	if frame == nil {
 		return mediaYes, mediaYes
 	}
 	if state, ok := cache[frame]; ok {
 		return state.light, state.dark
 	}
-	light, dark = evaluateConditionFrame(frame.parent, width, fallback, cache)
+	light, dark = evaluateConditionFrame(frame.parent, width, fallback, cache, budget)
 	frameLight, frameDark := frame.condition.states(width, fallback)
 	light = intersectMediaState(light, frameLight)
 	dark = intersectMediaState(dark, frameDark)
@@ -200,20 +208,23 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 	// No media decision can make an unusable cascade trustworthy. Retain one
 	// traversal so text and elements are still extracted and labelled unknown,
 	// but do not spend more work constructing activation vectors.
-	if s.cascadeIncomplete || s.stopped {
+	if s.cascadeIncomplete || s.stopped || !s.prepareMediaGroups() {
 		return []float64{1024}, true
 	}
 	var bounds []float64
 	unique := map[float64]bool{}
 	seenFrames := map[*conditionFrame]bool{}
 	charge := func() bool { return s.checkCPU() }
-	for _, r := range s.rules {
+	for _, group := range s.runtime.mediaGroups {
 		if !charge() {
 			return []float64{1024}, true
 		}
-		for frame := r.conditions; frame != nil; frame = frame.parent {
+		for frame := group; frame != nil; frame = frame.parent {
+			if !s.checkCPU() {
+				return []float64{1024}, true
+			}
 			if seenFrames[frame] {
-				continue
+				break
 			}
 			if !s.memory.Reserve(mediaFrameSetEntryBytes) {
 				return []float64{1024}, true
@@ -227,6 +238,11 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 							return []float64{1024}, true
 						}
 						unique[b.value] = true
+						var ok bool
+						bounds, ok = growSlice(bounds, 1, s.memory)
+						if !ok {
+							return []float64{1024}, true
+						}
 						bounds = append(bounds, b.value)
 					}
 				}
@@ -235,19 +251,19 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 	}
 	var candidates []float64
 	if len(bounds) == 0 {
-		if !s.memory.Reserve(int64(len(s.rules)) + int64(len(seenFrames))*mediaFrameSetEntryBytes + mediaFrameStateMapBytes) {
+		if !s.memory.Reserve(int64(len(s.runtime.mediaGroups)) + int64(len(seenFrames))*mediaFrameSetEntryBytes + mediaFrameStateMapBytes) {
 			return []float64{1024}, true
 		}
-		states := make([]uint8, 0, len(s.rules))
+		states := make([]uint8, 0, len(s.runtime.mediaGroups))
 		var frameStates map[*conditionFrame]conditionFrameState
 		if len(seenFrames) > 0 {
 			frameStates = make(map[*conditionFrame]conditionFrameState, len(seenFrames))
 		}
-		for _, r := range s.rules {
+		for _, group := range s.runtime.mediaGroups {
 			if !charge() {
 				return []float64{1024}, true
 			}
-			light, dark := evaluateConditionFrame(r.conditions, 1024, false, frameStates)
+			light, dark := evaluateConditionFrame(group, 1024, false, frameStates, s.cpu)
 			states = append(states, uint8(combinedMediaState(light, dark)))
 		}
 		s.runtime.mediaCache = map[mediaCacheKey][]uint8{{width: 1024}: states}
@@ -257,7 +273,7 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 			return []float64{1024}, true
 		}
 		sort.Float64s(bounds)
-		candidates = []float64{0}
+		candidates = make([]float64, 1, len(bounds)*2+2)
 		prev := 0.0
 		for _, b := range bounds {
 			if b > prev {
@@ -283,24 +299,70 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 	}
 	for _, w := range candidates {
 		clear(frameStates)
-		if !s.memory.Reserve(int64(len(s.rules))*2 + mediaActivationOverheadBytes) {
+		if !s.memory.Reserve(int64(len(s.runtime.mediaGroups))*2 + mediaActivationOverheadBytes) {
 			return []float64{1024}, true
 		}
-		states := make([]uint8, 0, len(s.rules))
-		for _, r := range s.rules {
+		states := make([]uint8, 0, len(s.runtime.mediaGroups))
+		for _, group := range s.runtime.mediaGroups {
 			if !charge() {
 				return []float64{1024}, true
 			}
-			light, dark := evaluateConditionFrame(r.conditions, w, false, frameStates)
+			light, dark := evaluateConditionFrame(group, w, false, frameStates, s.cpu)
 			states = append(states, uint8(combinedMediaState(light, dark)))
 		}
-		k := string(states)
+		k := string(states[1:])
 		if seen[k] {
 			continue
 		}
 		seen[k] = true
+		var ok bool
+		widths, ok = growSlice(widths, 1, s.memory)
+		if !ok {
+			return []float64{1024}, true
+		}
 		widths = append(widths, w)
 		s.runtime.mediaCache[mediaCacheKey{width: w}] = states
 	}
 	return widths, false
+}
+
+// Rules sharing a persistent condition chain always have identical media
+// states. Group zero is the unconditional state and is omitted from signatures.
+func (s *sheet) prepareMediaGroups() bool {
+	if s.runtime.mediaGroups != nil {
+		return true
+	}
+	if !s.memory.Reserve(mediaFrameStateMapBytes) {
+		return false
+	}
+	ids := map[*conditionFrame]int{nil: 0}
+	groups := []*conditionFrame(nil)
+	var ok bool
+	groups, ok = growSlice(groups, 1, s.memory)
+	if !ok {
+		return false
+	}
+	groups = append(groups, nil)
+	for i := range s.rules {
+		if !s.checkCPU() {
+			return false
+		}
+		frame := s.rules[i].conditions
+		id, found := ids[frame]
+		if !found {
+			if !s.memory.Reserve(mediaFrameSetEntryBytes) {
+				return false
+			}
+			id = len(groups)
+			ids[frame] = id
+			groups, ok = growSlice(groups, 1, s.memory)
+			if !ok {
+				return false
+			}
+			groups = append(groups, frame)
+		}
+		s.rules[i].mediaGroup = id
+	}
+	s.runtime.mediaGroups = groups
+	return true
 }

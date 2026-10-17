@@ -3,6 +3,7 @@ package htmlextract
 import (
 	"math"
 	"strings"
+	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
@@ -24,10 +25,10 @@ const colourThreshold = .005
 // as unresolved for both components; a later colour alone cannot reset an image.
 func backgroundDeclarations(value string, important bool, order int, budget *cpuGuard) []declaration {
 	tokens, status := lexValue(value, budget)
-	return backgroundDeclarationsTokens(value, tokens, status, important, order)
+	return backgroundDeclarationsTokens(value, tokens, status, important, order, budget)
 }
 
-func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus valueStatus, important bool, order int) []declaration {
+func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus valueStatus, important bool, order int, budget *cpuGuard) []declaration {
 	colourValue, image := "transparent", "none"
 	unsupported := false
 	imageColourStatus := valueResolved
@@ -45,11 +46,14 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 		haveNone := false
 		var b strings.Builder
 		for _, valueToken := range tokens {
+			if !budget.check() {
+				return nil
+			}
 			tt, s := valueToken.kind, asciiLower(valueToken.raw)
 			if isClosingToken(tt) && len(stack) == 0 {
 				return nil
 			}
-			stack, _ = advanceDelimiters(stack, tt)
+			stack, _ = advanceDelimiters(stack, tt, budget)
 			if len(stack) == 0 && tt == css.IdentToken && s == "none" {
 				if haveNone {
 					unsupported = true
@@ -72,7 +76,7 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 				// that fallback rather than assuming every image shorthand resets
 				// the colour to transparent.
 				var valid bool
-				colourValue, status, valid = backgroundFallbackColourTokens(tokens)
+				colourValue, status, valid = backgroundFallbackColourTokens(tokens, budget)
 				if !valid {
 					return nil
 				}
@@ -101,22 +105,25 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 	return []declaration{{prop: background, value: colourValue, important: important, order: order, unsupported: colourUnsupported}, {prop: backgroundImage, value: image, important: important, order: order, unsupported: imageUnsupported}}
 }
 
-func backgroundFallbackColourTokens(tokens []valueToken) (string, valueStatus, bool) {
+func backgroundFallbackColourTokens(tokens []valueToken, budget *cpuGuard) (string, valueStatus, bool) {
 	finalStart := 0
 	var stack []css.TokenType
 	for i, token := range tokens {
+		if !budget.check() {
+			return "", valueUnsupported, false
+		}
 		if token.kind == css.CommaToken && len(stack) == 0 {
 			finalStart = i + 1
 		}
-		stack, _ = advanceDelimiters(stack, token.kind)
+		stack, _ = advanceDelimiters(stack, token.kind, budget)
 	}
 	// A colour in any non-final layer makes the shorthand invalid.
 	if finalStart > 0 {
-		if _, _, count := backgroundLayerColour(tokens[:finalStart-1]); count != 0 {
+		if _, _, count := backgroundLayerColour(tokens[:finalStart-1], budget); count != 0 {
 			return "", valueInvalid, false
 		}
 	}
-	colour, colourStatus, count := backgroundLayerColour(tokens[finalStart:])
+	colour, colourStatus, count := backgroundLayerColour(tokens[finalStart:], budget)
 	if count > 1 {
 		return "", valueInvalid, false
 	}
@@ -126,15 +133,18 @@ func backgroundFallbackColourTokens(tokens []valueToken) (string, valueStatus, b
 	return colour, colourStatus, true
 }
 
-func backgroundLayerColour(tokens []valueToken) (string, valueStatus, int) {
+func backgroundLayerColour(tokens []valueToken, budget *cpuGuard) (string, valueStatus, int) {
 	var colour string
 	colourStatus, count := valueInvalid, 0
 	for i := 0; i < len(tokens); i++ {
+		if !budget.check() {
+			return "", valueUnsupported, 0
+		}
 		token := tokens[i]
 		candidate := ""
 		switch token.kind {
 		case css.FunctionToken:
-			end := closing(tokens, i)
+			end := closing(tokens, i, budget)
 			name := asciiLower(cssUnescape(strings.TrimSuffix(token.raw, "(")))
 			if isColourFunction(name) {
 				last := end + 1
@@ -218,17 +228,24 @@ func legacyDimension(value string) (string, bool) {
 // Presentational hints precede all author rules, with specificity zero. Full
 // HTML legacy colour-error recovery is deliberately not guessed: unfamiliar
 // legacy spellings are unresolved, and cannot prove colour concealment.
-func legacyDeclarations(n *html.Node) []declaration {
-	var result []declaration
+func legacyDeclarations(n *html.Node) []declaration { return legacyDeclarationsWithBudget(n, nil) }
+func legacyDeclarationsWithBudget(n *html.Node, budget *cpuGuard) []declaration {
+	if n.Namespace != "" {
+		return nil
+	}
+	// At most hidden, background colour, two dimensions and background image.
+	var hints [5]declaration
+	count := 0
+	addDeclaration := func(d declaration) { hints[count] = d; count++ }
 	if hasAttr(n, "hidden") && equalASCIIFold(strings.TrimSpace(attr(n, "hidden")), "until-found") {
 		// Hidden-until-found retains a generated box but does not paint its
 		// contents. Model the browser's presentational content-visibility hint
 		// separately from display so display:block cannot reveal the text.
-		result = append(result, declaration{prop: contentVisibility, value: "hidden", order: -2, unsupported: true})
+		addDeclaration(declaration{prop: contentVisibility, value: "hidden", order: -2, unsupported: true})
 	} else if hasAttr(n, "hidden") {
 		// The hidden presentational default participates below author CSS, so an
 		// explicit author display declaration can restore the element.
-		result = append(result, declaration{prop: display, value: "none", order: -2, unsupported: true})
+		addDeclaration(declaration{prop: display, value: "none", order: -2, unsupported: true})
 	}
 	add := func(prop int, value string) {
 		value = asciiLower(strings.TrimSpace(value))
@@ -241,10 +258,7 @@ func legacyDeclarations(n *html.Node) []declaration {
 			}
 		}
 		_, status := readColour(value)
-		result = append(result, declaration{prop: prop, value: value, order: -1, unsupported: status != valueResolved})
-	}
-	if n.Namespace != "" {
-		return nil
+		addDeclaration(declaration{prop: prop, value: value, order: -1, unsupported: status != valueResolved})
 	}
 	switch n.Data {
 	case "body", "table", "tr", "td", "th":
@@ -255,7 +269,7 @@ func legacyDeclarations(n *html.Node) []declaration {
 	}
 	addDimension := func(prop int, name string) {
 		if value, ok := legacyDimension(attr(n, name)); ok {
-			result = append(result, declaration{prop: prop, value: value, order: -1})
+			addDeclaration(declaration{prop: prop, value: value, order: -1})
 		}
 	}
 	// These obsolete attributes remain common in table-based email and are
@@ -271,9 +285,17 @@ func legacyDeclarations(n *html.Node) []declaration {
 	switch n.Data {
 	case "body", "table", "td", "th":
 		if v := attr(n, "background"); v != "" {
-			result = append(result, declaration{prop: backgroundImage, value: "legacy-image:" + v, order: -1, unsupported: true})
+			addDeclaration(declaration{prop: backgroundImage, value: "legacy-image:" + v, order: -1, unsupported: true})
 		}
 	}
+	if count == 0 {
+		return nil
+	}
+	if !budget.reserve(int64(count) * int64(unsafe.Sizeof(declaration{}))) {
+		return nil
+	}
+	result := make([]declaration, count)
+	copy(result, hints[:count])
 	return result
 }
 
@@ -318,7 +340,7 @@ type paintLayer struct {
 }
 
 // colourNeutral reports whether inserting this layer anywhere in the paint
-// stack leaves evaluateColourUncharged's result unchanged. Unknown images,
+// stack leaves evaluateColour's result unchanged. Unknown images,
 // composition effects and enhancements are deliberately non-neutral because
 // they can turn an otherwise usable or concealed result into uncertainty.
 func (p paintLayer) colourNeutral() bool {
@@ -404,28 +426,9 @@ func (c colourResult) inspection() colourInspection {
 // canvas is supplied after known layers; unresolved layers remain unknown. No sibling/layout/image
 // sampling, antialiasing, blending or filter model is implied.
 func evaluateColour(foreground Value, layers []paintLayer, work *cpuGuard) colourResult {
-	if !chargeColourEvaluation(foreground, layers, work) {
+	if !work.check() {
 		return colourResult{uncertainty: "style-analysis CPU limit"}
 	}
-	return evaluateColourUncharged(foreground, layers)
-}
-
-func chargeColourEvaluation(foreground Value, layers []paintLayer, work *cpuGuard) bool {
-	// Account for the fixed conversion/distance work and, when the foreground
-	// is usable, every ancestor layer the evaluator may inspect. Reserve the
-	// complete cost before starting so exhaustion cannot leave a partially
-	// composited colour looking trustworthy.
-	cost := int64(1)
-	if foreground.Known {
-		cost += int64(len(layers))
-	}
-	if work != nil && !work.check() {
-		return false
-	}
-	return true
-}
-
-func evaluateColourUncharged(foreground Value, layers []paintLayer) colourResult {
 	if !foreground.Known {
 		return colourResult{uncertainty: "unresolved foreground"}
 	}
@@ -433,6 +436,9 @@ func evaluateColourUncharged(foreground Value, layers []paintLayer) colourResult
 	uncertainEnhancement := false
 	unresolvedGroundImage := false
 	for i := len(layers) - 1; i >= 0; i-- {
+		if !work.check() {
+			return colourResult{uncertainty: "style-analysis CPU limit"}
+		}
 		p := layers[i]
 		if !p.compositionKnown {
 			return colourResult{uncertainty: "unsupported composition effect"}

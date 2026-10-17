@@ -146,7 +146,7 @@ type documentWalker struct {
 	document  *parsedDocument
 	stack     []documentFrame
 	nodeCount int
-	msoDepth  int
+	mso       msoRevealedState
 }
 
 func (w *documentWalker) run(root *html.Node) error {
@@ -169,12 +169,14 @@ func (w *documentWalker) run(root *html.Node) error {
 				prepared := w.document.elements[frame.n]
 				if !prepared.hasElementChild {
 					prepared.hasElementChild = true
-					w.document.elements[frame.n] = prepared
+					if !w.document.storePreparation(frame.n, prepared) {
+						return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
+					}
 				}
 			}
 			if len(w.stack) == cap(w.stack) {
 				newCapacity := max(1, cap(w.stack)*2)
-				if !w.processor.memory.Reserve(int64(newCapacity-cap(w.stack)) * int64(unsafe.Sizeof(documentFrame{}))) {
+				if !w.processor.memory.Reserve(int64(newCapacity) * int64(unsafe.Sizeof(documentFrame{}))) {
 					return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
 				}
 				grown := make([]documentFrame, len(w.stack), newCapacity)
@@ -206,7 +208,9 @@ func (w *documentWalker) visit(frame *documentFrame) error {
 		return errStopped
 	}
 	if node.Type == html.CommentNode && (frame.scope == scopeActive || frame.scope == scopeHead) {
-		w.visitComment(node)
+		if !w.visitComment(node) {
+			return errStopped
+		}
 	}
 	if node.Type == html.ElementNode {
 		if err := w.prepareElement(node, frame); err != nil {
@@ -220,7 +224,7 @@ func (w *documentWalker) visit(frame *documentFrame) error {
 	return nil
 }
 
-func (w *documentWalker) visitComment(node *html.Node) {
+func (w *documentWalker) visitComment(node *html.Node) bool {
 	marker := msoDownlevelRevealedMarker(node.Data)
 	if marker != msoRevealedNone {
 		// Foster parenting can move text out of table insertion modes while
@@ -241,15 +245,11 @@ func (w *documentWalker) visitComment(node *html.Node) {
 			}
 		}
 	}
-	switch marker {
-	case msoRevealedStart:
-		w.msoDepth++
-	case msoRevealedEnd:
-		if w.msoDepth > 0 {
-			w.msoDepth--
-		}
+	if !w.mso.update(marker, w.processor.cpu) {
+		return false
 	}
 	w.document.styles.parseMSOConditionalStyles(node.Data)
+	return !w.processor.cpu.stopNow(false)
 }
 
 func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) error {
@@ -265,7 +265,7 @@ func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) e
 			styles.abandonCascade()
 		} else {
 			origin := trustedStylesheetOrigin
-			if node.Namespace != "" || frame.uncertainStylesheetOrigin || w.msoDepth > 0 {
+			if node.Namespace != "" || frame.uncertainStylesheetOrigin || w.mso.uncertain > 0 {
 				origin = uncertainStylesheetOrigin
 			}
 			styles.parseStylesheet(cssText, attr(node, "media"), origin)
@@ -277,13 +277,12 @@ func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) e
 		prepared.inlineIncomplete = result.incomplete
 	}
 	if !styles.cascadeIncomplete && !styles.stopped {
-		prepared.legacy = prepareDeclarations(legacyDeclarations(node), w.processor.cpu)
+		prepared.legacy = prepareDeclarations(legacyDeclarationsWithBudget(node, w.processor.cpu), w.processor.cpu)
 	}
 	if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || prepared.inlineIncomplete {
-		if _, exists := w.document.elements[node]; !exists && !w.processor.memory.Reserve(elementPreparationEntryBytes) {
+		if !w.document.storePreparation(node, prepared) {
 			return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
 		}
-		w.document.elements[node] = prepared
 	}
 	if frame.scope == scopeActive && (node.Data == "img" || node.Data == "input") {
 		w.document.extractableElementCount++
@@ -342,13 +341,21 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	if document.styles.stopped {
 		return document, errStopped
 	}
-	if document.styles.cascadeIncomplete || document.styles.stopped {
+	if document.styles.cascadeIncomplete {
 		// No prepared per-element CSS can be used once global style analysis is
 		// incomplete. Release declarations and selector profiles collected before
 		// the failure rather than retaining them through result traversal.
 		document.elements = nil
 	}
 	return document, nil
+}
+
+func (d *parsedDocument) storePreparation(n *html.Node, prepared elementPreparation) bool {
+	if _, exists := d.elements[n]; !exists && !d.memory.Reserve(elementPreparationEntryBytes) {
+		return false
+	}
+	d.elements[n] = prepared
+	return true
 }
 
 func boundedStyleText(style *html.Node, maximum int) (string, bool) {

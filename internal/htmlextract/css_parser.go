@@ -18,14 +18,18 @@ type cssParseSession struct {
 	incomplete bool
 	out        []declaration
 
-	conditions         *conditionFrame
-	enclosingRules     []int
-	nestedGroups       []bool
-	atRuleRulesetDepth []int
-	rulesetDepth       int
-	defaultNamespace   bool
-	current            int
-	importsAllowed     bool
+	conditions       *conditionFrame
+	atRules          []atRuleFrame
+	rulesetDepth     int
+	defaultNamespace bool
+	current          int
+	importsAllowed   bool
+}
+
+type atRuleFrame struct {
+	enclosingRule int
+	nested        bool
+	rulesetDepth  int
 }
 
 func newCSSParseSession(s *sheet, text string, mode cssParseMode) cssParseSession {
@@ -104,7 +108,7 @@ func (p *cssParseSession) handleError(s *sheet, tokenType css.TokenType, values 
 		}
 		return true
 	}
-	insideNestedGroup := len(p.nestedGroups) > 0 && p.nestedGroups[len(p.nestedGroups)-1]
+	insideNestedGroup := len(p.atRules) > 0 && p.atRules[len(p.atRules)-1].nested
 	if !p.inline && p.rulesetDepth > 0 && (hasTopLevelCSSBlock(values) || (p.current < 0 && insideNestedGroup)) {
 		s.noteUnsupportedNesting()
 	}
@@ -155,11 +159,19 @@ func (p *cssParseSession) beginAtRule(s *sheet, name string, values []css.Token)
 	default:
 		condition = mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
 	}
-	p.conditions = newConditionFrame(condition, p.conditions)
-	p.enclosingRules = append(p.enclosingRules, enclosingRule)
-	parentNested := len(p.nestedGroups) > 0 && p.nestedGroups[len(p.nestedGroups)-1]
-	p.nestedGroups = append(p.nestedGroups, cssNestingGroup(name) && (enclosingRule >= 0 || parentNested))
-	p.atRuleRulesetDepth = append(p.atRuleRulesetDepth, p.rulesetDepth)
+	p.conditions = newConditionFrame(condition, p.conditions, s.memory)
+	if p.conditions == nil {
+		s.abandonCascade()
+		return true
+	}
+	parentNested := len(p.atRules) > 0 && p.atRules[len(p.atRules)-1].nested
+	var ok bool
+	p.atRules, ok = growSlice(p.atRules, 1, s.memory)
+	if !ok {
+		s.abandonCascade()
+		return true
+	}
+	p.atRules = append(p.atRules, atRuleFrame{enclosingRule: enclosingRule, nested: cssNestingGroup(name) && (enclosingRule >= 0 || parentNested), rulesetDepth: p.rulesetDepth})
 	return false
 }
 
@@ -169,10 +181,8 @@ func (p *cssParseSession) endAtRule() {
 		return
 	}
 	p.conditions = p.conditions.parent
-	p.current = p.enclosingRules[len(p.enclosingRules)-1]
-	p.enclosingRules = p.enclosingRules[:len(p.enclosingRules)-1]
-	p.nestedGroups = p.nestedGroups[:len(p.nestedGroups)-1]
-	p.atRuleRulesetDepth = p.atRuleRulesetDepth[:len(p.atRuleRulesetDepth)-1]
+	p.current = p.atRules[len(p.atRules)-1].enclosingRule
+	p.atRules = p.atRules[:len(p.atRules)-1]
 }
 
 func (p *cssParseSession) atRule(s *sheet, name string, values []css.Token) bool {
@@ -198,8 +208,8 @@ func (p *cssParseSession) atRule(s *sheet, name string, values []css.Token) bool
 func (p *cssParseSession) beginRuleset(s *sheet, values []css.Token) bool {
 	p.importsAllowed = false
 	nestedQualifiedRule := p.rulesetDepth > 0 &&
-		(len(p.atRuleRulesetDepth) == 0 || p.rulesetDepth > p.atRuleRulesetDepth[len(p.atRuleRulesetDepth)-1])
-	if !p.inline && (nestedQualifiedRule || len(p.nestedGroups) > 0 && p.nestedGroups[len(p.nestedGroups)-1]) {
+		(len(p.atRules) == 0 || p.rulesetDepth > p.atRules[len(p.atRules)-1].rulesetDepth)
+	if !p.inline && (nestedQualifiedRule || len(p.atRules) > 0 && p.atRules[len(p.atRules)-1].nested) {
 		s.noteUnsupportedNesting()
 	}
 	p.rulesetDepth++
@@ -227,7 +237,13 @@ func (p *cssParseSession) beginRuleset(s *sheet, values []css.Token) bool {
 			plans[i].makeUncertain(s.memory)
 		}
 	}
-	if !s.memory.Reserve(int64(unsafe.Sizeof(rule{})) + int64(len(plans))*int64(unsafe.Sizeof(selectorPlan{}))) {
+	if !s.memory.Reserve(int64(len(plans)) * int64(unsafe.Sizeof(selectorPlan{}))) {
+		s.abandonCascade()
+		return true
+	}
+	var ok bool
+	s.rules, ok = growSlice(s.rules, 1, s.memory)
+	if !ok {
 		s.abandonCascade()
 		return true
 	}
@@ -251,7 +267,7 @@ func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, propert
 		property = string(original)
 	}
 	property = normalizeDeclarationProperty(property)
-	insideNestedGroup := len(p.nestedGroups) > 0 && p.nestedGroups[len(p.nestedGroups)-1]
+	insideNestedGroup := len(p.atRules) > 0 && p.atRules[len(p.atRules)-1].nested
 	if !p.inline && p.rulesetDepth > 0 && grammar != css.CustomPropertyGrammar &&
 		(hasTopLevelCSSBlock(values) || (p.current < 0 && insideNestedGroup)) {
 		s.noteUnsupportedNesting()
@@ -267,7 +283,7 @@ func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, propert
 		valueTokens, status := lexValue(value, s.cpu)
 		declarations = s.declarationsFromTokens(property, valueTokens, status, value)
 	} else if cssTokensNeedRetention(property, values) {
-		valueTokens, status := ownedValueTokens(values, value)
+		valueTokens, status := ownedValueTokens(values, value, s.cpu)
 		declarations = s.declarationsFromTokens(property, valueTokens, status, value)
 	} else {
 		declarations = s.declarationsFromParsed(property, parseUnretainedCSSTokens(values, value), false)
@@ -276,15 +292,28 @@ func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, propert
 		s.abandonCascade()
 		return true
 	}
+	// Account for the temporary declaration slice separately from the retained
+	// inline/rule backing array grown below.
 	if !s.memory.Reserve(int64(len(declarations)) * int64(unsafe.Sizeof(declaration{}))) {
 		s.abandonCascade()
 		return true
 	}
 	s.declarationCount += len(declarations)
 	if p.inline {
+		var ok bool
+		p.out, ok = growSlice(p.out, len(declarations), s.memory)
+		if !ok {
+			s.abandonCascade()
+			return true
+		}
 		p.out = append(p.out, declarations...)
 	} else if p.current >= 0 {
-		s.rules[p.current].decls = append(s.rules[p.current].decls, declarations...)
+		out, ok := growSlice(s.rules[p.current].decls, len(declarations), s.memory)
+		if !ok {
+			s.abandonCascade()
+			return true
+		}
+		s.rules[p.current].decls = append(out, declarations...)
 	}
 	return false
 }

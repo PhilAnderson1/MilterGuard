@@ -1,5 +1,7 @@
 package htmlextract
 
+import "unsafe"
+
 type visibilityLabel uint8
 
 const (
@@ -127,6 +129,9 @@ func decideVisibility(style *Style, state presentationState, colour *colourResul
 }
 
 func concealmentReasonStrings(mask concealmentReason) []string {
+	return concealmentReasonStringsWithBudget(mask, nil)
+}
+func concealmentReasonStringsWithBudget(mask concealmentReason, budget *cpuGuard) []string {
 	var reasons [8]string
 	count := 0
 	for _, reason := range []struct {
@@ -147,7 +152,12 @@ func concealmentReasonStrings(mask concealmentReason) []string {
 			count++
 		}
 	}
-	return append([]string(nil), reasons[:count]...)
+	if !budget.reserve(int64(count) * int64(unsafe.Sizeof(string("")))) {
+		return nil
+	}
+	out := make([]string, count)
+	copy(out, reasons[:count])
+	return out
 }
 
 func aggregateLabel(bits visibilityLabel) string {

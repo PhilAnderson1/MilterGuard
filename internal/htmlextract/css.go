@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
@@ -56,6 +57,7 @@ type declaration struct {
 	animationShorthand   bool
 	animation            *animationValue
 	variableDependencies []string
+	variableBlocks       []valueBlock
 	dependenciesReady    bool
 }
 
@@ -78,11 +80,16 @@ func (d *declaration) ensureTokens(budget *cpuGuard) {
 	d.tokensReady = true
 }
 
-func (d *declaration) recordVariableDependencies() {
+func (d *declaration) recordVariableDependencies(budget *cpuGuard) {
 	if !d.hasVars || !d.tokensReady || d.valueStatus != valueResolved {
 		return
 	}
-	d.variableDependencies = variableRefs(d.valueTokens)
+	var ok bool
+	d.variableBlocks, ok = indexValueBlocks(d.valueTokens, budget)
+	if !ok {
+		return
+	}
+	d.variableDependencies = variableRefs(d.valueTokens, budget)
 	d.dependenciesReady = true
 }
 
@@ -105,6 +112,7 @@ func (d *declaration) discardTransientState() {
 	d.valueTokens = nil
 	d.tokensReady = false
 	d.variableDependencies = nil
+	d.variableBlocks = nil
 	d.dependenciesReady = false
 }
 
@@ -150,7 +158,7 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 	if (d.custom != "" || d.hasVars) && !d.tokensReady {
 		d.ensureTokens(budget)
 	}
-	d.recordVariableDependencies()
+	d.recordVariableDependencies(budget)
 	if d.prop == animationProperty && d.custom == "" {
 		// Cache context-independent name parsing, including escaped identifiers
 		// that the conservative hasVars fast path initially treated as dynamic.
@@ -167,6 +175,10 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 			prepared.status = valueUnsupported
 		} else {
 			prepared.value, prepared.status = resolveWithBudget(d.prop, d.value, &initialStyle, &initialStyle, budget)
+		}
+		if !budget.reserve(int64(unsafe.Sizeof(preparedDeclaration{}))) {
+			d.discardTransientState()
+			return d
 		}
 		d.setPrepared(prepared.value, prepared.status)
 	} else if d.custom == "" && !d.hasVars && !d.shorthand && !d.unsupported {
@@ -205,6 +217,7 @@ func (s *sheet) prepareDeclarations(ds []declaration) []declaration {
 }
 
 type rule struct {
+	mediaGroup      int
 	plans           []selectorPlan
 	decls           []declaration
 	conditions      *conditionFrame
@@ -212,21 +225,26 @@ type rule struct {
 }
 
 // sheetRuntime contains evaluation caches and reusable scratch storage. Rules,
-// declarations and selector plans remain immutable once indexing completes.
+// declarations and selector plans remain immutable once selector and media
+// grouping preparation completes.
 type sheetRuntime struct {
-	mediaCache          map[mediaCacheKey][]uint8
-	cacheMatches        bool
-	matchCaches         []map[*html.Node]uint8
-	matchCacheEntries   int
-	attributeCandidates map[*html.Node]selectorAttributeCandidates
-	candidateScratch    []selectorRef
-	candidateMarks      []uint32
-	candidateGeneration uint32
-	ancestorNodes       []*html.Node
-	ancestorRecent      []ancestorStateEntry
-	ancestorStates      []map[*html.Node]ancestorChainState
-	activeAncestors     activeAncestorBuckets
-	variableScratch     map[string]candidate
+	mediaGroups             []*conditionFrame
+	mediaCache              map[mediaCacheKey][]uint8
+	cacheMatches            bool
+	matchCaches             []map[*html.Node]uint8
+	matchCacheEntries       int
+	attributeCandidates     map[*html.Node]selectorAttributeCandidates
+	attributeMarks          []uint32
+	attributeGeneration     uint32
+	candidateScratch        []selectorRef
+	candidateMarks          []uint32
+	candidateGeneration     uint32
+	ancestorNodes           []*html.Node
+	ancestorRecent          []ancestorStateEntry
+	ancestorStates          []map[*html.Node]ancestorChainState
+	activeAncestors         activeAncestorBuckets
+	variableScratch         map[string]candidate
+	variableScratchCapacity int
 }
 
 type sheet struct {
@@ -269,8 +287,8 @@ func (s *sheet) admitCSS(text string) bool {
 		s.abandonCascade()
 		return false
 	}
-	// Account for the complete parser pass before doing it. Selector and
-	// declaration processing below is charged separately.
+	// Sample before entering the parser; its loops and declaration processing
+	// continue sampling the shared cooperative stop callback.
 	if !s.checkCPU() {
 		return false
 	}
@@ -371,6 +389,7 @@ func opaqueRuleBearingAtRule(name string) bool {
 
 func (s *sheet) invalidateMediaCache() {
 	s.runtime.mediaCache = nil
+	s.runtime.mediaGroups = nil
 }
 
 func tokenString(v []css.Token) string {
@@ -632,7 +651,10 @@ func (s *sheet) declarations(prop, value string) []declaration {
 	return s.declarationsFromTokens(prop, tokens, status, value)
 }
 
-func ownedValueTokens(values []css.Token, raw string) ([]valueToken, valueStatus) {
+func ownedValueTokens(values []css.Token, raw string, budget *cpuGuard) ([]valueToken, valueStatus) {
+	if !budget.reserve(int64(len(values)) * int64(unsafe.Sizeof(valueToken{}))) {
+		return nil, valueUnsupported
+	}
 	tokens := make([]valueToken, 0, len(values))
 	offset := 0
 	for _, token := range values {
@@ -716,7 +738,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	imp := parsed.important
 	custom := strings.HasPrefix(prop, "--")
 	s.unsupportedColours += parsed.unsupportedColours
-	if custom && (parsed.status == valueInvalid || (parsed.status == valueResolved && !validVariableFunctions(parsed.tokens))) {
+	if custom && (parsed.status == valueInvalid || (parsed.status == valueResolved && !validVariableFunctions(parsed.tokens, s.cpu))) {
 		return nil
 	}
 	prepared := func(d declaration) declaration {
@@ -793,7 +815,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 				prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true}),
 			}
 		}
-		return s.prepareDeclarations(backgroundDeclarationsTokens(asciiLower(value), parsed.tokens, parsed.status, imp, s.order))
+		return s.prepareDeclarations(backgroundDeclarationsTokens(asciiLower(value), parsed.tokens, parsed.status, imp, s.order, s.cpu))
 	}
 	if prop == "mask" {
 		return []declaration{prepared(declaration{prop: maskImage, value: value, important: imp, order: s.order, unsupported: true})}
@@ -954,12 +976,24 @@ func (s *sheet) attachMediaCondition(firstRule int, media string) {
 		return
 	}
 	condition := s.parseMediaCondition(media)
+	if !s.memory.Reserve(mediaFrameStateMapBytes) {
+		s.abandonCascade()
+		return
+	}
 	frames := make(map[*conditionFrame]*conditionFrame)
 	for i := firstRule; i < len(s.rules); i++ {
 		parent := s.rules[i].conditions
 		frame := frames[parent]
 		if frame == nil {
-			frame = newConditionFrame(condition, parent)
+			if !s.memory.Reserve(mediaFrameSetEntryBytes) {
+				s.abandonCascade()
+				return
+			}
+			frame = newConditionFrame(condition, parent, s.memory)
+			if frame == nil {
+				s.abandonCascade()
+				return
+			}
 			frames[parent] = frame
 		}
 		s.rules[i].conditions = frame

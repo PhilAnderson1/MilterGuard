@@ -99,13 +99,20 @@ func tokenText(ts []valueToken) string {
 	}
 	return b.String()
 }
-func significant(ts []valueToken) []valueToken {
-	var out []valueToken
+
+// significant compacts a privately owned lexer result. Never pass retained
+// declaration tokens: math evaluates those with a whitespace-skipping cursor.
+func significant(ts []valueToken, budget *cpuGuard) []valueToken {
+	out := ts[:0]
 	for _, t := range ts {
+		if !budget.check() {
+			return nil
+		}
 		if t.kind != css.WhitespaceToken && t.kind != css.CommentToken {
 			out = append(out, t)
 		}
 	}
+	clear(ts[len(out):])
 	return out
 }
 
@@ -134,8 +141,13 @@ func isClosingToken(kind css.TokenType) bool {
 // advanceDelimiters follows CSS component-value block matching. A closing
 // token only closes the corresponding innermost block; a mismatched closer is
 // part of that block and must not prematurely close an enclosing function.
-func advanceDelimiters(stack []css.TokenType, kind css.TokenType) ([]css.TokenType, bool) {
+func advanceDelimiters(stack []css.TokenType, kind css.TokenType, budget *cpuGuard) ([]css.TokenType, bool) {
 	if closer, ok := expectedClosingToken(kind); ok {
+		var grown bool
+		stack, grown = growSlice(stack, 1, budget.allocationMemory())
+		if !grown {
+			return stack, false
+		}
 		return append(stack, closer), false
 	}
 	if !isClosingToken(kind) {
@@ -147,15 +159,20 @@ func advanceDelimiters(stack []css.TokenType, kind css.TokenType) ([]css.TokenTy
 	return stack[:len(stack)-1], true
 }
 
-func closing(ts []valueToken, start int) int {
+func closing(ts []valueToken, start int, budget *cpuGuard) int {
 	closer, ok := expectedClosingToken(ts[start].kind)
 	if !ok {
 		return len(ts)
 	}
-	stack := []css.TokenType{closer}
+	var initial [1]css.TokenType
+	initial[0] = closer
+	stack := initial[:]
 	for i := start + 1; i < len(ts); i++ {
+		if !budget.check() {
+			return len(ts)
+		}
 		var matched bool
-		stack, matched = advanceDelimiters(stack, ts[i].kind)
+		stack, matched = advanceDelimiters(stack, ts[i].kind, budget)
 		if matched && len(stack) == 0 {
 			return i
 		}
@@ -167,7 +184,7 @@ func closing(ts []valueToken, start int) int {
 // validVariableFunctions validates the grammar of every var() reference in a
 // custom-property value. CSS requires a custom-property declaration containing
 // a malformed var() to be ignored rather than allowed to win the cascade.
-func validVariableFunctions(ts []valueToken) bool {
+func validVariableFunctions(ts []valueToken, budget *cpuGuard) bool {
 	type frame struct {
 		variable    bool
 		fallback    bool
@@ -210,15 +227,28 @@ func validVariableFunctions(ts []valueToken) bool {
 	}
 
 	for _, token := range ts {
+		if !budget.check() {
+			return false
+		}
 		switch token.kind {
 		case css.FunctionToken:
 			// A nested function before a var()'s comma is part of its name
 			// grammar and therefore makes that name invalid.
 			addNameToken(token)
+			var ok bool
+			stack, ok = growSlice(stack, 1, budget.allocationMemory())
+			if !ok {
+				return false
+			}
 			stack = append(stack, frame{variable: equalASCIIFold(token.raw, "var("), closer: css.RightParenthesisToken})
 		case css.LeftParenthesisToken, css.LeftBracketToken, css.LeftBraceToken:
 			addNameToken(token)
 			closer, _ := expectedClosingToken(token.kind)
+			var ok bool
+			stack, ok = growSlice(stack, 1, budget.allocationMemory())
+			if !ok {
+				return false
+			}
 			stack = append(stack, frame{closer: closer})
 		case css.RightParenthesisToken, css.RightBracketToken, css.RightBraceToken:
 			if len(stack) == 0 || stack[len(stack)-1].closer != token.kind {
@@ -248,15 +278,23 @@ func validVariableFunctions(ts []valueToken) bool {
 }
 
 // Includes fallback dependencies even when the fallback would not be used.
-func variableRefs(ts []valueToken) []string {
+func variableRefs(ts []valueToken, budget *cpuGuard) []string {
 	var out []string
 	for i, t := range ts {
+		if !budget.check() {
+			return nil
+		}
 		if t.kind == css.FunctionToken && equalASCIIFold(t.raw, "var(") {
 			j := i + 1
 			for j < len(ts) && (ts[j].kind == css.WhitespaceToken || ts[j].kind == css.CommentToken) {
 				j++
 			}
 			if j < len(ts) {
+				var ok bool
+				out, ok = growSlice(out, 1, budget.allocationMemory())
+				if !ok {
+					return nil
+				}
 				out = append(out, cssUnescape(ts[j].raw))
 			}
 		}
@@ -333,7 +371,7 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 	if !budget.reserve(int64(len(defs))*96 + 64) {
 		return unresolvedVariableScope(parent), true
 	}
-	s := &variableScope{parent: parent, values: make(map[string]variableValue, len(defs))}
+	s := &variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency, values: make(map[string]variableValue, len(defs))}
 	for name, definition := range defs {
 		d := definition.d
 		var value variableValue
@@ -395,7 +433,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	if !budget.reserve(int64(len(defs))*variableDefinitionWorkBytes + int64(len(alternate))*variableAlternateEntryBytes + variableScopeBaseBytes) {
 		return unresolvedVariableScope(parent)
 	}
-	s := &variableScope{parent: parent, values: make(map[string]variableValue), colourDependent: make(map[string]bool)}
+	s := &variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency, values: make(map[string]variableValue), colourDependent: make(map[string]bool)}
 	var ordered []string
 	for n := range defs {
 		ordered = append(ordered, n)
@@ -447,7 +485,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		definition := defs[n]
 		dependencies := definition.d.variableDependencies
 		if !definition.d.dependenciesReady {
-			dependencies = variableRefs(tokens[n])
+			dependencies = variableRefs(tokens[n], budget)
 		}
 		for _, ref := range dependencies {
 			if _, local := tokens[ref]; local {
@@ -491,7 +529,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		case "revert", "revert-layer":
 			v = variableValue{status: valueUnsupported}
 		default:
-			v = substituteTokens(tokens[n], func(ref string) variableValue { return resolveName(ref, depth+1) }, budget, depth)
+			v = substituteIndexedTokens(tokens[n], d.variableBlocks, func(ref string) variableValue { return resolveName(ref, depth+1) }, budget, depth)
 		}
 		s.values[n] = v
 		return v
@@ -567,64 +605,110 @@ func substitute(d *declaration, vars *variableScope, budget *cpuGuard) variableV
 	if !d.tokensReady || d.valueStatus != valueResolved {
 		return variableValue{status: d.valueStatus}
 	}
-	return substituteTokens(d.valueTokens, func(name string) variableValue {
+	return substituteIndexedTokens(d.valueTokens, d.variableBlocks, func(name string) variableValue {
 		return vars.get(name, budget)
 	}, budget, 0)
 }
 
+// valueBlock records component-value boundaries in one pass. Mismatched
+// closing tokens remain inside their current block; EOF implicitly closes it.
+type valueBlock struct{ end, comma int }
+
+func indexValueBlocks(ts []valueToken, budget *cpuGuard) ([]valueBlock, bool) {
+	if !budget.reserve(int64(len(ts)) * int64(unsafe.Sizeof(valueBlock{}))) {
+		return nil, false
+	}
+	blocks := make([]valueBlock, len(ts))
+	var stack []int
+	for i, t := range ts {
+		if !budget.check() {
+			return nil, false
+		}
+		if _, open := expectedClosingToken(t.kind); open {
+			blocks[i] = valueBlock{end: len(ts), comma: -1}
+			var ok bool
+			stack, ok = growSlice(stack, 1, budget.allocationMemory())
+			if !ok {
+				return nil, false
+			}
+			stack = append(stack, i)
+		} else if len(stack) > 0 {
+			top := stack[len(stack)-1]
+			closer, _ := expectedClosingToken(ts[top].kind)
+			if t.kind == closer {
+				blocks[top].end = i
+				stack = stack[:len(stack)-1]
+			} else if t.kind == css.CommaToken && blocks[top].comma < 0 {
+				blocks[top].comma = i
+			}
+		}
+	}
+	return blocks, true
+}
+
 func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget *cpuGuard, depth int) variableValue {
-	if depth >= maxCSSValueDepth {
+	return substituteIndexedTokens(ts, nil, lookup, budget, depth)
+}
+func substituteIndexedTokens(ts []valueToken, blocks []valueBlock, lookup func(string) variableValue, budget *cpuGuard, depth int) variableValue {
+	if depth >= maxCSSValueDepth || !budget.check() {
 		return variableValue{status: valueUnsupported}
 	}
-	if !budget.check() {
-		return variableValue{status: valueUnsupported}
+	if len(blocks) != len(ts) {
+		var ok bool
+		blocks, ok = indexValueBlocks(ts, budget)
+		if !ok {
+			return variableValue{status: valueUnsupported}
+		}
 	}
-	var out strings.Builder
-	for i := 0; i < len(ts); i++ {
-		t := ts[i]
-		if t.kind != css.FunctionToken || !equalASCIIFold(t.raw, "var(") {
+	var expand func(int, int, int) variableValue
+	expand = func(start, limit, depth int) variableValue {
+		if depth >= maxCSSValueDepth || !budget.check() {
+			return variableValue{status: valueUnsupported}
+		}
+		var out strings.Builder
+		for i := start; i < limit; i++ {
 			if !budget.check() {
 				return variableValue{status: valueUnsupported}
 			}
-			if !budget.reserve(int64(len(t.raw))) {
-				return variableValue{status: valueUnsupported}
-			}
-			out.WriteString(t.raw)
-		} else {
-			end := closing(ts, i)
-			inner := ts[i+1 : end]
-			comma := -1
-			var stack []css.TokenType
-			for j, v := range inner {
-				if v.kind == css.CommaToken && len(stack) == 0 && comma < 0 {
-					comma = j
+			t := ts[i]
+			if t.kind != css.FunctionToken || !equalASCIIFold(t.raw, "var(") {
+				if !budget.reserve(int64(len(t.raw))) {
+					return variableValue{status: valueUnsupported}
 				}
-				stack, _ = advanceDelimiters(stack, v.kind)
+				out.WriteString(t.raw)
+				continue
 			}
-			nameTokens := inner
+			end, comma := blocks[i].end, blocks[i].comma
+			nameEnd := end
 			if comma >= 0 {
-				nameTokens = inner[:comma]
+				nameEnd = comma
 			}
-			nameTokens = significant(nameTokens)
-			if len(nameTokens) != 1 || (nameTokens[0].kind != css.IdentToken && nameTokens[0].kind != css.CustomPropertyNameToken) {
+			var nameToken valueToken
+			count := 0
+			for j := i + 1; j < nameEnd; j++ {
+				if !budget.check() {
+					return variableValue{status: valueUnsupported}
+				}
+				if ts[j].kind != css.WhitespaceToken && ts[j].kind != css.CommentToken {
+					nameToken = ts[j]
+					count++
+				}
+			}
+			if count != 1 || (nameToken.kind != css.IdentToken && nameToken.kind != css.CustomPropertyNameToken) {
 				return variableValue{status: valueInvalid}
 			}
-			name := cssUnescape(nameTokens[0].raw)
+			name := cssUnescape(nameToken.raw)
 			if !strings.HasPrefix(name, "--") || name == "--" {
 				return variableValue{status: valueInvalid}
 			}
 			v := lookup(name)
 			if v.status == valueInvalid && comma >= 0 {
-				v = substituteTokens(inner[comma+1:], lookup, budget, depth+1)
+				v = expand(comma+1, end, depth+1)
 			}
 			if v.status != valueResolved {
 				return v
 			}
-			if !budget.check() {
-				return variableValue{status: valueUnsupported}
-			}
-			// Whitespace prevents token concatenation such as var(--n)px.
-			if !budget.reserve(int64(len(v.text) + 2)) {
+			if !budget.check() || !budget.reserve(int64(len(v.text)+2)) {
 				return variableValue{status: valueUnsupported}
 			}
 			out.WriteByte(' ')
@@ -632,6 +716,7 @@ func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget
 			out.WriteByte(' ')
 			i = end
 		}
+		return variableValue{trimCSSWhitespace(out.String()), valueResolved}
 	}
-	return variableValue{trimCSSWhitespace(out.String()), valueResolved}
+	return expand(0, len(ts), depth)
 }

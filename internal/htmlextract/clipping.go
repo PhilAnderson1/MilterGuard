@@ -17,7 +17,7 @@ func resolveClip(p int, s string, budget *cpuGuard) (Value, valueStatus) {
 	if status != valueResolved {
 		return Value{Text: s}, status
 	}
-	ts = significant(ts)
+	ts = significant(ts, budget)
 	if p == clipPath {
 		if len(ts) == 3 && ts[0].kind == css.FunctionToken && ts[2].kind == css.RightParenthesisToken {
 			f := asciiLower(ts[0].raw)

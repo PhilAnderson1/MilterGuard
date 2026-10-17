@@ -126,7 +126,7 @@ func TestVariableFunctionValidation(t *testing.T) {
 			if status != valueResolved {
 				t.Fatalf("lexing status = %d", status)
 			}
-			if got := validVariableFunctions(tokens); got != test.valid {
+			if got := validVariableFunctions(tokens, nil); got != test.valid {
 				t.Fatalf("validVariableFunctions(%q) = %t, want %t", test.value, got, test.valid)
 			}
 		})

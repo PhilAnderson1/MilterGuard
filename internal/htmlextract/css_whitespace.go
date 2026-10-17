@@ -44,7 +44,7 @@ func equalASCIIFold(left, right string) bool {
 	if len(left) != len(right) {
 		return false
 	}
-	for i := range left {
+	for i := 0; i < len(left); i++ {
 		a, b := left[i], right[i]
 		if a >= 'A' && a <= 'Z' {
 			a += 'a' - 'A'

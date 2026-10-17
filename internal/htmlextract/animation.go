@@ -61,7 +61,7 @@ func parseAnimationValue(value string, shorthand bool, budget *cpuGuard) animati
 	if status != valueResolved {
 		return animationValue{unresolved: true}
 	}
-	tokens = significant(tokens)
+	tokens = significant(tokens, budget)
 	if len(tokens) == 0 {
 		return animationValue{unresolved: true}
 	}

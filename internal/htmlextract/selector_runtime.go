@@ -42,7 +42,7 @@ func ancestorChainNeedsMap(complexity selectorComplexity) bool {
 // earlier compounds for every possible ancestor and can therefore perform
 // binomial work for a chain of descendant combinators. Cached prefix states
 // make each (plan,node) pair linear in the number of compounds, and all work
-// is interruptibly charged.
+// samples cooperative cancellation.
 func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context selectorMatchContext, budget *cpuGuard) (bool, bool) {
 	if len(plan.ancestorChain) != len(plan.complexity.compounds) || len(plan.ancestorChain) != len(plan.complexity.combinators)+1 {
 		return false, false
@@ -85,6 +85,11 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 		} else if recent.node == current {
 			parentState = recent.state
 			break
+		}
+		var ok bool
+		nodes, ok = growSlice(nodes, 1, s.memory)
+		if !ok {
+			return false, false
 		}
 		nodes = append(nodes, current)
 	}
@@ -237,85 +242,104 @@ func ruleHasEffectiveSelectorPlan(rule *rule) bool {
 }
 
 func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *cpuGuard) (selectorAttributeCandidates, bool) {
-	if len(node.Attr) == 0 {
-		return selectorAttributeCandidates{}, true
+	var result selectorAttributeCandidates
+	needID := len(s.index.ids) != 0 || len(s.index.ancestorIDs) != 0
+	needClass := len(s.index.classes) != 0 || len(s.index.ancestorClasses) != 0
+	if len(node.Attr) == 0 || !needID && !needClass {
+		return result, true
 	}
 	if cached, ok := s.runtime.attributeCandidates[node]; ok {
 		return cached, true
 	}
-	var cached selectorAttributeCandidates
-	if budget != nil && !budget.check() {
-		return cached, false
+	if !budget.check() {
+		return result, false
+	}
+	if len(s.runtime.attributeMarks) < s.index.count {
+		if !s.memory.Reserve(int64(s.index.count) * 4) {
+			return result, false
+		}
+		s.runtime.attributeMarks = make([]uint32, s.index.count)
+	}
+	s.runtime.attributeGeneration++
+	if s.runtime.attributeGeneration == 0 {
+		clear(s.runtime.attributeMarks)
+		s.runtime.attributeGeneration = 1
+	}
+	generation := s.runtime.attributeGeneration
+	appendBucket := func(out *[][]selectorRef, bucket []selectorRef) bool {
+		if len(bucket) == 0 || s.runtime.attributeMarks[bucket[0].sequence] == generation {
+			return true
+		}
+		s.runtime.attributeMarks[bucket[0].sequence] = generation
+		grown, ok := growSlice(*out, 1, s.memory)
+		if !ok {
+			return false
+		}
+		*out = append(grown, bucket)
+		return true
+	}
+	appendIndexed := func(value string, direct, ancestor map[string][]selectorRef) bool {
+		return budget.check() && appendBucket(&result.direct, direct[value]) && appendBucket(&result.ancestor, ancestor[value])
 	}
 	var id, classes string
-	var idSeen, classesSeen bool
+	idSeen, classSeen := !needID, !needClass
 	for _, attribute := range node.Attr {
+		if !budget.check() {
+			return result, false
+		}
 		switch attribute.Key {
 		case "id":
 			if !idSeen {
 				id, idSeen = attribute.Val, true
 			}
 		case "class":
-			if !classesSeen {
-				classes, classesSeen = attribute.Val, true
+			if !classSeen {
+				classes, classSeen = attribute.Val, true
 			}
 		}
-		if idSeen && classesSeen {
+		if idSeen && classSeen {
 			break
 		}
 	}
-	appendIndexed := func(value string, direct, ancestor map[string][]selectorRef) bool {
-		lookups := 0
-		if len(direct) != 0 {
-			lookups++
-		}
-		if len(ancestor) != 0 {
-			lookups++
-		}
-		if budget != nil && lookups != 0 && !budget.check() {
-			return false
-		}
-		if bucket := direct[value]; len(bucket) != 0 {
-			cached.direct = append(cached.direct, bucket)
-		}
-		if bucket := ancestor[value]; len(bucket) != 0 {
-			cached.ancestor = append(cached.ancestor, bucket)
-		}
-		return true
-	}
 	if id != "" && !appendIndexed(id, s.index.ids, s.index.ancestorIDs) {
-		return selectorAttributeCandidates{}, false
+		return result, false
 	}
-	if classes != "" {
-		if budget != nil && !budget.check() {
-			return selectorAttributeCandidates{}, false
+	for start := 0; start < len(classes); {
+		for start < len(classes) && isCSSSpace(classes[start]) {
+			if !budget.check() {
+				return result, false
+			}
+			start++
 		}
-		for start := 0; start < len(classes); {
-			for start < len(classes) && isCSSSpace(classes[start]) {
-				start++
+		end := start
+		for end < len(classes) && !isCSSSpace(classes[end]) {
+			if !budget.check() {
+				return result, false
 			}
-			end := start
-			for end < len(classes) && !isCSSSpace(classes[end]) {
-				end++
-			}
-			if end > start && !appendIndexed(classes[start:end], s.index.classes, s.index.ancestorClasses) {
-				return selectorAttributeCandidates{}, false
-			}
-			start = end
+			end++
 		}
+		if end > start && !appendIndexed(classes[start:end], s.index.classes, s.index.ancestorClasses) {
+			return result, false
+		}
+		start = end
 	}
-	cacheBytes := attributeCandidateBaseBytes + int64(len(cached.direct)+len(cached.ancestor))*int64(unsafe.Sizeof([]selectorRef{}))
+	// Negative entries only pay off when another viewing case or ancestor
+	// activation may reuse this lookup. Positive entries also avoid reallocation.
+	if len(result.direct)+len(result.ancestor) == 0 && !s.runtime.cacheMatches && !s.hasAncestorSelectorIndex() {
+		return result, true
+	}
+	bytes := attributeCandidateBaseBytes
 	if s.runtime.attributeCandidates == nil {
-		if s.memory.Reserve(cacheBytes + attributeCandidateMapBytes) {
-			s.runtime.attributeCandidates = make(map[*html.Node]selectorAttributeCandidates)
-			s.runtime.attributeCandidates[node] = cached
-		}
-		return cached, true
+		bytes += attributeCandidateMapBytes
 	}
-	if s.memory.Reserve(cacheBytes) {
-		s.runtime.attributeCandidates[node] = cached
+	if !s.memory.Reserve(bytes) {
+		return result, false
 	}
-	return cached, true
+	if s.runtime.attributeCandidates == nil {
+		s.runtime.attributeCandidates = make(map[*html.Node]selectorAttributeCandidates)
+	}
+	s.runtime.attributeCandidates[node] = result
+	return result, true
 }
 
 func (s *sheet) hasAncestorSelectorIndex() bool {
@@ -340,9 +364,8 @@ func preparedHasElementChild(node *html.Node, elements map[*html.Node]elementPre
 }
 
 // activateAncestorBuckets records the current element's ancestor-index keys
-// for its children. Attribute parsing is still charged once through the
-// existing bounded cache. Bucket activation itself replaces the previously
-// uncharged parent-pointer walk and does not alter the match-work contract.
+// for its children. Attribute parsing is reused through the bounded cache,
+// avoiding a parent-pointer walk during candidate collection.
 func (s *sheet) activateAncestorBuckets(node *html.Node, budget *cpuGuard) (selectorAncestorActivation, bool) {
 	var activation selectorAncestorActivation
 	if !s.runtime.activeAncestors.enabled || !s.hasAncestorSelectorIndex() {
@@ -405,11 +428,16 @@ func (s *sheet) collectCandidates(n *html.Node, budget *cpuGuard) ([]selectorRef
 		if budget != nil && !budget.check() {
 			return false
 		}
+		s.runtime.candidateMarks[bucket[0].sequence] = generation
+		var ok bool
+		refs, ok = growSlice(refs, len(bucket), s.memory)
+		if !ok {
+			return false
+		}
 		for _, ref := range bucket {
-			if s.runtime.candidateMarks[ref.sequence] == generation {
-				continue
+			if !budget.check() {
+				return false
 			}
-			s.runtime.candidateMarks[ref.sequence] = generation
 			refs = append(refs, ref)
 		}
 		return true

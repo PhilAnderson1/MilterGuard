@@ -91,13 +91,13 @@ type viewingCaseRunner struct {
 }
 
 func (r *viewingCaseRunner) evaluateColour(foreground Value) colourResult {
-	if !chargeColourEvaluation(foreground, r.layers, r.work) {
+	if !r.work.check() {
 		return colourResult{uncertainty: "style-analysis CPU limit"}
 	}
 	if r.colourMemo.valid && r.colourMemo.generation == r.layerGeneration && r.colourMemo.foreground == foreground {
 		return r.colourMemo.result
 	}
-	result := evaluateColourUncharged(foreground, r.layers)
+	result := evaluateColour(foreground, r.layers, r.work)
 	r.colourMemo = colourMemo{foreground: foreground, result: result, generation: r.layerGeneration, valid: true}
 	return result
 }
@@ -121,20 +121,6 @@ func (r *viewingCaseRunner) leavePaintLayer(changed bool) {
 	r.layers = r.layers[:len(r.layers)-1]
 	if changed {
 		r.layerGeneration++
-	}
-}
-
-func updateMSORevealedDepth(n *html.Node, scope nodeScope, depth *int) {
-	if n.Type != html.CommentNode || scope != scopeActive && scope != scopeHead {
-		return
-	}
-	switch msoDownlevelRevealedMarker(n.Data) {
-	case msoRevealedStart:
-		*depth++
-	case msoRevealedEnd:
-		if *depth > 0 {
-			*depth--
-		}
 	}
 }
 
@@ -184,7 +170,7 @@ func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, root
 	} else {
 		resolved = r.styles.elementStyle(n, parentStyle, rootStyle, f.vars, prepared.legacy, prepared.inline, media, selectorMatchContext{elements: r.document.elements}, r.work)
 	}
-	if r.styles.stopped {
+	if r.styles.stopped || r.work.stopNow(false) {
 		return errStopped
 	}
 	r.styleStack = append(r.styleStack, resolved.style)
@@ -258,6 +244,9 @@ func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, root
 func (r *viewingCaseRunner) recordText(n *html.Node, f *viewingCaseFrame, msoRevealedDepth int, textIndex *int, initialize bool) error {
 	style := &r.styleStack[f.styleIndex]
 	colour := r.evaluateColour(style[color])
+	if r.work.stopNow(false) {
+		return errStopped
+	}
 	textState := f.presentationState
 	if msoRevealedDepth > 0 {
 		textState.layoutUncertain = true
@@ -304,10 +293,12 @@ func (r *viewingCaseRunner) run(c viewingCase) error {
 	r.colourMemo.valid = false
 	r.styles.runtime.activeAncestors.enabled = r.styles.hasAncestorSelectorIndex()
 	if r.styles.runtime.activeAncestors.enabled {
-		r.styles.runtime.activeAncestors.reset(r.styles.index.count)
+		if !r.styles.runtime.activeAncestors.reset(r.styles.index.count, r.styles.memory) {
+			return errStopped
+		}
 	}
 	defer func() { r.styles.runtime.activeAncestors.enabled = false }()
-	msoRevealedDepth := 0
+	mso := msoRevealedState{}
 	for len(r.frames) > 0 {
 		r.visited++
 		if r.visited&255 == 0 && r.shouldStop != nil && r.shouldStop() {
@@ -318,15 +309,19 @@ func (r *viewingCaseRunner) run(c viewingCase) error {
 		if !frame.entered {
 			frame.entered = true
 			frame.next = node.FirstChild
-			updateMSORevealedDepth(node, frame.scope, &msoRevealedDepth)
+			if node.Type == html.CommentNode && (frame.scope == scopeActive || frame.scope == scopeHead) {
+				if !mso.update(msoDownlevelRevealedMarker(node.Data), r.work) {
+					return errStopped
+				}
+			}
 			if node.Type == html.ElementNode {
-				if err := r.enterElement(node, frame, &rootStyle, &media, msoRevealedDepth, &elementIndex, c.initialize); err != nil {
+				if err := r.enterElement(node, frame, &rootStyle, &media, mso.uncertain, &elementIndex, c.initialize); err != nil {
 					return err
 				}
 			}
 			frame.scope = nodeContentScope(node, frame.scope)
 			if node.Type == html.TextNode && frame.scope == scopeActive {
-				if err := r.recordText(node, frame, msoRevealedDepth, &textIndex, c.initialize); err != nil {
+				if err := r.recordText(node, frame, mso.uncertain, &textIndex, c.initialize); err != nil {
 					return err
 				}
 			}
@@ -359,6 +354,13 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 		p.memory = resourceguard.NewMemory(p.Limits.MemoryBytes)
 	}
 	p.cpu.memory = p.memory
+	// Parsers and traversals share the same latched stop observation.
+	p.shouldStop = func() bool { return p.cpu.stopNow(true) }
+	defer func() {
+		if p.memory.Exhausted() {
+			resultErr = fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+		}
+	}()
 	if p.stopped() {
 		return Document{}, errStopped
 	}
@@ -445,17 +447,23 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 		}
 	}
 	for i, bits := range results.textLabels {
+		if !guard.check() {
+			return in, errStopped
+		}
 		label := aggregateLabel(bits)
 		results.text[i].Label = label
 		if label == "concealed" {
-			results.text[i].ConcealmentReasons = concealmentReasonStrings(results.textReasons[i])
+			results.text[i].ConcealmentReasons = concealmentReasonStringsWithBudget(results.textReasons[i], guard)
 		}
 	}
 	in.Text = results.text
 	for i, bits := range results.elementLabels {
+		if !guard.check() {
+			return in, errStopped
+		}
 		results.elements[i].Label = aggregateLabel(bits)
 		if results.elements[i].Label == "concealed" {
-			results.elements[i].ConcealmentReasons = concealmentReasonStrings(results.elementReasons[i])
+			results.elements[i].ConcealmentReasons = concealmentReasonStringsWithBudget(results.elementReasons[i], guard)
 		}
 	}
 	in.Elements = results.elements
