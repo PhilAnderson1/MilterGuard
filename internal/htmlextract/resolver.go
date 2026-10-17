@@ -7,6 +7,15 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 )
 
+// These conservative estimates cover Go map buckets and per-entry overhead
+// which unsafe.Sizeof cannot observe through a map value.
+const (
+	mediaCacheMapBytes      int64 = 128
+	mediaStateSliceOverhead int64 = 48
+	matchCacheMapBytes      int64 = 128
+	matchCacheEntryBytes    int64 = 32
+)
+
 type mediaCacheKey struct {
 	width    float64
 	fallback bool
@@ -30,7 +39,7 @@ func (s *sheet) mediaStates(width float64, fallback bool, work *cpuGuard) ([]uin
 		return states, true
 	}
 	if s.runtime.mediaCache == nil {
-		if !s.memory.Reserve(128) {
+		if !s.memory.Reserve(mediaCacheMapBytes) {
 			return nil, false
 		}
 		s.runtime.mediaCache = make(map[mediaCacheKey][]uint8)
@@ -42,7 +51,7 @@ func (s *sheet) mediaStates(width float64, fallback bool, work *cpuGuard) ([]uin
 	if work != nil && !work.check() {
 		return nil, false
 	}
-	if !s.memory.Reserve(int64(len(s.rules)) + 48) {
+	if !s.memory.Reserve(int64(len(s.rules)) + mediaStateSliceOverhead) {
 		return nil, false
 	}
 	states := make([]uint8, len(s.rules))
@@ -90,13 +99,13 @@ func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
 	}
 	cache := s.runtime.matchCaches[plan.sequence]
 	if cache == nil {
-		if !s.memory.Reserve(128) {
+		if !s.memory.Reserve(matchCacheMapBytes) {
 			return
 		}
 		cache = make(map[*html.Node]uint8)
 		s.runtime.matchCaches[plan.sequence] = cache
 	}
-	if !s.memory.Reserve(32) {
+	if !s.memory.Reserve(matchCacheEntryBytes) {
 		return
 	}
 	cache[n] = 1
@@ -199,8 +208,13 @@ func (m *mediaEvaluation) evaluate(s *sheet, work *cpuGuard) ([]uint8, bool) {
 	return m.states, m.complete
 }
 
-func resolvedDeclaration(d *declaration, property int, uncertainOrigin bool, context evaluationContext, resolveUnsupported bool) (Value, valueStatus) {
-	if (d.unsupported || uncertainOrigin) && !resolveUnsupported {
+type declarationResolution struct {
+	uncertainOrigin  bool
+	allowUnsupported bool
+}
+
+func resolvedDeclaration(d *declaration, property int, context evaluationContext, options declarationResolution) (Value, valueStatus) {
+	if (d.unsupported || options.uncertainOrigin) && !options.allowUnsupported {
 		return Value{Text: d.value}, valueUnsupported
 	}
 	if d.prepared != nil {
@@ -271,20 +285,27 @@ func (c evaluationContext) substitute(d *declaration) variableValue {
 // collectCascade identifies the declarations that win the CSS cascade for one
 // element. It reserves each declaration list's complete cost before mutating
 // the result so an exhausted work budget can never expose partial winners.
-func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, matches *cpuGuard, context evaluationContext) (cascadeWinners, bool) {
+func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, work *cpuGuard, context evaluationContext) (cascadeWinners, bool) {
 	var winners cascadeWinners
+	type cascadeSource struct {
+		specificity           cascadia.Specificity
+		inline                bool
+		uncertain             bool
+		colourSchemeDependent bool
+		retain                bool
+	}
 	// Parsed declaration slices are immutable and stable for the duration of
 	// evaluation. Winners retain references plus per-use property/uncertainty
 	// metadata instead of copying and modifying complete declarations.
-	apply := func(ds []declaration, spec cascadia.Specificity, inl, uncertain, colourSchemeDependent, retain bool) bool {
+	apply := func(ds []declaration, source cascadeSource) bool {
 		// Reserve the complete declaration-list cost before changing the
 		// cascade. A failed reservation must not leave a partially applied
 		// style that appears trustworthy.
-		if len(ds) > 0 && !matches.check() {
+		if len(ds) > 0 && !work.check() {
 			return false
 		}
 		applyProperty := func(d *declaration, property int) {
-			c := candidate{d: d, property: property, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
+			c := candidate{d: d, property: property, set: true, inline: source.inline, uncertainOrigin: source.uncertain, spec: source.specificity}
 			if property == animationProperty {
 				if c.beats(winners.animation) {
 					winners.animation = c
@@ -309,13 +330,13 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 					continue
 				}
 				if !d.validityReady && !d.hasVars && !d.shorthand {
-					_, status := resolvedDeclaration(d, d.prop, false, context, false)
+					_, status := resolvedDeclaration(d, d.prop, context, declarationResolution{})
 					if status == valueInvalid {
 						continue
 					}
 				}
 			}
-			if colourSchemeDependent {
+			if source.colourSchemeDependent {
 				if d.custom != "" {
 					if winners.alternateColourSchemeVars == nil {
 						winners.alternateColourSchemeVars = make(map[string]bool)
@@ -325,11 +346,11 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 					winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(d)
 				}
 			}
-			if !retain {
+			if !source.retain {
 				continue
 			}
 			if d.custom != "" {
-				c := candidate{d: d, property: d.prop, set: true, inline: inl, uncertainOrigin: uncertain, spec: spec}
+				c := candidate{d: d, property: d.prop, set: true, inline: source.inline, uncertainOrigin: source.uncertain, spec: source.specificity}
 				if winners.variables == nil {
 					if s.runtime.variableScratch == nil {
 						s.runtime.variableScratch = make(map[string]candidate)
@@ -351,10 +372,10 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 		}
 		return true
 	}
-	if !apply(legacy, cascadia.Specificity{}, false, false, false, true) {
+	if !apply(legacy, cascadeSource{retain: true}) {
 		return cascadeWinners{}, false
 	}
-	mediaStates, complete := media.evaluate(s, matches)
+	mediaStates, complete := media.evaluate(s, work)
 	if !complete {
 		return cascadeWinners{}, false
 	}
@@ -372,7 +393,7 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 		}
 		if !cached {
 			if plan.uncertain {
-				if !matches.check() {
+				if !work.check() {
 					return cascadeWinners{}, false
 				}
 				var complete bool
@@ -382,12 +403,12 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 				}
 			} else if plan.ancestorChain != nil {
 				var complete bool
-				matched, complete = s.matchAncestorChain(plan, n, selectorContext, matches)
+				matched, complete = s.matchAncestorChain(plan, n, selectorContext, work)
 				if !complete {
 					return cascadeWinners{}, false
 				}
 			} else {
-				if !matches.check() {
+				if !work.check() {
 					return cascadeWinners{}, false
 				}
 				var complete bool
@@ -400,34 +421,31 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 		}
 		if matched {
 			if state == mediaAlternateColourScheme {
-				if !apply(r.decls, plan.specificity, false, false, true, false) {
+				if !apply(r.decls, cascadeSource{specificity: plan.specificity, colourSchemeDependent: true}) {
 					return cascadeWinners{}, false
 				}
 			} else if plan.uncertain || r.uncertainOrigin {
-				if !apply(r.decls, plan.specificity, false, true, state == mediaYesColourScheme, true) {
+				if !apply(r.decls, cascadeSource{specificity: plan.specificity, uncertain: true, colourSchemeDependent: state == mediaYesColourScheme, retain: true}) {
 					return cascadeWinners{}, false
 				}
 			} else {
-				if !apply(r.decls, plan.specificity, false, state == mediaUnknown, state == mediaYesColourScheme, true) {
+				if !apply(r.decls, cascadeSource{specificity: plan.specificity, uncertain: state == mediaUnknown, colourSchemeDependent: state == mediaYesColourScheme, retain: true}) {
 					return cascadeWinners{}, false
 				}
 			}
 		}
 	}
-	if !apply(inline, cascadia.Specificity{}, true, false, false, true) {
+	if !apply(inline, cascadeSource{inline: true, retain: true}) {
 		return cascadeWinners{}, false
 	}
 	return winners, true
 }
 
-func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *variableScope, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, matches *cpuGuard, budget *cpuGuard) elementStyleResult {
+func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *variableScope, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, work *cpuGuard) elementStyleResult {
 	if s.cascadeIncomplete {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
-	if !matches.check() {
-		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
-	}
-	if !matches.check() {
+	if !work.check() {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
 	st := initial()
@@ -436,7 +454,7 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 			st[i] = parent[i]
 		}
 	}
-	refs, complete := s.collectCandidates(n, matches)
+	refs, complete := s.collectCandidates(n, work)
 	if !complete {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
@@ -447,32 +465,32 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 		// effects are carried separately by viewingCaseFrame.
 		return elementStyleResult{style: st, variables: parentVars}
 	}
-	if !matches.check() {
+	if !work.check() {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
 	variableMemo := declarationScopeMemo{}
-	context := evaluationContext{parent: parent, root: root, vars: parentVars, budget: budget, variableMemo: &variableMemo}
-	winners, complete := s.collectCascade(n, refs, legacy, inline, media, selectorContext, matches, context)
+	context := evaluationContext{parent: parent, root: root, vars: parentVars, budget: work, variableMemo: &variableMemo}
+	winners, complete := s.collectCascade(n, refs, legacy, inline, media, selectorContext, work, context)
 	if !complete {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
-	scope := buildVariables(parentVars, winners.variables, winners.alternateColourSchemeVars, budget)
+	scope := buildVariables(parentVars, winners.variables, winners.alternateColourSchemeVars, work)
 	// Variable scopes never retain the cascade map, so it can be reused by the
 	// next element even when expression evaluation was abandoned.
 	if winners.variables != nil {
 		s.runtime.variableScratch = winners.variables
 	}
-	if budget.stopped {
+	if work.stopped {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
 	context.vars = scope
 	for i := 0; i < properties; i++ {
 		c := winners.properties[i]
 		if c.set {
-			if declarationUsesColourSchemeVariable(c.d, scope, budget, context.variableMemo) {
+			if declarationUsesColourSchemeVariable(c.d, scope, work, context.variableMemo) {
 				winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(c.d)
 			}
-			v, status := resolvedDeclaration(c.d, c.property, c.uncertainOrigin, context, false)
+			v, status := resolvedDeclaration(c.d, c.property, context, declarationResolution{uncertainOrigin: c.uncertainOrigin})
 			if status == valueUnsupported {
 				v.Known = false
 			}
@@ -480,7 +498,7 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 		}
 	}
 	for i := range winners.layout {
-		if c := winners.layout[i]; c.set && declarationUsesColourSchemeVariable(c.d, scope, budget, context.variableMemo) {
+		if c := winners.layout[i]; c.set && declarationUsesColourSchemeVariable(c.d, scope, work, context.variableMemo) {
 			winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(c.d)
 		}
 	}
@@ -488,7 +506,7 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 		st[background] = st[color]
 	}
 	layout := layoutVisibility(&winners.layout, &st, context, n)
-	animationActive := s.potentiallyActiveAnimation(winners.animation, context, matches)
+	animationActive := s.potentiallyActiveAnimation(winners.animation, context, work)
 	return elementStyleResult{
 		style: st, variables: scope, layoutUncertain: layout.uncertain, elementGeometryConcealed: layout.elementConcealed,
 		clipsDescendantsX: layout.clipsX, clipsDescendantsY: layout.clipsY,

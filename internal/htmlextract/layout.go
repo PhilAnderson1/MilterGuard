@@ -15,13 +15,6 @@ const extremeOffscreenPixels = 250
 const extremeMarginPixels = 1000
 const extremeNegativeSpacingPixels = 8
 
-// layoutVisibilityUncertain recognizes a deliberately narrow set of common
-// hiding patterns without attempting layout. These combinations are evidence
-// that visibility depends on geometry, not proof that the subtree is hidden.
-func layoutVisibilityUncertain(wins *[layoutProperties]layoutCandidate, style *Style, context evaluationContext) bool {
-	return layoutVisibility(wins, style, context, nil).uncertain
-}
-
 type layoutVisibilityResult struct {
 	uncertain, elementConcealed bool
 	clipsX, clipsY              bool
@@ -152,7 +145,10 @@ func resolveLayoutCandidate(candidate *layoutCandidate, context evaluationContex
 	// Unsupported layout values are parsed here so a potentially active hiding
 	// combination still makes visibility uncertain. Cascade-origin uncertainty
 	// is retained separately on layoutCandidate and checked by the caller.
-	value, status := resolvedDeclaration(candidate.d, candidate.property, candidate.uncertainOrigin, context, true)
+	value, status := resolvedDeclaration(candidate.d, candidate.property, context, declarationResolution{
+		uncertainOrigin:  candidate.uncertainOrigin,
+		allowUnsupported: true,
+	})
 	return layoutResult{value: value, status: status, set: true}
 }
 

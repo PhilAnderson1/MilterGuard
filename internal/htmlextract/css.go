@@ -263,8 +263,7 @@ type sheetRuntime struct {
 
 type sheet struct {
 	rules                []rule
-	rulesSeen            int
-	selectors, order     int
+	order                int
 	limits               Limits
 	cascadeIncomplete    bool
 	planCount            int
@@ -932,23 +931,30 @@ type cssParseResult struct {
 	incomplete   bool
 }
 
-// parseCSS preserves the compact declaration-only interface used by internal
-// callers that do not need localized inline-error handling. A stylesheet parse
-// error invalidates the shared cascade; callers parsing a style attribute use
-// parseInlineCSS so the uncertainty can remain local to that element.
-func (s *sheet) parseCSS(text string, inline bool) []declaration {
-	result := s.parseCSSResult(text, inline)
-	if result.incomplete && !inline {
+type cssParseMode uint8
+
+const (
+	stylesheetCSS cssParseMode = iota
+	inlineCSS
+)
+
+// parseStylesheetCSS invalidates the shared cascade on an incomplete parse.
+// Style attributes use parseInlineCSS so their uncertainty remains local to
+// the element.
+func (s *sheet) parseStylesheetCSS(text string) []declaration {
+	result := s.parseCSSResult(text, stylesheetCSS)
+	if result.incomplete {
 		s.abandonCascade()
 	}
 	return result.declarations
 }
 
 func (s *sheet) parseInlineCSS(text string) cssParseResult {
-	return s.parseCSSResult(text, true)
+	return s.parseCSSResult(text, inlineCSS)
 }
 
-func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
+func (s *sheet) parseCSSResult(text string, mode cssParseMode) cssParseResult {
+	inline := mode == inlineCSS
 	if !inline {
 		s.invalidateMediaCache()
 	}
@@ -1151,8 +1157,6 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 					plans[i].makeUncertain(s.memory)
 				}
 			}
-			s.selectors += len(plans)
-			s.rulesSeen++
 			if !s.memory.Reserve(int64(unsafe.Sizeof(rule{})) + int64(len(plans))*int64(unsafe.Sizeof(selectorPlan{}))) {
 				s.abandonCascade()
 				return cssParseResult{declarations: out}
@@ -1234,13 +1238,20 @@ func (s *sheet) parseCSSResult(text string, inline bool) cssParseResult {
 	}
 }
 
+type stylesheetOrigin uint8
+
+const (
+	trustedStylesheetOrigin stylesheetOrigin = iota
+	uncertainStylesheetOrigin
+)
+
 // parseStylesheet parses a style element and applies the element's media
 // attribute to every rule it contributes. Conditions already attached by
 // nested at-rules are retained, making the conditions conjunctive.
-func (s *sheet) parseStylesheet(text, media string, uncertainOrigin bool) {
+func (s *sheet) parseStylesheet(text, media string, origin stylesheetOrigin) {
 	firstRule := len(s.rules)
-	s.parseCSS(text, false)
-	if uncertainOrigin {
+	s.parseStylesheetCSS(text)
+	if origin == uncertainStylesheetOrigin {
 		s.markRulesUncertain(firstRule)
 	}
 	s.attachMediaCondition(firstRule, media)

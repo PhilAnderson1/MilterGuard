@@ -12,6 +12,14 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
+// Conservative retained-size estimates for the maps, dependency graph, and
+// traversal state used while resolving a non-literal custom-property scope.
+const (
+	variableDefinitionWorkBytes int64 = 320
+	variableAlternateEntryBytes int64 = 24
+	variableScopeBaseBytes      int64 = 256
+)
+
 const maxCSSValueDepth = 256
 
 type valueToken struct {
@@ -608,7 +616,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	if scope, ok := buildLiteralVariables(parent, defs, alternate, budget); ok {
 		return scope
 	}
-	if !budget.reserve(int64(len(defs))*320 + int64(len(alternate))*24 + 256) {
+	if !budget.reserve(int64(len(defs))*variableDefinitionWorkBytes + int64(len(alternate))*variableAlternateEntryBytes + variableScopeBaseBytes) {
 		return unresolvedVariableScope(parent)
 	}
 	s := &variableScope{parent: parent, values: make(map[string]variableValue), colourDependent: make(map[string]bool)}

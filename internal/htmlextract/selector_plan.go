@@ -9,6 +9,17 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
+// Conservative estimates for retained selector maps and their entries. Slice
+// and struct payloads whose sizes are known continue to use unsafe.Sizeof.
+const (
+	ancestorStateEntryBytes     int64 = 48
+	ancestorStateMapBytes       int64 = 128
+	selectorIndexMapEntryBytes  int64 = 48
+	selectorIndexMapsBytes      int64 = 768
+	attributeCandidateBaseBytes int64 = 64
+	attributeCandidateMapBytes  int64 = 128
+)
+
 type selectorKeyKind uint8
 
 const (
@@ -181,12 +192,10 @@ type selectorPlan struct {
 
 func (p *selectorPlan) makeUncertain(memory *resourceguard.Memory) {
 	p.uncertain = true
-	scope, execution := p.conservativeScope(memory)
-	p.scope = compileConservativeScope(scope, memory)
+	p.scope, p.execution = p.conservativeScope(memory)
 	p.matcher = nil
 	p.ancestorChain = nil
 	p.specificity = cascadia.Specificity{1<<30 - 1, 1<<30 - 1, 1<<30 - 1}
-	p.execution = execution
 }
 
 func (p *selectorPlan) makeForeignCaseUncertain(memory *resourceguard.Memory) {
@@ -221,20 +230,20 @@ func (p *selectorPlan) makeForeignCaseUncertain(memory *resourceguard.Memory) {
 // relationship is safe to preserve even when an earlier, expensive part of
 // the selector has to be abandoned. This prevents a rule such as
 // "u + .body .product img" from degrading all the way to every img element.
-func (p *selectorPlan) conservativeScope(memory *resourceguard.Memory) (string, selectorComplexity) {
+func (p *selectorPlan) conservativeScope(memory *resourceguard.Memory) (cascadia.Matcher, selectorComplexity) {
 	fallback := scopeSelectorComplexity(p.scopePrefix)
 	if p.scopePrefix == "" || p.scopePrefix == "*" || len(p.complexity.compounds) < 2 {
-		return p.scopePrefix, fallback
+		return compileConservativeScope(p.scopePrefix, memory), fallback
 	}
 	last := len(p.complexity.compounds) - 1
 	combinator := p.complexity.combinators[last-1]
 	if combinator != ' ' && combinator != '>' {
-		return p.scopePrefix, fallback
+		return compileConservativeScope(p.scopePrefix, memory), fallback
 	}
 	right := trimCSSWhitespace(p.complexity.compounds[last].source)
 	left := trimCSSWhitespace(p.complexity.compounds[last-1].source)
 	if right != p.scopePrefix || left == "" || left == "*" || positiveCompoundPrefix(left) != left {
-		return p.scopePrefix, fallback
+		return compileConservativeScope(p.scopePrefix, memory), fallback
 	}
 	separator := " "
 	if combinator == '>' {
@@ -243,9 +252,9 @@ func (p *selectorPlan) conservativeScope(memory *resourceguard.Memory) (string, 
 	scope := left + separator + right
 	group, err := cascadia.ParseGroupWithMemory(scope, memory)
 	if err != nil || len(group) != 1 {
-		return p.scopePrefix, fallback
+		return compileConservativeScope(p.scopePrefix, memory), fallback
 	}
-	return scope, selectorComplexity{
+	return group[0], selectorComplexity{
 		compounds:   []compoundComplexity{p.complexity.compounds[last-1], p.complexity.compounds[last]},
 		combinators: []byte{combinator},
 	}
@@ -819,9 +828,9 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 			return false, false
 		}
 		if hasElementChild {
-			if mapStates && s.memory.Reserve(48) {
+			if mapStates && s.memory.Reserve(ancestorStateEntryBytes) {
 				if states == nil {
-					if !s.memory.Reserve(128) {
+					if !s.memory.Reserve(ancestorStateMapBytes) {
 						continue
 					}
 					states = make(map[*html.Node]ancestorChainState)
@@ -858,7 +867,7 @@ func (s *sheet) buildSelectorIndex() {
 	for i := range s.rules {
 		planCount += len(s.rules[i].plans)
 	}
-	if !s.memory.Reserve(int64(planCount)*(int64(unsafe.Sizeof(selectorRef{}))+48) + 768) {
+	if !s.memory.Reserve(int64(planCount)*(int64(unsafe.Sizeof(selectorRef{}))+selectorIndexMapEntryBytes) + selectorIndexMapsBytes) {
 		s.abandonCascade()
 		return
 	}
@@ -991,9 +1000,9 @@ func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *cpuGuard) (se
 			start = end
 		}
 	}
-	cacheBytes := int64(64 + (len(cached.direct)+len(cached.ancestor))*int(unsafe.Sizeof([]selectorRef{})))
+	cacheBytes := attributeCandidateBaseBytes + int64(len(cached.direct)+len(cached.ancestor))*int64(unsafe.Sizeof([]selectorRef{}))
 	if s.runtime.attributeCandidates == nil {
-		if s.memory.Reserve(cacheBytes + 128) {
+		if s.memory.Reserve(cacheBytes + attributeCandidateMapBytes) {
 			s.runtime.attributeCandidates = make(map[*html.Node]selectorAttributeCandidates)
 			s.runtime.attributeCandidates[node] = cached
 		}

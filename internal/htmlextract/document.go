@@ -12,6 +12,10 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
+// Conservative retained-size estimate for one entry in the map that attaches
+// prepared inline and legacy declarations to a DOM element.
+const elementPreparationEntryBytes int64 = 128
+
 // Text describes one extractable text node. Label and ConcealmentReasons are
 // aggregated across every evaluated viewing case. FontSize and
 // EffectiveOpacity begin with the narrowest-case values; when either explains
@@ -113,9 +117,6 @@ type parsedDocument struct {
 	styles                  sheet
 	elements                map[*html.Node]elementPreparation
 	treeDepth               int
-	nodeCount               int
-	textCount               int
-	attributeCount          int
 	extractableTextCount    int
 	extractableElementCount int
 	msoOrderUncertain       bool
@@ -187,6 +188,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	stack := make([]entry, 1, stackCap)
 	stack[0] = entry{n: root}
 	msoRevealedDepth := 0
+	nodeCount := 0
 	for len(stack) > 0 {
 		e := &stack[len(stack)-1]
 		if e.entered {
@@ -224,12 +226,9 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		if e.depth > document.treeDepth {
 			document.treeDepth = e.depth
 		}
-		document.nodeCount++
-		if document.nodeCount&255 == 0 && p.stopped() {
+		nodeCount++
+		if nodeCount&255 == 0 && p.stopped() {
 			return document, errStopped
-		}
-		if n.Type == html.TextNode {
-			document.textCount++
 		}
 		if n.Type == html.CommentNode && (e.scope == scopeActive || e.scope == scopeHead) {
 			marker := msoDownlevelRevealedMarker(n.Data)
@@ -263,7 +262,6 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 			document.styles.parseMSOConditionalStyles(n.Data)
 		}
 		if n.Type == html.ElementNode {
-			document.attributeCount += len(n.Attr)
 			var prepared elementPreparation
 			if href, media, applies := document.styles.stylesheetLink(n); applies && (e.scope == scopeActive || e.scope == scopeHead) {
 				document.styles.loadStylesheetReference(href, media)
@@ -276,7 +274,11 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 					if !complete {
 						styles.abandonCascade()
 					} else {
-						styles.parseStylesheet(css, attr(n, "media"), n.Namespace != "" || e.uncertainStylesheetOrigin || msoRevealedDepth > 0)
+						origin := trustedStylesheetOrigin
+						if n.Namespace != "" || e.uncertainStylesheetOrigin || msoRevealedDepth > 0 {
+							origin = uncertainStylesheetOrigin
+						}
+						styles.parseStylesheet(css, attr(n, "media"), origin)
 					}
 				}
 			}
@@ -289,7 +291,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 				prepared.legacy = prepareDeclarations(legacyDeclarations(n), p.cpu)
 			}
 			if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || prepared.inlineIncomplete {
-				if _, exists := document.elements[n]; !exists && !p.memory.Reserve(128) {
+				if _, exists := document.elements[n]; !exists && !p.memory.Reserve(elementPreparationEntryBytes) {
 					return document, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
 				}
 				document.elements[n] = prepared

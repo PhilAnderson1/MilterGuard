@@ -44,7 +44,7 @@ func independentMediaState(frame *conditionFrame, width float64, fallback bool) 
 
 func TestRulesShareImmutableConditionStack(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`@media all{@media screen{p{display:none}b{display:none}i{display:none}}}`, false)
+	s.parseStylesheetCSS(`@media all{@media screen{p{display:none}b{display:none}i{display:none}}}`)
 	if len(s.rules) != 3 {
 		t.Fatalf("rules = %d, want 3", len(s.rules))
 	}
@@ -92,13 +92,13 @@ func TestDisplayContentsHasNoClippableBox(t *testing.T) {
 	style[display] = Value{Text: "contents", Known: true}
 	style[clipPath] = Value{Text: "circle(0px)", Number: 1, Known: true}
 	node := &xhtml.Node{Type: xhtml.ElementNode, Data: "div"}
-	empty, known, inlineUncertain, clientDependent := emptyClip(&style, node, true)
-	if empty || !known || inlineUncertain || clientDependent {
-		t.Fatalf("display:contents clipping = empty:%t known:%t inline-uncertain:%t client-dependent:%t", empty, known, inlineUncertain, clientDependent)
+	clip := emptyClip(&style, node, true)
+	if clip.empty || !clip.known || clip.inlineUncertain || clip.clientDependent {
+		t.Fatalf("display:contents clipping = %+v", clip)
 	}
 
 	foreign := &xhtml.Node{Type: xhtml.ElementNode, Data: "g", Namespace: "svg"}
-	if _, foreignKnown, _, _ := emptyClip(&style, foreign, true); foreignKnown {
+	if clip := emptyClip(&style, foreign, true); clip.known {
 		t.Fatal("foreign-namespace clipping was treated as known")
 	}
 }
@@ -328,7 +328,7 @@ func TestCSSParserAcceptsBalancedComponents(t *testing.T) {
 		`p{--x:red;color:var(--x,[unused)])}`,
 	} {
 		s := sheet{limits: limits}
-		s.parseCSS(source, false)
+		s.parseStylesheetCSS(source)
 		if s.cascadeIncomplete {
 			t.Errorf("valid CSS rejected: %s", source)
 		}

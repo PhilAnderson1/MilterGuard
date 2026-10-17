@@ -43,7 +43,7 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 			style.Reset()
 			return true
 		}
-		s.parseStylesheet(style.String(), attr(&styleNode, "media"), true)
+		s.parseStylesheet(style.String(), attr(&styleNode, "media"), uncertainStylesheetOrigin)
 		style.Reset()
 		return !s.cascadeIncomplete && !s.stopped
 	}

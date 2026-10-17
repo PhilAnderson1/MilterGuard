@@ -69,12 +69,17 @@ type colourMemo struct {
 	valid      bool
 }
 
+type viewingCase struct {
+	width      float64
+	fallback   bool
+	initialize bool
+}
+
 type viewingCaseRunner struct {
 	document         *parsedDocument
 	styles           *sheet
 	retainInspection bool
-	matches          *cpuGuard
-	expressions      *cpuGuard
+	work             *cpuGuard
 	results          *viewingCaseResults
 	frames           []viewingCaseFrame
 	styleStack       []Style
@@ -86,7 +91,7 @@ type viewingCaseRunner struct {
 }
 
 func (r *viewingCaseRunner) evaluateColour(foreground Value) colourResult {
-	if !chargeColourEvaluation(foreground, r.layers, r.matches) {
+	if !chargeColourEvaluation(foreground, r.layers, r.work) {
 		return colourResult{uncertainty: "style-analysis CPU limit"}
 	}
 	if r.colourMemo.valid && r.colourMemo.generation == r.layerGeneration && r.colourMemo.foreground == foreground {
@@ -119,9 +124,9 @@ func (r *viewingCaseRunner) leavePaintLayer(changed bool) {
 	}
 }
 
-func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
+func (r *viewingCaseRunner) run(c viewingCase) error {
 	textIndex, elementIndex := 0, 0
-	media := mediaEvaluation{width: width, fallback: fallback}
+	media := mediaEvaluation{width: c.width, fallback: c.fallback}
 	r.frames = r.frames[:0]
 	r.styleStack = r.styleStack[:0]
 	r.styleStack = append(r.styleStack, initial())
@@ -171,7 +176,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					// stylesheet analysis.
 					resolved = elementStyleResult{style: unresolvedStyle(), variables: f.vars}
 				} else {
-					resolved = r.styles.elementStyle(n, parentStyle, &rootStyle, f.vars, prepared.legacy, prepared.inline, &media, selectorContext, r.matches, r.expressions)
+					resolved = r.styles.elementStyle(n, parentStyle, &rootStyle, f.vars, prepared.legacy, prepared.inline, &media, selectorContext, r.work)
 				}
 				if r.styles.stopped {
 					return errStopped
@@ -180,18 +185,18 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 				f.styleIndex = len(r.styleStack) - 1
 				style := &r.styleStack[f.styleIndex]
 				f.vars = resolved.variables
-				empty, known, inlineClipPathUncertain, clientDependentClip := emptyClip(style, n, resolved.displayDeclared)
+				clip := emptyClip(style, n, resolved.displayDeclared)
 				wasClipped := f.clipped
-				f.clipped = f.clipped || empty
-				if empty {
-					if clientDependentClip && !wasClipped {
+				f.clipped = f.clipped || clip.empty
+				if clip.empty {
+					if clip.clientDependent && !wasClipped {
 						f.clientDependentReasons |= reasonEmptyClip
-					} else if !clientDependentClip {
+					} else if !clip.clientDependent {
 						f.clientDependentReasons &^= reasonEmptyClip
 					}
 				}
-				f.clipKnown = f.clipKnown && known
-				f.colourContextChanged = r.enterPaintLayer(n, layerWithClipOverride(style, inlineClipPathUncertain))
+				f.clipKnown = f.clipKnown && clip.known
+				f.colourContextChanged = r.enterPaintLayer(n, layerWithClipOverride(style, clip.inlineUncertain))
 				if n.Data == "html" {
 					rootStyle = *style
 				}
@@ -254,7 +259,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 						elementState.none = true
 					}
 					decision := decideVisibility(style, elementState, nil)
-					if first {
+					if c.initialize {
 						r.results.elementLabels = append(r.results.elementLabels, decision.label)
 						r.results.elementReasons = append(r.results.elementReasons, decision.reasons)
 						r.results.elements = append(r.results.elements, Element{Node: n, EffectiveOpacity: f.alpha})
@@ -275,8 +280,8 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					// definitely visible to the recipient.
 					f.layoutUncertain = true
 				}
-				if !r.matches.stopped && prepared.hasElementChild {
-					activation, complete := r.styles.activateAncestorBuckets(n, r.matches)
+				if !r.work.stopped && prepared.hasElementChild {
+					activation, complete := r.styles.activateAncestorBuckets(n, r.work)
 					if complete {
 						f.ancestorKeys = activation
 					}
@@ -294,7 +299,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 					textState.layoutUncertain = true
 				}
 				decision := decideVisibility(style, textState, &colour)
-				if first {
+				if c.initialize {
 					r.results.textLabels = append(r.results.textLabels, decision.label)
 					r.results.textReasons = append(r.results.textReasons, decision.reasons)
 					text := Text{FontSize: style[fontSize].Text, EffectiveOpacity: f.alpha, Node: n}
@@ -332,7 +337,7 @@ func (r *viewingCaseRunner) run(width float64, fallback, first bool) error {
 			vars: f.vars,
 		})
 	}
-	if !first && (textIndex != len(r.results.textLabels) || elementIndex != len(r.results.elementLabels)) {
+	if !c.initialize && (textIndex != len(r.results.textLabels) || elementIndex != len(r.results.elementLabels)) {
 		return fmt.Errorf("internal: viewing-case traversal shape changed: text %d/%d, elements %d/%d", textIndex, len(r.results.textLabels), elementIndex, len(r.results.elementLabels))
 	}
 	return nil
@@ -402,7 +407,7 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 	}
 	runner := viewingCaseRunner{
 		document: &document, styles: s, retainInspection: p.retainInspection,
-		matches: guard, expressions: guard, results: &results,
+		work: guard, results: &results,
 		frames:     make([]viewingCaseFrame, 0, document.treeDepth+1),
 		styleStack: make([]Style, 0, document.treeDepth+1),
 		layers:     make([]paintLayer, 0, document.treeDepth),
@@ -412,13 +417,12 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 		if p.stopped() {
 			return in, errStopped
 		}
-		if err := runner.run(width, fallback, caseIndex == 0); err != nil {
+		if err := runner.run(viewingCase{width: width, fallback: fallback, initialize: caseIndex == 0}); err != nil {
 			if p.memory.Exhausted() {
 				err = fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
 			}
 			return in, err
 		}
-		_ = caseIndex
 	}
 	if s.unsupportedNesting || document.msoOrderUncertain {
 		// Nested selectors can target descendants, siblings, or ancestors of

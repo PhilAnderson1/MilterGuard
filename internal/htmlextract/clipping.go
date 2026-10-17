@@ -67,18 +67,23 @@ func resolveClip(p int, s string, budget *cpuGuard) (Value, valueStatus) {
 	}
 	return Value{Text: s}, valueUnsupported
 }
-func emptyClip(st *Style, n *html.Node, displayDeclared bool) (empty, known, inlineClipPathUncertain, clientDependent bool) {
+
+type clipResult struct {
+	empty, known, inlineUncertain, clientDependent bool
+}
+
+func emptyClip(st *Style, n *html.Node, displayDeclared bool) clipResult {
 	if n.Namespace != "" || !st[display].Known {
-		return false, false, false, false
+		return clipResult{}
 	}
 	if st[display].Text == "contents" {
 		// display:contents generates no principal box on which clip or
 		// clip-path could operate. Its child boxes therefore inherit no clipping
 		// uncertainty from these declarations.
-		return false, true, false, false
+		return clipResult{known: true}
 	}
-	inlineClipPathUncertain = st[clipPath].Text != "none" && nonReplacedInlineBox(n, st, displayDeclared)
-	known = st[clipPath].Known && !inlineClipPathUncertain
+	inlineClipPathUncertain := st[clipPath].Text != "none" && nonReplacedInlineBox(n, st, displayDeclared)
+	known := st[clipPath].Known && !inlineClipPathUncertain
 	clipPathEmpty := false
 	if inlineClipPathUncertain {
 		// The specification applies clip-path to inline boxes, but email-client
@@ -89,15 +94,15 @@ func emptyClip(st *Style, n *html.Node, displayDeclared bool) (empty, known, inl
 	}
 	pos := st[position]
 	if pos.Known && (pos.Text == "static" || pos.Text == "relative" || pos.Text == "sticky") {
-		return clipPathEmpty, known, inlineClipPathUncertain, clipPathEmpty
+		return clipResult{empty: clipPathEmpty, known: known, inlineUncertain: inlineClipPathUncertain, clientDependent: clipPathEmpty}
 	}
 	if pos.Known && (pos.Text == "absolute" || pos.Text == "fixed") {
 		if st[clip].Known && st[clip].Number == 1 {
-			return true, true, inlineClipPathUncertain, false
+			return clipResult{empty: true, known: true, inlineUncertain: inlineClipPathUncertain}
 		}
-		return clipPathEmpty, known && st[clip].Known, inlineClipPathUncertain, clipPathEmpty
+		return clipResult{empty: clipPathEmpty, known: known && st[clip].Known, inlineUncertain: inlineClipPathUncertain, clientDependent: clipPathEmpty}
 	}
-	return clipPathEmpty, known && st[clip].Known && st[clip].Text == "auto", inlineClipPathUncertain, clipPathEmpty
+	return clipResult{empty: clipPathEmpty, known: known && st[clip].Known && st[clip].Text == "auto", inlineUncertain: inlineClipPathUncertain, clientDependent: clipPathEmpty}
 }
 
 // nonReplacedInlineBox identifies boxes for which email-client clip-path

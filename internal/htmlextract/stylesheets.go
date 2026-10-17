@@ -131,7 +131,7 @@ func (s *sheet) loadStylesheetReference(href, media string) {
 
 func (s *sheet) parseImportedStylesheet(text, media string) {
 	firstRule := len(s.rules)
-	s.parseCSS(text, false)
+	s.parseStylesheetCSS(text)
 	// Email clients disagree on whether data-URL stylesheets are applicable.
 	// Retain their possible cascade effects, but do not let them establish a
 	// definite visibility result. This also marks rules from nested imports
@@ -141,31 +141,37 @@ func (s *sheet) parseImportedStylesheet(text, media string) {
 }
 
 func (s *sheet) parseImport(values []css.Token) {
-	href, media, ok, unsupported := importReference(values)
-	if !ok {
+	reference := importReference(values)
+	if !reference.valid {
 		return
 	}
-	if unsupported {
+	if reference.unsupported {
 		s.unresolvedStylesheet = true
 		return
 	}
-	if !s.mediaCanApply(media) {
+	if !s.mediaCanApply(reference.media) {
 		return
 	}
-	s.loadStylesheetReference(href, media)
+	s.loadStylesheetReference(reference.href, reference.media)
 }
 
-func importReference(values []css.Token) (href, media string, ok, unsupported bool) {
+type cssImportReference struct {
+	href, media string
+	valid       bool
+	unsupported bool
+}
+
+func importReference(values []css.Token) cssImportReference {
 	start := 0
 	for start < len(values) && (values[start].TokenType == css.WhitespaceToken || values[start].TokenType == css.CommentToken) {
 		start++
 	}
 	if start == len(values) {
-		return "", "", false, false
+		return cssImportReference{}
 	}
-	href, ok = cssURL(values[start])
+	href, ok := cssURL(values[start])
 	if !ok {
-		return "", "", false, false
+		return cssImportReference{}
 	}
 	start++
 	for start < len(values) && (values[start].TokenType == css.WhitespaceToken || values[start].TokenType == css.CommentToken) {
@@ -176,11 +182,11 @@ func importReference(values []css.Token) (href, media string, ok, unsupported bo
 		if first == "layer" || strings.HasPrefix(first, "layer(") || strings.HasPrefix(first, "supports(") {
 			// Cascade layers and supports() need semantics the extractor does not
 			// model. Do not apply the imported sheet unconditionally.
-			return href, "", true, true
+			return cssImportReference{href: href, valid: true, unsupported: true}
 		}
-		media = tokenString(values[start:])
+		return cssImportReference{href: href, media: tokenString(values[start:]), valid: true}
 	}
-	return href, media, true, false
+	return cssImportReference{href: href, valid: true}
 }
 
 func cssURL(token css.Token) (string, bool) {

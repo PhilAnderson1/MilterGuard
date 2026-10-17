@@ -6,6 +6,17 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unsafe"
+)
+
+// Conservative estimates for the temporary and retained maps built while
+// reducing media-query widths to distinct activation vectors.
+const (
+	mediaFrameSetEntryBytes      int64 = 32
+	mediaBoundSetEntryBytes      int64 = 24
+	mediaFrameStateMapBytes      int64 = 128
+	mediaViewingCaseMapsBytes    int64 = 256
+	mediaActivationOverheadBytes int64 = 48
 )
 
 // A condition is a disjunction of alternatives; nested conditions are ANDed.
@@ -134,11 +145,6 @@ func (c mediaCondition) states(width float64, fallback bool) (light, dark int) {
 	return light, dark
 }
 
-func (r rule) mediaState(width float64, fallback bool) int {
-	light, dark := evaluateConditionFrame(r.conditions, width, fallback, nil)
-	return combinedMediaState(light, dark)
-}
-
 type conditionFrameState struct {
 	light, dark int
 }
@@ -209,7 +215,7 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 			if seenFrames[frame] {
 				continue
 			}
-			if !s.memory.Reserve(32) {
+			if !s.memory.Reserve(mediaFrameSetEntryBytes) {
 				return []float64{1024}, true
 			}
 			seenFrames[frame] = true
@@ -217,7 +223,7 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 			for _, a := range c {
 				for _, b := range a.bounds {
 					if !unique[b.value] {
-						if !s.memory.Reserve(24) {
+						if !s.memory.Reserve(mediaBoundSetEntryBytes) {
 							return []float64{1024}, true
 						}
 						unique[b.value] = true
@@ -229,7 +235,7 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 	}
 	var candidates []float64
 	if len(bounds) == 0 {
-		if !s.memory.Reserve(int64(len(s.rules)) + int64(len(seenFrames))*32 + 128) {
+		if !s.memory.Reserve(int64(len(s.rules)) + int64(len(seenFrames))*mediaFrameSetEntryBytes + mediaFrameStateMapBytes) {
 			return []float64{1024}, true
 		}
 		states := make([]uint8, 0, len(s.rules))
@@ -247,7 +253,7 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 		s.runtime.mediaCache = map[mediaCacheKey][]uint8{{width: 1024}: states}
 		return []float64{1024}, false
 	} else {
-		if !s.memory.Reserve(int64(len(bounds)*2+2) * 8) {
+		if !s.memory.Reserve(int64(len(bounds)*2+2) * int64(unsafe.Sizeof(float64(0)))) {
 			return []float64{1024}, true
 		}
 		sort.Float64s(bounds)
@@ -265,7 +271,7 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 	}
 	// Each activation vector becomes one string key. The shared memory budget
 	// accounts for candidates, state vectors, and retained cache entries.
-	if !s.memory.Reserve(int64(len(seenFrames))*32 + 256) {
+	if !s.memory.Reserve(int64(len(seenFrames))*mediaFrameSetEntryBytes + mediaViewingCaseMapsBytes) {
 		return []float64{1024}, true
 	}
 	seen := map[string]bool{}
@@ -277,7 +283,7 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 	}
 	for _, w := range candidates {
 		clear(frameStates)
-		if !s.memory.Reserve(int64(len(s.rules))*2 + 48) {
+		if !s.memory.Reserve(int64(len(s.rules))*2 + mediaActivationOverheadBytes) {
 			return []float64{1024}, true
 		}
 		states := make([]uint8, 0, len(s.rules))

@@ -139,7 +139,7 @@ func TestCSSParserSamplesCooperativeStop(t *testing.T) {
 			return true
 		},
 	}
-	s.parseCSS(`/*`+strings.Repeat(`x`, 8<<10)+`*/p{color:red}`, false)
+	s.parseStylesheetCSS(`/*` + strings.Repeat(`x`, 8<<10) + `*/p{color:red}`)
 	if !s.stopped {
 		t.Fatal("CSS parsing did not report the cooperative stop")
 	}
@@ -152,12 +152,12 @@ func TestCSSByteLimitAppliesAcrossParserInputs(t *testing.T) {
 	limits := DefaultLimits()
 	limits.CSSBytes = len(`p{display:none}`) + len(`div{display:none}`)
 	s := sheet{limits: limits}
-	s.parseCSS(`p{display:none}`, false)
-	s.parseCSS(`div{display:none}`, false)
+	s.parseStylesheetCSS(`p{display:none}`)
+	s.parseStylesheetCSS(`div{display:none}`)
 	if s.cascadeIncomplete {
 		t.Fatal("CSS at the cumulative limit invalidated the cascade")
 	}
-	s.parseCSS(`i{display:none}`, false)
+	s.parseStylesheetCSS(`i{display:none}`)
 	if !s.cascadeIncomplete {
 		t.Fatal("split CSS inputs bypassed the cumulative byte limit")
 	}
@@ -168,7 +168,7 @@ func TestCSSByteLimitAppliesAcrossParserInputs(t *testing.T) {
 
 func TestSelectorBranchLimitAbandonsCascade(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(strings.Repeat("a,", maxSelectorBranches)+"a{display:none}", false)
+	s.parseStylesheetCSS(strings.Repeat("a,", maxSelectorBranches) + "a{display:none}")
 	if !s.cascadeIncomplete {
 		t.Fatal("selector branch limit did not abandon the cascade")
 	}
@@ -180,7 +180,7 @@ func TestSelectorBranchLimitAbandonsCascade(t *testing.T) {
 func TestDeclarationLimitAbandonsCascade(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
 	s.declarationCount = maxCSSDeclarations
-	s.parseCSS(`a{color:red}`, false)
+	s.parseStylesheetCSS(`a{color:red}`)
 	if !s.cascadeIncomplete {
 		t.Fatal("declaration limit did not abandon the cascade")
 	}
@@ -488,7 +488,7 @@ func TestInlineAtRuleDeclarationsAreNotAppliedUnconditionally(t *testing.T) {
 
 	t.Run("nested ruleset cannot escape into document stylesheet", func(t *testing.T) {
 		s := sheet{limits: DefaultLimits()}
-		if declarations := s.parseCSS(`@keyframes k{p{display:none}}`, true); len(declarations) != 0 {
+		if declarations := s.parseInlineCSS(`@keyframes k{p{display:none}}`).declarations; len(declarations) != 0 {
 			t.Fatalf("inline declarations = %+v", declarations)
 		}
 		if len(s.rules) != 0 {
@@ -779,9 +779,9 @@ func TestParserCompatibilityPreservesAuthorEscapedParentheses(t *testing.T) {
 			s := sheet{limits: DefaultLimits()}
 			var declarations []declaration
 			if test.inline {
-				declarations = s.parseCSS(test.css, true)
+				declarations = s.parseInlineCSS(test.css).declarations
 			} else {
-				s.parseCSS(test.css, false)
+				s.parseStylesheetCSS(test.css)
 				if len(s.rules) != 1 {
 					t.Fatalf("rules = %d, want 1", len(s.rules))
 				}
@@ -1192,8 +1192,8 @@ func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 		t.Fatalf("unexpected conservative plan: %+v", plan)
 	}
 	scope := `.rio-asin-container-image img`
-	if used := memory.Used(); used < int64(2*len(scope)) {
-		t.Fatalf("conservative scope charged %d bytes, want at least %d", used, 2*len(scope))
+	if used := memory.Used(); used != int64(len(scope)) {
+		t.Fatalf("conservative scope charged %d bytes, want %d for one compilation", used, len(scope))
 	}
 
 	ordinary := &html.Node{Type: html.ElementNode, Data: "img"}
@@ -1252,7 +1252,7 @@ func TestConservativeSelectorScopeAlwaysHasSafeFallback(t *testing.T) {
 func TestSelectorIndexIncludesEveryPotentialCandidate(t *testing.T) {
 	limits := DefaultLimits()
 	s := sheet{limits: limits}
-	s.parseCSS(`p{display:none}.target{opacity:0}#chosen{visibility:hidden}.ancestor *{font-size:0}[data-x]{color:red}`, false)
+	s.parseStylesheetCSS(`p{display:none}.target{opacity:0}#chosen{visibility:hidden}.ancestor *{font-size:0}[data-x]{color:red}`)
 	s.buildSelectorIndex()
 	ancestor := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "ancestor"}}}
 	node := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "id", Val: "chosen"}, {Key: "class", Val: "target"}, {Key: "data-x", Val: "1"}}, Parent: ancestor}
@@ -1270,7 +1270,7 @@ func TestSelectorIndexIncludesEveryPotentialCandidate(t *testing.T) {
 
 func TestDirectSelectorIndexHasNoAncestorSearch(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`p{display:none}`, false)
+	s.parseStylesheetCSS(`p{display:none}`)
 	s.buildSelectorIndex()
 	if len(s.index.ancestorTags) != 0 || len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
 		t.Fatalf("direct selector populated ancestor index: %+v", s.index)
@@ -1288,7 +1288,7 @@ func TestDirectSelectorIndexHasNoAncestorSearch(t *testing.T) {
 
 func TestNamespaceSelectorsRetainEveryPotentialCandidate(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`s|text{display:none}*|text{display:none}|text{display:none}s|*{visibility:hidden}s|linearGradient{opacity:0}[s|href]{display:none}`, false)
+	s.parseStylesheetCSS(`s|text{display:none}*|text{display:none}|text{display:none}s|*{visibility:hidden}s|linearGradient{opacity:0}[s|href]{display:none}`)
 	s.buildSelectorIndex()
 	node := &html.Node{Type: html.ElementNode, Data: "text", Namespace: "svg"}
 	refs := s.candidates(node)
@@ -1360,7 +1360,7 @@ func TestMixedCaseSVGTypeSelectorsAreConservative(t *testing.T) {
 
 func TestMixedCaseSVGTypeSelectorIsIndexed(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`textPath{display:none}`, false)
+	s.parseStylesheetCSS(`textPath{display:none}`)
 	s.buildSelectorIndex()
 	node := &html.Node{Type: html.ElementNode, Data: "textPath", Namespace: "svg"}
 	refs := s.candidates(node)
@@ -1373,7 +1373,7 @@ func TestMixedCaseSVGTypeSelectorIsIndexed(t *testing.T) {
 	}
 
 	s = sheet{limits: DefaultLimits()}
-	s.parseCSS(`textpath{display:none}`, false)
+	s.parseStylesheetCSS(`textpath{display:none}`)
 	s.buildSelectorIndex()
 	refs = s.candidates(node)
 	if len(refs) != 1 {
@@ -1387,7 +1387,7 @@ func TestMixedCaseSVGTypeSelectorIsIndexed(t *testing.T) {
 
 func TestSelectorIndexDoesNotReturnUnrelatedKeyedRules(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`.wanted{display:none}#chosen{opacity:0}section{visibility:hidden}`, false)
+	s.parseStylesheetCSS(`.wanted{display:none}#chosen{opacity:0}section{visibility:hidden}`)
 	s.buildSelectorIndex()
 	node := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: "other"}}}
 	if refs := s.candidates(node); len(refs) != 0 {
@@ -1397,7 +1397,7 @@ func TestSelectorIndexDoesNotReturnUnrelatedKeyedRules(t *testing.T) {
 
 func TestSelectorIndexRemovesRulesWithoutRelevantDeclarations(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`*{}.unused{unknown-property:value}p{display:none}`, false)
+	s.parseStylesheetCSS(`*{}.unused{unknown-property:value}p{display:none}`)
 	if len(s.rules) != 3 {
 		t.Fatalf("parsed rules = %d, want 3", len(s.rules))
 	}
@@ -1422,7 +1422,7 @@ func TestSelectorIndexBypassesAttributeWorkWithoutSelectors(t *testing.T) {
 
 func TestActiveAncestorCandidatesMatchParentWalk(t *testing.T) {
 	s := sheet{limits: DefaultLimits()}
-	s.parseCSS(`.wanted *{display:none}#outer *{opacity:0}div *{visibility:hidden}svg *{font-size:0}linearGradient *{color:red}.absent *{display:none}p{display:block}`, false)
+	s.parseStylesheetCSS(`.wanted *{display:none}#outer *{opacity:0}div *{visibility:hidden}svg *{font-size:0}linearGradient *{color:red}.absent *{display:none}p{display:block}`)
 	s.buildSelectorIndex()
 	root, err := html.Parse(strings.NewReader(`<div id="outer" class="wanted"><div class="wanted"><p></p></div><svg><linearGradient><rect></rect></linearGradient></svg></div>`))
 	if err != nil {
