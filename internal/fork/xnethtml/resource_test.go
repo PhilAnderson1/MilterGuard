@@ -45,6 +45,23 @@ func TestAttributeCountLimitIsResourceError(t *testing.T) {
 	}
 }
 
+func TestDocumentAttributeCountLimitIsResourceError(t *testing.T) {
+	attributes := strings.Repeat("a=x ", maxAttributesPerTag)
+	withinLimit := strings.Repeat("<div "+attributes+"></div>", maxDocumentAttributes/maxAttributesPerTag)
+	if _, err := Parse(strings.NewReader(withinLimit)); err != nil {
+		t.Fatalf("document at attribute limit rejected: %v", err)
+	}
+
+	_, err := Parse(strings.NewReader(withinLimit + "<div a=x></div>"))
+	var limitErr *ResourceLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("err=%v, want ResourceLimitError", err)
+	}
+	if limitErr.Resource != "document attributes" || limitErr.Limit != maxDocumentAttributes {
+		t.Fatalf("limit error = %+v", limitErr)
+	}
+}
+
 func TestDocumentNodeLimitIsResourceError(t *testing.T) {
 	p := parser{nodeCount: maxDocumentNodes}
 	defer func() {

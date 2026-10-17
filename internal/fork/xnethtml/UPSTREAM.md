@@ -20,6 +20,9 @@ Local changes:
   because HTML tree-builder algorithms can grow quadratically with nesting
   depth. Exceeding it returns the same typed resource error as the fork's
   other intentional limits instead of using an untyped panic.
+- Source attributes are limited to 4,096 per tag and 65,536 per document. Both
+  limits count duplicates because duplicate detection and tokenization still
+  consume resources before HTML duplicate removal.
 - `NewTokenizerWithStop` exposes cooperative cancellation for the standalone
   tokenizer used by bounded lexical fallback.
 

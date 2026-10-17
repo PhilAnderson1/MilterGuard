@@ -37,10 +37,12 @@ const (
 // ErrBufferExceeded means that the buffering limit was exceeded.
 var ErrBufferExceeded = errors.New("max buffer exceeded")
 
-// maxAttributesPerTag bounds tokenizer slices, duplicate-detection state, and
-// transient strings for a single hostile tag. Real-world HTML stays several
-// orders of magnitude below this limit.
-const maxAttributesPerTag = 4096
+// Attribute count limits bound tokenizer slices, duplicate-detection state,
+// and retained DOM attributes without estimating Go allocator overhead.
+const (
+	maxAttributesPerTag   = 4096
+	maxDocumentAttributes = 65_536
+)
 
 // String returns a string representation of the TokenType.
 func (t TokenType) String() string {
@@ -160,10 +162,11 @@ type Tokenizer struct {
 	// pendingAttr is the attribute key and value currently being tokenized.
 	// When complete, pendingAttr is pushed onto attr. nAttrReturned is
 	// incremented on each call to TagAttr.
-	pendingAttr   [2]span
-	attr          [][2]span
-	attrNames     map[string]bool
-	nAttrReturned int
+	pendingAttr    [2]span
+	attr           [][2]span
+	attrNames      map[string]bool
+	nAttrReturned  int
+	attributeCount int
 	// rawTag is the "script" in "</script>" that closes the next token. If
 	// non-empty, the subsequent call to Next will return a raw or RCDATA text
 	// token: one that treats "<p>" as text instead of an element.
@@ -918,6 +921,11 @@ func (z *Tokenizer) readTag(saveAttr bool) {
 		attributeCount++
 		if attributeCount > maxAttributesPerTag {
 			z.err = &ResourceLimitError{Resource: "attributes per tag", Limit: maxAttributesPerTag}
+			break
+		}
+		z.attributeCount++
+		if z.attributeCount > maxDocumentAttributes {
+			z.err = &ResourceLimitError{Resource: "document attributes", Limit: maxDocumentAttributes}
 			break
 		}
 		keyBytes := z.pendingAttr[0].end - z.pendingAttr[0].start

@@ -178,11 +178,18 @@ func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Messag
 		return exceeded
 	}
 	control.ShouldFallback = shouldFallback
+	continueAfterCPULimit := s.ai.HTMLParseCPULimitAction == "fallback"
 	fallbackStarted := time.Duration(0)
 	fallbackStartedOK := false
 	fallbackExceeded := false
 	control.FallbackShouldStop = func() bool {
 		if contextStopped() {
+			return true
+		}
+		// Rejecting actions discard the extracted content, so do not spend a
+		// second CPU allowance constructing lexical fallback after the primary
+		// allowance has expired. Non-CPU parser failures may still use fallback.
+		if exceeded && !continueAfterCPULimit {
 			return true
 		}
 		if fallbackExceeded {

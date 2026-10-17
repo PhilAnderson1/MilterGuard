@@ -201,8 +201,7 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 	} else if d.custom == "" && !d.hasVars && !d.shorthand && !d.unsupported {
 		value := normalizeCSSKeyword(d.value)
 		if (d.prop == fontSize || d.prop == opacity) && isMath(value) && d.tokensReady && d.valueStatus == valueResolved {
-			budget := cpuGuard{}
-			_, d.validity = evalMathTokens(d.prop, value, d.valueTokens, &initialStyle, &initialStyle, &budget)
+			_, d.validity = evalMathTokens(d.prop, value, d.valueTokens, &initialStyle, &initialStyle, budget)
 		} else {
 			_, d.validity = resolveWithBudget(d.prop, value, &initialStyle, &initialStyle, budget)
 		}

@@ -1186,9 +1186,14 @@ func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 	sequence := 0
 	plans, _, _ := planSelectorList(`u + .body .rio-asin-container-image img`, &sequence, nil, maxSelectorBranches)
 	plan := plans[0]
-	plan.makeUncertain(nil)
+	memory := resourceguard.NewMemory(1 << 20)
+	plan.makeUncertain(memory)
 	if !plan.uncertain || len(plan.execution.compounds) != 2 || len(plan.execution.combinators) != 1 || plan.execution.combinators[0] != ' ' {
 		t.Fatalf("unexpected conservative plan: %+v", plan)
+	}
+	scope := `.rio-asin-container-image img`
+	if used := memory.Used(); used < int64(2*len(scope)) {
+		t.Fatalf("conservative scope charged %d bytes, want at least %d", used, 2*len(scope))
 	}
 
 	ordinary := &html.Node{Type: html.ElementNode, Data: "img"}
@@ -1200,6 +1205,21 @@ func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 	}
 	if !plan.scope.Match(product) {
 		t.Fatal("conservative selector scope did not retain the necessary ancestor")
+	}
+}
+
+func TestPreparedMathDeclarationUsesCPUControl(t *testing.T) {
+	value := `calc(1px + 1px)`
+	tokens, status := lexValue(value, nil)
+	guard := &cpuGuard{shouldStop: func() bool { return true }}
+	prepared := prepareDeclaration(declaration{
+		prop: fontSize, value: value, valueTokens: tokens, valueStatus: status, tokensReady: true,
+	}, guard)
+	if !guard.stopped {
+		t.Fatal("math declaration validation did not sample the CPU control")
+	}
+	if !prepared.validityReady || prepared.validity != valueUnsupported {
+		t.Fatalf("stopped declaration validity = (%d, %t), want unsupported", prepared.validity, prepared.validityReady)
 	}
 }
 

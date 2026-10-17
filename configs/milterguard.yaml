@@ -125,11 +125,12 @@ ai:
 
   # Maximum CPU time, in milliseconds, for preparing message content for
   # analysis, including MIME, plain-text, HTML and CSS processing. If bounded
-  # HTML fallback extraction is needed, its tokenizer receives a separate
-  # allowance of the same size, so total processing CPU can approach twice this
-  # value. CPU time excludes time waiting to be scheduled. The value must be
-  # positive. Exceeding it applies html_parse_cpu_limit_action below;
-  # dos-reject treats the event as a suspected attack and updates IP reputation.
+  # If HTML fallback extraction is needed and the action below is fallback, its
+  # tokenizer receives a separate allowance of the same size. Rejecting actions
+  # stop extraction when the primary allowance expires. CPU time excludes time
+  # waiting to be scheduled. The value must be positive. Exceeding it applies
+  # html_parse_cpu_limit_action below; dos-reject treats the event as a
+  # suspected attack and updates IP reputation.
   max_html_parse_cpu_ms: 250
 
   # Cumulative per-message allocation budget for HTML/CSS parsing, rendering,

@@ -181,7 +181,7 @@ type selectorPlan struct {
 
 func (p *selectorPlan) makeUncertain(memory *resourceguard.Memory) {
 	p.uncertain = true
-	scope, execution := p.conservativeScope()
+	scope, execution := p.conservativeScope(memory)
 	p.scope = compileConservativeScope(scope, memory)
 	p.matcher = nil
 	p.ancestorChain = nil
@@ -221,7 +221,7 @@ func (p *selectorPlan) makeForeignCaseUncertain(memory *resourceguard.Memory) {
 // relationship is safe to preserve even when an earlier, expensive part of
 // the selector has to be abandoned. This prevents a rule such as
 // "u + .body .product img" from degrading all the way to every img element.
-func (p *selectorPlan) conservativeScope() (string, selectorComplexity) {
+func (p *selectorPlan) conservativeScope(memory *resourceguard.Memory) (string, selectorComplexity) {
 	fallback := scopeSelectorComplexity(p.scopePrefix)
 	if p.scopePrefix == "" || p.scopePrefix == "*" || len(p.complexity.compounds) < 2 {
 		return p.scopePrefix, fallback
@@ -241,7 +241,7 @@ func (p *selectorPlan) conservativeScope() (string, selectorComplexity) {
 		separator = ">"
 	}
 	scope := left + separator + right
-	group, err := cascadia.ParseGroup(scope)
+	group, err := cascadia.ParseGroupWithMemory(scope, memory)
 	if err != nil || len(group) != 1 {
 		return p.scopePrefix, fallback
 	}

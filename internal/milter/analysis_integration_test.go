@@ -106,6 +106,31 @@ func TestHTMLCPULimitFallbackContinuesAIWithBoundedExtraction(t *testing.T) {
 	}
 }
 
+func TestHTMLCPULimitRejectStopsLexicalFallback(t *testing.T) {
+	readings := []time.Duration{time.Second, 2 * time.Second, 2 * time.Second}
+	reading := 0
+	service := &analysisService{ai: config.AIConfig{
+		MaxBodyChars: 4096, MaxHTMLParseCPUMilliseconds: 250,
+		HTMLParseCPULimitAction: "dos-reject", VisionMode: "off",
+	}}
+	service.threadCPUTime = func() (time.Duration, bool) {
+		value := readings[min(reading, len(readings)-1)]
+		reading++
+		return value, true
+	}
+	msg := message.New(4096)
+	msg.AddHeader("Content-Type", "text/html")
+	msg.AddBody([]byte(`<p style="display:none">hidden</p><p>ordinary message</p>`))
+
+	prepared, _, measured, exceeded := service.buildAnalysis(context.Background(), msg, message.AnalysisContext{})
+	if !measured || !exceeded || !prepared.BodyExtractionIncomplete || !prepared.HTMLCPULimitExceeded {
+		t.Fatalf("prepared=%+v measured=%t exceeded=%t", prepared, measured, exceeded)
+	}
+	if strings.Contains(prepared.Prompt, "ordinary message") {
+		t.Fatalf("CPU-rejected analysis retained lexical fallback: %q", prepared.Prompt)
+	}
+}
+
 func TestHTMLCPULimitFallbackRetainsCompletedMultipartAnalysis(t *testing.T) {
 	newService := func() *analysisService {
 		return &analysisService{ai: config.AIConfig{
