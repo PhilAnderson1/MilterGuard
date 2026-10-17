@@ -129,6 +129,171 @@ type elementPreparation struct {
 	hasElementChild  bool
 }
 
+type documentFrame struct {
+	n, next *html.Node
+	depth   int
+	scope   nodeScope
+	// Styles declared below noscript are client-dependent: some email
+	// sanitizers discard the container while others retain its fallback
+	// content. Keep parsing the rules, but do not let them establish a certain
+	// presentation result.
+	uncertainStylesheetOrigin bool
+	entered                   bool
+}
+
+type documentWalker struct {
+	processor processor
+	document  *parsedDocument
+	stack     []documentFrame
+	nodeCount int
+	msoDepth  int
+}
+
+func (w *documentWalker) run(root *html.Node) error {
+	const initialStackCapacity = 64
+	if !w.processor.memory.Reserve(initialStackCapacity * int64(unsafe.Sizeof(documentFrame{}))) {
+		return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
+	}
+	w.stack = make([]documentFrame, 1, initialStackCapacity)
+	w.stack[0] = documentFrame{n: root}
+	for len(w.stack) > 0 {
+		frame := &w.stack[len(w.stack)-1]
+		if frame.entered {
+			if frame.next == nil {
+				w.stack = w.stack[:len(w.stack)-1]
+				continue
+			}
+			child := frame.next
+			frame.next = child.NextSibling
+			if frame.n.Type == html.ElementNode && child.Type == html.ElementNode {
+				prepared := w.document.elements[frame.n]
+				if !prepared.hasElementChild {
+					prepared.hasElementChild = true
+					w.document.elements[frame.n] = prepared
+				}
+			}
+			if len(w.stack) == cap(w.stack) {
+				newCapacity := max(1, cap(w.stack)*2)
+				if !w.processor.memory.Reserve(int64(newCapacity-cap(w.stack)) * int64(unsafe.Sizeof(documentFrame{}))) {
+					return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
+				}
+				grown := make([]documentFrame, len(w.stack), newCapacity)
+				copy(grown, w.stack)
+				w.stack = grown
+			}
+			w.stack = append(w.stack, documentFrame{
+				n: child, depth: frame.depth + 1, scope: frame.scope,
+				uncertainStylesheetOrigin: frame.uncertainStylesheetOrigin,
+			})
+			continue
+		}
+		frame.entered = true
+		frame.next = frame.n.FirstChild
+		if err := w.visit(frame); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *documentWalker) visit(frame *documentFrame) error {
+	node := frame.n
+	if frame.depth > w.document.treeDepth {
+		w.document.treeDepth = frame.depth
+	}
+	w.nodeCount++
+	if w.nodeCount&255 == 0 && w.processor.stopped() {
+		return errStopped
+	}
+	if node.Type == html.CommentNode && (frame.scope == scopeActive || frame.scope == scopeHead) {
+		w.visitComment(node)
+	}
+	if node.Type == html.ElementNode {
+		if err := w.prepareElement(node, frame); err != nil {
+			return err
+		}
+	}
+	frame.scope = nodeContentScope(node, frame.scope)
+	if node.Type == html.TextNode && frame.scope == scopeActive {
+		w.document.extractableTextCount++
+	}
+	return nil
+}
+
+func (w *documentWalker) visitComment(node *html.Node) {
+	marker := msoDownlevelRevealedMarker(node.Data)
+	if marker != msoRevealedNone {
+		// Foster parenting can move text out of table insertion modes while
+		// leaving these source-order markers below the table. Once that has
+		// happened the final tree cannot identify the displaced region.
+	msoAncestors:
+		for i := len(w.stack) - 2; i >= 0; i-- {
+			ancestor := w.stack[i].n
+			if ancestor.Type != html.ElementNode {
+				continue
+			}
+			switch ancestor.Data {
+			case "td", "th", "caption":
+				break msoAncestors
+			case "table", "tbody", "thead", "tfoot", "tr", "colgroup":
+				w.document.msoOrderUncertain = true
+				break msoAncestors
+			}
+		}
+	}
+	switch marker {
+	case msoRevealedStart:
+		w.msoDepth++
+	case msoRevealedEnd:
+		if w.msoDepth > 0 {
+			w.msoDepth--
+		}
+	}
+	w.document.styles.parseMSOConditionalStyles(node.Data)
+}
+
+func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) error {
+	styles := &w.document.styles
+	var prepared elementPreparation
+	if href, media, applies := styles.stylesheetLink(node); applies && (frame.scope == scopeActive || frame.scope == scopeHead) {
+		styles.loadStylesheetReference(href, media)
+	}
+	if node.Data == "style" && cssTypeAttributeApplies(node) && (frame.scope == scopeActive || frame.scope == scopeHead) && !styles.cascadeIncomplete && !styles.stopped {
+		remaining := styles.limits.CSSBytes - styles.cssBytes
+		cssText, complete := boundedStyleText(node, remaining)
+		if !complete {
+			styles.abandonCascade()
+		} else {
+			origin := trustedStylesheetOrigin
+			if node.Namespace != "" || frame.uncertainStylesheetOrigin || w.msoDepth > 0 {
+				origin = uncertainStylesheetOrigin
+			}
+			styles.parseStylesheet(cssText, attr(node, "media"), origin)
+		}
+	}
+	if value := attr(node, "style"); value != "" {
+		result := styles.parseInlineCSS(value)
+		prepared.inline = result.declarations
+		prepared.inlineIncomplete = result.incomplete
+	}
+	if !styles.cascadeIncomplete && !styles.stopped {
+		prepared.legacy = prepareDeclarations(legacyDeclarations(node), w.processor.cpu)
+	}
+	if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || prepared.inlineIncomplete {
+		if _, exists := w.document.elements[node]; !exists && !w.processor.memory.Reserve(elementPreparationEntryBytes) {
+			return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
+		}
+		w.document.elements[node] = prepared
+	}
+	if frame.scope == scopeActive && (node.Data == "img" || node.Data == "input") {
+		w.document.extractableElementCount++
+	}
+	if node.Namespace == "" && node.Data == "noscript" {
+		frame.uncertainStylesheetOrigin = true
+	}
+	return nil
+}
+
 func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	document := parsedDocument{memory: p.memory}
 	if err := p.Limits.validate(); err != nil {
@@ -170,143 +335,9 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		return document, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
 	}
 	document.elements = make(map[*html.Node]elementPreparation)
-	type entry struct {
-		n, next *html.Node
-		depth   int
-		scope   nodeScope
-		// Styles declared below noscript are client-dependent: some email
-		// sanitizers discard the container while others retain its fallback
-		// content. Keep parsing the rules, but do not let them establish a
-		// certain presentation result.
-		uncertainStylesheetOrigin bool
-		entered                   bool
-	}
-	stackCap := 64
-	if !p.memory.Reserve(int64(stackCap) * int64(unsafe.Sizeof(entry{}))) {
-		return document, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
-	}
-	stack := make([]entry, 1, stackCap)
-	stack[0] = entry{n: root}
-	msoRevealedDepth := 0
-	nodeCount := 0
-	for len(stack) > 0 {
-		e := &stack[len(stack)-1]
-		if e.entered {
-			if e.next == nil {
-				stack = stack[:len(stack)-1]
-				continue
-			}
-			child := e.next
-			e.next = child.NextSibling
-			if e.n.Type == html.ElementNode && child.Type == html.ElementNode {
-				prepared := document.elements[e.n]
-				if !prepared.hasElementChild {
-					prepared.hasElementChild = true
-					document.elements[e.n] = prepared
-				}
-			}
-			if len(stack) == cap(stack) {
-				newCap := max(1, cap(stack)*2)
-				if !p.memory.Reserve(int64(newCap-cap(stack)) * int64(unsafe.Sizeof(entry{}))) {
-					return document, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
-				}
-				grown := make([]entry, len(stack), newCap)
-				copy(grown, stack)
-				stack = grown
-			}
-			stack = append(stack, entry{
-				n: child, depth: e.depth + 1, scope: e.scope,
-				uncertainStylesheetOrigin: e.uncertainStylesheetOrigin,
-			})
-			continue
-		}
-		e.entered = true
-		e.next = e.n.FirstChild
-		n := e.n
-		if e.depth > document.treeDepth {
-			document.treeDepth = e.depth
-		}
-		nodeCount++
-		if nodeCount&255 == 0 && p.stopped() {
-			return document, errStopped
-		}
-		if n.Type == html.CommentNode && (e.scope == scopeActive || e.scope == scopeHead) {
-			marker := msoDownlevelRevealedMarker(n.Data)
-			if marker != msoRevealedNone {
-				// Foster parenting can move text out of table insertion modes while
-				// leaving these source-order markers below the table. Once that has
-				// happened the final tree cannot identify the displaced region.
-			msoAncestors:
-				for i := len(stack) - 2; i >= 0; i-- {
-					ancestor := stack[i].n
-					if ancestor.Type != html.ElementNode {
-						continue
-					}
-					switch ancestor.Data {
-					case "td", "th", "caption":
-						break msoAncestors // Ordinary content here is not foster parented.
-					case "table", "tbody", "thead", "tfoot", "tr", "colgroup":
-						document.msoOrderUncertain = true
-						break msoAncestors
-					}
-				}
-			}
-			switch marker {
-			case msoRevealedStart:
-				msoRevealedDepth++
-			case msoRevealedEnd:
-				if msoRevealedDepth > 0 {
-					msoRevealedDepth--
-				}
-			}
-			document.styles.parseMSOConditionalStyles(n.Data)
-		}
-		if n.Type == html.ElementNode {
-			var prepared elementPreparation
-			if href, media, applies := document.styles.stylesheetLink(n); applies && (e.scope == scopeActive || e.scope == scopeHead) {
-				document.styles.loadStylesheetReference(href, media)
-			}
-			if n.Data == "style" && cssTypeAttributeApplies(n) && (e.scope == scopeActive || e.scope == scopeHead) {
-				styles := &document.styles
-				if !styles.cascadeIncomplete && !styles.stopped {
-					remaining := styles.limits.CSSBytes - styles.cssBytes
-					css, complete := boundedStyleText(n, remaining)
-					if !complete {
-						styles.abandonCascade()
-					} else {
-						origin := trustedStylesheetOrigin
-						if n.Namespace != "" || e.uncertainStylesheetOrigin || msoRevealedDepth > 0 {
-							origin = uncertainStylesheetOrigin
-						}
-						styles.parseStylesheet(css, attr(n, "media"), origin)
-					}
-				}
-			}
-			if value := attr(n, "style"); value != "" {
-				result := document.styles.parseInlineCSS(value)
-				prepared.inline = result.declarations
-				prepared.inlineIncomplete = result.incomplete
-			}
-			if !document.styles.cascadeIncomplete && !document.styles.stopped {
-				prepared.legacy = prepareDeclarations(legacyDeclarations(n), p.cpu)
-			}
-			if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || prepared.inlineIncomplete {
-				if _, exists := document.elements[n]; !exists && !p.memory.Reserve(elementPreparationEntryBytes) {
-					return document, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
-				}
-				document.elements[n] = prepared
-			}
-			if e.scope == scopeActive && (n.Data == "img" || n.Data == "input") {
-				document.extractableElementCount++
-			}
-			if n.Namespace == "" && n.Data == "noscript" {
-				e.uncertainStylesheetOrigin = true
-			}
-		}
-		e.scope = nodeContentScope(n, e.scope)
-		if n.Type == html.TextNode && e.scope == scopeActive {
-			document.extractableTextCount++
-		}
+	walker := documentWalker{processor: p, document: &document}
+	if err := walker.run(root); err != nil {
+		return document, err
 	}
 	if document.styles.stopped {
 		return document, errStopped

@@ -2,14 +2,11 @@ package htmlextract
 
 import (
 	"bytes"
-	"errors"
 	"strconv"
 	"strings"
 	"unicode/utf8"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
-	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
@@ -23,67 +20,6 @@ const (
 	maxMatchCacheEntries = 65_536
 	maxCSSDeclarations   = 32_768
 )
-
-const (
-	display = iota
-	visibility
-	contentVisibility
-	msoHide
-	opacity
-	fontSize
-	color
-	background
-	backgroundImage
-	filter
-	blend
-	backdropFilter
-	backgroundBlend
-	maskImage
-	backgroundClip
-	textShadow
-	textFill
-	transform
-	position
-	textStroke
-	clip
-	clipPath
-	lineHeight
-	properties
-)
-
-const (
-	overflowX = properties + iota
-	overflowY
-	width
-	height
-	maxWidth
-	maxHeight
-	left
-	top
-	right
-	bottom
-	textIndent
-	letterSpacing
-	wordSpacing
-	marginTop
-	marginRight
-	marginBottom
-	marginLeft
-	zoom
-	declarationProperties
-	layoutProperties = declarationProperties - properties
-	// allShorthandProperty is an internal sentinel. Keep one declaration for
-	// the source shorthand and broadcast it across the tracked properties only
-	// while applying the cascade; eagerly materialising every property permits
-	// severe memory amplification from a small stylesheet.
-	allShorthandProperty = declarationProperties
-	// animationProperty is a cascade-only sentinel. Animation is not rendered;
-	// its winning declaration is retained solely to prevent a time-varying
-	// subtree from receiving a static visibility conclusion.
-	animationProperty = allShorthandProperty + 1
-)
-
-var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "line-height", "overflow-x", "overflow-y", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "letter-spacing", "word-spacing", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom"}
 
 // A declaration progresses through these preparation states:
 //
@@ -128,6 +64,50 @@ type preparedDeclaration struct {
 	status valueStatus
 }
 
+func (d *declaration) setTokens(tokens []valueToken, status valueStatus, ready bool) {
+	d.valueTokens = tokens
+	d.valueStatus = status
+	d.tokensReady = ready
+}
+
+func (d *declaration) ensureTokens(budget *cpuGuard) {
+	if d.tokensReady {
+		return
+	}
+	d.valueTokens, d.valueStatus = lexValue(d.value, budget)
+	d.tokensReady = true
+}
+
+func (d *declaration) recordVariableDependencies() {
+	if !d.hasVars || !d.tokensReady || d.valueStatus != valueResolved {
+		return
+	}
+	d.variableDependencies = variableRefs(d.valueTokens)
+	d.dependenciesReady = true
+}
+
+func (d *declaration) setPrepared(value Value, status valueStatus) {
+	d.prepared = &preparedDeclaration{value: value, status: status}
+	d.validity = status
+	d.validityReady = true
+	// The prepared value is the complete runtime representation. Keeping the
+	// parser token stream as well only retains duplicate strings and slices.
+	d.valueTokens = nil
+	d.tokensReady = false
+}
+
+func (d *declaration) setValidity(status valueStatus) {
+	d.validity = status
+	d.validityReady = true
+}
+
+func (d *declaration) discardTransientState() {
+	d.valueTokens = nil
+	d.tokensReady = false
+	d.variableDependencies = nil
+	d.dependenciesReady = false
+}
+
 // contextualDeclaration reports whether computing the value requires an
 // element's inherited/root style. Variables and shorthands are handled by the
 // caller because their substituted value may change this answer.
@@ -168,13 +148,9 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 		d.keyword = normalizeCSSKeyword(d.value)
 	}
 	if (d.custom != "" || d.hasVars) && !d.tokensReady {
-		d.valueTokens, d.valueStatus = lexValue(d.value, budget)
-		d.tokensReady = true
+		d.ensureTokens(budget)
 	}
-	if d.hasVars && d.tokensReady && d.valueStatus == valueResolved {
-		d.variableDependencies = variableRefs(d.valueTokens)
-		d.dependenciesReady = true
-	}
+	d.recordVariableDependencies()
 	if d.prop == animationProperty && d.custom == "" {
 		// Cache context-independent name parsing, including escaped identifiers
 		// that the conservative hasVars fast path initially treated as dynamic.
@@ -192,12 +168,7 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 		} else {
 			prepared.value, prepared.status = resolveWithBudget(d.prop, d.value, &initialStyle, &initialStyle, budget)
 		}
-		d.prepared = &prepared
-		d.validity, d.validityReady = prepared.status, true
-		// The prepared value is the complete runtime representation. Keeping the
-		// parser token stream as well only retains duplicate strings and slices.
-		d.valueTokens = nil
-		d.tokensReady = false
+		d.setPrepared(prepared.value, prepared.status)
 	} else if d.custom == "" && !d.hasVars && !d.shorthand && !d.unsupported {
 		value := normalizeCSSKeyword(d.value)
 		if (d.prop == fontSize || d.prop == opacity) && isMath(value) && d.tokensReady && d.valueStatus == valueResolved {
@@ -205,7 +176,7 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 		} else {
 			_, d.validity = resolveWithBudget(d.prop, value, &initialStyle, &initialStyle, budget)
 		}
-		d.validityReady = true
+		d.setValidity(d.validity)
 	}
 	return d
 }
@@ -219,10 +190,7 @@ func prepareDeclarations(ds []declaration, budget *cpuGuard) []declaration {
 
 func (s *sheet) prepareDeclaration(d declaration) declaration {
 	if !s.checkCPU() {
-		d.valueTokens = nil
-		d.tokensReady = false
-		d.variableDependencies = nil
-		d.dependenciesReady = false
+		d.discardTransientState()
 		return d
 	}
 	d = prepareDeclaration(d, s.cpu)
@@ -753,9 +721,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	}
 	prepared := func(d declaration) declaration {
 		d.unsupported = d.unsupported || parsed.status == valueUnsupported
-		d.valueTokens = parsed.tokens
-		d.valueStatus = parsed.status
-		d.tokensReady = tokensReady
+		d.setTokens(parsed.tokens, parsed.status, tokensReady)
 		return s.prepareDeclaration(d)
 	}
 	s.order++
@@ -954,288 +920,8 @@ func (s *sheet) parseInlineCSS(text string) cssParseResult {
 }
 
 func (s *sheet) parseCSSResult(text string, mode cssParseMode) cssParseResult {
-	inline := mode == inlineCSS
-	if !inline {
-		s.invalidateMediaCache()
-	}
-	if !s.admitCSS(text) {
-		return cssParseResult{}
-	}
-	compatibility := parserCompatibleCSS(text, s.shouldStop, s.memory)
-	if compatibility.stopped {
-		if s.memory.Exhausted() {
-			s.abandonCascade()
-			return cssParseResult{}
-		}
-		s.stopped = true
-		return cssParseResult{}
-	}
-	if len(compatibility.text) > len(text) && !s.memory.Reserve(int64(len(compatibility.text)-len(text))) {
-		s.abandonCascade()
-		return cssParseResult{}
-	}
-	p := css.NewParserWithLimits(parse.NewInputString(compatibility.text), inline, css.ResourceLimits{
-		ShouldStop: s.shouldStop,
-		Memory:     s.memory,
-	})
-	var conditions *conditionFrame
-	// Each at-rule temporarily suspends its enclosing qualified rule. Keep
-	// this separate from conditions, which are retained by parsed rules.
-	var enclosingRules []int
-	var nestedGroups []bool
-	// Record the qualified-rule depth at which each block at-rule began.
-	// tdewolff also reports keyframe selectors such as "from" as rulesets;
-	// this lets us distinguish those from a qualified rule nested directly
-	// inside another qualified rule.
-	var atRuleRulesetDepth []int
-	conditionDepth := 0
-	rulesetDepth := 0
-	defaultNamespace := false
-	current := -1
-	// CSS permits @import only before ordinary rules and block at-rules. The
-	// statement forms of @charset and @layer do not close that import window;
-	// every assignment below corresponds to syntax that does.
-	importsAllowed := !inline
-	var out []declaration
-	grammarEnd := 0
-	for {
-		if s.cascadeIncomplete || s.stopped {
-			return cssParseResult{declarations: out}
-		}
-		grammarStart := grammarEnd
-		g, tokenType, data := p.Next()
-		grammarEnd = p.Offset()
-		values := p.Values()
-		switch g {
-		case css.ErrorGrammar:
-			if !p.HasParseError() {
-				err := p.Err()
-				if errors.Is(err, css.ErrResourceStopped) {
-					s.stopped = true
-					return cssParseResult{declarations: out}
-				}
-				var limitErr *css.ResourceLimitError
-				if errors.As(err, &limitErr) || errors.Is(err, css.ErrUnsafeDelimiter) {
-					if inline {
-						return cssParseResult{declarations: out, incomplete: true}
-					}
-					s.abandonCascade()
-				}
-				return cssParseResult{declarations: out}
-			}
-			insideNestedGroup := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
-			if !inline && rulesetDepth > 0 && (hasTopLevelCSSBlock(values) || (current < 0 && insideNestedGroup)) {
-				s.noteUnsupportedNesting()
-			}
-			// Recovery inside an inline at-rule can consume its closing brace
-			// without emitting EndAtRuleGrammar. Subsequent declarations would
-			// then look nested and be silently discarded. The block boundary
-			// is no longer reliable: preserve local uncertainty instead.
-			if inline && conditions != nil {
-				return cssParseResult{declarations: out, incomplete: true}
-			}
-			// A stray right brace in a qualified-rule prelude can make
-			// tdewolff silently pop its enclosing at-rule state without
-			// emitting EndAtRuleGrammar. Its reported tokenType is whitespace,
-			// but the brace remains in Values. Do not retain our now-stale
-			// condition frame and misclassify later top-level rules.
-			if !inline && conditions != nil && hasCSSToken(values, css.RightBraceToken) {
-				return cssParseResult{declarations: out, incomplete: true}
-			}
-			// tdewolff's declaration recovery decrements its nesting level for
-			// an unmatched ')' or ']'. The level then remains negative, so the
-			// recovery routine can consume later declarations or the rest of
-			// the sheet. Other reported parse errors recover at the normal CSS
-			// boundary and remain safe to skip.
-			if tokenType == css.RightParenthesisToken || tokenType == css.RightBracketToken {
-				return cssParseResult{declarations: out, incomplete: true}
-			}
-			continue
-		case css.BeginAtRuleGrammar:
-			importsAllowed = false
-			if !inline && opaqueRuleBearingAtRule(string(data)) {
-				s.unresolvedStylesheet = true
-			}
-			// Descriptor declarations inside @page, @font-face and similar
-			// blocks never belong to an enclosing qualified rule. Clear the
-			// active rule before tdewolff emits the block's declarations so
-			// they cannot override declarations on that outer selector. Restore
-			// the enclosing rule only when this at-rule's block ends.
-			enclosingRule := current
-			current = -1
-			if !s.checkCPU() {
-				return cssParseResult{declarations: out}
-			}
-			vals := tokenString(values)
-			var cond mediaCondition
-			switch asciiLower(string(data)) {
-			case "@media":
-				cond = s.parseMediaCondition(vals)
-			case "@font-face":
-				cond = mediaCondition{{schemes: colourSchemeBoth, never: true}}
-			case "@keyframes", "@-webkit-keyframes":
-				if !inline {
-					s.recordKeyframeName(values)
-				}
-				cond = mediaCondition{{schemes: colourSchemeBoth, never: true}}
-			default:
-				cond = mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
-			}
-			conditions = newConditionFrame(cond, conditions)
-			enclosingRules = append(enclosingRules, enclosingRule)
-			parentNested := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
-			nestedGroups = append(nestedGroups, cssNestingGroup(string(data)) && (enclosingRule >= 0 || parentNested))
-			atRuleRulesetDepth = append(atRuleRulesetDepth, rulesetDepth)
-			conditionDepth++
-		case css.EndAtRuleGrammar:
-			current = -1
-			if conditions != nil {
-				conditions = conditions.parent
-				conditionDepth--
-				current = enclosingRules[len(enclosingRules)-1]
-				enclosingRules = enclosingRules[:len(enclosingRules)-1]
-				nestedGroups = nestedGroups[:len(nestedGroups)-1]
-				atRuleRulesetDepth = atRuleRulesetDepth[:len(atRuleRulesetDepth)-1]
-			}
-		case css.AtRuleGrammar:
-			if !s.checkCPU() {
-				return cssParseResult{declarations: out}
-			}
-			name := asciiLower(string(data))
-			if name == "@import" {
-				if importsAllowed && conditions == nil {
-					s.parseImport(values)
-				}
-				continue
-			}
-			if name != "@charset" && name != "@layer" {
-				importsAllowed = false
-			}
-			if !inline && conditions == nil && name == "@namespace" && defaultNamespaceRule(values) {
-				defaultNamespace = true
-			}
-		case css.BeginRulesetGrammar:
-			importsAllowed = false
-			// Newer tdewolff releases emit nested qualified rules directly
-			// instead of routing them through declaration-error recovery.
-			// MilterGuard does not yet resolve CSS nesting, so preserve the
-			// conservative whole-stylesheet uncertainty used for older parser
-			// event streams.
-			nestedQualifiedRule := rulesetDepth > 0 &&
-				(len(atRuleRulesetDepth) == 0 || rulesetDepth > atRuleRulesetDepth[len(atRuleRulesetDepth)-1])
-			if !inline && (nestedQualifiedRule || len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]) {
-				s.noteUnsupportedNesting()
-			}
-			rulesetDepth++
-			current = -1
-			if inline {
-				// Rulesets are not valid members of a style attribute. In
-				// particular, do not let a ruleset nested in a malformed inline
-				// at-rule escape into the document stylesheet.
-				continue
-			}
-			selector := tokenString(values)
-			if !s.checkCPU() {
-				return cssParseResult{declarations: out}
-			}
-			plans, branches, exceeded := planSelectorList(selector, &s.planCount, s.memory, maxSelectorBranches-s.selectorBranches)
-			s.selectorBranches += branches
-			if exceeded {
-				s.abandonCascade()
-				return cssParseResult{declarations: out}
-			}
-			if len(plans) == 0 {
-				continue
-			}
-			if defaultNamespace {
-				for i := range plans {
-					// A default namespace can alter even otherwise supported type
-					// selectors. Cascadia cannot express that constraint, so do not
-					// let its HTML-oriented scope or index omit a possible match.
-					plans[i].scopePrefix = ""
-					plans[i].key = selectorKey{}
-					plans[i].makeUncertain(s.memory)
-				}
-			}
-			if !s.memory.Reserve(int64(unsafe.Sizeof(rule{})) + int64(len(plans))*int64(unsafe.Sizeof(selectorPlan{}))) {
-				s.abandonCascade()
-				return cssParseResult{declarations: out}
-			}
-			r := rule{plans: plans, conditions: conditions}
-			s.rules = append(s.rules, r)
-			current = len(s.rules) - 1
-		case css.EndRulesetGrammar:
-			current = -1
-			if rulesetDepth > 0 {
-				rulesetDepth--
-			}
-		case css.DeclarationGrammar, css.CustomPropertyGrammar:
-			// Unlike selectors and media queries, declaration values can end
-			// with an escaped whitespace character. Preserve the raw token data
-			// so it cannot be mistaken for insignificant surrounding space.
-			if !s.checkCPU() {
-				return cssParseResult{declarations: out}
-			}
-			prop, propertySafe := compatibility.declarationProperty(string(data), grammarStart, grammarEnd)
-			insideNestedGroup := len(nestedGroups) > 0 && nestedGroups[len(nestedGroups)-1]
-			if !inline && rulesetDepth > 0 && g != css.CustomPropertyGrammar && (hasTopLevelCSSBlock(values) || (current < 0 && insideNestedGroup)) {
-				s.noteUnsupportedNesting()
-				continue
-			}
-			applicable := (inline && conditions == nil) || (!inline && current >= 0)
-			if !applicable || !relevantNormalizedDeclarationProperty(prop) {
-				continue
-			}
-			if !propertySafe {
-				return cssParseResult{declarations: out, incomplete: true}
-			}
-			vals := rawTokenString(values)
-			var declarations []declaration
-			vals, compatibilityRestored, compatibilitySafe := compatibility.restoreDeclarationValue(vals, grammarStart, grammarEnd)
-			if !compatibilitySafe {
-				// Parser output could not be aligned with the rewritten source.
-				// Retain the declaration as uncertain rather than evaluating bytes
-				// that may differ from the author's value.
-				valueTokens, _ := lexValue(vals, s.cpu)
-				declarations = s.declarationsFromTokens(prop, valueTokens, valueUnsupported, vals)
-			} else if compatibilityRestored {
-				// Re-tokenize after restoring only the delimiters inserted by the
-				// compatibility pass. Author-written escapes remain untouched.
-				valueTokens, valueStatus := lexValue(vals, s.cpu)
-				declarations = s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)
-			} else if g == css.CustomPropertyGrammar {
-				// tdewolff deliberately exposes a custom-property value as one
-				// opaque CustomPropertyValue token. Lex that payload once here so
-				// var() dependencies and !important retain their CSS token boundaries.
-				valueTokens, valueStatus := lexValue(vals, s.cpu)
-				declarations = s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)
-			} else if cssTokensNeedRetention(prop, values) {
-				valueTokens, valueStatus := ownedValueTokens(values, vals)
-				declarations = s.declarationsFromTokens(prop, valueTokens, valueStatus, vals)
-			} else {
-				declarations = s.declarationsFromParsed(prop, parseUnretainedCSSTokens(values, vals), false)
-			}
-			if len(declarations) > maxCSSDeclarations-s.declarationCount {
-				s.abandonCascade()
-				return cssParseResult{declarations: out}
-			}
-			if !s.memory.Reserve(int64(len(declarations)) * int64(unsafe.Sizeof(declaration{}))) {
-				s.abandonCascade()
-				return cssParseResult{declarations: out}
-			}
-			s.declarationCount += len(declarations)
-			// A style attribute is a declaration list, not a stylesheet. Some
-			// recoverable parsers nevertheless expose declarations nested in an
-			// invalid at-rule. Such declarations have no unconditional inline
-			// effect and must not override valid top-level declarations.
-			if inline {
-				out = append(out, declarations...)
-			} else if current >= 0 {
-				s.rules[current].decls = append(s.rules[current].decls, declarations...)
-			}
-		case css.QualifiedRuleGrammar, css.TokenGrammar:
-		}
-	}
+	session := newCSSParseSession(s, text, mode)
+	return session.run(s)
 }
 
 type stylesheetOrigin uint8

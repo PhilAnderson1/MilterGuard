@@ -124,12 +124,179 @@ func (r *viewingCaseRunner) leavePaintLayer(changed bool) {
 	}
 }
 
+func updateMSORevealedDepth(n *html.Node, scope nodeScope, depth *int) {
+	if n.Type != html.CommentNode || scope != scopeActive && scope != scopeHead {
+		return
+	}
+	switch msoDownlevelRevealedMarker(n.Data) {
+	case msoRevealedStart:
+		*depth++
+	case msoRevealedEnd:
+		if *depth > 0 {
+			*depth--
+		}
+	}
+}
+
+func (r *viewingCaseRunner) recordElement(n *html.Node, f *viewingCaseFrame, style *Style, resolved elementStyleResult, msoRevealedDepth int, elementIndex *int, initialize bool) error {
+	if f.scope != scopeActive || n.Data != "img" && n.Data != "input" {
+		return nil
+	}
+	elementState := f.presentationState
+	if msoRevealedDepth > 0 {
+		elementState.layoutUncertain = true
+	}
+	if resolved.elementGeometryConcealed {
+		elementState.clipped = true
+	}
+	if !elementPaintKnown(style) {
+		elementState.layoutUncertain = true
+	}
+	if hiddenInput(n) {
+		elementState.none = true
+	}
+	decision := decideVisibility(style, elementState, nil)
+	if initialize {
+		r.results.elementLabels = append(r.results.elementLabels, decision.label)
+		r.results.elementReasons = append(r.results.elementReasons, decision.reasons)
+		r.results.elements = append(r.results.elements, Element{Node: n, EffectiveOpacity: f.alpha})
+	} else if !mergeViewingCaseLabel(r.results.elementLabels, *elementIndex, decision.label) {
+		return fmt.Errorf("internal: viewing-case element count exceeded first case")
+	} else {
+		r.results.elementReasons[*elementIndex] |= decision.reasons
+		if decision.reasons&reasonOpacity != 0 && f.alpha < r.results.elements[*elementIndex].EffectiveOpacity {
+			r.results.elements[*elementIndex].EffectiveOpacity = f.alpha
+		}
+	}
+	*elementIndex++
+	return nil
+}
+
+func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, rootStyle *Style, media *mediaEvaluation, msoRevealedDepth int, elementIndex *int, initialize bool) error {
+	var prepared elementPreparation
+	if len(r.document.elements) != 0 {
+		prepared = r.document.elements[n]
+	}
+	parentStyle := &r.styleStack[f.styleIndex]
+	var resolved elementStyleResult
+	if prepared.inlineIncomplete {
+		resolved = elementStyleResult{style: unresolvedStyle(), variables: f.vars}
+	} else {
+		resolved = r.styles.elementStyle(n, parentStyle, rootStyle, f.vars, prepared.legacy, prepared.inline, media, selectorMatchContext{elements: r.document.elements}, r.work)
+	}
+	if r.styles.stopped {
+		return errStopped
+	}
+	r.styleStack = append(r.styleStack, resolved.style)
+	f.styleIndex = len(r.styleStack) - 1
+	style := &r.styleStack[f.styleIndex]
+	f.vars = resolved.variables
+	clip := emptyClip(style, n, resolved.displayDeclared)
+	wasClipped := f.clipped
+	f.clipped = f.clipped || clip.empty
+	if clip.empty {
+		if clip.clientDependent && !wasClipped {
+			f.clientDependentReasons |= reasonEmptyClip
+		} else if !clip.clientDependent {
+			f.clientDependentReasons &^= reasonEmptyClip
+		}
+	}
+	f.clipKnown = f.clipKnown && clip.known
+	f.colourContextChanged = r.enterPaintLayer(n, layerWithClipOverride(style, clip.inlineUncertain))
+	if n.Data == "html" {
+		*rootStyle = *style
+	}
+	f.displayKnown = f.displayKnown && style[display].Known
+	if style[display].Known && style[display].Text == "none" {
+		f.none = true
+	}
+	contentVisibilityValue := style[contentVisibility]
+	if contentVisibilityValue.Known && contentVisibilityValue.Text == "hidden" {
+		f.contentHidden = true
+		f.clientDependentReasons |= reasonContentVisibility
+	}
+	f.contentKnown = f.contentKnown && contentVisibilityValue.Known
+	msoHideValue := style[msoHide]
+	if msoHideValue.Known && msoHideValue.Text == "all" {
+		f.msoHidden = true
+	}
+	f.msoKnown = f.msoKnown && msoHideValue.Known
+	if f.clipsDescendantsX && resolved.offsetWithinClippedAncestorX || f.clipsDescendantsY && resolved.offsetWithinClippedAncestorY {
+		f.layoutUncertain = true
+	}
+	f.layoutUncertain = f.layoutUncertain || resolved.layoutUncertain
+	f.clipsDescendantsX = f.clipsDescendantsX || resolved.clipsDescendantsX
+	f.clipsDescendantsY = f.clipsDescendantsY || resolved.clipsDescendantsY
+	f.animationUncertain = f.animationUncertain || resolved.animationActive
+	f.alternateColourSchemeReasons |= resolved.alternateColourSchemeReasons
+	opacityValue := style[opacity]
+	if opacityValue.Known && opacityValue.Number == 0 {
+		f.alpha = 0
+		f.alphaKnown = true
+	} else if !(f.alphaKnown && f.alpha == 0) {
+		f.alpha *= opacityValue.Number
+		f.alphaKnown = f.alphaKnown && opacityValue.Known
+	}
+	if f.alphaKnown && f.alpha <= .01+1e-14 {
+		f.clientDependentReasons |= reasonOpacity | reasonColour
+	}
+	if err := r.recordElement(n, f, style, resolved, msoRevealedDepth, elementIndex, initialize); err != nil {
+		return err
+	}
+	if n.Namespace == "" && n.Data == "noscript" {
+		f.layoutUncertain = true
+	}
+	if !r.work.stopped && prepared.hasElementChild {
+		activation, complete := r.styles.activateAncestorBuckets(n, r.work)
+		if complete {
+			f.ancestorKeys = activation
+		}
+	}
+	return nil
+}
+
+func (r *viewingCaseRunner) recordText(n *html.Node, f *viewingCaseFrame, msoRevealedDepth int, textIndex *int, initialize bool) error {
+	style := &r.styleStack[f.styleIndex]
+	colour := r.evaluateColour(style[color])
+	textState := f.presentationState
+	if msoRevealedDepth > 0 {
+		textState.layoutUncertain = true
+	}
+	decision := decideVisibility(style, textState, &colour)
+	if initialize {
+		r.results.textLabels = append(r.results.textLabels, decision.label)
+		r.results.textReasons = append(r.results.textReasons, decision.reasons)
+		text := Text{FontSize: style[fontSize].Text, EffectiveOpacity: f.alpha, Node: n}
+		if r.retainInspection {
+			text.inspection = &textInspection{style: *style, colour: colour.inspection()}
+		}
+		r.results.text = append(r.results.text, text)
+	} else if !mergeViewingCaseLabel(r.results.textLabels, *textIndex, decision.label) {
+		return fmt.Errorf("internal: viewing-case text count exceeded first case")
+	} else {
+		r.results.textReasons[*textIndex] |= decision.reasons
+		if decision.reasons&reasonOpacity != 0 && f.alpha < r.results.text[*textIndex].EffectiveOpacity {
+			r.results.text[*textIndex].EffectiveOpacity = f.alpha
+		}
+		if decision.reasons&reasonFontSize != 0 {
+			r.results.text[*textIndex].FontSize = style[fontSize].Text
+		}
+	}
+	*textIndex++
+	return nil
+}
+
+func (r *viewingCaseRunner) leaveElement(f *viewingCaseFrame) {
+	r.styles.deactivateAncestorBuckets(f.ancestorKeys)
+	r.leavePaintLayer(f.colourContextChanged)
+	r.styleStack = r.styleStack[:len(r.styleStack)-1]
+}
+
 func (r *viewingCaseRunner) run(c viewingCase) error {
 	textIndex, elementIndex := 0, 0
 	media := mediaEvaluation{width: c.width, fallback: c.fallback}
 	r.frames = r.frames[:0]
-	r.styleStack = r.styleStack[:0]
-	r.styleStack = append(r.styleStack, initial())
+	r.styleStack = append(r.styleStack[:0], initial())
 	r.frames = append(r.frames, viewingCaseFrame{n: r.document.root, presentationState: initialPresentationState()})
 	rootStyle := initial()
 	r.layers = r.layers[:0]
@@ -146,195 +313,36 @@ func (r *viewingCaseRunner) run(c viewingCase) error {
 		if r.visited&255 == 0 && r.shouldStop != nil && r.shouldStop() {
 			return errStopped
 		}
-		f := &r.frames[len(r.frames)-1]
-		n := f.n
-		if !f.entered {
-			f.entered = true
-			f.next = n.FirstChild
-			if n.Type == html.CommentNode && (f.scope == scopeActive || f.scope == scopeHead) {
-				switch msoDownlevelRevealedMarker(n.Data) {
-				case msoRevealedStart:
-					msoRevealedDepth++
-				case msoRevealedEnd:
-					if msoRevealedDepth > 0 {
-						msoRevealedDepth--
-					}
+		frame := &r.frames[len(r.frames)-1]
+		node := frame.n
+		if !frame.entered {
+			frame.entered = true
+			frame.next = node.FirstChild
+			updateMSORevealedDepth(node, frame.scope, &msoRevealedDepth)
+			if node.Type == html.ElementNode {
+				if err := r.enterElement(node, frame, &rootStyle, &media, msoRevealedDepth, &elementIndex, c.initialize); err != nil {
+					return err
 				}
 			}
-			if n.Type == html.ElementNode {
-				var prepared elementPreparation
-				if len(r.document.elements) != 0 {
-					prepared = r.document.elements[n]
+			frame.scope = nodeContentScope(node, frame.scope)
+			if node.Type == html.TextNode && frame.scope == scopeActive {
+				if err := r.recordText(node, frame, msoRevealedDepth, &textIndex, c.initialize); err != nil {
+					return err
 				}
-				selectorContext := selectorMatchContext{elements: r.document.elements}
-				parentStyle := &r.styleStack[f.styleIndex]
-				var resolved elementStyleResult
-				if prepared.inlineIncomplete {
-					// A malformed style attribute can affect this element and its
-					// descendants, but cannot alter the cascade elsewhere in the
-					// document. Keep that uncertainty local instead of abandoning all
-					// stylesheet analysis.
-					resolved = elementStyleResult{style: unresolvedStyle(), variables: f.vars}
-				} else {
-					resolved = r.styles.elementStyle(n, parentStyle, &rootStyle, f.vars, prepared.legacy, prepared.inline, &media, selectorContext, r.work)
-				}
-				if r.styles.stopped {
-					return errStopped
-				}
-				r.styleStack = append(r.styleStack, resolved.style)
-				f.styleIndex = len(r.styleStack) - 1
-				style := &r.styleStack[f.styleIndex]
-				f.vars = resolved.variables
-				clip := emptyClip(style, n, resolved.displayDeclared)
-				wasClipped := f.clipped
-				f.clipped = f.clipped || clip.empty
-				if clip.empty {
-					if clip.clientDependent && !wasClipped {
-						f.clientDependentReasons |= reasonEmptyClip
-					} else if !clip.clientDependent {
-						f.clientDependentReasons &^= reasonEmptyClip
-					}
-				}
-				f.clipKnown = f.clipKnown && clip.known
-				f.colourContextChanged = r.enterPaintLayer(n, layerWithClipOverride(style, clip.inlineUncertain))
-				if n.Data == "html" {
-					rootStyle = *style
-				}
-				f.displayKnown = f.displayKnown && style[display].Known
-				if style[display].Known && style[display].Text == "none" {
-					f.none = true
-				}
-				cv := style[contentVisibility]
-				if cv.Known && cv.Text == "hidden" {
-					f.contentHidden = true
-					f.clientDependentReasons |= reasonContentVisibility
-				}
-				f.contentKnown = f.contentKnown && cv.Known
-				mh := style[msoHide]
-				if mh.Known && mh.Text == "all" {
-					f.msoHidden = true
-				}
-				f.msoKnown = f.msoKnown && mh.Known
-				if f.clipsDescendantsX && resolved.offsetWithinClippedAncestorX ||
-					f.clipsDescendantsY && resolved.offsetWithinClippedAncestorY {
-					// Relative and positioned descendants can be shifted wholly outside
-					// an ancestor's clipping box even when the standalone offset is below
-					// the coarse off-screen threshold.
-					f.layoutUncertain = true
-				}
-				f.layoutUncertain = f.layoutUncertain || resolved.layoutUncertain
-				f.clipsDescendantsX = f.clipsDescendantsX || resolved.clipsDescendantsX
-				f.clipsDescendantsY = f.clipsDescendantsY || resolved.clipsDescendantsY
-				f.animationUncertain = f.animationUncertain || resolved.animationActive
-				f.alternateColourSchemeReasons |= resolved.alternateColourSchemeReasons
-				a := style[opacity]
-				if a.Known && a.Number == 0 {
-					f.alpha = 0
-					f.alphaKnown = true
-				} else if !(f.alphaKnown && f.alpha == 0) {
-					f.alpha *= a.Number
-					f.alphaKnown = f.alphaKnown && a.Known
-				}
-				if f.alphaKnown && f.alpha <= .01+1e-14 {
-					// The colour evaluator applies group opacity before measuring
-					// contrast, so opacity can also manufacture a colour-distance
-					// concealment reason. Word-based Outlook ignores opacity; mark
-					// both conclusions as client-dependent so the derived colour
-					// result cannot accidentally make the decision authoritative.
-					f.clientDependentReasons |= reasonOpacity | reasonColour
-				}
-				if f.scope == scopeActive && (n.Data == "img" || n.Data == "input") {
-					elementState := f.presentationState
-					if msoRevealedDepth > 0 {
-						// Word-based Outlook excludes downlevel-revealed regions.
-						elementState.layoutUncertain = true
-					}
-					if resolved.elementGeometryConcealed {
-						elementState.clipped = true
-					}
-					if !elementPaintKnown(style) {
-						elementState.layoutUncertain = true
-					}
-					if hiddenInput(n) {
-						elementState.none = true
-					}
-					decision := decideVisibility(style, elementState, nil)
-					if c.initialize {
-						r.results.elementLabels = append(r.results.elementLabels, decision.label)
-						r.results.elementReasons = append(r.results.elementReasons, decision.reasons)
-						r.results.elements = append(r.results.elements, Element{Node: n, EffectiveOpacity: f.alpha})
-					} else if !mergeViewingCaseLabel(r.results.elementLabels, elementIndex, decision.label) {
-						return fmt.Errorf("internal: viewing-case element count exceeded first case")
-					} else {
-						r.results.elementReasons[elementIndex] |= decision.reasons
-						if decision.reasons&reasonOpacity != 0 && f.alpha < r.results.elements[elementIndex].EffectiveOpacity {
-							r.results.elements[elementIndex].EffectiveOpacity = f.alpha
-						}
-					}
-					elementIndex++
-				}
-				if n.Namespace == "" && n.Data == "noscript" {
-					// Email clients disagree on whether noscript fallback content is
-					// rendered or removed during sanitization. Retain the subtree for
-					// analysis, but do not claim that otherwise readable content is
-					// definitely visible to the recipient.
-					f.layoutUncertain = true
-				}
-				if !r.work.stopped && prepared.hasElementChild {
-					activation, complete := r.styles.activateAncestorBuckets(n, r.work)
-					if complete {
-						f.ancestorKeys = activation
-					}
-				}
-			}
-			f.scope = nodeContentScope(n, f.scope)
-			if n.Type == html.TextNode && f.scope == scopeActive {
-				style := &r.styleStack[f.styleIndex]
-				colour := r.evaluateColour(style[color])
-				textState := f.presentationState
-				if msoRevealedDepth > 0 {
-					// Content readable in ordinary clients but excluded by Outlook
-					// cannot be called definitely visible. Independently concealed
-					// content remains concealed in every client.
-					textState.layoutUncertain = true
-				}
-				decision := decideVisibility(style, textState, &colour)
-				if c.initialize {
-					r.results.textLabels = append(r.results.textLabels, decision.label)
-					r.results.textReasons = append(r.results.textReasons, decision.reasons)
-					text := Text{FontSize: style[fontSize].Text, EffectiveOpacity: f.alpha, Node: n}
-					if r.retainInspection {
-						text.inspection = &textInspection{style: *style, colour: colour.inspection()}
-					}
-					r.results.text = append(r.results.text, text)
-				} else if !mergeViewingCaseLabel(r.results.textLabels, textIndex, decision.label) {
-					return fmt.Errorf("internal: viewing-case text count exceeded first case")
-				} else {
-					r.results.textReasons[textIndex] |= decision.reasons
-					if decision.reasons&reasonOpacity != 0 && f.alpha < r.results.text[textIndex].EffectiveOpacity {
-						r.results.text[textIndex].EffectiveOpacity = f.alpha
-					}
-					if decision.reasons&reasonFontSize != 0 {
-						r.results.text[textIndex].FontSize = style[fontSize].Text
-					}
-				}
-				textIndex++
 			}
 		}
-		if f.next == nil {
-			if f.n.Type == html.ElementNode {
-				r.styles.deactivateAncestorBuckets(f.ancestorKeys)
-				r.leavePaintLayer(f.colourContextChanged)
-				r.styleStack = r.styleStack[:len(r.styleStack)-1]
+		if frame.next == nil {
+			if frame.n.Type == html.ElementNode {
+				r.leaveElement(frame)
 			}
 			r.frames = r.frames[:len(r.frames)-1]
 			continue
 		}
-		child := f.next
-		f.next = child.NextSibling
+		child := frame.next
+		frame.next = child.NextSibling
 		r.frames = append(r.frames, viewingCaseFrame{
-			n: child, styleIndex: f.styleIndex, scope: f.scope, presentationState: f.presentationState,
-			vars: f.vars,
+			n: child, styleIndex: frame.styleIndex, scope: frame.scope, presentationState: frame.presentationState,
+			vars: frame.vars,
 		})
 	}
 	if !c.initialize && (textIndex != len(r.results.textLabels) || elementIndex != len(r.results.elementLabels)) {

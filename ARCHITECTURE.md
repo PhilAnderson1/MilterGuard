@@ -137,13 +137,14 @@ scripts or fetch external resources. Processing proceeds through these stages:
    Structural caps independently bound document nodes, open-element depth,
    and source attributes per tag.
    It samples cooperative cancellation during tokenization and tree recovery.
-2. Traverse the completed tree with an explicit stack charged to the same
-   budget. Collect applicable stylesheets,
+2. Traverse the completed tree through `documentWalker`, using an explicit
+   stack charged to the same budget. Collect applicable stylesheets,
    inline styles, legacy presentation attributes, and selector profiles while
    distinguishing active, head, and inert content. The standalone tokenizer
    used for Outlook conditional-comment styles samples the same cooperative
    stop callback while consuming the fragment.
-3. Enforce a cumulative CSS byte limit, then parse each source with the local
+3. Enforce a cumulative CSS byte limit, then parse each source through a
+   short-lived `cssParseSession` using the local
    `tdewolff` fork in `internal/fork/tdewolffparse/css`. Its guard charges
    retained tokens and parser-state growth to the shared memory budget, rejects
    closing delimiters that would corrupt recovery state, and samples
@@ -151,8 +152,9 @@ scripts or fetch external resources. Processing proceeds through these stages:
    nesting also have fixed structural caps. The limits apply to style elements, style attributes,
    conditional-comment styles, and decoded data-URL stylesheets, including
    nested imports.
-4. Prepare declarations and build a selector index, then evaluate the distinct
-   viewport cases found in the stylesheet. Resolve the cascade, inheritance,
+4. Prepare declarations and build a selector index, then use
+   `viewingCaseRunner` to evaluate the distinct viewport cases found in the
+   stylesheet. Resolve the cascade, inheritance,
    custom properties, expressions, layout, clipping, opacity, and colours while
    sampling the CPU guard and charging retained and amplified allocations to
    the same memory budget. Aggregate the cases into visible, concealed,

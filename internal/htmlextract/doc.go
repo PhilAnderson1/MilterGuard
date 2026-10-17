@@ -10,4 +10,9 @@
 // monotonic allocation budget is shared by the forked HTML and CSS parsers,
 // selector compiler, DOM collection, cascade evaluation, and extraction.
 // CPU use is sampled cooperatively inside the same parser and traversal loops.
+// Processing first builds the DOM, then documentWalker collects all applicable
+// style sources and per-element declarations. cssParseSession turns each CSS
+// event stream into retained rules. Finally, viewingCaseRunner evaluates the
+// distinct media cases and merges their visibility decisions. These are
+// separate passes because later styles can affect earlier elements.
 package htmlextract
