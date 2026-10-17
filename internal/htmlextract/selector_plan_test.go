@@ -18,7 +18,7 @@ func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 	if !plan.uncertain || len(plan.execution.compounds) != 2 || len(plan.execution.combinators) != 1 || plan.execution.combinators[0] != ' ' {
 		t.Fatalf("unexpected conservative plan: %+v", plan)
 	}
-	scope := `.rio-asin-container-image img`
+	scope := plan.execution.compounds[0].source + " " + plan.execution.compounds[1].source
 	if used := memory.Used(); used != int64(len(scope)) {
 		t.Fatalf("conservative scope charged %d bytes, want %d for one compilation", used, len(scope))
 	}

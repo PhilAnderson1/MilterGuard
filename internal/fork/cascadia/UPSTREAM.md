@@ -22,5 +22,18 @@ Local changes:
 - Escaped selector names and strings are assembled with `strings.Builder`
   after the first escape, avoiding upstream's quadratic repeated string
   concatenation while retaining its zero-copy path for unescaped input.
+- `ParseGroupWithPseudoElementsAndMemory`, `SplitSelectorList`, and `Metadata`
+  expose compiled selector structure to MilterGuard. Metadata includes
+  compound matchers, candidate keys, original type spelling, attribute
+  sensitivity, and the deliberately small selector subset evaluated exactly
+  for static email.
+- Metadata's newly serialized compound strings are charged to the shared
+  memory budget. Component object counts remain bounded by the parser's
+  structural component limit.
+- `ConservativeFallback` recovers only a safe rightmost positive candidate
+  from rejected syntax, keeping malformed and unsupported branches local
+  without adding selector parsing to the caller.
+- Type selectors retain their original spelling for foreign-element case
+  handling, so serialization preserves that spelling.
 
 The upstream BSD licence is retained as `LICENSE`.

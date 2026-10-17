@@ -32,6 +32,9 @@ The Cascadia fork rejects selector inputs above 16 KiB, more than 1,024 simple
 selector components, or more than 64 nested selector groups. Its nonstandard
 regular-expression pseudo-classes are disabled because email HTML does not use
 them and Go's regexp engine would otherwise sit outside selector accounting.
+It also owns selector-list splitting and exposes compiled-selector metadata;
+HTML extraction no longer reparses valid selectors or recompiles their
+individual compounds.
 
 Each package directory contains an `UPSTREAM.md` with its source tag and
 commit, plus the upstream licence and tests. Local imports deliberately use

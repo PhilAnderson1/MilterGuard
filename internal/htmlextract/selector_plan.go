@@ -32,6 +32,8 @@ type selectorComplexity struct {
 
 type compoundComplexity struct {
 	source             string
+	positiveSource     string
+	matcher            cascadia.Matcher
 	attributeSensitive bool
 }
 
@@ -107,49 +109,6 @@ func (a *activeAncestorBuckets) remove(bucket []selectorRef) {
 	a.buckets[last] = nil
 	a.buckets = a.buckets[:last]
 	a.positions[key] = 0
-}
-
-func selectorCompoundComplexity(part string) compoundComplexity {
-	complexity := compoundComplexity{source: part}
-	brackets := 0
-	var quote byte
-	for i := 0; i < len(part); i++ {
-		c := part[i]
-		if c == '\\' {
-			i++
-			continue
-		}
-		if quote != 0 {
-			if c == quote {
-				quote = 0
-			}
-			continue
-		}
-		if c == '\'' || c == '"' {
-			quote = c
-			continue
-		}
-		switch c {
-		case '[':
-			if brackets == 0 {
-				complexity.attributeSensitive = true
-			}
-			brackets++
-		case ']':
-			if brackets > 0 {
-				brackets--
-			}
-		case '.':
-			if brackets == 0 {
-				complexity.attributeSensitive = true
-			}
-		case '#':
-			if brackets == 0 {
-				complexity.attributeSensitive = true
-			}
-		}
-	}
-	return complexity
 }
 
 func (c selectorComplexity) attributeSensitive() bool {
@@ -230,7 +189,7 @@ func (p *selectorPlan) conservativeScope(memory *resourceguard.Memory) (cascadia
 	}
 	right := trimCSSWhitespace(p.complexity.compounds[last].source)
 	left := trimCSSWhitespace(p.complexity.compounds[last-1].source)
-	if right != p.scopePrefix || left == "" || left == "*" || positiveCompoundPrefix(left) != left {
+	if right != p.scopePrefix || left == "" || left == "*" || p.complexity.compounds[last-1].positiveSource != left {
 		return compileConservativeScope(p.scopePrefix, memory), fallback
 	}
 	separator := " "
@@ -273,6 +232,10 @@ func compileAncestorChain(complexity selectorComplexity, memory *resourceguard.M
 	}
 	matchers := make([]cascadia.Matcher, len(complexity.compounds))
 	for i, compound := range complexity.compounds {
+		if compound.matcher != nil {
+			matchers[i] = compound.matcher
+			continue
+		}
 		group, err := cascadia.ParseGroupWithMemory(compound.source, memory)
 		if err != nil || len(group) != 1 {
 			return nil
@@ -280,6 +243,32 @@ func compileAncestorChain(complexity selectorComplexity, memory *resourceguard.M
 		matchers[i] = group[0]
 	}
 	return matchers
+}
+
+func selectorComplexityFromMetadata(metadata cascadia.SelectorMetadata) selectorComplexity {
+	complexity := selectorComplexity{combinators: append([]byte(nil), metadata.Combinators...)}
+	for _, compound := range metadata.Compounds {
+		complexity.compounds = append(complexity.compounds, compoundComplexity{
+			source:             compound.Source,
+			positiveSource:     compound.PositiveSource,
+			matcher:            compound.Matcher,
+			attributeSensitive: compound.AttributeSensitive,
+		})
+	}
+	return complexity
+}
+
+func localSelectorKey(key cascadia.IndexKey) selectorKey {
+	switch key.Kind {
+	case cascadia.IndexTag:
+		return selectorKey{kind: selectorTag, value: key.Value}
+	case cascadia.IndexID:
+		return selectorKey{kind: selectorID, value: key.Value}
+	case cascadia.IndexClass:
+		return selectorKey{kind: selectorClass, value: key.Value}
+	default:
+		return selectorKey{}
+	}
 }
 
 type selectorMatchContext struct {
@@ -304,255 +293,97 @@ type selectorIndex struct {
 }
 
 func planSelectorList(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int) (plans []selectorPlan, branches int, exceeded bool) {
-	start, brackets, parens := 0, 0, 0
-	var quote byte
-	appendBranch := func(end int) {
-		branch := trimCSSWhitespace(source[start:end])
-		if branch == "" {
-			return
-		}
-		if branches >= remainingBranches {
-			exceeded = true
-			return
-		}
+	selectorBranches, exceeded := cascadia.SplitSelectorList(source, remainingBranches)
+	for _, branch := range selectorBranches {
 		branches++
 		if plan, keep := planSelectorBranch(branch, *nextSequence, memory); keep {
 			plans = append(plans, plan)
 			(*nextSequence)++
 		}
 	}
-	for i := 0; i < len(source) && !exceeded; i++ {
-		c := source[i]
-		if c == '\\' {
-			i++
-			continue
-		}
-		if quote != 0 {
-			if c == quote {
-				quote = 0
-			}
-			continue
-		}
-		if c == '\'' || c == '"' {
-			quote = c
-			continue
-		}
-		switch c {
-		case '[':
-			brackets++
-		case ']':
-			if brackets > 0 {
-				brackets--
-			}
-		case '(':
-			if brackets == 0 {
-				parens++
-			}
-		case ')':
-			if brackets == 0 && parens > 0 {
-				parens--
-			}
-		case ',':
-			if brackets == 0 && parens == 0 {
-				appendBranch(i)
-				start = i + 1
-			}
-		}
-	}
-	if !exceeded {
-		appendBranch(len(source))
-	}
 	return plans, branches, exceeded
 }
 
 func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memory) (selectorPlan, bool) {
-	supported, inactive := true, false
-	generatedPseudo := false
-	brackets, parens, combinators := 0, 0, 0
-	compoundStart, rightmostStart := 0, 0
-	var quote byte
-	complexity := selectorComplexity{}
-	var compoundPrefixes []string
-	finishCompound := func(end int) {
-		part := trimCSSWhitespace(branch[compoundStart:end])
-		if part != "" {
-			complexity.compounds = append(complexity.compounds, selectorCompoundComplexity(part))
-			compoundPrefixes = append(compoundPrefixes, positiveCompoundPrefix(part))
+	group, err := cascadia.ParseGroupWithPseudoElementsAndMemory(branch, memory)
+	if err == nil && len(group) == 1 {
+		metadata, metadataErr := cascadia.MetadataWithMemory(group[0], memory)
+		if metadataErr != nil {
+			return selectorPlan{}, false
 		}
+		if metadata.Inactive {
+			return selectorPlan{}, false
+		}
+		plan := planCompiledSelector(branch, sequence, group[0], metadata, memory)
+		if !metadata.Supported {
+			plan.makeUncertain(memory)
+		}
+		return plan, true
 	}
-	for i := 0; i < len(branch); i++ {
-		c := branch[i]
-		if c == '\\' {
-			if i+1 >= len(branch) {
-				supported = false
-			} else {
-				i++
-			}
-			continue
-		}
-		if quote != 0 {
-			if c == quote {
-				quote = 0
-			}
-			continue
-		}
-		if c == '\'' || c == '"' {
-			quote = c
-			continue
-		}
-		if c == '[' {
-			brackets++
-			continue
-		}
-		if c == ']' {
-			if brackets == 0 {
-				supported = false
-			} else {
-				brackets--
-			}
-			continue
-		}
-		if brackets > 0 {
-			continue
-		}
-		if c == '(' {
-			parens++
-			continue
-		}
-		if c == ')' {
-			if parens == 0 {
-				supported = false
-			} else {
-				parens--
-			}
-			continue
-		}
-		if parens > 0 {
-			continue
-		}
-		if c == '|' {
-			supported = false
-			continue
-		}
-		if c == ':' {
-			nameStart := i + 1
-			nameEnd := nameStart
-			for nameEnd < len(branch) && isSelectorNameByte(branch[nameEnd]) {
-				nameEnd++
-			}
-			name := asciiLower(branch[nameStart:nameEnd])
-			if (name == "before" || name == "after") && nameEnd == len(branch) {
-				// Both the modern ::before/::after spelling and the legacy
-				// single-colon spelling are valid. Restrict this marker to a
-				// terminal pseudo-element; escaped colons and pseudos nested in a
-				// functional selector never reach this branch.
-				generatedPseudo = i == 0 || branch[i-1] != ':' || i == 1 || branch[i-2] != ':'
-			}
-			switch name {
-			case "hover", "focus", "focus-visible", "focus-within", "active", "visited":
-				inactive = true
-			case "root":
-			case "not":
-				if nameEnd >= len(branch) || branch[nameEnd] != '(' {
-					supported = false
-					continue
-				}
-				end := strings.IndexByte(branch[nameEnd+1:], ')')
-				if end < 0 {
-					supported = false
-					continue
-				}
-				arg := branch[nameEnd+1 : nameEnd+1+end]
-				if strings.ContainsAny(arg, ":(),>+~ \t\r\n") {
-					supported = false
-				}
-				i = nameEnd + end + 1
-			default:
-				supported = false
-			}
-			continue
-		}
-		if c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' {
-			j := i + 1
-			for j < len(branch) && strings.ContainsRune(" \t\r\n\f", rune(branch[j])) {
-				j++
-			}
-			prevExplicit := i > 0 && strings.ContainsRune(">+~", rune(branch[i-1]))
-			nextExplicit := j < len(branch) && strings.ContainsRune(">+~", rune(branch[j]))
-			if !prevExplicit && !nextExplicit && trimCSSWhitespace(branch[compoundStart:i]) != "" && j < len(branch) {
-				finishCompound(i)
-				complexity.combinators = append(complexity.combinators, ' ')
-				combinators++
-				compoundStart, rightmostStart = j, j
-			}
-			i = j - 1
-			continue
-		}
-		if c == '>' || c == '+' || c == '~' {
-			finishCompound(i)
-			complexity.combinators = append(complexity.combinators, c)
-			combinators++
-			j := i + 1
-			for j < len(branch) && strings.ContainsRune(" \t\r\n\f", rune(branch[j])) {
-				j++
-			}
-			compoundStart, rightmostStart = j, j
-			i = j - 1
-		}
+
+	fallback := cascadia.ConservativeFallback(branch)
+	compound := compoundComplexity{
+		source:         fallback.PositiveSource,
+		positiveSource: fallback.PositiveSource,
 	}
-	finishCompound(len(branch))
-	if quote != 0 || brackets != 0 || parens != 0 || combinators > 32 || len(complexity.compounds) != len(complexity.combinators)+1 {
-		supported = false
+	plan := selectorPlan{
+		source:          branch,
+		complexity:      selectorComplexity{compounds: []compoundComplexity{compound}},
+		execution:       selectorComplexity{compounds: []compoundComplexity{compound}},
+		key:             localSelectorKey(fallback.Key),
+		scopePrefix:     fallback.PositiveSource,
+		sequence:        sequence,
+		generatedPseudo: fallback.GeneratedPseudo,
 	}
-	if inactive {
-		return selectorPlan{}, false
+	if _, ok := canonicalSVGTagNames[fallback.OriginalTypeName]; ok {
+		plan.foreignCaseType = true
+		plan.makeForeignCaseUncertain(memory)
+	} else {
+		plan.makeUncertain(memory)
 	}
-	prefix := positiveCompoundPrefix(trimCSSWhitespace(branch[rightmostStart:]))
-	key := selectorIndexKey(prefix)
-	if key.kind == selectorUniversal {
+	return plan, true
+}
+
+func planCompiledSelector(branch string, sequence int, selector cascadia.Sel, metadata cascadia.SelectorMetadata, memory *resourceguard.Memory) selectorPlan {
+	complexity := selectorComplexityFromMetadata(metadata)
+	rightmost := metadata.Compounds[len(metadata.Compounds)-1]
+	plan := selectorPlan{
+		source:          branch,
+		matcher:         selector,
+		specificity:     selector.Specificity(),
+		complexity:      complexity,
+		execution:       complexity,
+		key:             localSelectorKey(rightmost.Key),
+		scopePrefix:     rightmost.PositiveSource,
+		sequence:        sequence,
+		generatedPseudo: metadata.PseudoElement != "",
+	}
+	if plan.key.kind == selectorUniversal {
 		ancestorOnly := true
-		for _, combinator := range complexity.combinators {
+		for _, combinator := range metadata.Combinators {
 			ancestorOnly = ancestorOnly && (combinator == ' ' || combinator == '>')
 		}
 		if ancestorOnly {
-			for i := len(compoundPrefixes) - 2; i >= 0; i-- {
-				key = ancestorSelectorKey(selectorIndexKey(compoundPrefixes[i]))
-				if key.kind != selectorUniversal {
+			for i := len(metadata.Compounds) - 2; i >= 0; i-- {
+				plan.key = ancestorSelectorKey(localSelectorKey(metadata.Compounds[i].Key))
+				if plan.key.kind != selectorUniversal {
 					break
 				}
 			}
 		}
 	}
-	foreignCaseType := false
-	for _, compoundPrefix := range compoundPrefixes {
-		if _, ok := canonicalSVGTypeSelector(compoundPrefix); ok {
-			foreignCaseType = true
+	for _, compound := range metadata.Compounds {
+		if _, ok := canonicalSVGTagNames[compound.OriginalTypeName]; ok {
+			plan.foreignCaseType = true
 			break
 		}
 	}
-	plan := selectorPlan{source: branch, sequence: sequence, complexity: complexity, execution: complexity, key: key, scopePrefix: prefix, generatedPseudo: generatedPseudo, foreignCaseType: foreignCaseType}
-	if supported {
-		group, err := cascadia.ParseGroupWithMemory(branch, memory)
-		if err == nil && len(group) == 1 {
-			plan.matcher = group[0]
-			plan.specificity = group[0].Specificity()
-			if foreignCaseType {
-				plan.makeForeignCaseUncertain(memory)
-				return plan, true
-			}
-			// The lightweight structural planner does not decode hexadecimal CSS
-			// escapes. In particular, the optional whitespace terminating an
-			// escape is not a descendant combinator. Leave escaped selectors to
-			// Cascadia's authoritative matcher rather than compiling a potentially
-			// different ancestor chain.
-			if !strings.Contains(branch, `\`) {
-				plan.ancestorChain = compileAncestorChain(complexity, memory)
-			}
-			return plan, true
-		}
+	if plan.foreignCaseType {
+		plan.makeForeignCaseUncertain(memory)
+		return plan
 	}
-	plan.makeUncertain(memory)
-	return plan, true
+	plan.ancestorChain = compileAncestorChain(complexity, memory)
+	return plan
 }
 
 var canonicalSVGTagNames = map[string]struct{}{
@@ -583,7 +414,7 @@ func canonicalSVGTypeSelector(prefix string) (string, bool) {
 }
 
 func scopeSelectorComplexity(prefix string) selectorComplexity {
-	return selectorComplexity{compounds: []compoundComplexity{selectorCompoundComplexity(prefix)}}
+	return selectorComplexity{compounds: []compoundComplexity{{source: prefix, positiveSource: prefix}}}
 }
 
 func ancestorSelectorKey(key selectorKey) selectorKey {
@@ -600,49 +431,6 @@ func ancestorSelectorKey(key selectorKey) selectorKey {
 	return key
 }
 
-func isSelectorNameByte(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
-}
-
-func positiveCompoundPrefix(compound string) string {
-	for i := 0; i < len(compound); i++ {
-		if compound[i] == '\\' {
-			i++
-			continue
-		}
-		if compound[i] == ':' || compound[i] == '[' {
-			return trimCSSWhitespace(compound[:i])
-		}
-		if compound[i] == '|' {
-			// Cascadia does not implement CSS namespaces. A namespace prefix is
-			// not an element name: s|text can only match an element whose local
-			// name is text, never an HTML <s>. Retaining that local name gives
-			// the uncertain plan a useful but still conservative candidate set.
-			// Wildcards, escapes and the || column combinator cannot be narrowed
-			// safely here and therefore use universal scope.
-			start := i + 1
-			if start >= len(compound) || compound[start] == '|' || compound[start] == '*' || compound[start] == '\\' {
-				return ""
-			}
-			end := start
-			for end < len(compound) && isSelectorNameByte(compound[end]) {
-				end++
-			}
-			if end == start {
-				return ""
-			}
-			// Foreign element names are case-sensitive. The existing HTML tag
-			// index and Cascadia's type selector both fold names to lower case,
-			// so retain a local-name constraint only when folding is a no-op.
-			if local := compound[start:end]; local != asciiLower(local) {
-				return ""
-			}
-			return asciiLower(compound[start:end])
-		}
-	}
-	return trimCSSWhitespace(compound)
-}
-
 var universalScopeMatcher cascadia.Matcher = cascadia.Selector(func(*html.Node) bool { return true })
 
 func compileConservativeScope(prefix string, memory *resourceguard.Memory) cascadia.Matcher {
@@ -654,49 +442,4 @@ func compileConservativeScope(prefix string, memory *resourceguard.Memory) casca
 		return universalScopeMatcher
 	}
 	return group[0]
-}
-
-func selectorIndexKey(prefix string) selectorKey {
-	if prefix == "" || prefix == "*" || strings.ContainsAny(prefix, "\\|[") {
-		return selectorKey{}
-	}
-	var tag, id, class string
-	for i := 0; i < len(prefix); {
-		kind := byte(0)
-		if prefix[i] == '#' || prefix[i] == '.' {
-			kind = prefix[i]
-			i++
-		}
-		start := i
-		for i < len(prefix) && isSelectorNameByte(prefix[i]) {
-			i++
-		}
-		if start == i {
-			return selectorKey{}
-		}
-		value := prefix[start:i]
-		switch kind {
-		case '#':
-			id = value
-		case '.':
-			if class == "" {
-				class = value
-			}
-		default:
-			if tag != "" {
-				return selectorKey{}
-			}
-			tag = asciiLower(value)
-		}
-	}
-	if id != "" {
-		return selectorKey{kind: selectorID, value: id}
-	}
-	if class != "" {
-		return selectorKey{kind: selectorClass, value: class}
-	}
-	if tag != "" {
-		return selectorKey{kind: selectorTag, value: tag}
-	}
-	return selectorKey{}
 }

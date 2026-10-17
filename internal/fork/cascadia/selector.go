@@ -75,13 +75,23 @@ func ParseGroup(sel string) (SelectorGroup, error) {
 // data. Explicit byte, component, group and nesting limits bound structural
 // amplification independently of Go allocator details.
 func ParseGroupWithMemory(sel string, memory *resourceguard.Memory) (SelectorGroup, error) {
+	return parseGroup(sel, memory, false)
+}
+
+// ParseGroupWithPseudoElementsAndMemory parses a selector group including
+// pseudo-elements and charges retained source-sized data to memory.
+func ParseGroupWithPseudoElementsAndMemory(sel string, memory *resourceguard.Memory) (SelectorGroup, error) {
+	return parseGroup(sel, memory, true)
+}
+
+func parseGroup(sel string, memory *resourceguard.Memory, acceptPseudoElements bool) (SelectorGroup, error) {
 	if err := validateSelectorInput(sel); err != nil {
 		return nil, err
 	}
 	if memory != nil && !memory.Reserve(int64(len(sel))) {
 		return nil, fmt.Errorf("cascadia: memory limit exceeded")
 	}
-	p := &parser{s: sel}
+	p := &parser{s: sel, acceptPseudoElements: acceptPseudoElements}
 	compiled, err := p.parseSelectorGroup()
 	if err != nil {
 		return nil, err
@@ -97,20 +107,7 @@ func ParseGroupWithMemory(sel string, memory *resourceguard.Memory) (SelectorGro
 // ParseGroupWithPseudoElements parses a selector, or a group of selectors separated by commas.
 // It supports pseudo-elements.
 func ParseGroupWithPseudoElements(sel string) (SelectorGroup, error) {
-	if err := validateSelectorInput(sel); err != nil {
-		return nil, err
-	}
-	p := &parser{s: sel, acceptPseudoElements: true}
-	compiled, err := p.parseSelectorGroup()
-	if err != nil {
-		return nil, err
-	}
-
-	if p.i < len(sel) {
-		return nil, fmt.Errorf("parsing %q: %d bytes left over", sel, len(sel)-p.i)
-	}
-
-	return compiled, nil
+	return ParseGroupWithPseudoElementsAndMemory(sel, nil)
 }
 
 // A Selector is a function which tells whether a node matches or not.
@@ -230,7 +227,8 @@ func Filter(nodes []*html.Node, m Matcher) (result []*html.Node) {
 }
 
 type tagSelector struct {
-	tag string
+	tag      string
+	original string
 }
 
 // Matches elements with a given tag name.

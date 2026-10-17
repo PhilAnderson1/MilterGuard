@@ -22,6 +22,9 @@ func init() {
 func escape(s string) string { return specialCharReplacer.Replace(s) }
 
 func (c tagSelector) String() string {
+	if c.original != "" {
+		return c.original
+	}
 	return c.tag
 }
 
