@@ -1,6 +1,7 @@
 package message
 
 import (
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
@@ -1111,8 +1112,9 @@ func TestPlainURLHarvestingPreservesBalancedDelimiters(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var got []string
-			walkPlainHTTPURLs(test.text, maxExtractedLinks*2, func(link string, _, _ int) {
+			walkPlainHTTPURLs(test.text, maxExtractedLinks*2, nil, func(link string, _, _ int) bool {
 				got = append(got, link)
+				return true
 			})
 			if len(got) != 1 || got[0] != test.want {
 				t.Fatalf("harvested URLs = %v, want [%s]", got, test.want)
@@ -1133,6 +1135,56 @@ func TestNextHTTPPrefixScansCaseInsensitively(t *testing.T) {
 	}
 	if got := nextHTTPPrefix(strings.Repeat("highway haze ", 4096), 0); got != -1 {
 		t.Fatalf("non-URL text matched at %d", got)
+	}
+}
+
+func TestPlainURLWalkCanBeStoppedBetweenCandidates(t *testing.T) {
+	text := strings.Repeat("http://example.test/a ", 300)
+	checks := 0
+	visited := 0
+	complete := walkPlainHTTPURLs(text, -1, func() bool {
+		checks++
+		return checks == 2
+	}, func(string, int, int) bool {
+		visited++
+		return true
+	})
+	if complete {
+		t.Fatal("URL walk reported completion after stop callback fired")
+	}
+	if visited != 256 {
+		t.Fatalf("visited %d URLs before stop; want 256", visited)
+	}
+}
+
+func TestPlainURLRewriteStopsCollectingAtLinkLimit(t *testing.T) {
+	var text strings.Builder
+	for i := range maxExtractedLinks + 50 {
+		fmt.Fprintf(&text, "http://%d.example.test/ ", i)
+	}
+	collector := linkCollector{compactURLs: true}
+	rewritten, complete := rewritePlainTextURLs(text.String(), true, &collector, nil)
+	if !complete {
+		t.Fatal("link limit was reported as interrupted processing")
+	}
+	if len(collector.links) != maxExtractedLinks || !collector.Full() {
+		t.Fatalf("collected=%d full=%v, want %d/true", len(collector.links), collector.Full(), maxExtractedLinks)
+	}
+	if rewritten != text.String() {
+		t.Fatal("ordinary URLs changed while testing collection limit")
+	}
+}
+
+func TestLinkCollectorCachesRenderedDestination(t *testing.T) {
+	raw := "https://example.test/" + strings.Repeat("segment/", 100)
+	collector := linkCollector{compactURLs: true}
+	first := collector.AddDestination(raw)
+	second := collector.AddDestination(raw)
+	if first == raw || second != first {
+		t.Fatalf("rendered destinations: first=%q second=%q", first, second)
+	}
+	if len(collector.links) != 1 || len(collector.rendered) != 1 {
+		t.Fatalf("links=%d cached=%d, want 1/1", len(collector.links), len(collector.rendered))
 	}
 }
 

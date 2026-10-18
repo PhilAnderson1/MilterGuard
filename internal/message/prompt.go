@@ -490,11 +490,14 @@ func runeByteOffsets(value string, runeIndexes ...int) []int {
 // rewritePlainTextURLs handles URLs embedded in otherwise unstructured text.
 // HTML href/src destinations take the direct rendering path and do not need a
 // second scan over the completed body.
-func rewritePlainTextURLs(text string, compact bool, links *linkCollector) string {
+func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shouldStop func() bool) (string, bool) {
+	if links.Full() {
+		return text, true
+	}
 	var rewritten strings.Builder
 	last := 0
 	changed := false
-	walkPlainHTTPURLs(text, -1, func(link string, start, end int) {
+	complete := walkPlainHTTPURLs(text, -1, shouldStop, func(link string, start, end int) bool {
 		var displayed string
 		if links != nil {
 			displayed = links.AddDestination(link)
@@ -502,7 +505,7 @@ func rewritePlainTextURLs(text string, compact bool, links *linkCollector) strin
 			displayed = promptURL(link, compact)
 		}
 		if displayed == link {
-			return
+			return !links.Full()
 		}
 		if !changed {
 			rewritten.Grow(len(text))
@@ -511,20 +514,21 @@ func rewritePlainTextURLs(text string, compact bool, links *linkCollector) strin
 		rewritten.WriteString(displayed)
 		last = end
 		changed = true
+		return !links.Full()
 	})
 	if !changed {
-		return text
+		return text, complete
 	}
 	rewritten.WriteString(text[last:])
-	return rewritten.String()
+	return rewritten.String(), complete
 }
 
-func walkPlainHTTPURLs(text string, limit int, visit func(link string, start, end int)) {
+func walkPlainHTTPURLs(text string, limit int, shouldStop func() bool, visit func(link string, start, end int) bool) bool {
 	found := 0
 	for search := 0; search < len(text) && (limit < 0 || found < limit); {
 		start := nextHTTPPrefix(text, search)
 		if start < 0 {
-			return
+			return true
 		}
 		end := start
 		for end < len(text) && !plainURLDelimiter(text[end]) {
@@ -532,14 +536,20 @@ func walkPlainHTTPURLs(text string, limit int, visit func(link string, start, en
 		}
 		link := trimPlainURLPunctuation(text[start:end])
 		if link != "" {
+			if found&255 == 0 && shouldStop != nil && shouldStop() {
+				return false
+			}
 			linkEnd := start + len(link)
-			visit(link, start, linkEnd)
+			if !visit(link, start, linkEnd) {
+				return true
+			}
 			found++
 			search = linkEnd
 			continue
 		}
 		search = start + 1
 	}
+	return true
 }
 
 func nextHTTPPrefix(text string, start int) int {

@@ -23,8 +23,18 @@ func (g *MatchControl) step() bool {
 	}
 	g.steps++
 	if g.steps == 1 || g.steps&255 == 0 {
-		g.stopped = g.shouldStop != nil && g.shouldStop()
+		return g.checkNow()
 	}
+	return false
+}
+
+// checkNow samples the caller immediately before an operation whose cost is
+// proportional to attacker-controlled input rather than to one matching step.
+func (g *MatchControl) checkNow() bool {
+	if g == nil || g.stopped {
+		return g != nil && g.stopped
+	}
+	g.stopped = g.shouldStop != nil && g.shouldStop()
 	return g.stopped
 }
 

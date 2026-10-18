@@ -15,7 +15,9 @@ Local changes:
 - `MatchControl` and `MatchWithStop` sample cooperative cancellation inside
   selector-controlled traversal and matching loops. Every such loop and
   recursive traversal must advance the control, including each `:lang`
-  ancestor visit.
+  ancestor visit. Attribute-value operations sample the callback immediately
+  before inspecting attacker-controlled values, and case-insensitive matching
+  scans ASCII directly without allocating lowercase copies.
 - Cascadia's proprietary raw-regex selectors (`#=`, `:matches`, and
   `:matchesOwn`) are rejected. They are not browser CSS, and Go regular
   expressions cannot be interrupted by the cooperative CPU guard.

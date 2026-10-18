@@ -314,7 +314,7 @@ func (t attrSelector) Match(n *html.Node) bool {
 func (t attrSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	switch t.operation {
 	case "":
-		return matchAttributeResource(n, t.key, func(string) bool { return true }, guard)
+		return hasAttributeResource(n, t.key, guard)
 	case "=":
 		return matchAttributeResource(n, t.key, func(s string) bool { return matchInsensitiveValue(s, t.val, t.insensitive) }, guard)
 	case "!=":
@@ -340,7 +340,7 @@ func (t attrSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 // the real attribute is the attribute value found in the code parsed
 func matchInsensitiveValue(userAttr string, realAttr string, ignoreCase bool) bool {
 	if ignoreCase {
-		return strings.EqualFold(userAttr, realAttr)
+		return equalASCIIFold(userAttr, realAttr)
 	}
 	return userAttr == realAttr
 
@@ -359,7 +359,13 @@ func matchAttributeResource(n *html.Node, key string, f func(string) bool, guard
 		if guard.step() {
 			return false
 		}
-		if a.Key == key && f(a.Val) {
+		if a.Key != key {
+			continue
+		}
+		if guard.checkNow() {
+			return false
+		}
+		if f(a.Val) {
 			return true
 		}
 	}
@@ -380,7 +386,13 @@ func attributeNotEqualMatchResource(key, val string, n *html.Node, ignoreCase bo
 		if guard.step() {
 			return false
 		}
-		if a.Key == key && matchInsensitiveValue(a.Val, val, ignoreCase) {
+		if a.Key != key {
+			continue
+		}
+		if guard.checkNow() {
+			return false
+		}
+		if matchInsensitiveValue(a.Val, val, ignoreCase) {
 			return false
 		}
 	}
@@ -443,7 +455,7 @@ func attributePrefixMatchResource(key, val string, n *html.Node, ignoreCase bool
 				return false
 			}
 			if ignoreCase {
-				return strings.HasPrefix(strings.ToLower(s), strings.ToLower(val))
+				return hasPrefixASCIIFold(s, val)
 			}
 			return strings.HasPrefix(s, val)
 		}, guard)
@@ -462,7 +474,7 @@ func attributeSuffixMatchResource(key, val string, n *html.Node, ignoreCase bool
 				return false
 			}
 			if ignoreCase {
-				return strings.HasSuffix(strings.ToLower(s), strings.ToLower(val))
+				return hasSuffixASCIIFold(s, val)
 			}
 			return strings.HasSuffix(s, val)
 		}, guard)
@@ -481,10 +493,92 @@ func attributeSubstringMatchResource(key, val string, n *html.Node, ignoreCase b
 				return false
 			}
 			if ignoreCase {
-				return strings.Contains(strings.ToLower(s), strings.ToLower(val))
+				return containsASCIIFold(s, val)
 			}
 			return strings.Contains(s, val)
 		}, guard)
+}
+
+func hasAttributeResource(n *html.Node, key string, guard *MatchControl) bool {
+	if n.Type != html.ElementNode {
+		return false
+	}
+	for _, attribute := range n.Attr {
+		if guard.step() {
+			return false
+		}
+		if attribute.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func equalASCIIFold(left, right string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range len(left) {
+		if foldASCII(left[i]) != foldASCII(right[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasPrefixASCIIFold(value, prefix string) bool {
+	return len(value) >= len(prefix) && equalASCIIFold(value[:len(prefix)], prefix)
+}
+
+func hasSuffixASCIIFold(value, suffix string) bool {
+	return len(value) >= len(suffix) && equalASCIIFold(value[len(value)-len(suffix):], suffix)
+}
+
+// containsASCIIFold uses KMP so hostile repeated prefixes cannot turn a
+// case-insensitive substring selector into quadratic work. Most CSS needles
+// fit in the stack-backed failure table.
+func containsASCIIFold(value, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(needle) > len(value) {
+		return false
+	}
+	var localFailure [64]int
+	failure := localFailure[:0]
+	if len(needle) <= len(localFailure) {
+		failure = localFailure[:len(needle)]
+	} else {
+		failure = make([]int, len(needle))
+	}
+	for i, matched := 1, 0; i < len(needle); i++ {
+		for matched > 0 && foldASCII(needle[i]) != foldASCII(needle[matched]) {
+			matched = failure[matched-1]
+		}
+		if foldASCII(needle[i]) == foldASCII(needle[matched]) {
+			matched++
+		}
+		failure[i] = matched
+	}
+	for i, matched := 0, 0; i < len(value); i++ {
+		for matched > 0 && foldASCII(value[i]) != foldASCII(needle[matched]) {
+			matched = failure[matched-1]
+		}
+		if foldASCII(value[i]) == foldASCII(needle[matched]) {
+			matched++
+			if matched == len(needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func foldASCII(value byte) byte {
+	if 'A' <= value && value <= 'Z' {
+		return value + ('a' - 'A')
+	}
+	return value
 }
 
 func (c attrSelector) Specificity() Specificity {

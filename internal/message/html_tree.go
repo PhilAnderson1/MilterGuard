@@ -652,7 +652,7 @@ func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode
 	if content == "" {
 		return
 	}
-	promptContent := rewritePlainTextURLs(content, e.compactURLs, &e.links)
+	promptContent, _ := rewritePlainTextURLs(content, e.compactURLs, &e.links, e.stopNow)
 	state := e.elements[n]
 	if state == nil {
 		out.WriteString(promptContent)
@@ -792,9 +792,9 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *guardedBuilder,
 	if n.Type == xhtml.TextNode {
 		value := sanitizeSenderText(n.Data)
 		if walk.anchorDepth > 0 {
-			value = rewritePlainTextURLs(value, e.compactURLs, nil)
+			value, _ = rewritePlainTextURLs(value, e.compactURLs, nil, walk.shouldStop)
 		} else {
-			value = rewritePlainTextURLs(value, e.compactURLs, &walk.links)
+			value, _ = rewritePlainTextURLs(value, e.compactURLs, &walk.links, walk.shouldStop)
 		}
 		return walk.writeString(out, value)
 	}
@@ -865,10 +865,10 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 	if e.anchorDepth > 0 {
 		// Text resembling a URL inside an anchor label is sender-visible text,
 		// not an independently validated destination.
-		outText = rewritePlainTextURLs(text, e.compactURLs, nil)
+		outText, _ = rewritePlainTextURLs(text, e.compactURLs, nil, e.stopNow)
 		outText = markdownLabelText(outText)
 	} else {
-		outText = rewritePlainTextURLs(text, e.compactURLs, &e.links)
+		outText, _ = rewritePlainTextURLs(text, e.compactURLs, &e.links, e.stopNow)
 	}
 	// Presentation annotations around whitespace add noise without carrying a
 	// visibility claim about message content. This includes decoded HTML space
@@ -1085,7 +1085,7 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 	}
 	raw := strings.TrimSpace(firstAttr(n, "src"))
 	alt := sanitizeSenderText(firstAttr(n, "alt"))
-	alt = rewritePlainTextURLs(alt, e.compactURLs, nil)
+	alt, _ = rewritePlainTextURLs(alt, e.compactURLs, nil, e.stopNow)
 	var destination string
 	if strings.HasPrefix(strings.ToLower(raw), "cid:") {
 		id := normalizeContentID(raw[4:])
@@ -1331,7 +1331,14 @@ func (collector *linkCollector) AddDestination(candidate string) string {
 	if candidate == "" {
 		return ""
 	}
-	candidate = promptURL(candidate, collector.compactURLs)
+	if rendered, exists := collector.rendered[candidate]; exists {
+		return rendered
+	}
+	if collector.Full() {
+		return candidate
+	}
+	raw := candidate
+	candidate = promptURL(raw, collector.compactURLs)
 	if collector.seen == nil {
 		collector.seen = make(map[string]struct{})
 	}
@@ -1340,8 +1347,13 @@ func (collector *linkCollector) AddDestination(candidate string) string {
 	}
 	characters := utf8.RuneCountInString(candidate)
 	if len(collector.links) >= maxExtractedLinks || collector.chars+characters > maxExtractedLinkChars {
+		collector.full = true
 		return candidate
 	}
+	if collector.rendered == nil {
+		collector.rendered = make(map[string]string)
+	}
+	collector.rendered[raw] = candidate
 	collector.seen[candidate] = struct{}{}
 	collector.links = append(collector.links, candidate)
 	collector.chars += characters

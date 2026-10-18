@@ -331,11 +331,12 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		}
 	}
 	links := linkCollector{compactURLs: budget.compactURLs}
-	promptText := rewritePlainTextURLs(text, budget.compactURLs, &links)
+	promptText, urlsComplete := rewritePlainTextURLs(text, budget.compactURLs, &links, budget.useFallback)
 	return extractedContent{
 		Text: promptText, VisibleText: text,
 		ConfidentVisibleChars: confidentTextCharacters(text),
-		Links:                 links.links, TransferIncomplete: transferIncomplete, ExtractionIncomplete: !complete,
+		Links:                 links.links, TransferIncomplete: transferIncomplete, ExtractionIncomplete: !complete || !urlsComplete,
+		HTMLCPULimitExceeded: budget.cpuLimitExceeded,
 	}
 }
 

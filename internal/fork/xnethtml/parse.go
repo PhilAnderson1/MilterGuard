@@ -38,6 +38,11 @@ type parser struct {
 	head, form *Node
 	// Other parsing state flags (section 12.2.4.5).
 	scripting, framesetOK bool
+	// Repeated html and body start tags merge previously unseen attributes
+	// into their existing nodes. Retain the name sets so each merge does not
+	// rebuild them from every attribute accumulated so far.
+	htmlAttributeNames map[string]struct{}
+	bodyAttributeNames map[string]struct{}
 	// The stack of template insertion modes
 	templateStack insertionModeStack
 	// im is the current insertion mode.
@@ -880,15 +885,26 @@ func (p *parser) copyAttributes(dst *Node, src Token) {
 	if len(src.Attr) == 0 {
 		return
 	}
-	attr := map[string]string{}
-	for _, t := range dst.Attr {
-		attr[t.Key] = t.Val
+	var names *map[string]struct{}
+	switch dst.DataAtom {
+	case a.Html:
+		names = &p.htmlAttributeNames
+	case a.Body:
+		names = &p.bodyAttributeNames
+	default:
+		panic("html: copyAttributes called for non-html/body node")
+	}
+	if *names == nil {
+		*names = make(map[string]struct{}, len(dst.Attr)+len(src.Attr))
+		for _, attribute := range dst.Attr {
+			(*names)[attribute.Key] = struct{}{}
+		}
 	}
 	for _, t := range src.Attr {
-		if _, ok := attr[t.Key]; !ok {
+		if _, ok := (*names)[t.Key]; !ok {
 			p.guard.mustAttributes(1)
 			dst.Attr = append(dst.Attr, t)
-			attr[t.Key] = t.Val
+			(*names)[t.Key] = struct{}{}
 		}
 	}
 }

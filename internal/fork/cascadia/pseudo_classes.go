@@ -417,11 +417,11 @@ func (s rootPseudoClassSelector) Match(n *html.Node) bool {
 }
 
 func hasAttr(n *html.Node, attr string) bool {
-	return matchAttribute(n, attr, func(string) bool { return true })
+	return hasAttributeResource(n, attr, nil)
 }
 
 func hasAttrResource(n *html.Node, attr string, guard *MatchControl) bool {
-	return matchAttributeResource(n, attr, func(string) bool { return true }, guard)
+	return hasAttributeResource(n, attr, guard)
 }
 
 type linkPseudoClassSelector struct {

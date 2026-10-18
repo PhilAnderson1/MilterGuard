@@ -99,3 +99,65 @@ func TestMatchControlSamplesAcrossMatches(t *testing.T) {
 		t.Fatalf("CPU callback called %d times for 100 simple matches; want 1", checks)
 	}
 }
+
+func TestAttributeValueMatchChecksImmediately(t *testing.T) {
+	selector, err := ParseGroup(`[data-value*="needle" i]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "data-value", Val: "a needle"}}}
+	checks := 0
+	matched, stopped := MatchWithStop(selector, n, func() bool {
+		checks++
+		return checks == 2
+	})
+	if matched || !stopped {
+		t.Fatalf("matched=%v stopped=%v, want false/true", matched, stopped)
+	}
+	if checks != 2 {
+		t.Fatalf("CPU callback called %d times; want immediate second check before attribute value", checks)
+	}
+}
+
+func TestAttributePresenceDoesNotCheckValue(t *testing.T) {
+	selector, err := ParseGroup(`[data-value]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "data-value", Val: "present"}}}
+	checks := 0
+	matched, stopped := MatchWithStop(selector, n, func() bool {
+		checks++
+		return false
+	})
+	if !matched || stopped {
+		t.Fatalf("matched=%v stopped=%v, want true/false", matched, stopped)
+	}
+	if checks != 1 {
+		t.Fatalf("CPU callback called %d times; presence selector should not inspect the value", checks)
+	}
+}
+
+func TestCaseInsensitiveAttributeMatchingUsesASCIIFolding(t *testing.T) {
+	for _, test := range []struct {
+		selector string
+		value    string
+		want     bool
+	}{
+		{`[data-value="abc" i]`, "ABC", true},
+		{`[data-value^="abc" i]`, "ABCdef", true},
+		{`[data-value$="def" i]`, "abcDEF", true},
+		{`[data-value*="cde" i]`, "abCDEf", true},
+		{`[data-value*="aaaab" i]`, strings.Repeat("A", 1_000) + "B", true},
+		{`[data-value="k" i]`, "K", false},
+	} {
+		selector, err := ParseGroup(test.selector)
+		if err != nil {
+			t.Fatalf("parse %q: %v", test.selector, err)
+		}
+		n := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "data-value", Val: test.value}}}
+		if got := selector.Match(n); got != test.want {
+			t.Errorf("selector %q value %q: got %v, want %v", test.selector, test.value, got, test.want)
+		}
+	}
+}

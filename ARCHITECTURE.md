@@ -246,12 +246,26 @@ message-side traversals and MIME-part processing sample the same callback. The
 request context is also included in the normal and fallback callbacks, so a
 client disconnect, shutdown, or analysis deadline stops content preparation at
 the next cooperative checkpoint. Configuration requires a positive CPU limit.
+Lexical fallback uses a separate allowance of the configured duration. CPU
+exhaustion opens that second window only for the `fallback` action; rejecting
+actions stop immediately. Non-CPU parse failures may use the fallback window
+under every action so malformed or structurally limited HTML can still yield
+bounded classification evidence. Such a failure can make total extraction CPU
+approach twice the configured per-window limit.
 
-`max_html_parse_memory_bytes` supplies one cumulative allocation budget for all
-HTML parts in a message. Parser and CSS structures, extraction maps, rendered
-and normalized output, and multipart output combination all consume the same
-budget. Superseded backing arrays remain charged because Go may retain them
+`max_html_parse_memory_bytes` supplies one cumulative accounting budget for all
+HTML parts in a message. Parser and CSS structures, extraction maps, guarded
+rendering buffers, and multipart output combination consume the same budget.
+Superseded charged backing arrays remain charged because Go may retain them
 until a later garbage collection.
+
+This accounting budget is not a ceiling on the Go heap or process RSS. Raw and
+decoded input buffers, bounded temporary allocations, runtime bookkeeping, and
+garbage awaiting collection can exist outside it. Those allocations remain
+bounded by message-size, decoded-input, MIME-depth, structural, and CPU limits.
+Capacity planning must also allow for normal application memory and up to
+`ai.max_concurrent` simultaneous analyses; a process or container memory limit
+is required when deployment needs a hard process-wide ceiling.
 
 ## AI analysis
 

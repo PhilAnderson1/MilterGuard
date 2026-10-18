@@ -99,14 +99,25 @@ repeat-offender escalation. IP and reverse-DNS allowlists still apply.
 MilterGuard refuses to start if its operating environment does not provide the
 per-thread CPU clock required to enforce this limit.
 
-`ai.max_html_parse_memory_bytes` sets the cumulative per-message allocation
-budget used by HTML/CSS parsing, extraction rendering, normalization, and MIME
-output combination. The default is 67108864 bytes (64 MiB), and the accepted
-range is 8-512 MiB. The budget is shared across every HTML part in a message;
-raising it increases the memory available to both legitimate and hostile mail.
-When sizing a host, allow approximately this value multiplied by
-`ai.max_concurrent`, plus normal application memory and allocations outside the
-guard. Exhaustion stops extraction and marks the body incomplete;
+Lexical HTML fallback has a separate allowance of the same duration. When the
+primary CPU allowance expires, only the `fallback` action permits that second
+window; `reject` and `dos-reject` stop extraction. A non-CPU parser failure,
+such as malformed input or a structural or memory limit, may use the fallback
+allowance under any action so bounded message text remains available. A
+message that fails late for a non-CPU reason can therefore consume nearly two
+configured allowances.
+
+`ai.max_html_parse_memory_bytes` sets the cumulative per-message accounting
+budget used by HTML/CSS parsing, guarded extraction buffers, and MIME output
+combination. The default is 67108864 bytes (64 MiB), and the accepted range is
+8-512 MiB. The budget is shared across every HTML part in a message; raising it
+increases the memory available to both legitimate and hostile mail. It is not
+a ceiling on the Go heap or process RSS: bounded input and decoding buffers,
+temporary allocations, runtime overhead, and garbage awaiting collection also
+consume memory. When sizing a host, allow for those costs in addition to as
+many as `ai.max_concurrent` simultaneous accounting budgets. Use an operating
+system or container memory limit when a hard process-wide ceiling is required.
+Exhaustion stops extraction and marks the body incomplete;
 `ai.incomplete_body_action` then determines whether retained content is scanned
 or the message is rejected. Memory exhaustion does not add an IP-reputation
 strike.

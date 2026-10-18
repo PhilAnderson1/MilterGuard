@@ -31,12 +31,17 @@ callback while consuming input, and samples tree-builder checkpoints once per
 It limits open-element nesting to 512 entries and the document to 262,144 nodes,
 and rejects more than 4,096 source attributes on one tag or 65,536 across one
 document. The attribute limits count duplicates because they still consume
-tokenizer memory before HTML duplicate removal.
+tokenizer memory before HTML duplicate removal. Repeated `html` and `body`
+start tags reuse incremental attribute-name caches instead of rebuilding a map
+of all previously merged attributes for every token.
 
 The Cascadia fork rejects selector inputs above 16 KiB, more than 1,024 simple
 selector components, or more than 64 nested selector groups. Its nonstandard
 regular-expression pseudo-classes are disabled because email HTML does not use
 them and Go's regexp engine would otherwise sit outside selector accounting.
+Attribute-value matching samples the CPU callback immediately before inspecting
+the value, and ASCII case-insensitive operators avoid lowercase copies of
+attacker-controlled strings.
 It also owns selector-list splitting and exposes compiled-selector metadata;
 HTML extraction no longer reparses valid selectors or recompiles their
 individual compounds.

@@ -23,6 +23,8 @@ Local changes:
 - Source attributes are limited to 4,096 per tag and 65,536 per document. Both
   limits count duplicates because duplicate detection and tokenization still
   consume resources before HTML duplicate removal.
+- Repeated `html` and `body` tags reuse per-destination attribute-name caches
+  while merging attributes, avoiding upstream's quadratic map reconstruction.
 - `NewTokenizerWithStop` exposes cooperative cancellation for the standalone
   tokenizer used by bounded lexical fallback.
 

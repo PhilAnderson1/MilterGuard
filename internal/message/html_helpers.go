@@ -20,8 +20,14 @@ var markdownURLReplacer = strings.NewReplacer(
 type linkCollector struct {
 	links       []string
 	seen        map[string]struct{}
+	rendered    map[string]string
 	chars       int
+	full        bool
 	compactURLs bool
+}
+
+func (collector *linkCollector) Full() bool {
+	return collector != nil && (collector.full || len(collector.links) >= maxExtractedLinks)
 }
 
 type imageRefCollector struct {
@@ -275,10 +281,11 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, shouldStop func
 		complete = false
 	}
 	value := normalizeHTMLText(sanitizeSenderText(text.String()))
-	value = rewritePlainTextURLs(value, compactURLs, &links)
+	value, urlsComplete := rewritePlainTextURLs(value, compactURLs, &links, shouldStop)
+	complete = complete && urlsComplete
 	return extractedContent{Text: value, HTMLFallbackUsed: true,
 		Links: links.links, ImageRefs: images.refs, ExtractionIncomplete: !complete,
-		HTMLCPULimitExceeded: errors.Is(z.Err(), xhtml.ErrResourceStopped)}
+		HTMLCPULimitExceeded: !urlsComplete || errors.Is(z.Err(), xhtml.ErrResourceStopped)}
 }
 
 func fallbackDestination(raw string, base *url.URL) (string, bool) {

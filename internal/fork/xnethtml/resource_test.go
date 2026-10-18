@@ -2,9 +2,11 @@ package html
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/atom"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
@@ -151,6 +153,28 @@ func TestAttributeContentIsChargedToMemoryBudget(t *testing.T) {
 	long := used(strings.Repeat("x", 2048))
 	if difference := long - short; difference < 2047 {
 		t.Fatalf("long attribute added %d charged bytes, want at least 2047", difference)
+	}
+}
+
+func TestRepeatedHTMLAndBodyAttributeCachesAreIndependent(t *testing.T) {
+	htmlNode := Node{Type: ElementNode, DataAtom: atom.Html, Data: "html", Attr: []Attribute{{Key: "lang", Val: "en"}}}
+	bodyNode := Node{Type: ElementNode, DataAtom: atom.Body, Data: "body", Attr: []Attribute{{Key: "class", Val: "original"}}}
+	p := parser{}
+	for i := range 100 {
+		p.copyAttributes(&htmlNode, Token{Attr: []Attribute{{Key: fmt.Sprintf("h%d", i), Val: "x"}}})
+		p.copyAttributes(&bodyNode, Token{Attr: []Attribute{{Key: fmt.Sprintf("b%d", i), Val: "x"}}})
+	}
+	p.copyAttributes(&htmlNode, Token{Attr: []Attribute{{Key: "lang", Val: "replaced"}}})
+	p.copyAttributes(&bodyNode, Token{Attr: []Attribute{{Key: "class", Val: "replaced"}}})
+
+	if len(htmlNode.Attr) != 101 || len(bodyNode.Attr) != 101 {
+		t.Fatalf("attribute counts: html=%d body=%d", len(htmlNode.Attr), len(bodyNode.Attr))
+	}
+	if htmlNode.Attr[0].Val != "en" || bodyNode.Attr[0].Val != "original" {
+		t.Fatalf("original attributes were replaced: html=%q body=%q", htmlNode.Attr[0].Val, bodyNode.Attr[0].Val)
+	}
+	if len(p.htmlAttributeNames) != 101 || len(p.bodyAttributeNames) != 101 {
+		t.Fatalf("cache sizes: html=%d body=%d", len(p.htmlAttributeNames), len(p.bodyAttributeNames))
 	}
 }
 

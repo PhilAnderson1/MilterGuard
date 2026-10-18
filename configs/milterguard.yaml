@@ -124,21 +124,24 @@ ai:
   compact_prompt_urls: true
 
   # Maximum CPU time, in milliseconds, for preparing message content for
-  # analysis, including MIME, plain-text, HTML and CSS processing. If bounded
-  # If HTML fallback extraction is needed and the action below is fallback, its
-  # tokenizer receives a separate allowance of the same size. Rejecting actions
-  # stop extraction when the primary allowance expires. CPU time excludes time
+  # analysis, including MIME, plain-text, HTML and CSS processing. With the
+  # fallback action, lexical fallback receives a separate allowance of the same
+  # size after the primary allowance expires. Rejecting actions do not run
+  # fallback after primary CPU exhaustion, but a non-CPU parser failure may use
+  # the separate fallback allowance under any action. CPU time excludes time
   # waiting to be scheduled. The value must be positive. Exceeding it applies
   # html_parse_cpu_limit_action below; dos-reject treats the event as a
   # suspected attack and updates IP reputation.
   max_html_parse_cpu_ms: 250
 
-  # Cumulative per-message allocation budget for HTML/CSS parsing, rendering,
-  # normalization, and combining extracted MIME parts. This is an integer byte
-  # count. The default is 67108864 (64 MiB); allowed range is 8-512 MiB. When
-  # exhausted, extraction stops and incomplete_body_action below determines
-  # whether retained content is scanned or the message is rejected. Memory
-  # exhaustion does not add an IP-reputation strike.
+  # Cumulative per-message accounting budget for HTML/CSS parsing, guarded
+  # extraction buffers, and combining extracted MIME parts. It is not a limit
+  # on total process memory: bounded input/decoding buffers, temporary data, Go
+  # runtime overhead, and concurrent analyses also consume memory. This is an
+  # integer byte count. The default is 67108864 (64 MiB); allowed range is
+  # 8-512 MiB. When exhausted, extraction stops and incomplete_body_action
+  # below determines whether retained content is scanned or the message is
+  # rejected. Memory exhaustion does not add an IP-reputation strike.
   max_html_parse_memory_bytes: 67108864
 
   # Action when the content-processing CPU limit is reached: fallback continues
