@@ -21,23 +21,86 @@ func trimCSSWhitespace(s string) string {
 // asciiLower applies the case folding used by CSS and HTML keyword grammars.
 // Unicode case folding is deliberately inappropriate here: for example, the
 // Kelvin sign must not be accepted as an ASCII "k" in a CSS identifier.
-func asciiLower(s string) string {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 'A' && s[i] <= 'Z' {
-			out := []byte(s)
-			for j := i; j < len(out); j++ {
-				if out[j] >= 'A' && out[j] <= 'Z' {
-					out[j] += 'a' - 'A'
-				}
-			}
-			return string(out)
-		}
-	}
-	return s
+func asciiLower(s string) string { return asciiLowerWithBudget(s, nil) }
+
+func asciiLowerWithBudget(s string, budget *cpuGuard) string {
+	value, _ := lowerASCIIWithBudget(s, budget)
+	return value
 }
 
 func normalizeCSSKeyword(s string) string {
 	return asciiLower(trimCSSWhitespace(s))
+}
+
+// Expanded variables can be much larger than the stylesheet that defines them.
+// Trim in bounded chunks and admit one owned lowercase string only if needed.
+func trimCSSWhitespaceWithBudget(s string, budget *cpuGuard) (string, bool) {
+	const whitespace = " \t\r\n\f"
+	for len(s) > 0 {
+		if len(s) > stringWorkChunk && budget.stopNow(true) {
+			return "", false
+		}
+		n := min(len(s), stringWorkChunk)
+		tail := strings.TrimLeft(s[:n], whitespace)
+		s = s[n-len(tail):]
+		if len(tail) != 0 {
+			break
+		}
+	}
+	for len(s) > 0 {
+		if len(s) > stringWorkChunk && budget.stopNow(true) {
+			return "", false
+		}
+		start := max(0, len(s)-stringWorkChunk)
+		head := strings.TrimRight(s[start:], whitespace)
+		s = s[:start+len(head)]
+		if len(head) != 0 {
+			break
+		}
+	}
+	return s, true
+}
+
+func normalizeCSSKeywordWithBudget(s string, budget *cpuGuard) (string, bool) {
+	s, ok := trimCSSWhitespaceWithBudget(s, budget)
+	if !ok {
+		return "", false
+	}
+	return lowerASCIIWithBudget(s, budget)
+}
+
+func lowerASCIIWithBudget(s string, budget *cpuGuard) (string, bool) {
+	changed := false
+	for start := 0; start < len(s) && !changed; start += stringWorkChunk {
+		if len(s) > stringWorkChunk && budget.stopNow(true) {
+			return "", false
+		}
+		for _, c := range []byte(s[start:min(start+stringWorkChunk, len(s))]) {
+			if c >= 'A' && c <= 'Z' {
+				changed = true
+				break
+			}
+		}
+	}
+	if !changed {
+		return s, true
+	}
+	var out strings.Builder
+	if !growBuilder(&out, len(s), budget) {
+		return "", false
+	}
+	for start := 0; start < len(s); start += stringWorkChunk {
+		if len(s) > stringWorkChunk && budget.stopNow(true) {
+			return "", false
+		}
+		for _, c := range []byte(s[start:min(start+stringWorkChunk, len(s))]) {
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			out.WriteByte(c)
+		}
+	}
+	return out.String(), true
 }
 
 func equalASCIIFold(left, right string) bool {
@@ -78,6 +141,16 @@ func equalASCIIFoldBytes(left []byte, right string) bool {
 	return true
 }
 
-func splitCSSWhitespace(s string) []string {
-	return strings.FieldsFunc(s, isCSSWhitespace)
+// splitCSSWhitespace fills caller-owned storage without allocating. An extra
+// component rejects the value without collecting the rest of the input.
+func splitCSSWhitespace(s string, storage []string) []string {
+	limit := len(storage)
+	parts := storage[:0]
+	for part := range strings.FieldsFuncSeq(s, isCSSWhitespace) {
+		if len(parts) == limit {
+			return nil
+		}
+		parts = append(parts, part)
+	}
+	return parts
 }

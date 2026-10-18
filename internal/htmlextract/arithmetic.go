@@ -2,8 +2,8 @@ package htmlextract
 
 import (
 	"math"
-	"strconv"
 	"strings"
+	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 )
@@ -14,16 +14,66 @@ type quantity struct {
 }
 type mathParser struct {
 	ts              []valueToken
+	literals        []mathLiteral
 	at, depth, prop int
 	status          valueStatus
 	parent, root    *Style
 	budget          *cpuGuard
 }
 
+// Numeric conversion is context independent; only unit scaling depends on
+// the element. A parallel slice avoids enlarging every CSS lexer token.
+type mathLiteral struct {
+	value float64
+	unit  int16 // index into lengthUnits, or -1 for an unsupported dimension
+	valid bool
+}
+
+func prepareMathLiterals(ts []valueToken, budget *cpuGuard) []mathLiteral {
+	if !budget.reserve(int64(len(ts)) * int64(unsafe.Sizeof(mathLiteral{}))) {
+		return nil
+	}
+	literals := make([]mathLiteral, len(ts))
+	for i, t := range ts {
+		if !budget.check() {
+			return nil
+		}
+		text := t.raw
+		switch t.kind {
+		case css.NumberToken:
+		case css.PercentageToken:
+			text = strings.TrimSuffix(text, "%")
+		case css.DimensionToken:
+			literals[i].unit = -1
+			text = asciiLowerWithBudget(text, budget)
+			for j, unit := range lengthUnits {
+				if strings.HasSuffix(text, unit.suffix) {
+					if unit.kind == lengthUnitContextual || unit.kind == lengthUnitPercentage {
+						break
+					}
+					literals[i].unit = int16(j)
+					text = text[:len(text)-len(unit.suffix)]
+					break
+				}
+			}
+			if literals[i].unit < 0 {
+				continue
+			}
+		default:
+			continue
+		}
+		literals[i].value, literals[i].valid = numberWithBudget(text, budget)
+	}
+	if budget.stopNow(false) {
+		return nil
+	}
+	return literals
+}
+
 func isMath(s string) bool {
-	s = normalizeCSSKeyword(s)
+	s = trimCSSWhitespace(s)
 	for _, f := range []string{"calc(", "min(", "max(", "clamp("} {
-		if strings.HasPrefix(s, f) {
+		if hasASCIIFoldPrefix(s, f) {
 			return true
 		}
 	}
@@ -43,6 +93,15 @@ func evalMath(prop int, src string, parent, root *Style, budget *cpuGuard) (Valu
 }
 
 func evalMathTokens(prop int, src string, ts []valueToken, parent, root *Style, budget *cpuGuard) (Value, valueStatus) {
+	return evalPreparedMathTokens(prop, src, ts, nil, parent, root, budget)
+}
+func evalPreparedMathTokens(prop int, src string, ts []valueToken, literals []mathLiteral, parent, root *Style, budget *cpuGuard) (Value, valueStatus) {
+	if len(literals) != len(ts) {
+		literals = prepareMathLiterals(ts, budget)
+	}
+	if len(literals) != len(ts) || budget.stopNow(false) {
+		return Value{Text: src}, valueUnsupported
+	}
 	if !budget.check() {
 		return Value{Text: src}, valueUnsupported
 	}
@@ -57,7 +116,7 @@ func evalMathTokens(prop int, src string, ts []valueToken, parent, root *Style, 
 			}
 		}
 	}
-	p := mathParser{ts: ts, status: valueResolved, prop: prop, parent: parent, root: root, budget: budget}
+	p := mathParser{ts: ts, literals: literals, status: valueResolved, prop: prop, parent: parent, root: root, budget: budget}
 	q := p.expr(0)
 	p.skipSpace()
 	if p.at != len(p.ts) && p.status == valueResolved {
@@ -76,10 +135,11 @@ func evalMathTokens(prop int, src string, ts []valueToken, parent, root *Style, 
 	if prop == opacity {
 		q.n = math.Min(1, q.n)
 	}
-	txt := strconv.FormatFloat(q.n, 'g', -1, 64)
+	unit := ""
 	if prop == fontSize {
-		txt += "px"
+		unit = "px"
 	}
+	txt := numberStringWithBudget(q.n, unit, budget)
 	return Value{Text: txt, Number: q.n, Known: true}, valueResolved
 }
 func (p *mathParser) expr(min int) quantity {
@@ -154,9 +214,10 @@ func (p *mathParser) atom() quantity {
 		return quantity{}
 	}
 	t := p.ts[p.at]
+	literal := p.literals[p.at]
 	p.at++
 	if t.kind == css.FunctionToken || t.kind == css.LeftParenthesisToken {
-		name := asciiLower(t.raw)
+		name := asciiLowerWithBudget(t.raw, p.budget)
 		if t.kind == css.LeftParenthesisToken {
 			name = "calc("
 		}
@@ -228,14 +289,14 @@ func (p *mathParser) atom() quantity {
 		return q
 	}
 	if t.kind == css.NumberToken {
-		v, ok := number(t.raw)
+		v, ok := literal.value, literal.valid
 		if !ok {
 			p.status = valueUnsupported
 		}
 		return quantity{n: v}
 	}
 	if t.kind == css.PercentageToken {
-		v, ok := number(strings.TrimSuffix(t.raw, "%"))
+		v, ok := literal.value, literal.valid
 		if !ok {
 			p.status = valueUnsupported
 		}
@@ -252,13 +313,12 @@ func (p *mathParser) atom() quantity {
 			p.status = valueInvalid
 			return quantity{}
 		}
-		s := asciiLower(t.raw)
-		numberText, unit, found := splitLength(s)
-		if !found || unit.kind == lengthUnitContextual || unit.kind == lengthUnitPercentage {
+		if literal.unit < 0 {
 			p.status = valueUnsupported
 			return quantity{}
 		}
-		v, ok := number(numberText)
+		unit := lengthUnits[literal.unit]
+		v, ok := literal.value, literal.valid
 		if !ok {
 			p.status = valueInvalid
 		}

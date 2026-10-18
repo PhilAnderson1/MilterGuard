@@ -4,7 +4,6 @@ import (
 	"math"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"unsafe"
 
@@ -67,9 +66,13 @@ var widthFeature = regexp.MustCompile(`^\(\s*(min|max)-(?:device-)?width\s*:\s*(
 
 func parseMedia(src string) mediaCondition { return parseMediaBudgeted(src, nil) }
 
-// Only retained conditions need the operation budget. Transient applicability
-// parsing has the same per-query bounds and keeps no document-wide cache.
+// Both retained conditions and temporary applicability parsing consume the
+// monotonic allocation budget. Per-query bounds also limit regexp scratch.
 func parseMediaBudgeted(src string, memory *resourceguard.Memory) mediaCondition {
+	return parseMediaWithBudget(src, &cpuGuard{memory: memory})
+}
+func parseMediaWithBudget(src string, budget *cpuGuard) mediaCondition {
+	memory := budget.allocationMemory()
 	unknown := func() mediaCondition {
 		if !memory.Reserve(int64(unsafe.Sizeof(mediaAlternative{}))) {
 			return nil
@@ -79,16 +82,33 @@ func parseMediaBudgeted(src string, memory *resourceguard.Memory) mediaCondition
 	if len(src) > 4096 || strings.Count(src, ",") > 31 {
 		return unknown()
 	}
+	if !budget.reserve(int64(strings.Count(src, ",")+1) * 16) {
+		return nil
+	}
 	var result mediaCondition
-	for _, raw := range strings.Split(asciiLower(src), ",") {
+	for _, raw := range strings.Split(asciiLowerWithBudget(src, budget), ",") {
+		if !budget.check() {
+			return nil
+		}
 		a := mediaAlternative{schemes: colourSchemeBoth}
 		raw = trimCSSWhitespace(strings.TrimPrefix(trimCSSWhitespace(raw), "only "))
 		// The supported subset has no functions or nested query parentheses.
-		parts := regexpAnd.Split(raw, -1)
+		parts := []string{raw}
+		if strings.Contains(raw, "and") {
+			// At most 17 results and bounded regexp match-index scratch. The extra
+			// result detects excessive clauses without splitting the entire query.
+			if !budget.reserve(17 * 128) {
+				return nil
+			}
+			parts = regexpAnd.Split(raw, 17)
+		}
 		if len(parts) > 16 {
 			return unknown()
 		}
 		for _, part := range parts {
+			if !budget.check() {
+				return nil
+			}
 			part = trimCSSWhitespace(part)
 			switch part {
 			case "screen", "all":
@@ -99,13 +119,17 @@ func parseMediaBudgeted(src string, memory *resourceguard.Memory) mediaCondition
 			case "(prefers-color-scheme:dark)", "(prefers-color-scheme: dark)":
 				a.schemes &= colourSchemeDark
 			default:
+				if !budget.reserve(256) {
+					return nil
+				}
 				m := widthFeature.FindStringSubmatch(part)
 				if m == nil {
 					a.unknown = true
 					continue
 				}
-				v, err := strconv.ParseFloat(m[2], 64)
-				if err != nil || math.IsInf(v, 0) || (m[3] == "" && v != 0) {
+				// Preserve the media grammar's acceptance of a trailing decimal point.
+				v, valid := numberWithBudget(strings.TrimSuffix(m[2], "."), budget)
+				if !valid || (m[3] == "" && v != 0) {
 					a.unknown = true
 					continue
 				}

@@ -141,7 +141,7 @@ func TestAuditAllocationBoundaries(t *testing.T) {
 		}
 	})
 	t.Run("plain container preparation", func(t *testing.T) {
-		memory := resourceguard.NewMemory(64*int64(unsafe.Sizeof(documentFrame{})) + elementPreparationEntryBytes - 1)
+		memory := resourceguard.NewMemory(64*int64(unsafe.Sizeof(documentFrame{})) + mapEntryAllocationBytes[*html.Node, elementPreparation]() - 1)
 		root := &html.Node{Type: html.ElementNode, Data: "div"}
 		root.AppendChild(&html.Node{Type: html.ElementNode, Data: "span"})
 		document := parsedDocument{memory: memory, elements: make(map[*html.Node]elementPreparation)}

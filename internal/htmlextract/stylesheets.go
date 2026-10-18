@@ -5,6 +5,8 @@ import (
 	"mime"
 	"net/url"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
@@ -34,7 +36,8 @@ func oversizedCSSMediaTypeMayApply(value string) bool {
 	return end == len(value) || value[end] == ';' || htmlSpace(value[end])
 }
 
-func cssTypeAttributeApplies(n *html.Node) bool {
+func cssTypeAttributeApplies(n *html.Node) bool { return cssTypeAttributeAppliesWithBudget(n, nil) }
+func cssTypeAttributeAppliesWithBudget(n *html.Node, budget *cpuGuard) bool {
 	typ := attr(n, "type")
 	// mime.ParseMediaType builds a map for every parameter. Avoid allowing one
 	// HTML attribute to turn an input-sized parameter list into a much larger
@@ -47,6 +50,9 @@ func cssTypeAttributeApplies(n *html.Node) bool {
 	if typ == "" {
 		return true
 	}
+	if !reserveMediaType(typ, budget) {
+		return false
+	}
 	mediaType, _, err := mime.ParseMediaType(typ)
 	return err == nil && equalASCIIFold(mediaType, "text/css")
 }
@@ -58,16 +64,10 @@ func (s *sheet) stylesheetLink(n *html.Node) (href, media string, applies bool) 
 	if n.Namespace != "" || n.Data != "link" || hasAttr(n, "disabled") {
 		return "", "", false
 	}
-	relations := strings.Fields(asciiLower(attr(n, "rel")))
-	stylesheet, alternate := false, false
-	for _, relation := range relations {
-		stylesheet = stylesheet || relation == "stylesheet"
-		alternate = alternate || relation == "alternate"
-	}
-	if !stylesheet || alternate {
+	if !s.hasStylesheetRelation(attr(n, "rel")) {
 		return "", "", false
 	}
-	if !cssTypeAttributeApplies(n) {
+	if !cssTypeAttributeAppliesWithBudget(n, s.resourceBudget()) {
 		return "", "", false
 	}
 	media = attr(n, "media")
@@ -78,11 +78,40 @@ func (s *sheet) stylesheetLink(n *html.Node) (href, media string, applies bool) 
 	return href, media, href != ""
 }
 
+// Inspect borrowed words without lowercasing or collecting the entire rel
+// attribute. Preserve strings.Fields whitespace semantics, including Unicode.
+func (s *sheet) hasStylesheetRelation(rel string) bool {
+	if !s.checkCPU() {
+		return false
+	}
+	stylesheet := false
+	start, nextCheck := 0, stringWorkChunk
+	for i, r := range rel {
+		if i >= nextCheck {
+			if s.cpu.stopNow(true) {
+				s.stopped = true
+				return false
+			}
+			nextCheck = i + stringWorkChunk
+		}
+		if unicode.IsSpace(r) {
+			word := rel[start:i]
+			if equalASCIIFold(word, "alternate") {
+				return false
+			}
+			stylesheet = stylesheet || equalASCIIFold(word, "stylesheet")
+			start = i + utf8.RuneLen(r)
+		}
+	}
+	word := rel[start:]
+	return !equalASCIIFold(word, "alternate") && (stylesheet || equalASCIIFold(word, "stylesheet"))
+}
+
 func (s *sheet) parseMediaCondition(value string) mediaCondition {
 	if !s.checkCPU() {
 		return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
 	}
-	return parseMediaBudgeted(value, s.memory)
+	return parseMediaWithBudget(value, s.resourceBudget())
 }
 
 func (s *sheet) mediaCanApply(value string) bool {
@@ -93,7 +122,7 @@ func (s *sheet) mediaCanApply(value string) bool {
 	if !s.checkCPU() {
 		return true
 	}
-	for _, alternative := range parseMedia(value) {
+	for _, alternative := range parseMediaWithBudget(value, s.resourceBudget()) {
 		if !alternative.never {
 			return true
 		}
@@ -113,13 +142,16 @@ func (s *sheet) loadStylesheetReference(href, media string) {
 	if remaining < 0 {
 		remaining = 0
 	}
-	data, isData, valid := decodeCSSDataURL(href, remaining)
+	data, isData, valid := decodeCSSDataURLWithBudget(href, remaining, s.resourceBudget())
 	if !isData {
 		s.unresolvedStylesheet = true
 		return
 	}
 	if !valid {
 		s.unresolvedStylesheet = true
+		return
+	}
+	if !s.memory.Reserve(int64(len(data))) {
 		return
 	}
 	s.parseImportedStylesheet(string(data), media)
@@ -137,7 +169,7 @@ func (s *sheet) parseImportedStylesheet(text, media string) {
 }
 
 func (s *sheet) parseImport(values []css.Token) {
-	reference := importReference(values)
+	reference := importReferenceWithBudget(values, s.resourceBudget())
 	if !reference.valid {
 		return
 	}
@@ -158,6 +190,9 @@ type cssImportReference struct {
 }
 
 func importReference(values []css.Token) cssImportReference {
+	return importReferenceWithBudget(values, nil)
+}
+func importReferenceWithBudget(values []css.Token, budget *cpuGuard) cssImportReference {
 	start := 0
 	for start < len(values) && (values[start].TokenType == css.WhitespaceToken || values[start].TokenType == css.CommentToken) {
 		start++
@@ -165,7 +200,7 @@ func importReference(values []css.Token) cssImportReference {
 	if start == len(values) {
 		return cssImportReference{}
 	}
-	href, ok := cssURL(values[start])
+	href, ok := cssURLWithBudget(values[start], budget)
 	if !ok {
 		return cssImportReference{}
 	}
@@ -174,22 +209,29 @@ func importReference(values []css.Token) cssImportReference {
 		start++
 	}
 	if start < len(values) {
-		first := normalizeCSSKeyword(string(values[start].Data))
+		if !budget.reserve(int64(len(values[start].Data))) {
+			return cssImportReference{}
+		}
+		first, _ := normalizeCSSKeywordWithBudget(string(values[start].Data), budget)
 		if first == "layer" || strings.HasPrefix(first, "layer(") || strings.HasPrefix(first, "supports(") {
 			// Cascade layers and supports() need semantics the extractor does not
 			// model. Do not apply the imported sheet unconditionally.
 			return cssImportReference{href: href, valid: true, unsupported: true}
 		}
-		return cssImportReference{href: href, media: tokenString(values[start:]), valid: true}
+		return cssImportReference{href: href, media: tokenStringWithBudget(values[start:], budget), valid: true}
 	}
 	return cssImportReference{href: href, valid: true}
 }
 
-func cssURL(token css.Token) (string, bool) {
+func cssURL(token css.Token) (string, bool) { return cssURLWithBudget(token, nil) }
+func cssURLWithBudget(token css.Token, budget *cpuGuard) (string, bool) {
+	if !budget.reserve(int64(len(token.Data))) {
+		return "", false
+	}
 	raw := trimCSSWhitespace(string(token.Data))
 	switch token.TokenType {
 	case css.StringToken:
-		return unquoteCSSURL(raw)
+		return unquoteCSSURLWithBudget(raw, budget)
 	case css.URLToken:
 		open := strings.IndexByte(raw, '(')
 		if open < 0 {
@@ -199,13 +241,14 @@ func cssURL(token css.Token) (string, bool) {
 		if strings.HasSuffix(raw, ")") {
 			raw = trimCSSWhitespace(raw[:len(raw)-1])
 		}
-		return unquoteCSSURL(raw)
+		return unquoteCSSURLWithBudget(raw, budget)
 	default:
 		return "", false
 	}
 }
 
-func unquoteCSSURL(value string) (string, bool) {
+func unquoteCSSURL(value string) (string, bool) { return unquoteCSSURLWithBudget(value, nil) }
+func unquoteCSSURLWithBudget(value string, budget *cpuGuard) (string, bool) {
 	if len(value) >= 1 && (value[0] == '\'' || value[0] == '"') {
 		quote := value[0]
 		value = value[1:]
@@ -213,11 +256,14 @@ func unquoteCSSURL(value string) (string, bool) {
 			value = value[:len(value)-1]
 		}
 	}
-	value = cssUnescape(value)
+	value = cssUnescapeWithBudget(value, budget)
 	return value, value != ""
 }
 
 func decodeCSSDataURL(reference string, maxBytes int) ([]byte, bool, bool) {
+	return decodeCSSDataURLWithBudget(reference, maxBytes, nil)
+}
+func decodeCSSDataURLWithBudget(reference string, maxBytes int, budget *cpuGuard) ([]byte, bool, bool) {
 	if !hasASCIIFoldPrefix(reference, "data:") {
 		return nil, false, false
 	}
@@ -238,6 +284,9 @@ func decodeCSSDataURL(reference string, maxBytes int) ([]byte, bool, bool) {
 		base64Encoded = true
 		metadata = metadata[:separator]
 	}
+	if !reserveMediaType(metadata, budget) {
+		return nil, true, false
+	}
 	mediaType, params, err := mime.ParseMediaType(metadata)
 	if err != nil || !equalASCIIFold(mediaType, "text/css") {
 		return nil, true, false
@@ -250,12 +299,25 @@ func decodeCSSDataURL(reference string, maxBytes int) ([]byte, bool, bool) {
 		if base64.StdEncoding.DecodedLen(len(payload)) > maxBytes {
 			return nil, true, false
 		}
+		if !budget.reserve(int64(base64.StdEncoding.DecodedLen(len(payload)))) {
+			return nil, true, false
+		}
 		decoded, err := base64.StdEncoding.DecodeString(payload)
 		return decoded, true, err == nil && len(decoded) <= maxBytes
 	}
 	if len(payload) > maxBytes*3 {
 		return nil, true, false
 	}
+	if !budget.reserve(int64(len(payload)) * 2) {
+		return nil, true, false
+	}
 	decoded, err := url.PathUnescape(payload)
 	return []byte(decoded), true, err == nil && len(decoded) <= maxBytes
+}
+
+// MIME parameter parsing owns a map and decoded strings. The input is capped
+// at maxCSSMediaTypeBytes; this conservative allowance includes map growth and
+// short parameters whose entry overhead exceeds their source length.
+func reserveMediaType(value string, budget *cpuGuard) bool {
+	return budget.reserve(256 + int64(len(value))*32)
 }

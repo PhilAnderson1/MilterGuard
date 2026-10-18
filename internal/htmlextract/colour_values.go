@@ -1,9 +1,7 @@
 package htmlextract
 
 import (
-	"fmt"
 	"math"
-	"strconv"
 	"strings"
 )
 
@@ -180,7 +178,8 @@ var unsupportedColourNames = map[string]struct{}{
 	"visitedtext":      {},
 }
 
-func readColour(s string) (RGBA, valueStatus) {
+func readColour(s string) (RGBA, valueStatus) { return readColourWithBudget(s, nil) }
+func readColourWithBudget(s string, budget *cpuGuard) (RGBA, valueStatus) {
 	if s == "transparent" {
 		return RGBA{}, valueResolved
 	}
@@ -194,20 +193,23 @@ func readColour(s string) (RGBA, valueStatus) {
 		if len(h) != 3 && len(h) != 4 && len(h) != 6 && len(h) != 8 {
 			return RGBA{}, valueInvalid
 		}
+		step := 2
 		if len(h) <= 4 {
-			var b strings.Builder
-			for _, v := range h {
-				b.WriteRune(v)
-				b.WriteRune(v)
-			}
-			h = b.String()
+			step = 1
 		}
-		for i := 0; i < len(h)/2; i++ {
-			v, e := strconv.ParseUint(h[i*2:i*2+2], 16, 8)
-			if e != nil {
+		for i := 0; i < len(h)/step; i++ {
+			hi, ok := colourHexDigit(h[i*step])
+			if !ok {
 				return RGBA{}, valueInvalid
 			}
-			c[i] = float64(v)
+			lo := hi
+			if step == 2 {
+				lo, ok = colourHexDigit(h[i*step+1])
+				if !ok {
+					return RGBA{}, valueInvalid
+				}
+			}
+			c[i] = float64(hi*16 + lo)
 			if i == 3 {
 				c[i] /= 255
 			}
@@ -217,11 +219,11 @@ func readColour(s string) (RGBA, valueStatus) {
 		body := s[open+1 : len(s)-1]
 		switch name {
 		case "rgb", "rgba":
-			return finiteColourResult(parseRGBFunction(body))
+			return finiteColourResult(parseRGBFunctionWithBudget(body, budget))
 		case "hsl", "hsla":
-			return finiteColourResult(parseHSLFunction(body))
+			return finiteColourResult(parseHSLFunctionWithBudget(body, budget))
 		case "hwb":
-			return finiteColourResult(parseHWBFunction(body))
+			return finiteColourResult(parseHWBFunctionWithBudget(body, budget))
 		default:
 			return RGBA{}, valueUnsupported
 		}
@@ -247,48 +249,77 @@ func finiteColourResult(c RGBA, status valueStatus) (RGBA, valueStatus) {
 
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
-func colourFunctionParts(body string) (channels []string, alpha string, legacy bool, status valueStatus) {
+// Component counts are fixed by the colour grammar. Return the array by
+// value so repeated resolution needs no heap-allocated splitting scratch.
+func colourFunctionParts(body string) (channels [3]string, alpha string, legacy bool, status valueStatus) {
 	if strings.Contains(body, "(") || strings.Contains(body, "from") {
-		return nil, "", false, valueUnsupported
+		return channels, "", false, valueUnsupported
 	}
 	if strings.Contains(body, ",") {
 		if strings.Contains(body, "/") {
-			return nil, "", true, valueInvalid
+			return channels, "", true, valueInvalid
 		}
-		parts := strings.Split(body, ",")
-		if len(parts) != 3 && len(parts) != 4 {
-			return nil, "", true, valueInvalid
-		}
-		for i := range parts {
-			parts[i] = trimCSSWhitespace(parts[i])
-			if parts[i] == "" {
-				return nil, "", true, valueInvalid
+		count := 0
+		for part := range strings.SplitSeq(body, ",") {
+			part = trimCSSWhitespace(part)
+			if part == "" || count == 4 {
+				return channels, "", true, valueInvalid
 			}
+			if count < 3 {
+				channels[count] = part
+			} else {
+				alpha = part
+			}
+			count++
 		}
-		if len(parts) == 4 {
-			alpha = parts[3]
+		if count < 3 {
+			return channels, "", true, valueInvalid
 		}
-		return parts[:3], alpha, true, valueResolved
+		return channels, alpha, true, valueResolved
 	}
-	if strings.Count(body, "/") > 1 {
-		return nil, "", false, valueInvalid
-	}
-	parts := strings.SplitN(body, "/", 2)
-	channels = splitCSSWhitespace(parts[0])
-	if len(channels) != 3 {
-		return nil, "", false, valueInvalid
-	}
-	if len(parts) == 2 {
-		alphaParts := splitCSSWhitespace(parts[1])
-		if len(alphaParts) != 1 {
-			return nil, "", false, valueInvalid
+	body, alphaText, hasAlpha := strings.Cut(body, "/")
+	count := 0
+	for part := range strings.FieldsFuncSeq(body, isCSSWhitespace) {
+		if count == len(channels) {
+			return channels, "", false, valueInvalid
 		}
-		alpha = alphaParts[0]
+		channels[count] = part
+		count++
+	}
+	if count != len(channels) {
+		return channels, "", false, valueInvalid
+	}
+	if hasAlpha {
+		if strings.Contains(alphaText, "/") {
+			return channels, "", false, valueInvalid
+		}
+		for part := range strings.FieldsFuncSeq(alphaText, isCSSWhitespace) {
+			if alpha != "" {
+				return channels, "", false, valueInvalid
+			}
+			alpha = part
+		}
+		if alpha == "" {
+			return channels, "", false, valueInvalid
+		}
 	}
 	return channels, alpha, false, valueResolved
 }
 
-func colourNumber(component string, numberScale, hi float64) (float64, valueStatus) {
+func colourHexDigit(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func colourNumberWithBudget(component string, numberScale, hi float64, budget *cpuGuard) (float64, valueStatus) {
 	if component == "none" {
 		return 0, valueResolved
 	}
@@ -299,7 +330,7 @@ func colourNumber(component string, numberScale, hi float64) (float64, valueStat
 	if percentage {
 		component = strings.TrimSuffix(component, "%")
 	}
-	n, ok := colourComponentNumber(component)
+	n, ok := colourComponentNumberWithBudget(component, budget)
 	if !ok {
 		return 0, valueInvalid
 	}
@@ -313,22 +344,18 @@ func colourNumber(component string, numberScale, hi float64) (float64, valueStat
 // representational overflow for the caller to clamp to the colour channel's
 // finite range. The general number parser remains finite-only because layout
 // and arithmetic cannot safely give infinity a contextual meaning.
-func colourComponentNumber(component string) (float64, bool) {
-	if !validCSSNumber(component) {
-		return 0, false
-	}
-	value, _ := strconv.ParseFloat(component, 64)
-	return value, !math.IsNaN(value)
+func colourComponentNumberWithBudget(component string, budget *cpuGuard) (float64, bool) {
+	return parseCSSNumber(component, budget)
 }
 
-func parseAlpha(component string) (float64, valueStatus) {
+func parseAlphaWithBudget(component string, budget *cpuGuard) (float64, valueStatus) {
 	if component == "" {
 		return 1, valueResolved
 	}
-	return colourNumber(component, 1, 1)
+	return colourNumberWithBudget(component, 1, 1, budget)
 }
 
-func parseRGBFunction(body string) (RGBA, valueStatus) {
+func parseRGBFunctionWithBudget(body string, budget *cpuGuard) (RGBA, valueStatus) {
 	channels, alphaText, legacy, status := colourFunctionParts(body)
 	if status != valueResolved {
 		return RGBA{}, status
@@ -346,19 +373,19 @@ func parseRGBFunction(body string) (RGBA, valueStatus) {
 	}
 	var c [3]float64
 	for i, channel := range channels {
-		c[i], status = colourNumber(channel, 1, 255)
+		c[i], status = colourNumberWithBudget(channel, 1, 255, budget)
 		if status != valueResolved {
 			return RGBA{}, status
 		}
 	}
-	a, status := parseAlpha(alphaText)
+	a, status := parseAlphaWithBudget(alphaText, budget)
 	if status != valueResolved {
 		return RGBA{}, status
 	}
 	return RGBA{c[0] / 255, c[1] / 255, c[2] / 255, a}, valueResolved
 }
 
-func parseHue(component string) (float64, valueStatus) {
+func parseHueWithBudget(component string, budget *cpuGuard) (float64, valueStatus) {
 	if component == "none" {
 		return 0, valueResolved
 	}
@@ -379,7 +406,7 @@ func parseHue(component string) (float64, valueStatus) {
 	case strings.HasSuffix(component, "deg"):
 		component = strings.TrimSuffix(component, "deg")
 	}
-	n, ok := number(component)
+	n, ok := numberWithBudget(component, budget)
 	if !ok {
 		return 0, valueInvalid
 	}
@@ -396,7 +423,7 @@ func parseHue(component string) (float64, valueStatus) {
 	return n, valueResolved
 }
 
-func parseHSLFunction(body string) (RGBA, valueStatus) {
+func parseHSLFunctionWithBudget(body string, budget *cpuGuard) (RGBA, valueStatus) {
 	channels, alphaText, legacy, status := colourFunctionParts(body)
 	if status != valueResolved {
 		return RGBA{}, status
@@ -404,22 +431,22 @@ func parseHSLFunction(body string) (RGBA, valueStatus) {
 	if legacy && legacyColourHasMissingComponent(channels, alphaText) {
 		return RGBA{}, valueInvalid
 	}
-	h, status := parseHue(channels[0])
+	h, status := parseHueWithBudget(channels[0], budget)
 	if status != valueResolved {
 		return RGBA{}, status
 	}
 	if legacy && (!strings.HasSuffix(channels[1], "%") || !strings.HasSuffix(channels[2], "%")) {
 		return RGBA{}, valueInvalid
 	}
-	s, status := colourNumber(channels[1], .01, 1)
+	s, status := colourNumberWithBudget(channels[1], .01, 1, budget)
 	if status != valueResolved {
 		return RGBA{}, status
 	}
-	l, status := colourNumber(channels[2], .01, 1)
+	l, status := colourNumberWithBudget(channels[2], .01, 1, budget)
 	if status != valueResolved {
 		return RGBA{}, status
 	}
-	a, status := parseAlpha(alphaText)
+	a, status := parseAlphaWithBudget(alphaText, budget)
 	if status != valueResolved {
 		return RGBA{}, status
 	}
@@ -445,7 +472,7 @@ func parseHSLFunction(body string) (RGBA, valueStatus) {
 	return RGBA{r + m, g + m, b + m, a}, valueResolved
 }
 
-func legacyColourHasMissingComponent(channels []string, alpha string) bool {
+func legacyColourHasMissingComponent(channels [3]string, alpha string) bool {
 	if alpha == "none" {
 		return true
 	}
@@ -457,7 +484,7 @@ func legacyColourHasMissingComponent(channels []string, alpha string) bool {
 	return false
 }
 
-func parseHWBFunction(body string) (RGBA, valueStatus) {
+func parseHWBFunctionWithBudget(body string, budget *cpuGuard) (RGBA, valueStatus) {
 	channels, alphaText, legacy, status := colourFunctionParts(body)
 	if status != valueResolved {
 		return RGBA{}, status
@@ -466,7 +493,7 @@ func parseHWBFunction(body string) (RGBA, valueStatus) {
 	if legacy {
 		return RGBA{}, valueInvalid
 	}
-	h, status := parseHue(channels[0])
+	h, status := parseHueWithBudget(channels[0], budget)
 	if status != valueResolved {
 		return RGBA{}, status
 	}
@@ -475,15 +502,15 @@ func parseHWBFunction(body string) (RGBA, valueStatus) {
 			return RGBA{}, valueInvalid
 		}
 	}
-	w, status := colourNumber(channels[1], .01, 1)
+	w, status := colourNumberWithBudget(channels[1], .01, 1, budget)
 	if status != valueResolved {
 		return RGBA{}, status
 	}
-	bk, status := colourNumber(channels[2], .01, 1)
+	bk, status := colourNumberWithBudget(channels[2], .01, 1, budget)
 	if status != valueResolved {
 		return RGBA{}, status
 	}
-	a, status := parseAlpha(alphaText)
+	a, status := parseAlphaWithBudget(alphaText, budget)
 	if status != valueResolved {
 		return RGBA{}, status
 	}
@@ -513,6 +540,4 @@ func parseHWBFunction(body string) (RGBA, valueStatus) {
 	return RGBA{r*factor + w, g*factor + w, b*factor + w, a}, valueResolved
 }
 
-func colourString(c RGBA) string {
-	return fmt.Sprintf("rgba(%g,%g,%g,%g)", c.R*255, c.G*255, c.B*255, c.A)
-}
+func colourString(c RGBA) string { return colourStringWithBudget(c, nil) }

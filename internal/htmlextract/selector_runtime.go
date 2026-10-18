@@ -9,12 +9,10 @@ import (
 // Conservative estimates for retained selector maps and their entries. Slice
 // and struct payloads whose sizes are known continue to use unsafe.Sizeof.
 const (
-	ancestorStateEntryBytes     int64 = 48
-	ancestorStateMapBytes       int64 = 128
-	selectorIndexMapEntryBytes  int64 = 48
-	selectorIndexMapsBytes      int64 = 768
-	attributeCandidateBaseBytes int64 = 64
-	attributeCandidateMapBytes  int64 = 128
+	ancestorStateMapBytes      int64 = 128
+	selectorIndexMapEntryBytes int64 = 48
+	selectorIndexMapsBytes     int64 = 768
+	attributeCandidateMapBytes int64 = 128
 )
 
 type ancestorChainState struct {
@@ -133,7 +131,7 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 		}
 		if hasElementChild {
 			if mapStates {
-				cost := ancestorStateEntryBytes
+				cost := mapEntryAllocationBytes[*html.Node, ancestorChainState]()
 				if states == nil {
 					cost += ancestorStateMapBytes
 				}
@@ -333,7 +331,7 @@ func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *cpuGuard) (se
 	if len(result.direct)+len(result.ancestor) == 0 && !s.runtime.cacheMatches && !s.hasAncestorSelectorIndex() {
 		return result, true
 	}
-	bytes := attributeCandidateBaseBytes
+	bytes := mapEntryAllocationBytes[*html.Node, selectorAttributeCandidates]()
 	if s.runtime.attributeCandidates == nil {
 		bytes += attributeCandidateMapBytes
 	}
@@ -378,7 +376,7 @@ func (s *sheet) activateAncestorBuckets(node *html.Node, budget *cpuGuard) (sele
 	}
 	tag := node.Data
 	if node.Namespace != "" {
-		tag = asciiLower(tag)
+		tag = asciiLowerWithBudget(tag, budget)
 	}
 	activation.tag = s.index.ancestorTags[tag]
 	if len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
@@ -449,7 +447,7 @@ func (s *sheet) collectCandidates(n *html.Node, budget *cpuGuard) ([]selectorRef
 	}
 	tag := n.Data
 	if n.Namespace != "" {
-		tag = asciiLower(tag)
+		tag = asciiLowerWithBudget(tag, budget)
 	}
 	if !appendBucket(s.index.universal) || !appendBucket(s.index.tags[tag]) {
 		s.runtime.candidateScratch = refs
@@ -482,7 +480,7 @@ func (s *sheet) collectCandidates(n *html.Node, budget *cpuGuard) ([]selectorRef
 			}
 			ancestorTag := ancestor.Data
 			if ancestor.Namespace != "" {
-				ancestorTag = asciiLower(ancestorTag)
+				ancestorTag = asciiLowerWithBudget(ancestorTag, budget)
 			}
 			if !appendBucket(s.index.ancestorTags[ancestorTag]) {
 				s.runtime.candidateScratch = refs

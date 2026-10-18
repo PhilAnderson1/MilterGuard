@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // parseMSOConditionalStyles extracts style elements from a downlevel-hidden
@@ -16,13 +17,13 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 	if !s.checkCPU() {
 		return
 	}
-	fragment, ok := msoConditionalFragment(data)
+	fragment, ok := msoConditionalFragmentWithBudget(data, s.cpu)
 	if !ok || s.cascadeIncomplete || s.stopped {
 		return
 	}
 	// Most MSO comments contain alternate table markup rather than CSS. Avoid
 	// constructing a tokenizer for those very common fragments.
-	if !containsASCIIFold(fragment, "<style") {
+	if !containsASCIIFoldWithBudget(fragment, "<style", s.cpu) {
 		return
 	}
 	// Tokenizing the conditional markup is work in addition to parsing any CSS
@@ -30,8 +31,8 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 	if !s.checkCPU() {
 		return
 	}
-	z := html.NewTokenizerWithStop(strings.NewReader(fragment), s.shouldStop)
-	var style strings.Builder
+	z := html.NewTokenizerWithLimits(strings.NewReader(fragment), html.ResourceLimits{ShouldStop: s.shouldStop, Memory: s.memory})
+	var style []byte
 	var styleNode html.Node
 	inStyle := false
 	flush := func() bool {
@@ -39,12 +40,16 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 			return true
 		}
 		inStyle = false
-		if !cssTypeAttributeApplies(&styleNode) {
-			style.Reset()
+		if len(style) == 0 || !cssTypeAttributeAppliesWithBudget(&styleNode, s.resourceBudget()) {
+			style = style[:0]
 			return true
 		}
-		s.parseStylesheet(style.String(), attr(&styleNode, "media"), uncertainStylesheetOrigin)
-		style.Reset()
+		if !s.memory.Reserve(int64(len(style))) {
+			s.abandonCascade()
+			return false
+		}
+		s.parseStylesheet(string(style), attr(&styleNode, "media"), uncertainStylesheetOrigin)
+		style = style[:0]
 		return !s.cascadeIncomplete && !s.stopped
 	}
 	for {
@@ -69,7 +74,10 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 			styleNode = html.Node{Type: html.ElementNode, Data: "style"}
 			for hasAttributes {
 				key, value, more := z.TagAttr()
-				retainConditionalStyleAttribute(&styleNode, key, value)
+				if !retainConditionalStyleAttribute(&styleNode, key, value, s.memory) {
+					s.abandonCascade()
+					return
+				}
 				hasAttributes = more
 			}
 			inStyle = true
@@ -79,11 +87,17 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 			}
 			raw := z.Raw()
 			remaining := s.limits.CSSBytes - s.cssBytes
-			if remaining < 0 || len(raw) > remaining-style.Len() {
+			if remaining < 0 || len(raw) > remaining-len(style) {
 				s.abandonCascade()
 				return
 			}
-			style.Write(raw)
+			var admitted bool
+			style, admitted = growSlice(style, len(raw), s.memory)
+			if !admitted {
+				s.abandonCascade()
+				return
+			}
+			style = append(style, raw...)
 		case html.EndTagToken:
 			name, _ := z.TagName()
 			if inStyle && bytes.Equal(name, []byte("style")) && !flush() {
@@ -99,24 +113,44 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 // comment allocate a large synthetic html.Node outside the document's normal
 // attribute accounting. Keep the first occurrence, matching x/net/html's tree
 // builder treatment of duplicate HTML attributes.
-func retainConditionalStyleAttribute(style *html.Node, key, value []byte) {
-	name := string(key)
-	if (name != "type" && name != "media") || hasAttr(style, name) {
-		return
+func retainConditionalStyleAttribute(style *html.Node, key, value []byte, memory *resourceguard.Memory) bool {
+	var name string
+	switch string(key) {
+	case "type":
+		name = "type"
+	case "media":
+		name = "media"
+	default:
+		return true
+	}
+	if hasAttr(style, name) {
+		return true
+	}
+	if !memory.Reserve(int64(len(value))) {
+		return false
+	}
+	var admitted bool
+	style.Attr, admitted = growSlice(style.Attr, 1, memory)
+	if !admitted {
+		return false
 	}
 	style.Attr = append(style.Attr, html.Attribute{Key: name, Val: string(value)})
+	return true
 }
 
 func msoConditionalFragment(data string) (string, bool) {
+	return msoConditionalFragmentWithBudget(data, nil)
+}
+func msoConditionalFragmentWithBudget(data string, budget *cpuGuard) (string, bool) {
 	trimmed := strings.TrimSpace(data)
 	if len(trimmed) < len("[if ]>") || !hasASCIIFoldPrefix(trimmed, "[if ") {
 		return "", false
 	}
 	start := strings.Index(trimmed, "]>")
-	if start < 0 || !containsASCIIFold(trimmed[len("[if "):start], "mso") {
+	if start < 0 || !containsASCIIFoldWithBudget(trimmed[len("[if "):start], "mso", budget) {
 		return "", false
 	}
-	end := lastASCIIFoldIndex(trimmed, "<![endif]")
+	end := lastASCIIFoldIndexWithBudget(trimmed, "<![endif]", budget)
 	if end <= start+2 {
 		return "", false
 	}
@@ -371,7 +405,13 @@ func hasASCIIFoldPrefix(value, prefix string) bool {
 }
 
 func containsASCIIFold(value, target string) bool {
+	return containsASCIIFoldWithBudget(value, target, nil)
+}
+func containsASCIIFoldWithBudget(value, target string, budget *cpuGuard) bool {
 	for start := 0; start+len(target) <= len(value); start++ {
+		if start%stringWorkChunk == 0 && len(value) > stringWorkChunk && budget.stopNow(true) {
+			return false
+		}
 		if equalASCIIFold(value[start:start+len(target)], target) {
 			return true
 		}
@@ -380,7 +420,13 @@ func containsASCIIFold(value, target string) bool {
 }
 
 func lastASCIIFoldIndex(value, target string) int {
+	return lastASCIIFoldIndexWithBudget(value, target, nil)
+}
+func lastASCIIFoldIndexWithBudget(value, target string, budget *cpuGuard) int {
 	for start := len(value) - len(target); start >= 0; start-- {
+		if start%stringWorkChunk == 0 && len(value) > stringWorkChunk && budget.stopNow(true) {
+			return -1
+		}
 		if equalASCIIFold(value[start:start+len(target)], target) {
 			return start
 		}

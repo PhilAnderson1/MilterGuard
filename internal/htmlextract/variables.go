@@ -19,6 +19,14 @@ const (
 	variableScopeBaseBytes      int64 = 256
 )
 
+// Maps have a substantial fixed cost even with just one entry. These are
+// conservative allowances, not a model of a particular Go map implementation.
+const (
+	literalVariableScopeBaseBytes int64 = 512
+	literalVariableEntryBytes     int64 = 96
+	variableColourMapBaseBytes    int64 = 256
+)
+
 const maxCSSValueDepth = 256
 
 type valueToken struct {
@@ -27,8 +35,8 @@ type valueToken struct {
 }
 
 func lexValue(s string, budget *cpuGuard) ([]valueToken, valueStatus) {
-	// NewInputString owns one mutable copy including its terminal NUL.
-	if budget != nil && !budget.reserve(int64(len(s))+1) {
+	// Admit the mutable input copy and lexer setup before constructing either.
+	if budget != nil && !budget.reserve(int64(len(s))+1+cssLexerSetupBytes) {
 		return nil, valueUnsupported
 	}
 	limits := css.ResourceLimits{}
@@ -69,8 +77,9 @@ func lexValue(s string, budget *cpuGuard) ([]valueToken, valueStatus) {
 	}
 	return ts, valueResolved
 }
-func hasVariables(s string) bool {
-	return containsFold(s, "var(") || strings.Contains(s, "\\")
+func hasVariables(s string) bool { return hasVariablesWithBudget(s, nil) }
+func hasVariablesWithBudget(s string, budget *cpuGuard) bool {
+	return containsASCIIFoldWithBudget(s, "var(", budget) || indexByteWithBudget(s, '\\', budget) >= 0
 }
 
 func tokensHaveVariables(tokens []valueToken) bool {
@@ -93,10 +102,14 @@ func containsFold(s, substr string) bool {
 	}
 	return false
 }
-func tokenText(ts []valueToken) string {
+func tokenText(ts []valueToken) string { return tokenTextWithBudget(ts, nil) }
+
+func tokenTextWithBudget(ts []valueToken, budget *cpuGuard) string {
 	var b strings.Builder
 	for _, t := range ts {
-		b.WriteString(t.raw)
+		if !budget.check() || !writeBudgetedString(&b, t.raw, budget) {
+			return ""
+		}
 	}
 	return b.String()
 }
@@ -199,7 +212,7 @@ func validVariableFunctions(ts []valueToken, budget *cpuGuard) bool {
 		if f.invalidName || f.nameTokens != 1 || (f.name.kind != css.IdentToken && f.name.kind != css.CustomPropertyNameToken) {
 			return false
 		}
-		decoded := cssUnescape(f.name.raw)
+		decoded := cssUnescapeWithBudget(f.name.raw, budget)
 		return strings.HasPrefix(decoded, "--") && decoded != "--"
 	}
 	addNameToken := func(token valueToken) {
@@ -296,7 +309,7 @@ func variableRefs(ts []valueToken, budget *cpuGuard) []string {
 				if !ok {
 					return nil
 				}
-				out = append(out, cssUnescape(ts[j].raw))
+				out = append(out, cssUnescapeWithBudget(ts[j].raw, budget))
 			}
 		}
 	}
@@ -369,7 +382,7 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 	if !budget.check() {
 		return unresolvedVariableScope(parent), true
 	}
-	if !budget.reserve(int64(len(defs))*96 + 64) {
+	if !budget.reserve(int64(len(defs))*literalVariableEntryBytes + literalVariableScopeBaseBytes) {
 		return unresolvedVariableScope(parent), true
 	}
 	s := &variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency, values: make(map[string]variableValue, len(defs))}
@@ -400,7 +413,7 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 	if !budget.check() {
 		return unresolvedVariableScope(parent), true
 	}
-	if !budget.reserve(int64(len(defs)+len(alternate))*24 + 64) {
+	if !budget.reserve(int64(len(defs)+len(alternate))*variableAlternateEntryBytes + variableColourMapBaseBytes) {
 		return unresolvedVariableScope(parent), true
 	}
 	s.colourDependent = make(map[string]bool, len(defs)+len(alternate))
@@ -434,7 +447,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	if !budget.reserve(int64(len(defs))*variableDefinitionWorkBytes + int64(len(alternate))*variableAlternateEntryBytes + variableScopeBaseBytes) {
 		return unresolvedVariableScope(parent)
 	}
-	s := &variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency, values: make(map[string]variableValue), colourDependent: make(map[string]bool)}
+	s := &variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency, values: make(map[string]variableValue)}
 	var ordered []string
 	for n := range defs {
 		ordered = append(ordered, n)
@@ -488,7 +501,11 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		if !definition.d.dependenciesReady {
 			dependencies = variableRefs(tokens[n], budget)
 		}
+		// Cached and missing dependencies still consume work on every edge.
 		for _, ref := range dependencies {
+			if !budget.check() {
+				return
+			}
 			if _, local := tokens[ref]; local {
 				visit(ref, depth+1)
 			}
@@ -544,7 +561,13 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	if len(alternate) == 0 && (parent == nil || !parent.hasColourDependency) {
 		return s
 	}
-	var dependencyState = make(map[string]uint8, len(defs))
+	if !budget.reserve(int64(len(defs)+len(alternate))*variableAlternateEntryBytes + variableColourMapBaseBytes) {
+		return unresolvedVariableScope(parent)
+	}
+	s.colourDependent = make(map[string]bool, len(defs)+len(alternate))
+	// Cycle detection is complete; reuse its scratch map for colour dependencies.
+	clear(states)
+	dependencyState := states
 	var dependsOnColourScheme func(string, int) bool
 	dependsOnColourScheme = func(name string, depth int) bool {
 		if depth >= maxCSSValueDepth {
@@ -577,6 +600,9 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 			dependent = parent.colourSchemeDependent(name, budget)
 		default:
 			for _, ref := range definition.d.variableDependencies {
+				if !budget.check() {
+					return true
+				}
 				if dependsOnColourScheme(ref, depth+1) {
 					dependent = true
 				}
@@ -613,7 +639,11 @@ func substitute(d *declaration, vars *variableScope, budget *cpuGuard) variableV
 
 // valueBlock records component-value boundaries in one pass. Mismatched
 // closing tokens remain inside their current block; EOF implicitly closes it.
-type valueBlock struct{ end, comma int }
+type valueBlock struct {
+	end, comma int
+	// Decode the immutable variable reference once, not on every element.
+	name string
+}
 
 func indexValueBlocks(ts []valueToken, budget *cpuGuard) ([]valueBlock, bool) {
 	if !budget.reserve(int64(len(ts)) * int64(unsafe.Sizeof(valueBlock{}))) {
@@ -644,6 +674,38 @@ func indexValueBlocks(ts []valueToken, budget *cpuGuard) ([]valueBlock, bool) {
 			}
 		}
 	}
+	for i, token := range ts {
+		if !budget.check() {
+			return nil, false
+		}
+		if token.kind != css.FunctionToken || !equalASCIIFold(token.raw, "var(") {
+			continue
+		}
+		end := blocks[i].end
+		if blocks[i].comma >= 0 {
+			end = blocks[i].comma
+		}
+		var name valueToken
+		count := 0
+		for j := i + 1; j < end; j++ {
+			if !budget.check() {
+				return nil, false
+			}
+			if ts[j].kind != css.WhitespaceToken && ts[j].kind != css.CommentToken {
+				name = ts[j]
+				count++
+				if count > 1 {
+					break
+				}
+			}
+		}
+		if count == 1 && (name.kind == css.IdentToken || name.kind == css.CustomPropertyNameToken) {
+			blocks[i].name = cssUnescapeWithBudget(name.raw, budget)
+		}
+	}
+	if budget.stopNow(false) {
+		return nil, false
+	}
 	return blocks, true
 }
 
@@ -673,32 +735,13 @@ func substituteIndexedTokens(ts []valueToken, blocks []valueBlock, lookup func(s
 			}
 			t := ts[i]
 			if t.kind != css.FunctionToken || !equalASCIIFold(t.raw, "var(") {
-				if !budget.reserve(int64(len(t.raw))) {
+				if !writeBudgetedString(&out, t.raw, budget) {
 					return variableValue{status: valueUnsupported}
 				}
-				out.WriteString(t.raw)
 				continue
 			}
 			end, comma := blocks[i].end, blocks[i].comma
-			nameEnd := end
-			if comma >= 0 {
-				nameEnd = comma
-			}
-			var nameToken valueToken
-			count := 0
-			for j := i + 1; j < nameEnd; j++ {
-				if !budget.check() {
-					return variableValue{status: valueUnsupported}
-				}
-				if ts[j].kind != css.WhitespaceToken && ts[j].kind != css.CommentToken {
-					nameToken = ts[j]
-					count++
-				}
-			}
-			if count != 1 || (nameToken.kind != css.IdentToken && nameToken.kind != css.CustomPropertyNameToken) {
-				return variableValue{status: valueInvalid}
-			}
-			name := cssUnescape(nameToken.raw)
+			name := blocks[i].name
 			if !strings.HasPrefix(name, "--") || name == "--" {
 				return variableValue{status: valueInvalid}
 			}
@@ -709,15 +752,17 @@ func substituteIndexedTokens(ts []valueToken, blocks []valueBlock, lookup func(s
 			if v.status != valueResolved {
 				return v
 			}
-			if !budget.check() || !budget.reserve(int64(len(v.text)+2)) {
+			if !budget.check() || !writeBudgetedString(&out, " ", budget) ||
+				!writeBudgetedString(&out, v.text, budget) || !writeBudgetedString(&out, " ", budget) {
 				return variableValue{status: valueUnsupported}
 			}
-			out.WriteByte(' ')
-			out.WriteString(v.text)
-			out.WriteByte(' ')
 			i = end
 		}
-		return variableValue{trimCSSWhitespace(out.String()), valueResolved}
+		text, ok := trimCSSWhitespaceWithBudget(out.String(), budget)
+		if !ok {
+			return variableValue{status: valueUnsupported}
+		}
+		return variableValue{text, valueResolved}
 	}
 	return expand(0, len(ts), depth)
 }

@@ -20,7 +20,7 @@ func resolveClip(p int, s string, budget *cpuGuard) (Value, valueStatus) {
 	ts = significant(ts, budget)
 	if p == clipPath {
 		if len(ts) == 3 && ts[0].kind == css.FunctionToken && ts[2].kind == css.RightParenthesisToken {
-			f := asciiLower(ts[0].raw)
+			f := asciiLowerWithBudget(ts[0].raw, budget)
 			arg := ts[1].raw
 			if f == "circle(" && (arg == "0" || arg == "0px" || arg == "0%") || f == "inset(" && arg == "50%" {
 				return Value{Text: s, Number: 1, Known: true}, valueResolved
@@ -30,7 +30,8 @@ func resolveClip(p int, s string, budget *cpuGuard) (Value, valueStatus) {
 	}
 	if len(ts) >= 2 && ts[0].raw == "rect(" && ts[len(ts)-1].kind == css.RightParenthesisToken {
 		args := ts[1 : len(ts)-1]
-		var parts []valueToken
+		var scratch [4]valueToken
+		parts := scratch[:0]
 		if len(args) == 7 {
 			for i, t := range args {
 				if i%2 == 1 {
@@ -55,7 +56,7 @@ func resolveClip(p int, s string, budget *cpuGuard) (Value, valueStatus) {
 			if x != "0" && !strings.HasSuffix(x, "px") {
 				return Value{Text: s}, valueUnsupported
 			}
-			n, ok := number(strings.TrimSuffix(x, "px"))
+			n, ok := numberWithBudget(strings.TrimSuffix(x, "px"), budget)
 			if !ok {
 				return Value{}, valueInvalid
 			}

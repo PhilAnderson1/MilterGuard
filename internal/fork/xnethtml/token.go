@@ -1396,9 +1396,7 @@ func NewTokenizer(r io.Reader) *Tokenizer {
 // consuming input. If shouldStop returns true, the tokenizer reports
 // ErrResourceStopped.
 func NewTokenizerWithStop(r io.Reader, shouldStop func() bool) *Tokenizer {
-	z := NewTokenizer(r)
-	z.guard = &resourceGuard{limits: ResourceLimits{ShouldStop: shouldStop}}
-	return z
+	return NewTokenizerWithLimits(r, ResourceLimits{ShouldStop: shouldStop})
 }
 
 // NewTokenizerFragment returns a new HTML Tokenizer for the given Reader, for

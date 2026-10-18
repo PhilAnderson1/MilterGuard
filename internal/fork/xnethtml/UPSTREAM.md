@@ -94,3 +94,10 @@ diagnostics remain: attachment filename decoding wraps and reports that text.
 TagAttr advances the shared operation counter before processing each attribute,
 covering both direct callers and Token materialization. Long-value scans retain
 their inner checks; short values accumulate toward the existing sampled check.
+
+`NewTokenizerWithLimits` exposes the existing shared memory and CPU guards to
+standalone tokenizer consumers, including conditional-comment style extraction.
+It admits the initial buffer and tokenizer/guard storage before construction;
+later allocations use the existing tokenizer accounting. Admission failures
+are reported through `Next`/`Err`. `NewTokenizerWithStop` delegates to this
+constructor with no memory budget.

@@ -8,6 +8,14 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 )
 
+// Input, lexer and parser objects are separate from their backing buffers.
+// Include a conservative allowance for the resource guard, captured callbacks
+// and allocation rounding. Buffer growth is charged separately by the parser.
+const (
+	cssLexerSetupBytes  = int64(unsafe.Sizeof(parse.Input{})+unsafe.Sizeof(css.Lexer{})) + 128
+	cssParserSetupBytes = cssLexerSetupBytes + int64(unsafe.Sizeof(css.Parser{}))
+)
+
 // cssParseSession owns state which is meaningful only while consuming one
 // stylesheet or style attribute. Retained rules and cumulative limits remain
 // on sheet.
@@ -72,17 +80,17 @@ func (p *cssParseSession) run(s *sheet) cssParseResult {
 		case css.ErrorGrammar:
 			stop = p.handleError(s, tokenType, values)
 		case css.BeginAtRuleGrammar:
-			stop = p.beginAtRule(s, string(data), values)
+			stop = p.beginAtRule(s, ownedString(data, s.cpu), values)
 		case css.EndAtRuleGrammar:
 			p.endAtRule()
 		case css.AtRuleGrammar:
-			stop = p.atRule(s, string(data), values)
+			stop = p.atRule(s, ownedString(data, s.cpu), values)
 		case css.BeginRulesetGrammar:
 			stop = p.beginRuleset(s, values)
 		case css.EndRulesetGrammar:
 			p.endRuleset()
 		case css.DeclarationGrammar, css.CustomPropertyGrammar:
-			stop = p.declaration(s, grammar, string(data), values)
+			stop = p.declaration(s, grammar, ownedString(data, s.cpu), values)
 		case css.QualifiedRuleGrammar, css.TokenGrammar:
 		}
 		if stop {
@@ -146,9 +154,9 @@ func (p *cssParseSession) beginAtRule(s *sheet, name string, values []css.Token)
 		return true
 	}
 	var condition mediaCondition
-	switch asciiLower(name) {
+	switch asciiLowerWithBudget(name, s.cpu) {
 	case "@media":
-		condition = s.parseMediaCondition(tokenString(values))
+		condition = s.parseMediaCondition(tokenStringWithBudget(values, s.cpu))
 	case "@font-face":
 		condition = mediaCondition{{schemes: colourSchemeBoth, never: true}}
 	case "@keyframes", "@-webkit-keyframes":
@@ -189,7 +197,7 @@ func (p *cssParseSession) atRule(s *sheet, name string, values []css.Token) bool
 	if !s.checkCPU() {
 		return true
 	}
-	name = asciiLower(name)
+	name = asciiLowerWithBudget(name, s.cpu)
 	if name == "@import" {
 		if p.importsAllowed && p.conditions == nil {
 			s.parseImport(values)
@@ -217,7 +225,7 @@ func (p *cssParseSession) beginRuleset(s *sheet, values []css.Token) bool {
 	if p.inline {
 		return false
 	}
-	selector := tokenString(values)
+	selector := tokenStringWithBudget(values, s.cpu)
 	if !s.checkCPU() {
 		return true
 	}
@@ -275,9 +283,9 @@ func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, propert
 		return true
 	}
 	if original := p.parser.OriginalData(); len(original) != 0 {
-		property = string(original)
+		property = ownedString(original, s.cpu)
 	}
-	property = normalizeDeclarationProperty(property)
+	property = normalizeDeclarationPropertyWithBudget(property, s.cpu)
 	insideNestedGroup := len(p.atRules) > 0 && p.atRules[len(p.atRules)-1].nested
 	if !p.inline && p.rulesetDepth > 0 && grammar != css.CustomPropertyGrammar &&
 		(hasTopLevelCSSBlock(values) || (p.current < 0 && insideNestedGroup)) {
@@ -288,7 +296,7 @@ func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, propert
 	if !applicable || !relevantNormalizedDeclarationProperty(property) {
 		return false
 	}
-	value := rawTokenString(values)
+	value := rawTokenStringWithBudget(values, s.cpu)
 	var declarations []declaration
 	if grammar == css.CustomPropertyGrammar {
 		valueTokens, status := lexValue(value, s.cpu)
@@ -297,7 +305,7 @@ func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, propert
 		valueTokens, status := ownedValueTokens(values, value, s.cpu)
 		declarations = s.declarationsFromTokens(property, valueTokens, status, value)
 	} else {
-		declarations = s.declarationsFromParsed(property, parseUnretainedCSSTokens(values, value), false)
+		declarations = s.declarationsFromParsed(property, parseUnretainedCSSTokensWithBudget(values, value, s.cpu), false)
 	}
 	if len(declarations) > maxCSSDeclarations-s.declarationCount {
 		s.abandonCascade()

@@ -802,11 +802,11 @@ func TestMSODownlevelRevealedTableCellKeepsLocalUncertainty(t *testing.T) {
 
 func TestMSOConditionalStyleRetainsOnlyConsumedAttributes(t *testing.T) {
 	var style xhtml.Node
-	retainConditionalStyleAttribute(&style, []byte("data-unused"), []byte(strings.Repeat("x", 1024)))
-	retainConditionalStyleAttribute(&style, []byte("type"), []byte("text/plain"))
-	retainConditionalStyleAttribute(&style, []byte("type"), []byte("text/css"))
-	retainConditionalStyleAttribute(&style, []byte("media"), []byte("screen"))
-	retainConditionalStyleAttribute(&style, []byte("title"), []byte("unused"))
+	retainConditionalStyleAttribute(&style, []byte("data-unused"), []byte(strings.Repeat("x", 1024)), nil)
+	retainConditionalStyleAttribute(&style, []byte("type"), []byte("text/plain"), nil)
+	retainConditionalStyleAttribute(&style, []byte("type"), []byte("text/css"), nil)
+	retainConditionalStyleAttribute(&style, []byte("media"), []byte("screen"), nil)
+	retainConditionalStyleAttribute(&style, []byte("title"), []byte("unused"), nil)
 	if len(style.Attr) != 2 {
 		t.Fatalf("retained attributes = %+v, want only type and media", style.Attr)
 	}

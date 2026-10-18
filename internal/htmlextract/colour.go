@@ -24,6 +24,9 @@ const colourThreshold = .005
 // plus CSS-wide keywords. It resets image as well as colour. Other syntax wins
 // as unresolved for both components; a later colour alone cannot reset an image.
 func backgroundDeclarations(value string, important bool, order int, budget *cpuGuard) []declaration {
+	if !budget.reserve(2 * int64(unsafe.Sizeof(declaration{}))) {
+		return nil
+	}
 	tokens, status := lexValue(value, budget)
 	return backgroundDeclarationsTokens(value, tokens, status, important, order, budget)
 }
@@ -49,7 +52,7 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 			if !budget.check() {
 				return nil
 			}
-			tt, s := valueToken.kind, asciiLower(valueToken.raw)
+			tt, s := valueToken.kind, asciiLowerWithBudget(valueToken.raw, budget)
 			if isClosingToken(tt) && len(stack) == 0 {
 				return nil
 			}
@@ -61,17 +64,19 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 				haveNone = true
 				continue
 			}
-			b.WriteString(s)
+			if !writeBudgetedString(&b, s, budget) {
+				return nil
+			}
 		}
 		token := trimCSSWhitespace(b.String())
 		if token != "" {
 			haveColour = true
 			colourValue = token
-			_, status := readColour(token)
+			_, status := readColourWithBudget(token, budget)
 			if token == "currentcolor" {
 				status = valueResolved
 			}
-			if backgroundImageSyntax(token) {
+			if backgroundImageSyntaxWithBudget(token, budget) {
 				// Images paint over the final layer's explicit colour. Preserve
 				// that fallback rather than assuming every image shorthand resets
 				// the colour to transparent.
@@ -92,13 +97,13 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 		if !haveColour && !haveNone {
 			return nil
 		}
-		if unsupported && !backgroundImageSyntax(token) {
+		if unsupported && !backgroundImageSyntaxWithBudget(token, budget) {
 			colourValue = value
 			image = value
 		}
 	}
 	colourUnsupported, imageUnsupported := unsupported, unsupported
-	if backgroundImageSyntax(value) {
+	if backgroundImageSyntaxWithBudget(value, budget) {
 		colourUnsupported = imageColourStatus != valueResolved
 		imageUnsupported = true
 	}
@@ -145,22 +150,22 @@ func backgroundLayerColour(tokens []valueToken, budget *cpuGuard) (string, value
 		switch token.kind {
 		case css.FunctionToken:
 			end := closing(tokens, i, budget)
-			name := asciiLower(cssUnescape(strings.TrimSuffix(token.raw, "(")))
+			name := asciiLowerWithBudget(cssUnescapeWithBudget(strings.TrimSuffix(token.raw, "("), budget), budget)
 			if isColourFunction(name) {
 				last := end + 1
 				if last > len(tokens) {
 					last = len(tokens)
 				}
-				candidate = asciiLower(tokenText(tokens[i:last]))
+				candidate = asciiLowerWithBudget(tokenTextWithBudget(tokens[i:last], budget), budget)
 			}
 			i = end
 		case css.IdentToken, css.HashToken:
-			candidate = asciiLower(cssUnescape(token.raw))
+			candidate = asciiLowerWithBudget(cssUnescapeWithBudget(token.raw, budget), budget)
 		}
 		if candidate == "" {
 			continue
 		}
-		_, candidateStatus := readColour(candidate)
+		_, candidateStatus := readColourWithBudget(candidate, budget)
 		if candidate == "currentcolor" {
 			candidateStatus = valueResolved
 		}
@@ -182,9 +187,15 @@ func isColourFunction(name string) bool {
 }
 
 func countUnsupportedColourFunctions(tokens []valueToken) int {
+	return countUnsupportedColourFunctionsWithBudget(tokens, nil)
+}
+func countUnsupportedColourFunctionsWithBudget(tokens []valueToken, budget *cpuGuard) int {
 	count := 0
 	for _, token := range tokens {
-		if token.kind == css.FunctionToken && isUnsupportedColourFunction(token.raw) {
+		if !budget.check() {
+			return count
+		}
+		if token.kind == css.FunctionToken && isUnsupportedColourFunctionWithBudget(token.raw, budget) {
 			count++
 		}
 	}
@@ -192,7 +203,10 @@ func countUnsupportedColourFunctions(tokens []valueToken) int {
 }
 
 func isUnsupportedColourFunction(raw string) bool {
-	name := asciiLower(cssUnescape(strings.TrimSuffix(raw, "(")))
+	return isUnsupportedColourFunctionWithBudget(raw, nil)
+}
+func isUnsupportedColourFunctionWithBudget(raw string, budget *cpuGuard) bool {
+	name := asciiLowerWithBudget(cssUnescapeWithBudget(strings.TrimSuffix(raw, "("), budget), budget)
 	switch name {
 	case "lab", "lch", "oklab", "oklch", "color", "color-mix", "device-cmyk", "light-dark":
 		return true
@@ -200,12 +214,13 @@ func isUnsupportedColourFunction(raw string) bool {
 	return false
 }
 
-func backgroundImageSyntax(value string) bool {
-	value = asciiLower(value)
-	return strings.Contains(value, "url(") || strings.Contains(value, "gradient(") || strings.Contains(value, "image-set(") || strings.Contains(value, "cross-fade(")
+func backgroundImageSyntax(value string) bool { return backgroundImageSyntaxWithBudget(value, nil) }
+func backgroundImageSyntaxWithBudget(value string, budget *cpuGuard) bool {
+	return containsASCIIFoldWithBudget(value, "url(", budget) || containsASCIIFoldWithBudget(value, "gradient(", budget) || containsASCIIFoldWithBudget(value, "image-set(", budget) || containsASCIIFoldWithBudget(value, "cross-fade(", budget)
 }
 
-func legacyDimension(value string) (string, bool) {
+func legacyDimension(value string) (string, bool) { return legacyDimensionWithBudget(value, nil) }
+func legacyDimensionWithBudget(value string, budget *cpuGuard) (string, bool) {
 	value = strings.TrimSpace(value)
 	percentage := strings.HasSuffix(value, "%")
 	if percentage {
@@ -215,9 +230,15 @@ func legacyDimension(value string) (string, bool) {
 		return "", false
 	}
 	for i := range value {
+		if i%stringWorkChunk == 0 && len(value) > stringWorkChunk && budget.stopNow(true) {
+			return "", false
+		}
 		if value[i] < '0' || value[i] > '9' {
 			return "", false
 		}
+	}
+	if !budget.reserve(int64(len(value) + 2)) {
+		return "", false
 	}
 	if percentage {
 		return value + "%", true
@@ -248,16 +269,16 @@ func legacyDeclarationsWithBudget(n *html.Node, budget *cpuGuard) []declaration 
 		addDeclaration(declaration{prop: display, value: "none", order: -2, unsupported: true})
 	}
 	add := func(prop int, value string) {
-		value = asciiLower(strings.TrimSpace(value))
+		value = asciiLowerWithBudget(strings.TrimSpace(value), budget)
 		if value == "" || value == "transparent" {
 			return
 		}
 		if len(value) == 6 && !strings.HasPrefix(value, "#") {
-			if _, status := readColour("#" + value); status == valueResolved {
+			if _, status := readColourWithBudget("#"+value, budget); status == valueResolved {
 				value = "#" + value
 			}
 		}
-		_, status := readColour(value)
+		_, status := readColourWithBudget(value, budget)
 		addDeclaration(declaration{prop: prop, value: value, order: -1, unsupported: status != valueResolved})
 	}
 	switch n.Data {
@@ -268,7 +289,7 @@ func legacyDeclarationsWithBudget(n *html.Node, budget *cpuGuard) []declaration 
 		add(color, attr(n, "color"))
 	}
 	addDimension := func(prop int, name string) {
-		if value, ok := legacyDimension(attr(n, name)); ok {
+		if value, ok := legacyDimensionWithBudget(attr(n, name), budget); ok {
 			addDeclaration(declaration{prop: prop, value: value, order: -1})
 		}
 	}
@@ -285,6 +306,9 @@ func legacyDeclarationsWithBudget(n *html.Node, budget *cpuGuard) []declaration 
 	switch n.Data {
 	case "body", "table", "td", "th":
 		if v := attr(n, "background"); v != "" {
+			if !budget.reserve(int64(len("legacy-image:") + len(v))) {
+				return nil
+			}
 			addDeclaration(declaration{prop: backgroundImage, value: "legacy-image:" + v, order: -1, unsupported: true})
 		}
 	}

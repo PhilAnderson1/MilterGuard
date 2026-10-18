@@ -12,10 +12,6 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
-// Conservative retained-size estimate for one entry in the map that attaches
-// prepared inline and legacy declarations to a DOM element.
-const elementPreparationEntryBytes int64 = 128
-
 // Text describes one extractable text node. Label and ConcealmentReasons are
 // aggregated across every evaluated viewing case. FontSize and
 // EffectiveOpacity begin with the narrowest-case values; when either explains
@@ -263,9 +259,9 @@ func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) e
 	if href, media, applies := styles.stylesheetLink(node); applies && (frame.scope == scopeActive || frame.scope == scopeHead) {
 		styles.loadStylesheetReference(href, media)
 	}
-	if node.Data == "style" && cssTypeAttributeApplies(node) && (frame.scope == scopeActive || frame.scope == scopeHead) && !styles.cascadeIncomplete && !styles.stopped {
+	if node.Data == "style" && cssTypeAttributeAppliesWithBudget(node, w.processor.cpu) && (frame.scope == scopeActive || frame.scope == scopeHead) && !styles.cascadeIncomplete && !styles.stopped {
 		remaining := styles.limits.CSSBytes - styles.cssBytes
-		cssText, complete := boundedStyleText(node, remaining)
+		cssText, complete := boundedStyleTextWithBudget(node, remaining, w.processor.cpu)
 		if !complete {
 			styles.abandonCascade()
 		} else {
@@ -356,7 +352,7 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 }
 
 func (d *parsedDocument) storePreparation(n *html.Node, prepared elementPreparation) bool {
-	if _, exists := d.elements[n]; !exists && !d.memory.Reserve(elementPreparationEntryBytes) {
+	if _, exists := d.elements[n]; !exists && !d.memory.Reserve(mapEntryAllocationBytes[*html.Node, elementPreparation]()) {
 		return false
 	}
 	d.elements[n] = prepared
@@ -364,6 +360,9 @@ func (d *parsedDocument) storePreparation(n *html.Node, prepared elementPreparat
 }
 
 func boundedStyleText(style *html.Node, maximum int) (string, bool) {
+	return boundedStyleTextWithBudget(style, maximum, nil)
+}
+func boundedStyleTextWithBudget(style *html.Node, maximum int, budget *cpuGuard) (string, bool) {
 	if maximum < 0 {
 		return "", false
 	}
@@ -375,7 +374,9 @@ func boundedStyleText(style *html.Node, maximum int) (string, bool) {
 		if len(child.Data) > maximum-css.Len() {
 			return "", false
 		}
-		css.WriteString(child.Data)
+		if !budget.check() || !writeBudgetedString(&css, child.Data, budget) {
+			return "", false
+		}
 	}
 	return css.String(), true
 }

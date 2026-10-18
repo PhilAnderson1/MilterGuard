@@ -43,3 +43,10 @@ func (g *cpuGuard) stopNow(sampleExternal bool) bool {
 func (g *cpuGuard) reserve(bytes int64) bool {
 	return g == nil || g.memory == nil || g.memory.Reserve(bytes)
 }
+
+func (s *sheet) resourceBudget() *cpuGuard {
+	if s.cpu != nil {
+		return s.cpu
+	}
+	return &cpuGuard{memory: s.memory, shouldStop: s.shouldStop}
+}

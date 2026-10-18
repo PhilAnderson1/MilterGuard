@@ -105,19 +105,14 @@ func TestAncestorMatchingWithoutCacheCapacity(t *testing.T) {
 }
 
 func TestMediaRetentionAccounting(t *testing.T) {
+
 	m := resourceguard.NewMemory(1)
 	s := sheet{memory: m, cpu: &cpuGuard{memory: m}}
-	for i := 0; i < 10000; i++ {
-		if !s.mediaCanApply(fmt.Sprintf("screen and (min-width:%dpx)", i)) {
-			t.Fatal("applicable query lost")
-		}
+	s.mediaCanApply("screen and (min-width:1px)")
+	if !m.Exhausted() {
+		t.Fatal("temporary applicability parsing bypassed budget")
 	}
-	if m.Used() != 0 || m.Exhausted() {
-		t.Fatal("one-shot parsing retained state")
-	}
-	if got := s.parseMediaCondition("screen and (min-width:1px)"); got != nil || !m.Exhausted() {
-		t.Fatal("required retention bypassed budget")
-	}
+
 	for _, query := range []string{"print", "screen and (min-width:1px), (max-width:10px)", "unsupported", strings.Repeat("x", 4097), strings.Repeat("screen and ", 17) + "screen"} {
 		m := resourceguard.NewMemory(10000)
 		if got := parseMediaBudgeted(query, m); !reflect.DeepEqual(got, parseMedia(query)) || m.Used() == 0 || m.Exhausted() {

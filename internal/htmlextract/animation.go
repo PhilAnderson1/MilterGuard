@@ -14,15 +14,15 @@ type animationValue struct {
 	unresolved bool
 }
 
-func animationName(kind css.TokenType, raw string) (string, bool) {
+func animationName(kind css.TokenType, raw string, budget *cpuGuard) (string, bool) {
 	if kind == css.StringToken && len(raw) >= 2 && raw[0] == raw[len(raw)-1] {
-		return cssUnescape(raw[1 : len(raw)-1]), true
+		return cssUnescapeWithBudget(raw[1:len(raw)-1], budget), true
 	}
 	if kind != css.IdentToken && kind != css.CustomPropertyNameToken {
 		return "", false
 	}
-	name := cssUnescape(raw)
-	switch asciiLower(name) {
+	name := cssUnescapeWithBudget(raw, budget)
+	switch asciiLowerWithBudget(name, budget) {
 	case "none", "initial", "inherit", "unset", "revert", "revert-layer", "default":
 		return "", false
 	}
@@ -33,22 +33,30 @@ func (s *sheet) recordKeyframeName(tokens []css.Token) {
 	var name string
 	found := false
 	for _, token := range tokens {
+		if !s.checkCPU() {
+			return
+		}
 		if token.TokenType == css.WhitespaceToken || token.TokenType == css.CommentToken {
 			continue
 		}
 		if found {
 			return // A keyframes prelude contains exactly one name.
 		}
+		if !s.cpu.reserve(int64(len(token.Data))) {
+			return
+		}
 		var ok bool
-		name, ok = animationName(token.TokenType, string(token.Data))
+		name, ok = animationName(token.TokenType, string(token.Data), s.cpu)
 		if !ok {
 			return
 		}
 		found = true
 	}
 	if found {
-		// Source bytes and this prelude's planning work have already been
-		// admitted by parseCSSResult. The registry shares those document bounds.
+		// Charge each distinct retained registry entry as well as its name.
+		if _, exists := s.keyframeNames[name]; !exists && !s.memory.Reserve(128) {
+			return
+		}
 		if s.keyframeNames == nil {
 			s.keyframeNames = make(map[string]struct{})
 		}
@@ -66,7 +74,7 @@ func parseAnimationValue(value string, shorthand bool, budget *cpuGuard) animati
 		return animationValue{unresolved: true}
 	}
 	if len(tokens) == 1 && tokens[0].kind == css.IdentToken {
-		switch asciiLower(cssUnescape(tokens[0].raw)) {
+		switch asciiLowerWithBudget(cssUnescapeWithBudget(tokens[0].raw, budget), budget) {
 		case "initial", "unset":
 			return animationValue{}
 		case "inherit", "revert", "revert-layer":
@@ -78,6 +86,9 @@ func parseAnimationValue(value string, shorthand bool, budget *cpuGuard) animati
 		end := start
 		depth := 0
 		for end < len(tokens) {
+			if !budget.check() {
+				return animationValue{unresolved: true}
+			}
 			token := tokens[end]
 			if token.kind == css.CommaToken && depth == 0 {
 				break
@@ -95,11 +106,16 @@ func parseAnimationValue(value string, shorthand bool, budget *cpuGuard) animati
 		if depth != 0 || start == end {
 			return animationValue{unresolved: true}
 		}
-		name, named, ok := singleAnimationName(tokens[start:end], shorthand)
+		name, named, ok := singleAnimationName(tokens[start:end], shorthand, budget)
 		if !ok {
 			return animationValue{unresolved: true}
 		}
 		if named {
+			var admitted bool
+			result.names, admitted = growSlice(result.names, 1, budget.allocationMemory())
+			if !admitted {
+				return animationValue{unresolved: true}
+			}
 			result.names = append(result.names, name)
 		}
 		if end == len(tokens) {
@@ -113,15 +129,15 @@ func parseAnimationValue(value string, shorthand bool, budget *cpuGuard) animati
 	return result
 }
 
-func singleAnimationName(tokens []valueToken, shorthand bool) (name string, named, ok bool) {
+func singleAnimationName(tokens []valueToken, shorthand bool, budget *cpuGuard) (name string, named, ok bool) {
 	if !shorthand {
 		if len(tokens) != 1 {
 			return "", false, false
 		}
-		if tokens[0].kind == css.IdentToken && asciiLower(cssUnescape(tokens[0].raw)) == "none" {
+		if tokens[0].kind == css.IdentToken && asciiLowerWithBudget(cssUnescapeWithBudget(tokens[0].raw, budget), budget) == "none" {
 			return "", false, true
 		}
-		name, ok = animationName(tokens[0].kind, tokens[0].raw)
+		name, ok = animationName(tokens[0].kind, tokens[0].raw, budget)
 		return name, ok, ok
 	}
 	// Shorthand keywords fill their other longhand slots before animation-name.
@@ -129,8 +145,11 @@ func singleAnimationName(tokens []valueToken, shorthand bool) (name string, name
 	var timing, iteration, direction, fill, play, nameSet bool
 	times := 0
 	for i := 0; i < len(tokens); i++ {
+		if !budget.check() {
+			return "", false, false
+		}
 		token := tokens[i]
-		keyword := asciiLower(cssUnescape(token.raw))
+		keyword := asciiLowerWithBudget(cssUnescapeWithBudget(token.raw, budget), budget)
 		switch token.kind {
 		case css.DimensionToken:
 			unit := "s"
@@ -140,14 +159,14 @@ func singleAnimationName(tokens []valueToken, shorthand bool) (name string, name
 			if !strings.HasSuffix(keyword, unit) || times == 2 {
 				return "", false, false
 			}
-			n, valid := number(strings.TrimSuffix(keyword, unit))
+			n, valid := numberWithBudget(strings.TrimSuffix(keyword, unit), budget)
 			if !valid || (times == 0 && n < 0) {
 				return "", false, false
 			}
 			times++
 			continue
 		case css.NumberToken:
-			n, valid := number(token.raw)
+			n, valid := numberWithBudget(token.raw, budget)
 			if !valid || n < 0 || iteration {
 				return "", false, false
 			}
@@ -157,7 +176,7 @@ func singleAnimationName(tokens []valueToken, shorthand bool) (name string, name
 			if timing {
 				return "", false, false
 			}
-			end, valid := animationTimingFunction(tokens, i)
+			end, valid := animationTimingFunction(tokens, i, budget)
 			if !valid {
 				return "", false, false
 			}
@@ -189,7 +208,7 @@ func singleAnimationName(tokens []valueToken, shorthand bool) (name string, name
 		if token.kind == css.IdentToken && keyword == "none" {
 			continue
 		}
-		name, named = animationName(token.kind, token.raw)
+		name, named = animationName(token.kind, token.raw, budget)
 		if !named {
 			return "", false, false
 		}
@@ -199,9 +218,12 @@ func singleAnimationName(tokens []valueToken, shorthand bool) (name string, name
 
 // Recognise the established easing functions. Newer or complex unsupported
 // syntax remains uncertain rather than silently selecting no animation.
-func animationTimingFunction(tokens []valueToken, start int) (int, bool) {
+func animationTimingFunction(tokens []valueToken, start int, budget *cpuGuard) (int, bool) {
 	end := start + 1
 	for end < len(tokens) && tokens[end].kind != css.RightParenthesisToken {
+		if !budget.check() {
+			return 0, false
+		}
 		if tokens[end].kind == css.FunctionToken || tokens[end].kind == css.LeftParenthesisToken {
 			return 0, false
 		}
@@ -211,7 +233,7 @@ func animationTimingFunction(tokens []valueToken, start int) (int, bool) {
 		return 0, false
 	}
 	args := tokens[start+1 : end]
-	switch asciiLower(cssUnescape(tokens[start].raw)) {
+	switch asciiLowerWithBudget(cssUnescapeWithBudget(tokens[start].raw, budget), budget) {
 	case "cubic-bezier(":
 		if len(args) != 7 {
 			return 0, false
@@ -223,7 +245,7 @@ func animationTimingFunction(tokens []valueToken, start int) (int, bool) {
 				}
 				continue
 			}
-			n, ok := number(token.raw)
+			n, ok := numberWithBudget(token.raw, budget)
 			if token.kind != css.NumberToken || !ok || (i%4 == 0 && (n < 0 || n > 1)) {
 				return 0, false
 			}
@@ -232,7 +254,7 @@ func animationTimingFunction(tokens []valueToken, start int) (int, bool) {
 		if len(args) != 1 && len(args) != 3 {
 			return 0, false
 		}
-		n, ok := number(args[0].raw)
+		n, ok := numberWithBudget(args[0].raw, budget)
 		if args[0].kind != css.NumberToken || !ok || n < 1 || strings.ContainsAny(args[0].raw, ".eE") {
 			return 0, false
 		}
@@ -240,7 +262,7 @@ func animationTimingFunction(tokens []valueToken, start int) (int, bool) {
 			if args[1].kind != css.CommaToken || args[2].kind != css.IdentToken {
 				return 0, false
 			}
-			switch asciiLower(cssUnescape(args[2].raw)) {
+			switch asciiLowerWithBudget(cssUnescapeWithBudget(args[2].raw, budget), budget) {
 			case "jump-start", "jump-end", "jump-both", "start", "end":
 			case "jump-none":
 				if n < 2 {

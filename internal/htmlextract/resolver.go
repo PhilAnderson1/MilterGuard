@@ -13,7 +13,6 @@ const (
 	mediaCacheMapBytes      int64 = 128
 	mediaStateSliceOverhead int64 = 48
 	matchCacheMapBytes      int64 = 128
-	matchCacheEntryBytes    int64 = 32
 )
 
 type mediaCacheKey struct {
@@ -112,7 +111,7 @@ func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
 	if s.runtime.matchCacheEntries >= maxMatchCacheEntries {
 		return
 	}
-	cost := matchCacheEntryBytes
+	cost := mapEntryAllocationBytes[*html.Node, uint8]()
 	var cache map[*html.Node]uint8
 	if s.runtime.matchCaches == nil {
 		cost += int64(s.index.count) * int64(unsafe.Sizeof(map[*html.Node]uint8{}))
@@ -252,7 +251,10 @@ func resolvedDeclaration(d *declaration, property int, context evaluationContext
 	if v.status == valueUnsupported {
 		return Value{Text: d.value}, valueUnsupported
 	}
-	value := normalizeCSSKeyword(v.text)
+	value, normalized := normalizeCSSKeywordWithBudget(v.text, context.budget)
+	if !normalized {
+		return Value{Text: v.text}, valueUnsupported
+	}
 	if d.shorthand {
 		if property == overflowX || property == overflowY {
 			values, ok, uncertain := overflowShorthandValues(value)
@@ -279,7 +281,7 @@ func resolvedDeclaration(d *declaration, property int, context evaluationContext
 	var status valueStatus
 	if (property == fontSize || property == opacity) && isMath(value) {
 		if !hadVar && d.tokensReady && d.valueStatus == valueResolved {
-			out, status = evalMathTokens(property, value, d.valueTokens, context.parent, context.root, context.budget)
+			out, status = evalPreparedMathTokens(property, value, d.valueTokens, d.mathLiterals, context.parent, context.root, context.budget)
 		} else {
 			out, status = evalMath(property, value, context.parent, context.root, context.budget)
 		}
@@ -510,8 +512,11 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	if !work.check() {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
-	variableMemo := declarationScopeMemo{}
-	context := evaluationContext{parent: parent, root: root, vars: parentVars, budget: work, variableMemo: &variableMemo}
+	// Resolution is sequential; reuse scratch rather than allocating a memo
+	// for every element and viewing case. Never retain a previous element's key.
+	variableMemo := &s.runtime.variableMemo
+	*variableMemo = declarationScopeMemo{}
+	context := evaluationContext{parent: parent, root: root, vars: parentVars, budget: work, variableMemo: variableMemo}
 	winners, complete := s.collectCascade(n, refs, legacy, inline, media, selectorContext, work, context)
 	if !complete {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}

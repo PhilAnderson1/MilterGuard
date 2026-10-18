@@ -2,6 +2,7 @@ package html
 
 import (
 	"errors"
+	"io"
 	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
@@ -16,6 +17,19 @@ var ErrResourceStopped = errors.New("html: resource processing stopped")
 type ResourceLimits struct {
 	ShouldStop func() bool
 	Memory     *resourceguard.Memory
+}
+
+// NewTokenizerWithLimits applies shared allocation accounting and cooperative
+// cancellation to a standalone tokenizer. Admission failures are reported by
+// Next and Err, including failure to admit the initial buffer.
+func NewTokenizerWithLimits(r io.Reader, limits ResourceLimits) *Tokenizer {
+	const initialBytes = 4096 + int64(unsafe.Sizeof(Tokenizer{})) + int64(unsafe.Sizeof(resourceGuard{}))
+	if !limits.Memory.Reserve(initialBytes) {
+		return &Tokenizer{err: &ResourceLimitError{"memory bytes", limits.Memory.Limit()}}
+	}
+	z := NewTokenizer(r)
+	z.guard = &resourceGuard{limits: limits}
+	return z
 }
 
 // ResourceLimitError identifies the parser resource that exceeded its limit.

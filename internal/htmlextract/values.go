@@ -1,9 +1,7 @@
 package htmlextract
 
 import (
-	"fmt"
 	"math"
-	"strconv"
 	"strings"
 )
 
@@ -49,53 +47,7 @@ func inherits(p int) bool { return p == visibility || p == fontSize || p == line
 // number parses the decimal syntax accepted by CSS <number>. strconv.ParseFloat
 // alone is too permissive here: it also accepts Go spellings such as hexadecimal
 // floats and underscore separators that a browser does not treat as CSS numbers.
-func number(s string) (float64, bool) {
-	if !validCSSNumber(s) {
-		return 0, false
-	}
-	v, e := strconv.ParseFloat(s, 64)
-	return v, e == nil && !math.IsNaN(v) && !math.IsInf(v, 0)
-}
-
-func validCSSNumber(s string) bool {
-	i := 0
-	if i < len(s) && (s[i] == '+' || s[i] == '-') {
-		i++
-	}
-	integerStart := i
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		i++
-	}
-	hasInteger := i > integerStart
-	if i < len(s) && s[i] == '.' {
-		i++
-		fractionStart := i
-		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-			i++
-		}
-		// A decimal point is part of a CSS number only when followed by a
-		// digit. This deliberately rejects Go's accepted "1." spelling.
-		if i == fractionStart {
-			return false
-		}
-	} else if !hasInteger {
-		return false
-	}
-	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
-		i++
-		if i < len(s) && (s[i] == '+' || s[i] == '-') {
-			i++
-		}
-		exponentStart := i
-		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-			i++
-		}
-		if i == exponentStart {
-			return false
-		}
-	}
-	return i == len(s)
-}
+func number(s string) (float64, bool) { return numberWithBudget(s, nil) }
 
 func clamp(v, hi float64) float64 { return math.Min(hi, math.Max(0, v)) }
 
@@ -112,9 +64,13 @@ func resolve(p int, s string, parent, root *Style) (Value, valueStatus) {
 }
 
 func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (Value, valueStatus) {
-	s = normalizeCSSKeyword(s)
+	var normalized bool
+	s, normalized = normalizeCSSKeywordWithBudget(s, budget)
+	if !normalized {
+		return Value{}, valueUnsupported
+	}
 	if p >= properties {
-		return resolveLayoutProperty(p, s)
+		return resolveLayoutPropertyWithBudget(p, s, budget)
 	}
 	if strings.HasPrefix(s, "\"") || strings.HasPrefix(s, "'") {
 		return Value{}, valueInvalid
@@ -147,8 +103,10 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 		switch s {
 		case "none", "inline", "block", "inline-block", "list-item", "table", "table-row", "table-cell", "table-row-group", "table-header-group", "table-footer-group", "table-column", "table-column-group", "table-caption", "flex", "inline-flex", "grid", "inline-grid", "contents", "flow-root":
 			return Value{Text: s, Known: true}, valueResolved
+		case "run-in", "ruby", "ruby-base", "ruby-text", "ruby-base-container", "ruby-text-container", "math":
+			return Value{Text: s}, valueUnsupported
 		}
-		if strings.ContainsAny(s, " ()") || strings.Contains(" run-in ruby ruby-base ruby-text ruby-base-container ruby-text-container math ", " "+s+" ") {
+		if strings.ContainsAny(s, " ()") {
 			return Value{Text: s}, valueUnsupported
 		}
 		return Value{}, valueInvalid
@@ -173,12 +131,12 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 			scale = .01
 			s = strings.TrimSuffix(s, "%")
 		}
-		v, ok := number(s)
+		v, ok := numberWithBudget(s, budget)
 		if !ok {
 			return Value{}, valueInvalid
 		}
 		v = clamp(v*scale, 1)
-		return Value{Text: strconv.FormatFloat(v, 'g', -1, 64), Number: v, Known: true}, valueResolved
+		return Value{Text: numberStringWithBudget(v, "", budget), Number: v, Known: true}, valueResolved
 	case fontSize:
 		factor := 1.0
 		num, unit, hasUnit := splitLength(s)
@@ -197,7 +155,7 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 				factor = parent[fontSize].Number / 100
 				known = parent[fontSize].Known
 			case lengthUnitContextual:
-				v, ok := number(num)
+				v, ok := numberWithBudget(num, budget)
 				if !ok {
 					return Value{}, valueInvalid
 				}
@@ -212,7 +170,7 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 				"large": 18, "x-large": 24, "xx-large": 32, "xxx-large": 48,
 			}
 			if v, ok := absolute[s]; ok {
-				return Value{Text: fmt.Sprintf("%gpx", v), Number: v, Known: true}, valueResolved
+				return Value{Text: numberStringWithBudget(v, "px", budget), Number: v, Known: true}, valueResolved
 			}
 			if s == "smaller" || s == "larger" {
 				if !parent[fontSize].Known {
@@ -223,9 +181,9 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 					factor = 1.2
 				}
 				v := parent[fontSize].Number * factor
-				return Value{Text: fmt.Sprintf("%gpx", v), Number: v, Known: parent[fontSize].Known}, valueResolved
+				return Value{Text: numberStringWithBudget(v, "px", budget), Number: v, Known: parent[fontSize].Known}, valueResolved
 			}
-			if v, ok := number(s); ok {
+			if v, ok := numberWithBudget(s, budget); ok {
 				if v == 0 {
 					return Value{Text: "0px", Known: true}, valueResolved
 				}
@@ -236,7 +194,7 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 			}
 			return Value{}, valueInvalid
 		}
-		v, ok := number(num)
+		v, ok := numberWithBudget(num, budget)
 		if !ok || v < 0 {
 			return Value{}, valueInvalid
 		}
@@ -247,9 +205,9 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 		if math.IsInf(v, 0) || math.IsNaN(v) {
 			return Value{Text: s}, valueUnsupported
 		}
-		return Value{Text: fmt.Sprintf("%gpx", v), Number: v, Known: known}, valueResolved
+		return Value{Text: numberStringWithBudget(v, "px", budget), Number: v, Known: known}, valueResolved
 	case lineHeight:
-		return resolveLineHeight(s)
+		return resolveLineHeightWithBudget(s, budget)
 	case backgroundImage, filter, backdropFilter, maskImage, textShadow, transform:
 		if s == "none" {
 			return Value{Text: s, Known: true}, valueResolved
@@ -287,16 +245,19 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 			}
 			return Value{Text: s, Known: true}, valueResolved
 		}
-		c, status := readColour(s)
+		c, status := readColourWithBudget(s, budget)
 		if status != valueResolved {
 			return Value{Text: s}, status
 		}
-		return Value{Text: colourString(c), RGBA: c, Known: true}, status
+		return Value{Text: colourStringWithBudget(c, budget), RGBA: c, Known: true}, status
 	}
 	return Value{Text: s}, valueUnsupported
 }
 
 func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
+	return resolveLayoutPropertyWithBudget(property, value, nil)
+}
+func resolveLayoutPropertyWithBudget(property int, value string, budget *cpuGuard) (Value, valueStatus) {
 	if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
 		return Value{}, valueInvalid
 	}
@@ -334,7 +295,7 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 			scale = .01
 			numberText = strings.TrimSuffix(numberText, "%")
 		}
-		n, ok := number(numberText)
+		n, ok := numberWithBudget(numberText, budget)
 		if !ok || n < 0 {
 			return Value{}, valueInvalid
 		}
@@ -342,7 +303,8 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 		return Value{Text: value, Number: n, Known: true}, valueResolved
 	}
 	if property == overflowX || property == overflowY {
-		parts := splitCSSWhitespace(value)
+		var scratch [1]string
+		parts := splitCSSWhitespace(value, scratch[:])
 		if len(parts) != 1 {
 			return Value{}, valueInvalid
 		}
@@ -351,20 +313,20 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 				return Value{}, valueInvalid
 			}
 		}
-		return Value{Text: strings.Join(parts, " "), Known: true}, valueResolved
+		return Value{Text: parts[0], Known: true}, valueResolved
 	}
 	if (property == letterSpacing || property == wordSpacing) && value == "normal" {
 		return Value{Text: value, Known: true}, valueResolved
 	}
-	return resolveLayoutLength(property, value)
+	return resolveLayoutLengthWithBudget(property, value, budget)
 }
 
-func resolveLineHeight(value string) (Value, valueStatus) {
+func resolveLineHeightWithBudget(value string, budget *cpuGuard) (Value, valueStatus) {
 	if value == "normal" {
 		return Value{Text: value, Known: true}, valueResolved
 	}
 	numberText, unit, hasUnit := splitLength(value)
-	n, ok := number(numberText)
+	n, ok := numberWithBudget(numberText, budget)
 	if !ok || n < 0 {
 		return Value{}, valueInvalid
 	}
@@ -374,7 +336,7 @@ func resolveLineHeight(value string) (Value, valueStatus) {
 	return Value{Text: value, Number: n, Known: unit.kind == lengthUnitAbsolute && unit.suffix == "px"}, valueResolved
 }
 
-func resolveLayoutLength(property int, value string) (Value, valueStatus) {
+func resolveLayoutLengthWithBudget(property int, value string, budget *cpuGuard) (Value, valueStatus) {
 	if (property == width || property == height || property == left || property == top || property == right || property == bottom ||
 		property == marginTop || property == marginRight || property == marginBottom || property == marginLeft) && value == "auto" {
 		return Value{Text: value, Known: true}, valueResolved
@@ -383,12 +345,12 @@ func resolveLayoutLength(property int, value string) (Value, valueStatus) {
 		return Value{Text: value, Known: true}, valueResolved
 	}
 	numberText, unit, hasUnit := splitLength(value)
-	n, ok := number(numberText)
-	if !ok {
+	n, ok := parseCSSNumber(numberText, budget)
+	if !ok || math.IsInf(n, 0) {
 		// A syntactically valid number can overflow float64. It remains a valid
 		// contextual length for visibility purposes rather than becoming an
 		// invalid declaration that silently restores trusted visibility.
-		if hasUnit && validCSSNumber(numberText) {
+		if hasUnit && ok {
 			if !layoutPropertyAllowsNegative(property) && strings.HasPrefix(numberText, "-") {
 				return Value{}, valueInvalid
 			}
