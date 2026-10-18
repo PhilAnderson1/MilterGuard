@@ -540,61 +540,10 @@ var selectorTests = []selectorTest{
 		},
 	},
 	{
-		`<p>Text block that <span>wraps inner text</span> and continues</p>`,
-		`p:contains("that wraps")`,
-		[]string{
-			`<p>Text block that <span>wraps inner text</span> and continues</p>`,
-		},
-	},
-	{
-		`<p>Text block that <span>wraps inner text</span> and continues</p>`,
-		`p:containsOwn("that wraps")`,
-		[]string{},
-	},
-	{
-		`<p>Text block that <span>wraps inner text</span> and continues</p>`,
-		`:containsOwn("inner")`,
-		[]string{
-			`<span>wraps inner text</span>`,
-		},
-	},
-	{
-		`<p>Text block that <span>wraps inner text</span> and continues</p>`,
-		`p:containsOwn("block")`,
-		[]string{
-			`<p>Text block that <span>wraps inner text</span> and continues</p>`,
-		},
-	},
-	{
 		`<div id="d1"><p id="p1"><span>text content</span></p></div><div id="d2"/>`,
 		`div:has(#p1)`,
 		[]string{
 			`<div id="d1"><p id="p1"><span>text content</span></p></div>`,
-		},
-	},
-	{
-		`<div id="d1"><p id="p1"><span>contents 1</span></p></div>
-		<div id="d2"><p>contents <em>2</em></p></div>`,
-		`div:has(:containsOwn("2"))`,
-		[]string{
-			`<div id="d2"><p>contents <em>2</em></p></div>`,
-		},
-	},
-	{
-		`<body><div id="d1"><p id="p1"><span>contents 1</span></p></div>
-		<div id="d2"><p id="p2">contents <em>2</em></p></div></body>`,
-		`body :has(:containsOwn("2"))`,
-		[]string{
-			`<div id="d2"><p id="p2">contents <em>2</em></p></div>`,
-			`<p id="p2">contents <em>2</em></p>`,
-		},
-	},
-	{
-		`<body><div id="d1"><p id="p1"><span>contents 1</span></p></div>
-		<div id="d2"><p id="p2">contents <em>2</em></p></div></body>`,
-		`body :haschild(:containsOwn("2"))`,
-		[]string{
-			`<p id="p2">contents <em>2</em></p>`,
 		},
 	},
 	{

@@ -253,6 +253,11 @@ func (w *documentWalker) visitComment(node *html.Node) bool {
 }
 
 func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) error {
+	// The container itself is prepared in its parent scope; its contents cannot
+	// contribute presentation or stylesheet state. Structural traversal remains.
+	if frame.scope == scopeInert {
+		return nil
+	}
 	styles := &w.document.styles
 	var prepared elementPreparation
 	if href, media, applies := styles.stylesheetLink(node); applies && (frame.scope == scopeActive || frame.scope == scopeHead) {

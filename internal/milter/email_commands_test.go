@@ -608,3 +608,52 @@ func TestSenderOwnershipViaAliases(t *testing.T) {
 		t.Error("malformed command recipient unexpectedly accepted")
 	}
 }
+
+func TestCommandIncompleteMIMEExecutesNothing(t *testing.T) {
+	server, analyzer, conn, done := commandTestServer(t, true, nil)
+	defer func() { _ = conn.Close(); <-done }()
+	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', "192.0.2.10"))
+	if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip")); err != nil {
+		t.Fatal(err)
+	}
+	// Empty alternatives consume the part budget without exceeding the command
+	// prefix limit. The retained first command must never reach execution.
+	body := "--x\r\n\r\nWHITELIST ADD news@example.net\r\n" + strings.Repeat("--x\r\n\r\n\r\n", 256) + "--x--\r\n"
+	sendContinueFrames(t, conn, envelopeFrame(commandMail, "phil@example.com"), envelopeFrame(commandRecipient, "milterguard@example.com"), headerFrame("Content-Type", `multipart/alternative; boundary="x"`), []byte{commandEndHeaders}, append([]byte{commandBody}, []byte(body)...))
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	response, err := readFrame(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response) != 1 || response[0] != responseDiscard {
+		t.Fatalf("response=%q", response)
+	}
+	if analyzer.calls.Load() != 0 {
+		t.Fatal("command sent to AI")
+	}
+	if testCorrespondentMatch(t, server.sessions.policy.correspondents, context.Background(), "news@example.net", []string{"phil@example.com"}).Known {
+		t.Fatal("incomplete command executed")
+	}
+}
+
+func TestCommandIncompleteExtractionReturnsProcessingFailure(t *testing.T) {
+	for _, tc := range []struct{ name, ctype, encoding, body string }{
+		{"MIME", `multipart/alternative; boundary="x"`, "", "--x\r\nContent-Type: text/plain\r\n\r\nHELP\r\n"},
+		{"transfer", "text/plain", "base64", "SEVMUA==!!"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := message.New(100000)
+			msg.AddHeader("Content-Type", tc.ctype)
+			msg.AddHeader("Content-Transfer-Encoding", tc.encoding)
+			msg.AddBody([]byte(tc.body))
+			lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 65536, 8<<20, 250, nil)
+			var processingErr *commandBodyProcessingError
+			if len(lines) != 0 || !errors.As(err, &processingErr) {
+				t.Fatalf("lines=%q error=%v", lines, err)
+			}
+		})
+	}
+}

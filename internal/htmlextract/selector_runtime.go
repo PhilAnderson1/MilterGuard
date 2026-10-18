@@ -52,21 +52,16 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 	var states map[*html.Node]ancestorChainState
 	var recent *ancestorStateEntry
 	if mapStates {
-		if len(s.runtime.ancestorStates) < ancestorCount {
-			if !s.memory.Reserve(int64(ancestorCount) * int64(unsafe.Sizeof(map[*html.Node]ancestorChainState{}))) {
-				return false, false
-			}
-			s.runtime.ancestorStates = make([]map[*html.Node]ancestorChainState, ancestorCount)
+		if len(s.runtime.ancestorStates) >= ancestorCount {
+			states = s.runtime.ancestorStates[plan.ancestorCache]
 		}
-		states = s.runtime.ancestorStates[plan.ancestorCache]
 	} else {
-		if len(s.runtime.ancestorRecent) < ancestorCount {
-			if !s.memory.Reserve(int64(ancestorCount) * int64(unsafe.Sizeof(ancestorStateEntry{}))) {
-				return false, false
-			}
+		if len(s.runtime.ancestorRecent) < ancestorCount && s.memory.TryReserve(int64(ancestorCount)*int64(unsafe.Sizeof(ancestorStateEntry{}))) {
 			s.runtime.ancestorRecent = make([]ancestorStateEntry, ancestorCount)
 		}
-		recent = &s.runtime.ancestorRecent[plan.ancestorCache]
+		if len(s.runtime.ancestorRecent) >= ancestorCount {
+			recent = &s.runtime.ancestorRecent[plan.ancestorCache]
+		}
 	}
 	nodes := s.runtime.ancestorNodes[:0]
 	parentState := ancestorChainState{}
@@ -82,7 +77,7 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 				parentState = state
 				break
 			}
-		} else if recent.node == current {
+		} else if recent != nil && recent.node == current {
 			parentState = recent.state
 			break
 		}
@@ -137,16 +132,26 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 			return false, false
 		}
 		if hasElementChild {
-			if mapStates && s.memory.Reserve(ancestorStateEntryBytes) {
+			if mapStates {
+				cost := ancestorStateEntryBytes
 				if states == nil {
-					if !s.memory.Reserve(ancestorStateMapBytes) {
-						continue
-					}
+					cost += ancestorStateMapBytes
+				}
+				if len(s.runtime.ancestorStates) < ancestorCount {
+					cost += int64(ancestorCount) * int64(unsafe.Sizeof(map[*html.Node]ancestorChainState{}))
+				}
+				if !s.memory.TryReserve(cost) {
+					continue
+				}
+				if len(s.runtime.ancestorStates) < ancestorCount {
+					s.runtime.ancestorStates = make([]map[*html.Node]ancestorChainState, ancestorCount)
+				}
+				if states == nil {
 					states = make(map[*html.Node]ancestorChainState)
 					s.runtime.ancestorStates[plan.ancestorCache] = states
 				}
 				states[node] = state
-			} else if !mapStates {
+			} else if recent != nil {
 				*recent = ancestorStateEntry{node: node, state: state}
 			}
 		}

@@ -257,7 +257,6 @@ type sheet struct {
 	declarationCount     int
 	index                selectorIndex
 	cssBytes             int
-	mediaConditions      map[string]mediaCondition
 	keyframeNames        map[string]struct{}
 	unresolvedStylesheet bool
 	unsupportedNesting   bool

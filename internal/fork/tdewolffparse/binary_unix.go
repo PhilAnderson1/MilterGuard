@@ -3,8 +3,6 @@
 package parse
 
 import (
-	"errors"
-	"fmt"
 	"io"
 	"os"
 	"syscall"
@@ -20,7 +18,7 @@ func newBinaryReaderMmap(f *os.File) (*binaryReaderMmap, error) {
 	if err != nil {
 		return nil, err
 	} else if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("mmap: not a regular file: %v", info.Name())
+		return nil, errBinaryInput
 	}
 
 	size := info.Size()
@@ -34,9 +32,9 @@ func newBinaryReaderMmap(f *os.File) (*binaryReaderMmap, error) {
 			data: make([]byte, 0),
 		}, nil
 	} else if size < 0 {
-		return nil, fmt.Errorf("mmap: file %s has negative size", info.Name())
+		return nil, errBinaryInput
 	} else if size != int64(int(size)) {
-		return nil, fmt.Errorf("mmap: file %s is too large", info.Name())
+		return nil, errBinaryInput
 	}
 
 	data, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_SHARED)
@@ -70,9 +68,9 @@ func (r *binaryReaderMmap) Len() int64 {
 func (r *binaryReaderMmap) Bytes(b []byte, n, off int64) ([]byte, error) {
 	var err error
 	if r.data == nil {
-		return nil, errors.New("mmap: closed")
+		return nil, errBinaryInput
 	} else if off < 0 || n < 0 {
-		return nil, fmt.Errorf("mmap: invalid range %d--%d", off, off+n)
+		return nil, errBinaryInput
 	} else if int64(len(r.data)) <= off {
 		return nil, io.EOF
 	} else if int64(len(r.data))-off < n {

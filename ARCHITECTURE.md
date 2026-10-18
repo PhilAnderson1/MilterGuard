@@ -186,7 +186,19 @@ Elements with no indexed selector candidates or local declarations take an
 inheritance-only path that preserves computed inherited values and variables.
 This path skips cascade and layout resolution. Candidate discovery and any
 selector-evaluation caches use the CPU and memory guards. Optional caches stop
-growing when their allocation cannot be reserved.
+growing when their complete insertion cannot fit, without latching global memory
+exhaustion. Required allocations still fail normally. Ancestor matching retains
+its bounded dynamic-programming path when optional memoization is declined.
+
+Presentation preparation skips descendants of wholly inert containers while
+retaining structural traversal, parser limits, and the container's own styles.
+Mixed-case foreign ancestor selectors conservatively scope uncertainty to the
+rightmost target compound, not to the ancestor's name.
+
+Media applicability checks parse bounded queries transiently, without a
+per-document condition cache. Conditions retained by stylesheet frames charge
+their alternative and width-bound storage before allocation. The shared budget
+is allocation accounting, not a hard heap or RSS ceiling.
 
 Unsupported or exhausted style analysis preserves uncertainty rather than
 trusting a partial cascade. Malformed inline styles can make an element and
@@ -200,6 +212,25 @@ and produce an explicit limitation in the analysis prompt.
 Selector compilation is also capped by source bytes, components, nesting, and
 4,096 branches per document. Retained CSS declarations are capped at 32,768.
 CSS value evaluation and Outlook condition parsing have recursion limits.
+Fork allocation accounting follows storage ownership: HTML token strings,
+attributes, span arrays and name maps are charged before construction, even
+when the tree builder discards the token. Nodes charge their structures without
+charging transferred/shared strings again. Entity decoding admits replacement
+arrays before growth and samples numeric-reference and output scans; named
+lookup is bounded by the entity vocabulary. Normalized text and doctype
+attributes also reserve owned storage. Guarded standalone tokenizers expose
+resource failures through their error interface. Parser stack growth
+charges complete replacement arrays. CSS token buffers pay for growth and reuse
+capacity without per-token memory charges. Borrowed lexer values are charged
+when their consumer copies them. Selector compilation uses structural component
+allowances plus separately charged strings, metadata arrays and immutable KMP
+prefix tables. Short matches use sampled operation checks, while long attribute
+scans check cancellation every 1,024 bytes. These structural limits and sampled
+checks remain complementary to the shared allocation budget. Cascadia rejects
+proprietary text-collection pseudo-classes (`:contains`, `:containsOwn`), while
+email planning keeps those rules conservatively uncertain. Standard `:empty`
+matching preserves Unicode whitespace behavior with sampled scanning.
+
 Selector match caching retains at most 65,536 node/selector results; after that, matches
 continue without adding cache entries. These structural limits bound the two
 largest CSS allocation amplifiers independently of Go allocator details.
@@ -257,7 +288,11 @@ approach twice the configured per-window limit.
 HTML parts in a message. Parser and CSS structures, extraction maps, guarded
 rendering buffers, and multipart output combination consume the same budget.
 Superseded charged backing arrays remain charged because Go may retain them
-until a later garbage collection.
+until a later garbage collection. Multipart assembly reuses immutable strings
+when their representations are identical, and completes recovered output under
+the fallback allowance after primary processing stops. Opaque attachments retain
+only their descriptive marker; transfer validation streams through a fixed
+scratch buffer rather than materializing an unused decoded body.
 
 This accounting budget is not a ceiling on the Go heap or process RSS. Raw and
 decoded input buffers, bounded temporary allocations, runtime bookkeeping, and
@@ -268,6 +303,14 @@ Capacity planning must also allow for normal application memory and up to
 is required when deployment needs a hard process-wide ceiling.
 
 ## AI analysis
+
+Extraction completeness is derived from MIME, transfer-decoding, and content
+processing failures, including retained-body and structural-header truncation.
+The same result feeds analysis rejection policy and archived-body warnings.
+Failures encountered in discarded MIME alternatives remain limitations; merely
+selecting an alternative does not. Command execution consumes an explicit
+text/completeness result and refuses incomplete extraction of its configured raw
+prefix. The legacy text-only command helpers are not used to authorize execution.
 
 The Milter analysis service builds an `ai.Input` from the already processed
 message and connection evidence. `internal/ai` owns HTTP communication with the

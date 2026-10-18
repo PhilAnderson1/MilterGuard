@@ -90,7 +90,7 @@ func TestParse(t *testing.T) {
 		{false, "[class*=\"column\"]+[class*=\"column\"]:last-child{a:b;}", "[class*=\"column\"]+[class*=\"column\"]:last-child{a:b;}"},
 		{false, "@media { @viewport }", "@media{@viewport;}"},
 		{false, "table { @unknown }", "table{@unknown;}"},
-		{false, "a{@media{width:70%;} b{width:60%;}}", "a{@media{ERROR(unexpected ending in qualified rule)b{width:60%;}}"},
+		{false, "a{@media{width:70%;} b{width:60%;}}", "a{@media{ERROR(css: syntax error)b{width:60%;}}"},
 		{false, "a{& :is(b) { }}", "a{& :is(b){}}"},
 		{false, "a{&:is(b) :is(c) { }}", "a{&:is(b) :is(c){}}"},
 		{false, "a{b: 2   ,,  =   3}", "a{b:2,,=3;}"},
@@ -100,20 +100,20 @@ func TestParse(t *testing.T) {
 		{false, "@media{selector{", "@media{selector{"},
 
 		// bad grammar
-		{false, "}", "ERROR(unexpected ending in qualified rule)"},
-		{true, "}", "ERROR(unexpected token '}' in declaration)"},
-		{true, "~color:red", "ERROR(expected colon in declaration)"},
-		{true, "(color;red)", "ERROR(unexpected token '(' in declaration)"},
-		{true, "color(;red)", "ERROR(unexpected token 'color(' in declaration)"},
+		{false, "}", "ERROR(css: syntax error)"},
+		{true, "}", "ERROR(css: syntax error)"},
+		{true, "~color:red", "ERROR(css: syntax error)"},
+		{true, "(color;red)", "ERROR(css: syntax error)"},
+		{true, "color(;red)", "ERROR(css: syntax error)"},
 		{false, ".foo { *color: #fff;}", ".foo{*color:#fff;}"},
 		{true, "*color: red; font-size: 12pt;", "*color:red;font-size:12pt;"},
 		{true, "*--custom: red;", "*--custom: red;"},
 		{true, "_color: red; font-size: 12pt;", "_color:red;font-size:12pt;"},
-		{false, ".foo { baddecl } .bar { color:red; }", ".foo{ERROR(expected colon in declaration)}.bar{color:red;}"},
-		{false, ".foo { baddecl baddecl baddecl; height:100px } .bar { color:red; }", ".foo{ERROR(expected colon in declaration)height:100px;}.bar{color:red;}"},
-		{false, ".foo { visibility: hidden;” } .bar { color:red; }", ".foo{visibility:hidden;ERROR(expected colon in declaration)}.bar{color:red;}"},
-		{false, ".foo { baddecl (; color:red; }", ".foo{ERROR(expected colon in declaration)"},
-		{true, "color=blue;", "ERROR(expected colon in declaration)"},
+		{false, ".foo { baddecl } .bar { color:red; }", ".foo{ERROR(css: syntax error)}.bar{color:red;}"},
+		{false, ".foo { baddecl baddecl baddecl; height:100px } .bar { color:red; }", ".foo{ERROR(css: syntax error)height:100px;}.bar{color:red;}"},
+		{false, ".foo { visibility: hidden;” } .bar { color:red; }", ".foo{visibility:hidden;ERROR(css: syntax error)}.bar{color:red;}"},
+		{false, ".foo { baddecl (; color:red; }", ".foo{ERROR(css: syntax error)"},
+		{true, "color=blue;", "ERROR(css: syntax error)"},
 
 		// issues
 		{false, "@media print {.class{width:5px;}}", "@media print{.class{width:5px;}}"},                  // #6
@@ -133,7 +133,7 @@ func TestParse(t *testing.T) {
 				data = parse.Copy(data)
 				if grammar == ErrorGrammar {
 					if err := p.Err(); err != io.EOF {
-						data = []byte(fmt.Sprintf("ERROR(%v)", p.err))
+						data = []byte(fmt.Sprintf("ERROR(%v)", err))
 					} else {
 						break
 					}
@@ -169,16 +169,16 @@ func TestParse(t *testing.T) {
 
 func TestParseError(t *testing.T) {
 	var parseErrorTests = []struct {
-		inline bool
-		css    string
-		col    int
+		inline   bool
+		css      string
+		hasError bool
 	}{
-		{false, "}", 2},
-		{true, "}", 1},
-		{false, "selector", 9},
-		{true, "color 0", 7},
-		{true, "--color 0", 9},
-		{true, "--custom-variable:0", 0},
+		{false, "}", true},
+		{true, "}", true},
+		{false, "selector", true},
+		{true, "color 0", true},
+		{true, "--color 0", true},
+		{true, "--custom-variable:0", false},
 	}
 	for _, tt := range parseErrorTests {
 		t.Run(tt.css, func(t *testing.T) {
@@ -186,12 +186,10 @@ func TestParseError(t *testing.T) {
 			for {
 				grammar, _, _ := p.Next()
 				if grammar == ErrorGrammar {
-					if tt.col == 0 {
+					if !tt.hasError {
 						test.T(t, p.Err(), io.EOF)
-					} else if perr, ok := p.Err().(*parse.Error); ok {
+					} else if p.Err() == ErrSyntax {
 						test.That(t, p.HasParseError())
-						_, col, _ := perr.Position()
-						test.T(t, col, tt.col)
 					} else {
 						test.Fail(t, "bad error:", p.Err())
 					}

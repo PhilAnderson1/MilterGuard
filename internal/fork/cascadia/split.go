@@ -1,27 +1,55 @@
 package cascadia
 
-import "strings"
-
 // SelectorListIterator yields top-level selector branches without allocating
 // an intermediate slice.
 type SelectorListIterator struct {
-	source string
-	offset int
+	source    string
+	offset    int
+	control   MatchControl
+	nextCheck int
 }
 
 func NewSelectorListIterator(source string) SelectorListIterator {
 	return SelectorListIterator{source: source}
 }
 
+// NewSelectorListIteratorWithStop samples source scanning, including empty branches.
+func NewSelectorListIteratorWithStop(source string, shouldStop func() bool) SelectorListIterator {
+	return SelectorListIterator{source: source, control: MatchControl{shouldStop: shouldStop}}
+}
+func (iterator *SelectorListIterator) Stopped() bool {
+	return iterator.control.stopped
+}
+
 func (iterator *SelectorListIterator) Next() (string, bool) {
+	if iterator.Stopped() {
+		return "", false
+	}
 	for iterator.offset <= len(iterator.source) {
 		start := iterator.offset
 		brackets, parens := 0, 0
 		var quote byte
+		first, last := -1, start
 		end := len(iterator.source)
 		for i := start; i < len(iterator.source); i++ {
+			if iterator.control.shouldStop != nil && i >= iterator.nextCheck {
+				iterator.nextCheck = i + 1024
+				if iterator.control.checkNow() {
+					return "", false
+				}
+			}
 			c := iterator.source[i]
+			if !isCSSWhitespace(c) && !(c == ',' && quote == 0 && brackets == 0 && parens == 0) {
+				if first == -1 {
+					first = i
+				}
+				last = i + 1
+			}
+
 			if c == '\\' {
+				if i+1 < len(iterator.source) && !isCSSWhitespace(iterator.source[i+1]) {
+					last = i + 2
+				}
 				i++
 				continue
 			}
@@ -62,7 +90,10 @@ func (iterator *SelectorListIterator) Next() (string, bool) {
 		} else {
 			iterator.offset = end + 1
 		}
-		branch := strings.Trim(iterator.source[start:end], " \t\r\n\f")
+		branch := ""
+		if first >= 0 {
+			branch = iterator.source[first:last]
+		}
 		if branch != "" {
 			return branch, true
 		}

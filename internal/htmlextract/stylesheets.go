@@ -79,25 +79,21 @@ func (s *sheet) stylesheetLink(n *html.Node) (href, media string, applies bool) 
 }
 
 func (s *sheet) parseMediaCondition(value string) mediaCondition {
-	if condition, ok := s.mediaConditions[value]; ok {
-		return condition
-	}
 	if !s.checkCPU() {
 		return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
 	}
-	condition := parseMedia(value)
-	if s.mediaConditions == nil {
-		s.mediaConditions = make(map[string]mediaCondition)
-	}
-	s.mediaConditions[value] = condition
-	return condition
+	return parseMediaBudgeted(value, s.memory)
 }
 
 func (s *sheet) mediaCanApply(value string) bool {
 	if trimCSSWhitespace(value) == "" {
 		return true
 	}
-	for _, alternative := range s.parseMediaCondition(value) {
+	// Applicability is a one-shot question; do not retain its parsed condition.
+	if !s.checkCPU() {
+		return true
+	}
+	for _, alternative := range parseMedia(value) {
 		if !alternative.never {
 			return true
 		}

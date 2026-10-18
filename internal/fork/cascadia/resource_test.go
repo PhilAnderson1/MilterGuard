@@ -100,12 +100,12 @@ func TestMatchControlSamplesAcrossMatches(t *testing.T) {
 	}
 }
 
-func TestAttributeValueMatchChecksImmediately(t *testing.T) {
+func TestAttributeValueMatchStopsDuringLongScan(t *testing.T) {
 	selector, err := ParseGroup(`[data-value*="needle" i]`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "data-value", Val: "a needle"}}}
+	n := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "data-value", Val: strings.Repeat("x", 4096) + "needle"}}}
 	checks := 0
 	matched, stopped := MatchWithStop(selector, n, func() bool {
 		checks++
@@ -115,7 +115,7 @@ func TestAttributeValueMatchChecksImmediately(t *testing.T) {
 		t.Fatalf("matched=%v stopped=%v, want false/true", matched, stopped)
 	}
 	if checks != 2 {
-		t.Fatalf("CPU callback called %d times; want immediate second check before attribute value", checks)
+		t.Fatalf("CPU callback called %d times; want second check inside attribute value", checks)
 	}
 }
 

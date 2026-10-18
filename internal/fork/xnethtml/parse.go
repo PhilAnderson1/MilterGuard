@@ -5,14 +5,17 @@
 package html
 
 import (
-	"cmp"
 	"errors"
-	"fmt"
 	"io"
 	"slices"
 	"strings"
 
 	a "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/atom"
+)
+
+var (
+	errParse           = errors.New("html: parsing failed")
+	errFragmentContext = errors.New("html: invalid fragment context")
 )
 
 // A parser implements the HTML5 parsing algorithm:
@@ -144,7 +147,7 @@ func (p *parser) indexOfElementInScope(s scope, matchTags ...a.Atom) int {
 					return -1
 				}
 			default:
-				panic(fmt.Sprintf("html: internal error: indexOfElementInScope unknown scope: %d", s))
+				panic("html: internal error: unknown element scope")
 			}
 		}
 		switch s {
@@ -187,7 +190,7 @@ func (p *parser) clearStackToContext(s scope) {
 				return
 			}
 		default:
-			panic(fmt.Sprintf("html: internal error: clearStackToContext unknown scope: %d", s))
+			panic("html: internal error: unknown stack scope")
 		}
 	}
 }
@@ -244,12 +247,11 @@ func (p *parser) addChild(n *Node) {
 }
 
 func (p *parser) insertOpenElement(n *Node) {
-	p.guard.openElement(p, n)
-	p.oe = append(p.oe, n)
-	p.guard.stacks(p)
-	if len(p.oe) > 512 {
+	if len(p.oe) >= 512 {
 		panic(resourceAbort{&ResourceLimitError{Resource: "open elements", Limit: 512}})
 	}
+	p.oe = append(growResourceSlice(p.oe, 1, p.guard), n)
+	p.guard.stop()
 }
 
 // shouldFosterParent returns whether the next node to be added should be
@@ -340,14 +342,6 @@ func (p *parser) addText(text string) {
 	}))
 }
 
-func attrCompare(a, b Attribute) int {
-	return cmp.Or(
-		cmp.Compare(a.Namespace, b.Namespace),
-		cmp.Compare(a.Key, b.Key),
-		cmp.Compare(a.Val, b.Val),
-	)
-}
-
 // addElement adds a child element based on the current token.
 func (p *parser) addElement() {
 	p.addChild(p.newNode(Node{
@@ -361,13 +355,13 @@ func (p *parser) addElement() {
 
 func (p *parser) newNode(n Node) *Node {
 	p.takeNode()
-	p.guard.node(n)
+	p.guard.node()
 	return &n
 }
 
 func (p *parser) cloneNode(n *Node) *Node {
 	p.takeNode()
-	p.guard.node(*n)
+	p.guard.node()
 	p.guard.mustAttributes(len(n.Attr))
 	clone := n.clone()
 	clone.parserImplied = true
@@ -388,12 +382,13 @@ func (p *parser) addFormattingElement() {
 
 	// In order to optimize the search, we need the attributes to be sorted, so we
 	// can just use slices.Equal.
-	slices.SortFunc(attr, attrCompare)
+	slices.SortFunc(attr, func(a, b Attribute) int { p.guard.stop(); return attrCompareWithGuard(a, b, p.guard) })
 
 	// Implement the Noah's Ark clause, but with three per family instead of two.
 	identicalElements := 0
 findIdenticalElements:
 	for i := len(p.afe) - 1; i >= 0; i-- {
+		p.guard.stop()
 		n := p.afe[i]
 		if n.Type == scopeMarkerNode {
 			break
@@ -407,7 +402,7 @@ findIdenticalElements:
 		if n.DataAtom != tagAtom {
 			continue
 		}
-		if !slices.Equal(n.Attr, attr) {
+		if !equalAttrsWithGuard(n.Attr, attr, p.guard) {
 			continue findIdenticalElements
 		}
 
@@ -417,11 +412,10 @@ findIdenticalElements:
 		}
 	}
 
-	// Sort the attributes to optimize future identical-element searches.
+	// addElement transfers the token attribute slice; it is already sorted.
 	top := p.top()
-	slices.SortFunc(top.Attr, attrCompare)
 
-	p.afe = append(p.afe, top)
+	p.afe = append(growResourceSlice(p.afe, 1, p.guard), top)
 }
 
 // Section 12.2.4.3.
@@ -546,7 +540,7 @@ const whitespace = " \t\r\n\f"
 func initialIM(p *parser) bool {
 	switch p.tok.Type {
 	case TextToken:
-		p.tok.Data = strings.TrimLeft(p.tok.Data, whitespace)
+		p.tok.Data = trimLeftWithGuard(p.tok.Data, whitespace, p.guard)
 		if len(p.tok.Data) == 0 {
 			// It was all whitespace, so ignore it.
 			return true
@@ -559,8 +553,8 @@ func initialIM(p *parser) bool {
 		return true
 	case DoctypeToken:
 		p.takeNode()
-		p.guard.node(Node{Type: DoctypeNode, Data: p.tok.Data})
-		n, quirks := parseDoctype(p.tok.Data)
+		p.guard.node()
+		n, quirks := parseDoctypeWithGuard(p.tok.Data, p.guard)
 		p.doc.AppendChild(n)
 		p.quirks = quirks
 		p.im = beforeHTMLIM
@@ -578,7 +572,7 @@ func beforeHTMLIM(p *parser) bool {
 		// Ignore the token.
 		return true
 	case TextToken:
-		p.tok.Data = strings.TrimLeft(p.tok.Data, whitespace)
+		p.tok.Data = trimLeftWithGuard(p.tok.Data, whitespace, p.guard)
 		if len(p.tok.Data) == 0 {
 			// It was all whitespace, so ignore it.
 			return true
@@ -613,7 +607,7 @@ func beforeHTMLIM(p *parser) bool {
 func beforeHeadIM(p *parser) bool {
 	switch p.tok.Type {
 	case TextToken:
-		p.tok.Data = strings.TrimLeft(p.tok.Data, whitespace)
+		p.tok.Data = trimLeftWithGuard(p.tok.Data, whitespace, p.guard)
 		if len(p.tok.Data) == 0 {
 			// It was all whitespace, so ignore it.
 			return true
@@ -656,7 +650,7 @@ func beforeHeadIM(p *parser) bool {
 func inHeadIM(p *parser) bool {
 	switch p.tok.Type {
 	case TextToken:
-		s := strings.TrimLeft(p.tok.Data, whitespace)
+		s := trimLeftWithGuard(p.tok.Data, whitespace, p.guard)
 		if len(s) < len(p.tok.Data) {
 			// Add the initial whitespace to the current node.
 			p.addText(p.tok.Data[:len(p.tok.Data)-len(s)])
@@ -715,10 +709,10 @@ func inHeadIM(p *parser) bool {
 			}
 
 			p.addElement()
-			p.afe = append(p.afe, &scopeMarker)
+			p.afe = append(growResourceSlice(p.afe, 1, p.guard), &scopeMarker)
 			p.framesetOK = false
 			p.im = inTemplateIM
-			p.templateStack = append(p.templateStack, inTemplateIM)
+			p.templateStack = append(growResourceSlice(p.templateStack, 1, p.guard), inTemplateIM)
 			return true
 		}
 	case EndTagToken:
@@ -797,7 +791,7 @@ func inHeadNoscriptIM(p *parser) bool {
 			return true
 		}
 	case TextToken:
-		s := strings.TrimLeft(p.tok.Data, whitespace)
+		s := trimLeftWithGuard(p.tok.Data, whitespace, p.guard)
 		if len(s) == 0 {
 			// It was all whitespace.
 			return inHeadIM(p)
@@ -820,7 +814,7 @@ func inHeadNoscriptIM(p *parser) bool {
 func afterHeadIM(p *parser) bool {
 	switch p.tok.Type {
 	case TextToken:
-		s := strings.TrimLeft(p.tok.Data, whitespace)
+		s := trimLeftWithGuard(p.tok.Data, whitespace, p.guard)
 		if len(s) < len(p.tok.Data) {
 			// Add the initial whitespace to the current node.
 			p.addText(p.tok.Data[:len(p.tok.Data)-len(s)])
@@ -895,15 +889,16 @@ func (p *parser) copyAttributes(dst *Node, src Token) {
 		panic("html: copyAttributes called for non-html/body node")
 	}
 	if *names == nil {
-		*names = make(map[string]struct{}, len(dst.Attr)+len(src.Attr))
+		p.guard.reserve(attributeMapBaseBytes + int64(len(dst.Attr))*attributeMapEntryBytes)
+		*names = make(map[string]struct{}, len(dst.Attr))
 		for _, attribute := range dst.Attr {
 			(*names)[attribute.Key] = struct{}{}
 		}
 	}
 	for _, t := range src.Attr {
 		if _, ok := (*names)[t.Key]; !ok {
-			p.guard.mustAttributes(1)
-			dst.Attr = append(dst.Attr, t)
+			p.guard.reserve(attributeMapEntryBytes)
+			dst.Attr = append(growResourceSlice(dst.Attr, 1, p.guard), t)
 			(*names)[t.Key] = struct{}{}
 		}
 	}
@@ -926,13 +921,13 @@ func inBodyIM(p *parser) bool {
 				}
 			}
 		}
-		d = strings.Replace(d, "\x00", "", -1)
+		d = replaceNULString(d, "", p.guard)
 		if d == "" {
 			return true
 		}
 		p.reconstructActiveFormattingElements()
 		p.addText(d)
-		if p.framesetOK && strings.TrimLeft(d, whitespace) != "" {
+		if p.framesetOK && trimLeftWithGuard(d, whitespace, p.guard) != "" {
 			// There were non-whitespace characters inserted.
 			p.framesetOK = false
 		}
@@ -1065,7 +1060,7 @@ func inBodyIM(p *parser) bool {
 		case a.Applet, a.Marquee, a.Object:
 			p.reconstructActiveFormattingElements()
 			p.addElement()
-			p.afe = append(p.afe, &scopeMarker)
+			p.afe = append(growResourceSlice(p.afe, 1, p.guard), &scopeMarker)
 			p.framesetOK = false
 		case a.Table:
 			if !p.quirks {
@@ -1434,7 +1429,7 @@ func (p *parser) inBodyEndTagFormatting(tagAtom a.Atom, tagName string) {
 		// Steps 16-18. Reparent nodes from the furthest block's children
 		// to a clone of the formatting element.
 		clone := p.cloneNode(formattingElement)
-		reparentChildren(clone, furthestBlock)
+		reparentChildrenWithGuard(clone, furthestBlock, p.guard)
 		furthestBlock.AppendChild(clone)
 
 		// Step 19. Fix up the list of active formatting elements.
@@ -1443,10 +1438,12 @@ func (p *parser) inBodyEndTagFormatting(tagAtom a.Atom, tagName string) {
 			bookmark--
 		}
 		p.afe.remove(formattingElement)
+		p.afe = growResourceSlice(p.afe, 1, p.guard)
 		p.afe.insert(bookmark, clone)
 
 		// Step 20. Fix up the stack of open elements.
 		p.oe.remove(formattingElement)
+		p.oe = growResourceSlice(p.oe, 1, p.guard)
 		p.oe.insert(p.oe.index(furthestBlock)+1, clone)
 	}
 }
@@ -1505,10 +1502,10 @@ func textIM(p *parser) bool {
 func inTableIM(p *parser) bool {
 	switch p.tok.Type {
 	case TextToken:
-		p.tok.Data = strings.Replace(p.tok.Data, "\x00", "", -1)
+		p.tok.Data = replaceNULString(p.tok.Data, "", p.guard)
 		switch p.oe.top().DataAtom {
 		case a.Table, a.Tbody, a.Tfoot, a.Thead, a.Tr:
-			if strings.Trim(p.tok.Data, whitespace) == "" {
+			if trimWithGuard(p.tok.Data, whitespace, p.guard) == "" {
 				p.addText(p.tok.Data)
 				return true
 			}
@@ -1517,7 +1514,7 @@ func inTableIM(p *parser) bool {
 		switch p.tok.DataAtom {
 		case a.Caption:
 			p.clearStackToContext(tableScope)
-			p.afe = append(p.afe, &scopeMarker)
+			p.afe = append(growResourceSlice(p.afe, 1, p.guard), &scopeMarker)
 			p.addElement()
 			p.im = inCaptionIM
 			return true
@@ -1639,7 +1636,7 @@ func inCaptionIM(p *parser) bool {
 func inColumnGroupIM(p *parser) bool {
 	switch p.tok.Type {
 	case TextToken:
-		s := strings.TrimLeft(p.tok.Data, whitespace)
+		s := trimLeftWithGuard(p.tok.Data, whitespace, p.guard)
 		if len(s) < len(p.tok.Data) {
 			// Add the initial whitespace to the current node.
 			p.addText(p.tok.Data[:len(p.tok.Data)-len(s)])
@@ -1754,7 +1751,7 @@ func inRowIM(p *parser) bool {
 		case a.Td, a.Th:
 			p.clearStackToContext(tableRowScope)
 			p.addElement()
-			p.afe = append(p.afe, &scopeMarker)
+			p.afe = append(growResourceSlice(p.afe, 1, p.guard), &scopeMarker)
 			p.im = inCellIM
 			return true
 		case a.Caption, a.Col, a.Colgroup, a.Tbody, a.Tfoot, a.Thead, a.Tr:
@@ -1860,27 +1857,27 @@ func inTemplateIM(p *parser) bool {
 			return inHeadIM(p)
 		case a.Caption, a.Colgroup, a.Tbody, a.Tfoot, a.Thead:
 			p.templateStack.pop()
-			p.templateStack = append(p.templateStack, inTableIM)
+			p.templateStack = append(growResourceSlice(p.templateStack, 1, p.guard), inTableIM)
 			p.im = inTableIM
 			return false
 		case a.Col:
 			p.templateStack.pop()
-			p.templateStack = append(p.templateStack, inColumnGroupIM)
+			p.templateStack = append(growResourceSlice(p.templateStack, 1, p.guard), inColumnGroupIM)
 			p.im = inColumnGroupIM
 			return false
 		case a.Tr:
 			p.templateStack.pop()
-			p.templateStack = append(p.templateStack, inTableBodyIM)
+			p.templateStack = append(growResourceSlice(p.templateStack, 1, p.guard), inTableBodyIM)
 			p.im = inTableBodyIM
 			return false
 		case a.Td, a.Th:
 			p.templateStack.pop()
-			p.templateStack = append(p.templateStack, inRowIM)
+			p.templateStack = append(growResourceSlice(p.templateStack, 1, p.guard), inRowIM)
 			p.im = inRowIM
 			return false
 		default:
 			p.templateStack.pop()
-			p.templateStack = append(p.templateStack, inBodyIM)
+			p.templateStack = append(growResourceSlice(p.templateStack, 1, p.guard), inBodyIM)
 			p.im = inBodyIM
 			return false
 		}
@@ -1922,7 +1919,7 @@ func afterBodyIM(p *parser) bool {
 		// Stop parsing.
 		return true
 	case TextToken:
-		s := strings.TrimLeft(p.tok.Data, whitespace)
+		s := trimLeftWithGuard(p.tok.Data, whitespace, p.guard)
 		if len(s) == 0 {
 			// It was all whitespace.
 			return inBodyIM(p)
@@ -1963,13 +1960,7 @@ func inFramesetIM(p *parser) bool {
 		}))
 	case TextToken:
 		// Ignore all text but whitespace.
-		s := strings.Map(func(c rune) rune {
-			switch c {
-			case ' ', '\t', '\n', '\f', '\r':
-				return c
-			}
-			return -1
-		}, p.tok.Data)
+		s := whitespaceStringWithGuard(p.tok.Data, p.guard)
 		if s != "" {
 			p.addText(s)
 		}
@@ -2013,13 +2004,7 @@ func afterFramesetIM(p *parser) bool {
 		}))
 	case TextToken:
 		// Ignore all text but whitespace.
-		s := strings.Map(func(c rune) rune {
-			switch c {
-			case ' ', '\t', '\n', '\f', '\r':
-				return c
-			}
-			return -1
-		}, p.tok.Data)
+		s := whitespaceStringWithGuard(p.tok.Data, p.guard)
 		if s != "" {
 			p.addText(s)
 		}
@@ -2049,7 +2034,7 @@ func afterAfterBodyIM(p *parser) bool {
 		// Stop parsing.
 		return true
 	case TextToken:
-		s := strings.TrimLeft(p.tok.Data, whitespace)
+		s := trimLeftWithGuard(p.tok.Data, whitespace, p.guard)
 		if len(s) == 0 {
 			// It was all whitespace.
 			return inBodyIM(p)
@@ -2081,13 +2066,7 @@ func afterAfterFramesetIM(p *parser) bool {
 		}))
 	case TextToken:
 		// Ignore all text but whitespace.
-		s := strings.Map(func(c rune) rune {
-			switch c {
-			case ' ', '\t', '\n', '\f', '\r':
-				return c
-			}
-			return -1
-		}, p.tok.Data)
+		s := whitespaceStringWithGuard(p.tok.Data, p.guard)
 		if s != "" {
 			p.tok.Data = s
 			return inBodyIM(p)
@@ -2118,9 +2097,9 @@ func parseForeignContent(p *parser) bool {
 	switch p.tok.Type {
 	case TextToken:
 		if p.framesetOK {
-			p.framesetOK = strings.TrimLeft(p.tok.Data, whitespaceOrNUL) == ""
+			p.framesetOK = trimLeftWithGuard(p.tok.Data, whitespaceOrNUL, p.guard) == ""
 		}
-		p.tok.Data = strings.Replace(p.tok.Data, "\x00", "\ufffd", -1)
+		p.tok.Data = replaceNULString(p.tok.Data, "\ufffd", p.guard)
 		p.addText(p.tok.Data)
 	case CommentToken:
 		p.addChild(p.newNode(Node{
@@ -2261,7 +2240,7 @@ func (p *parser) parseCurrentToken() {
 
 	consumed := false
 	for !consumed {
-		p.guard.stacks(p)
+		p.guard.stop()
 		if p.inForeignContent() {
 			consumed = parseForeignContent(p)
 		} else {
@@ -2281,7 +2260,7 @@ func (p *parser) parse() (err error) {
 			if abort, ok := panicErr.(resourceAbort); ok {
 				err = abort.err
 			} else {
-				err = fmt.Errorf("%s", panicErr)
+				err = errParse
 			}
 		}
 	}()
@@ -2386,13 +2365,13 @@ func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) (
 	contextTag := ""
 	if context != nil {
 		if context.Type != ElementNode {
-			return nil, errors.New("html: ParseFragment of non-element Node")
+			return nil, errFragmentContext
 		}
 		// The next check isn't just context.DataAtom.String() == context.Data because
 		// it is valid to pass an element whose tag isn't a known atom. For example,
 		// DataAtom == 0 and Data = "tagfromthefuture" is perfectly consistent.
 		if context.DataAtom != a.Lookup([]byte(context.Data)) {
-			return nil, fmt.Errorf("html: inconsistent Node: DataAtom=%q, Data=%q", context.DataAtom, context.Data)
+			return nil, errFragmentContext
 		}
 		contextTag = context.DataAtom.String()
 	}
@@ -2419,13 +2398,14 @@ func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) (
 		parserImplied: true,
 	})
 	p.doc.AppendChild(root)
-	p.oe = nodeStack{root}
+	p.insertOpenElement(root)
 	if context != nil && context.DataAtom == a.Template {
-		p.templateStack = append(p.templateStack, inTemplateIM)
+		p.templateStack = append(growResourceSlice(p.templateStack, 1, p.guard), inTemplateIM)
 	}
 	p.resetInsertionMode()
 
 	for n := context; n != nil; n = n.Parent {
+		p.guard.stop()
 		if n.Type == ElementNode && n.DataAtom == a.Form {
 			p.form = n
 			break
@@ -2443,6 +2423,8 @@ func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) (
 
 	var result []*Node
 	for c := parent.FirstChild; c != nil; {
+		p.guard.stop()
+		result = growResourceSlice(result, 1, p.guard)
 		next := c.NextSibling
 		parent.RemoveChild(c)
 		result = append(result, c)

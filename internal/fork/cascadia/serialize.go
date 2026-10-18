@@ -55,14 +55,6 @@ func (c relativePseudoClassSelector) String() string {
 	return fmt.Sprintf(":%s(%s)", c.name, c.match.String())
 }
 
-func (c containsPseudoClassSelector) String() string {
-	s := "contains"
-	if c.own {
-		s += "Own"
-	}
-	return fmt.Sprintf(`:%s("%s")`, s, c.value)
-}
-
 func (c nthPseudoClassSelector) String() string {
 	if c.a == 0 && c.b == 1 { // special cases
 		s := ":first-"

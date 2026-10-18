@@ -573,3 +573,158 @@ func TestMultipartStrippedTextIsJoinedOnceWithoutEmptySeparators(t *testing.T) {
 		t.Fatalf("stripped text=%q, want %q", got.StrippedText, "first\\n\\nsecond")
 	}
 }
+
+func TestMultipartPreservesCPUFallbackEvidence(t *testing.T) {
+	source := `<p>RECOVERED EVIDENCE <a href="https://example.test/proof">link</a><img src="cid:logo"></p>`
+	for _, outer := range []string{"", "multipart/alternative", "multipart/mixed", "multipart/related", "nested"} {
+		for _, stopOutput := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stop=%v", outer, stopOutput), func(t *testing.T) {
+				ctype := "text/html"
+				body := source
+				primaryChecks := 1
+				if outer != "" {
+					ctype = outer + `; boundary="x"`
+					body = "--x\r\nContent-Type: text/html\r\n\r\n" + body + "\r\n--x--\r\n"
+					primaryChecks = 2
+				}
+				if outer == "nested" {
+					ctype = `multipart/mixed; boundary="y"`
+					body = "--y\r\nContent-Type: multipart/related; boundary=\"x\"\r\n\r\n" + body + "\r\n--y--\r\n"
+					primaryChecks = 3
+				}
+				calls := 0
+				budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool { calls++; return calls >= primaryChecks }, FallbackShouldStop: func() bool { return stopOutput }})
+				got := extractMIMEWithBudget(ctype, "", "", []byte(body), 0, budget)
+				if !got.HTMLCPULimitExceeded {
+					t.Fatal("missing CPU status")
+				}
+				if stopOutput {
+					if strings.Contains(got.Text, "RECOVERED EVIDENCE") {
+						t.Fatal("output continued after stop")
+					}
+					return
+				}
+				if !strings.Contains(got.Text, "RECOVERED EVIDENCE") || !got.HTMLFallbackUsed || len(got.Links) != 1 || len(got.ImageRefs) != 1 {
+					t.Fatalf("lost fallback evidence: %+v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestCompleteAlternativeAndFallbackAreNotMissingEvidence(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", `multipart/alternative; boundary="x"`)
+	m.AddBody([]byte("--x\r\nContent-Type: text/plain\r\n\r\nplain\r\n--x\r\nContent-Type: text/html\r\n\r\n<p>HTML</p>\r\n--x--\r\n"))
+	a := m.BuildAnalysis(AnalysisContext{}, 10000, VisionOptions{})
+	if a.BodyExtractionIncomplete || !strings.Contains(a.Prompt, "HTML") {
+		t.Fatalf("analysis=%+v", a)
+	}
+	content := extractBoundedHTMLFallback("<p>complete evidence</p>", true, nil)
+	if content.incomplete() || !content.HTMLFallbackUsed {
+		t.Fatalf("fallback=%+v", content)
+	}
+}
+
+func BenchmarkMultipartRepresentations(b *testing.B) {
+	for _, depth := range []int{0, 2} {
+		body := "--x\r\nContent-Type: text/plain\r\n\r\n" + strings.Repeat("a", 1<<20) + "\r\n--x\r\nContent-Type: text/plain\r\n\r\n" + strings.Repeat("b", 1<<20) + "\r\n--x--\r\n"
+		ctype := `multipart/mixed; boundary="x"`
+		for n := 0; n < depth; n++ {
+			boundary := fmt.Sprintf("wrapper%d", n)
+			body = "--" + boundary + "\r\nContent-Type: " + ctype + "\r\n\r\n" + body + "\r\n--" + boundary + "--\r\n"
+			ctype = "multipart/mixed; boundary=" + boundary
+		}
+		data := []byte(body)
+		b.Run(fmt.Sprintf("depth%d", depth), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				extractMIME(ctype, "", "", data, 0)
+			}
+		})
+	}
+}
+
+func BenchmarkOpaqueAttachment(b *testing.B) {
+	raw := bytes.Repeat([]byte("a"), 6<<20)
+	encoded := []byte(base64.StdEncoding.EncodeToString(raw))
+	for _, tc := range []struct {
+		name, encoding string
+		data           []byte
+	}{{"identity", "binary", raw}, {"base64", "base64", encoded}} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				extractMIME("application/octet-stream", tc.encoding, "", tc.data, 0)
+			}
+		})
+	}
+}
+
+func TestMultipartPlainTextReusesRepresentationsWithinBudget(t *testing.T) {
+	budget := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 8 << 20})
+	budget.setDecodedTextByteLimit(10 << 20)
+	body := []byte("--x\r\nContent-Type: text/plain\r\n\r\n" + strings.Repeat("a", 2<<20) + "\r\n--x\r\nContent-Type: text/plain\r\n\r\n" + strings.Repeat("b", 2<<20) + "\r\n--x--\r\n")
+	got := extractMIMEWithBudget(`multipart/mixed; boundary="x"`, "", "", body, 0, budget)
+	if got.incomplete() || len(got.Text) != 4<<20+2 || got.VisibleText != got.Text || got.StrippedText != got.Text {
+		t.Fatalf("text=%d visible=%d stripped=%d incomplete=%v", len(got.Text), len(got.VisibleText), len(got.StrippedText), got.incomplete())
+	}
+	if budget.memoryBytesRemaining != 8<<20-int64(len(got.Text)) {
+		t.Fatalf("remaining=%d", budget.memoryBytesRemaining)
+	}
+}
+
+func TestOpaqueTransferValidationMatchesRecovery(t *testing.T) {
+	for _, encoding := range []string{"base64", "quoted-printable", "binary", "7bit", "8bit", "", "unknown"} {
+		for _, data := range []string{"", "aGVsbG8=", "aGVsbG8", "aGVsbG8=!!", "!!", "hello=20world", "hello=XY", strings.Repeat("YWFh", 20000)} {
+			_, want := decodeTransferRecovering(encoding, []byte(data))
+			got, complete := validateOpaqueTransfer(encoding, []byte(data), nil)
+			if !complete || got != want {
+				t.Errorf("encoding=%q length=%d got=%v complete=%v want=%v", encoding, len(data), got, complete, want)
+			}
+		}
+	}
+	calls := 0
+	got := extractMIMEWithBudget("application/octet-stream; name=test.bin", "base64", "", []byte(strings.Repeat("YWFh", 20000)), 0, newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool { calls++; return calls >= 2 }}))
+	if !got.ExtractionIncomplete || !got.HTMLCPULimitExceeded || got.Text != "[attachment: test.bin; type=application/octet-stream]" {
+		t.Fatalf("interrupted validation=%+v", got)
+	}
+}
+
+func TestEmptyPartFailureSurvivesMIMEAssembly(t *testing.T) {
+	for _, kind := range []string{"mixed", "related", "alternative"} {
+		budget := newExtractionBudget()
+		budget.setDecodedTextByteLimit(0)
+		got := extractMIMEWithBudget("multipart/"+kind+"; boundary=x", "", "", []byte("--x\r\nContent-Type: text/plain\r\n\r\nlost text\r\n--x--\r\n"), 0, budget)
+		if !got.incomplete() {
+			t.Fatalf("%s lost empty-part failure: %+v", kind, got)
+		}
+	}
+}
+
+func TestUnselectedAlternativeFailureRemainsIncomplete(t *testing.T) {
+	budget := newExtractionBudget()
+	budget.setDecodedTextByteLimit(0)
+	got := extractMIMEWithBudget("multipart/alternative; boundary=x", "", "", []byte("--x\r\nContent-Type: text/plain\r\n\r\nlost text\r\n--x\r\nContent-Type: text/html\r\n\r\n<p>Selected HTML</p>\r\n--x--\r\n"), 0, budget)
+	if !got.incomplete() || !strings.Contains(got.Text, "Selected HTML") {
+		t.Fatalf("alternative=%+v", got)
+	}
+}
+
+func TestMultipartDistinctRepresentationsRemainDistinct(t *testing.T) {
+	url := "https://example.test/path?token=" + strings.Repeat("a", 200)
+	body := "--x\r\nContent-Type: text/plain\r\n\r\n" + url + "\r\n--x\r\nContent-Type: text/html\r\n\r\n<p>visible</p><div style=\"display:none\">concealed</div>\r\n--x--\r\n"
+	got := extractMIME("multipart/mixed; boundary=x", "", "", []byte(body), 0)
+	if got.incomplete() || !got.HasConcealedContent || !strings.Contains(got.Text, "concealed") || strings.Contains(got.StrippedText, "concealed") || strings.Contains(got.VisibleText, "concealed") || !strings.Contains(got.VisibleText, url) || strings.Contains(got.Text, url) {
+		t.Fatalf("representations=%+v", got)
+	}
+}
+
+func TestEmptyHTMLFallbackKeepsProvenance(t *testing.T) {
+	calls := 0
+	budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool { calls++; return calls >= 2 }, FallbackShouldStop: func() bool { return false }})
+	got := extractMIMEWithBudget("multipart/mixed; boundary=x", "", "", []byte("--x\r\nContent-Type: text/html\r\n\r\n<style>p{display:none}</style>\r\n--x--\r\n"), 0, budget)
+	if !got.HTMLFallbackUsed || !got.HTML || !got.HTMLCPULimitExceeded {
+		t.Fatalf("lost empty fallback provenance: %+v", got)
+	}
+}

@@ -318,3 +318,46 @@ func TestActiveAncestorCandidatesMatchParentWalk(t *testing.T) {
 		t.Fatalf("active ancestor buckets leaked after traversal: %d", len(active.buckets))
 	}
 }
+
+func TestRejectedTextPseudoClassesRetainConservativeScope(t *testing.T) {
+	for _, selector := range []string{`:contains(x)`, `.target:containsOwn(x)`, `div:has(:contains(x))`} {
+		sequence := 0
+		plans, _, exceeded := planSelectorList(selector, &sequence, nil, maxSelectorBranches)
+		if exceeded || len(plans) != 1 || !plans[0].uncertain || plans[0].matcher != nil {
+			t.Fatalf("unsafe plan for %s: %+v", selector, plans)
+		}
+		document := inspectHTML(t, `<style>`+selector+`{display:none}</style><div class="target">x</div><p>other</p>`)
+		if label := findText(t, document, "x").Label; label != "unknown" {
+			t.Fatalf("%s target=%s", selector, label)
+		}
+		if selector != `:contains(x)` {
+			if label := findText(t, document, "other").Label; label != "visible" {
+				t.Fatalf("%s unrelated=%s", selector, label)
+			}
+		}
+	}
+}
+
+func TestOversizedFallbackKeepsUncertainty(t *testing.T) {
+	for _, suffix := range []string{":unsupported", ":before", ":after"} {
+		selector := strings.Repeat("A", 17000) + suffix
+		sequence := 0
+		plans, _, exceeded := planSelectorList(selector, &sequence, resourceguard.NewMemory(1<<20), maxSelectorBranches)
+		if exceeded || len(plans) != 1 || !plans[0].uncertain || plans[0].matcher != nil || !plans[0].scope.Match(&html.Node{Type: html.ElementNode, Data: "p"}) {
+			t.Fatalf("unexpected fallback: %+v", plans)
+		}
+		// Opacity remains relevant even for generated content: it may overlay text.
+		document := inspectHTML(t, "<style>"+selector+"{opacity:0}</style><p>T</p>")
+		if got := findText(t, document, "T").Label; got != "unknown" {
+			t.Fatalf("%s: %q", suffix, got)
+		}
+	}
+}
+func TestSelectorPlanningStopsInsideBranch(t *testing.T) {
+	calls := 0
+	sequence := 0
+	plans, branches, exceeded, stopped := planSelectorListWithStop(strings.Repeat("a", 20000), &sequence, nil, maxSelectorBranches, func() bool { calls++; return calls == 2 })
+	if len(plans) != 0 || branches != 0 || exceeded || !stopped || calls != 2 {
+		t.Fatalf("%d %d %v %d", len(plans), branches, exceeded, calls)
+	}
+}

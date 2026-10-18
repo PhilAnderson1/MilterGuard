@@ -1,6 +1,10 @@
 package cascadia
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
+)
 
 // FallbackMetadata contains the small, safe positive constraint that can be
 // recovered when the authoritative parser rejects a selector. It never claims
@@ -17,6 +21,19 @@ type FallbackMetadata struct {
 // type, ID, and class prefix. Unsupported namespaces retain a lowercase local
 // type name when doing so is safe.
 func ConservativeFallback(source string) FallbackMetadata {
+	result, _ := ConservativeFallbackWithMemory(source, nil)
+	return result
+}
+
+// ConservativeFallbackWithMemory bounds rejected input and admits owned keys.
+func ConservativeFallbackWithMemory(source string, memory *resourceguard.Memory) (result FallbackMetadata, err error) {
+	defer recoverAllocation(&err)
+	if len(source) > maxSelectorBytes {
+		// Keep the entire rule uncertain. A bounded suffix check retains the same
+		// generated-content handling without scanning or normalizing the source.
+		return FallbackMetadata{GeneratedPseudo: generatedSuffix(source)}, nil
+	}
+
 	start, brackets, parens := 0, 0, 0
 	var quote byte
 	for i := 0; i < len(source); i++ {
@@ -69,14 +86,13 @@ func ConservativeFallback(source string) FallbackMetadata {
 	}
 	compound := strings.Trim(source[start:], " \t\r\n\f")
 	prefix, original := conservativePositivePrefix(compound)
-	result := FallbackMetadata{
+	result = FallbackMetadata{
 		PositiveSource:   prefix,
-		Key:              indexKeyFromPositiveSource(prefix),
+		Key:              indexKeyFromPositiveSourceWithMemory(prefix, memory),
 		OriginalTypeName: original,
 	}
-	lower := strings.ToLower(compound)
-	result.GeneratedPseudo = strings.HasSuffix(lower, ":before") || strings.HasSuffix(lower, ":after")
-	return result
+	result.GeneratedPseudo = generatedSuffix(compound)
+	return result, nil
 }
 
 func conservativePositivePrefix(compound string) (prefix, originalType string) {
@@ -101,7 +117,7 @@ func conservativePositivePrefix(compound string) (prefix, originalType string) {
 				return "", ""
 			}
 			local := compound[start:end]
-			if local != strings.ToLower(local) {
+			if !isLowerName(local) {
 				return "", local
 			}
 			return local, local
@@ -121,6 +137,9 @@ func conservativePositivePrefix(compound string) (prefix, originalType string) {
 }
 
 func indexKeyFromPositiveSource(source string) IndexKey {
+	return indexKeyFromPositiveSourceWithMemory(source, nil)
+}
+func indexKeyFromPositiveSourceWithMemory(source string, memory *resourceguard.Memory) IndexKey {
 	if source == "" || source == "*" || strings.ContainsAny(source, "\\|[") {
 		return IndexKey{}
 	}
@@ -149,7 +168,11 @@ func indexKeyFromPositiveSource(source string) IndexKey {
 			if tag != "" {
 				return IndexKey{}
 			}
-			tag = strings.ToLower(source[start:i])
+			tag = source[start:i]
+			if !isLowerName(tag) {
+				reserveSelector(memory, int64(len(tag)))
+				tag = strings.ToLower(tag)
+			}
 		}
 	}
 	if id != "" {
@@ -170,4 +193,22 @@ func isNameByte(c byte) bool {
 
 func isCSSWhitespace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f'
+}
+
+func isLowerName(s string) bool {
+	// Callers pass ASCII name bytes only.
+	for i := range s {
+		if 'A' <= s[i] && s[i] <= 'Z' {
+			return false
+		}
+	}
+	return true
+}
+func generatedSuffix(s string) bool {
+	for _, suffix := range []string{":before", ":after"} {
+		if len(s) >= len(suffix) && equalAttribute(s[len(s)-len(suffix):], suffix, true, nil) {
+			return true
+		}
+	}
+	return false
 }

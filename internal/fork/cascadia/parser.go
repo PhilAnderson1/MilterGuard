@@ -2,10 +2,13 @@
 package cascadia
 
 import (
-	"errors"
-	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+	"unsafe"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // a parser for CSS selectors
@@ -14,6 +17,7 @@ type parser struct {
 	i          int    // the current position
 	components int
 	depth      int
+	memory     *resourceguard.Memory
 
 	// if `false`, parsing a pseudo-element
 	// returns an error.
@@ -28,7 +32,7 @@ const (
 
 func validateSelectorInput(selector string) error {
 	if len(selector) > maxSelectorBytes {
-		return fmt.Errorf("selector exceeds %d bytes", maxSelectorBytes)
+		return ErrInvalidSelector
 	}
 	return nil
 }
@@ -36,22 +40,26 @@ func validateSelectorInput(selector string) error {
 func (p *parser) takeComponent() error {
 	p.components++
 	if p.components > maxSelectorComponents {
-		return fmt.Errorf("selector exceeds %d components", maxSelectorComponents)
+		return ErrInvalidSelector
 	}
+	// Allow a simple selector, compound/combinator wrappers and amortized
+	// interface-array growth (both compound and group arrays). Variable
+	// strings, KMP tables and metadata have separate allocation owners.
+	reserveSelector(p.memory, int64(unsafe.Sizeof(attrSelector{}))+int64(unsafe.Sizeof(compoundSelector{}))+int64(unsafe.Sizeof(combinedSelector{}))+8*int64(unsafe.Sizeof([1]Sel{})))
 	return nil
 }
 
 // parseEscape parses a backslash escape.
 func (p *parser) parseEscape() (result string, err error) {
 	if len(p.s) < p.i+2 || p.s[p.i] != '\\' {
-		return "", errors.New("invalid escape sequence")
+		return "", ErrInvalidSelector
 	}
 
 	start := p.i + 1
 	c := p.s[start]
 	switch {
 	case c == '\r' || c == '\n' || c == '\f':
-		return "", errors.New("escaped line ending outside string")
+		return "", ErrInvalidSelector
 	case hexDigit(c):
 		// unicode escape (hex)
 		var i int
@@ -71,6 +79,7 @@ func (p *parser) parseEscape() (result string, err error) {
 			}
 		}
 		p.i = i
+		reserveSelector(p.memory, 4)
 		return string(rune(v)), nil
 	}
 
@@ -128,15 +137,16 @@ func (p *parser) parseIdentifier() (result string, err error) {
 	}
 
 	if len(p.s) <= p.i {
-		return "", errors.New("expected identifier, found EOF instead")
+		return "", ErrInvalidSelector
 	}
 
 	if c := p.s[p.i]; !(nameStart(c) || c == '\\') {
-		return "", fmt.Errorf("expected identifier, found %c instead", c)
+		return "", ErrInvalidSelector
 	}
 
 	result, err = p.parseName()
 	if numPrefix > 0 && err == nil {
+		reserveSelector(p.memory, int64(2*numPrefix+len(result)))
 		result = strings.Repeat(string(prefix), numPrefix) + result
 	}
 	return
@@ -160,14 +170,14 @@ loop:
 			}
 		case c == '\\':
 			hasEscape = true
-			result.WriteString(p.s[segmentStart:i])
+			p.writeString(&result, p.s[segmentStart:i])
 			p.i = i
 			val, err := p.parseEscape()
 			if err != nil {
 				return "", err
 			}
 			i = p.i
-			result.WriteString(val)
+			p.writeString(&result, val)
 			segmentStart = i
 		default:
 			break loop
@@ -175,14 +185,14 @@ loop:
 	}
 
 	if i == start {
-		return "", errors.New("expected name, found EOF instead")
+		return "", ErrInvalidSelector
 	}
 
 	p.i = i
 	if !hasEscape {
 		return p.s[start:i], nil
 	}
-	result.WriteString(p.s[segmentStart:i])
+	p.writeString(&result, p.s[segmentStart:i])
 	return result.String(), nil
 }
 
@@ -190,7 +200,7 @@ loop:
 func (p *parser) parseString() (string, error) {
 	i := p.i
 	if len(p.s) < i+2 {
-		return "", errors.New("expected string, found EOF instead")
+		return "", ErrInvalidSelector
 	}
 
 	quote := p.s[i]
@@ -205,7 +215,7 @@ loop:
 		switch p.s[i] {
 		case '\\':
 			hasEscape = true
-			result.WriteString(p.s[segmentStart:i])
+			p.writeString(&result, p.s[segmentStart:i])
 			if len(p.s) > i+1 {
 				switch c := p.s[i+1]; c {
 				case '\r':
@@ -227,19 +237,19 @@ loop:
 				return "", err
 			}
 			i = p.i
-			result.WriteString(val)
+			p.writeString(&result, val)
 			segmentStart = i
 		case quote:
 			break loop
 		case '\r', '\n', '\f':
-			return "", errors.New("unexpected end of line in string")
+			return "", ErrInvalidSelector
 		default:
 			i++
 		}
 	}
 
 	if i >= len(p.s) {
-		return "", errors.New("EOF in string")
+		return "", ErrInvalidSelector
 	}
 
 	// Consume the final quote.
@@ -249,7 +259,7 @@ loop:
 	if !hasEscape {
 		return p.s[start : i-1], nil
 	}
-	result.WriteString(p.s[segmentStart : i-1])
+	p.writeString(&result, p.s[segmentStart:i-1])
 	return result.String(), nil
 }
 
@@ -312,16 +322,16 @@ func (p *parser) parseTypeSelector() (result tagSelector, err error) {
 	if err != nil {
 		return
 	}
-	return tagSelector{tag: toLowerASCII(tag), original: tag}, nil
+	return tagSelector{tag: p.lowerASCII(tag), original: tag}, nil
 }
 
 // parseIDSelector parses a selector that matches by id attribute.
 func (p *parser) parseIDSelector() (idSelector, error) {
 	if p.i >= len(p.s) {
-		return idSelector{}, fmt.Errorf("expected id selector (#id), found EOF instead")
+		return idSelector{}, ErrInvalidSelector
 	}
 	if p.s[p.i] != '#' {
-		return idSelector{}, fmt.Errorf("expected id selector (#id), found '%c' instead", p.s[p.i])
+		return idSelector{}, ErrInvalidSelector
 	}
 
 	p.i++
@@ -336,10 +346,10 @@ func (p *parser) parseIDSelector() (idSelector, error) {
 // parseClassSelector parses a selector that matches by class attribute.
 func (p *parser) parseClassSelector() (classSelector, error) {
 	if p.i >= len(p.s) {
-		return classSelector{}, fmt.Errorf("expected class selector (.class), found EOF instead")
+		return classSelector{}, ErrInvalidSelector
 	}
 	if p.s[p.i] != '.' {
-		return classSelector{}, fmt.Errorf("expected class selector (.class), found '%c' instead", p.s[p.i])
+		return classSelector{}, ErrInvalidSelector
 	}
 
 	p.i++
@@ -354,10 +364,10 @@ func (p *parser) parseClassSelector() (classSelector, error) {
 // parseAttributeSelector parses a selector that matches by attribute value.
 func (p *parser) parseAttributeSelector() (attrSelector, error) {
 	if p.i >= len(p.s) {
-		return attrSelector{}, fmt.Errorf("expected attribute selector ([attribute]), found EOF instead")
+		return attrSelector{}, ErrInvalidSelector
 	}
 	if p.s[p.i] != '[' {
-		return attrSelector{}, fmt.Errorf("expected attribute selector ([attribute]), found '%c' instead", p.s[p.i])
+		return attrSelector{}, ErrInvalidSelector
 	}
 
 	p.i++
@@ -366,11 +376,11 @@ func (p *parser) parseAttributeSelector() (attrSelector, error) {
 	if err != nil {
 		return attrSelector{}, err
 	}
-	key = toLowerASCII(key)
+	key = p.lowerASCII(key)
 
 	p.skipWhitespace()
 	if p.i >= len(p.s) {
-		return attrSelector{}, errors.New("unexpected EOF in attribute selector")
+		return attrSelector{}, ErrInvalidSelector
 	}
 
 	if p.s[p.i] == ']' {
@@ -379,23 +389,23 @@ func (p *parser) parseAttributeSelector() (attrSelector, error) {
 	}
 
 	if p.i+2 >= len(p.s) {
-		return attrSelector{}, errors.New("unexpected EOF in attribute selector")
+		return attrSelector{}, ErrInvalidSelector
 	}
 
 	op := p.s[p.i : p.i+2]
 	if op[0] == '=' {
 		op = "="
 	} else if op[1] != '=' {
-		return attrSelector{}, fmt.Errorf(`expected equality operator, found "%s" instead`, op)
+		return attrSelector{}, ErrInvalidSelector
 	}
 	if op == "#=" {
-		return attrSelector{}, errors.New("regular expression attribute selectors are not supported")
+		return attrSelector{}, ErrInvalidSelector
 	}
 	p.i += len(op)
 
 	p.skipWhitespace()
 	if p.i >= len(p.s) {
-		return attrSelector{}, errors.New("unexpected EOF in attribute selector")
+		return attrSelector{}, ErrInvalidSelector
 	}
 	var val string
 	switch p.s[p.i] {
@@ -410,7 +420,7 @@ func (p *parser) parseAttributeSelector() (attrSelector, error) {
 
 	p.skipWhitespace()
 	if p.i >= len(p.s) {
-		return attrSelector{}, errors.New("unexpected EOF in attribute selector")
+		return attrSelector{}, ErrInvalidSelector
 	}
 
 	// check if the attribute contains an ignore case flag
@@ -422,27 +432,26 @@ func (p *parser) parseAttributeSelector() (attrSelector, error) {
 
 	p.skipWhitespace()
 	if p.i >= len(p.s) {
-		return attrSelector{}, errors.New("unexpected EOF in attribute selector")
+		return attrSelector{}, ErrInvalidSelector
 	}
 
 	if p.s[p.i] != ']' {
-		return attrSelector{}, fmt.Errorf("expected ']', found '%c' instead", p.s[p.i])
+		return attrSelector{}, ErrInvalidSelector
 	}
 	p.i++
 
 	switch op {
 	case "=", "!=", "~=", "|=", "^=", "$=", "*=":
-		return attrSelector{key: key, val: val, operation: op, insensitive: ignoreCase}, nil
+		selector := attrSelector{key: key, val: val, operation: op, insensitive: ignoreCase}
+		if op == "*=" && len(val) > 0 {
+			reserveSelector(p.memory, int64(len(val))*int64(unsafe.Sizeof(int(0))))
+			selector.failure = substringFailure(val, ignoreCase)
+		}
+		return selector, nil
 	default:
-		return attrSelector{}, fmt.Errorf("attribute operator %q is not supported", op)
+		return attrSelector{}, ErrInvalidSelector
 	}
 }
-
-var (
-	errExpectedParenthesis        = errors.New("expected '(' but didn't find it")
-	errExpectedClosingParenthesis = errors.New("expected ')' but didn't find it")
-	errUnmatchedParenthesis       = errors.New("unmatched '('")
-)
 
 // parsePseudoclassSelector parses a pseudoclass selector like :not(p) or a pseudo-element
 // For backwards compatibility, both ':' and '::' prefix are allowed for pseudo-elements.
@@ -450,16 +459,16 @@ var (
 // Returning a nil `Sel` (and a nil `error`) means we found a pseudo-element.
 func (p *parser) parsePseudoclassSelector() (out Sel, pseudoElement string, err error) {
 	if p.i >= len(p.s) {
-		return nil, "", fmt.Errorf("expected pseudoclass selector (:pseudoclass), found EOF instead")
+		return nil, "", ErrInvalidSelector
 	}
 	if p.s[p.i] != ':' {
-		return nil, "", fmt.Errorf("expected attribute selector (:pseudoclass), found '%c' instead", p.s[p.i])
+		return nil, "", ErrInvalidSelector
 	}
 
 	p.i++
 	var mustBePseudoElement bool
 	if p.i >= len(p.s) {
-		return nil, "", fmt.Errorf("got empty pseudoclass (or pseudoelement)")
+		return nil, "", ErrInvalidSelector
 	}
 	if p.s[p.i] == ':' { // we found a pseudo-element
 		mustBePseudoElement = true
@@ -470,69 +479,44 @@ func (p *parser) parsePseudoclassSelector() (out Sel, pseudoElement string, err 
 	if err != nil {
 		return
 	}
-	name = toLowerASCII(name)
+	name = p.lowerASCII(name)
 	if mustBePseudoElement && (name != "after" && name != "backdrop" && name != "before" &&
 		name != "cue" && name != "first-letter" && name != "first-line" && name != "grammar-error" &&
 		name != "marker" && name != "placeholder" && name != "selection" && name != "spelling-error") {
-		return out, "", fmt.Errorf("unknown pseudoelement :%s", name)
+		return out, "", ErrInvalidSelector
 	}
 
 	switch name {
 	case "not", "has", "haschild":
 		if !p.consumeParenthesis() {
-			return out, "", errExpectedParenthesis
+			return out, "", ErrInvalidSelector
 		}
 		sel, parseErr := p.parseSelectorGroup()
 		if parseErr != nil {
 			return out, "", parseErr
 		}
 		if !p.consumeClosingParenthesis() {
-			return out, "", errExpectedClosingParenthesis
+			return out, "", ErrInvalidSelector
 		}
 
 		out = relativePseudoClassSelector{name: name, match: sel}
 
 	case "contains", "containsown":
-		if !p.consumeParenthesis() {
-			return out, "", errExpectedParenthesis
-		}
-		if p.i == len(p.s) {
-			return out, "", errUnmatchedParenthesis
-		}
-		var val string
-		switch p.s[p.i] {
-		case '\'', '"':
-			val, err = p.parseString()
-		default:
-			val, err = p.parseIdentifier()
-		}
-		if err != nil {
-			return out, "", err
-		}
-		val = strings.ToLower(val)
-		p.skipWhitespace()
-		if p.i >= len(p.s) {
-			return out, "", errors.New("unexpected EOF in pseudo selector")
-		}
-		if !p.consumeClosingParenthesis() {
-			return out, "", errExpectedClosingParenthesis
-		}
-
-		out = containsPseudoClassSelector{own: name == "containsown", value: val}
+		return out, "", ErrInvalidSelector
 
 	case "matches", "matchesown":
-		return out, "", fmt.Errorf("regular expression pseudo-class :%s is not supported", name)
+		return out, "", ErrInvalidSelector
 
 	case "nth-child", "nth-last-child", "nth-of-type", "nth-last-of-type":
 		if !p.consumeParenthesis() {
-			return out, "", errExpectedParenthesis
+			return out, "", ErrInvalidSelector
 		}
 		a, b, err := p.parseNth()
 		if err != nil {
 			return out, "", err
 		}
 		if !p.consumeClosingParenthesis() {
-			return out, "", errExpectedClosingParenthesis
+			return out, "", ErrInvalidSelector
 		}
 		last := name == "nth-last-child" || name == "nth-last-of-type"
 		ofType := name == "nth-of-type" || name == "nth-last-of-type"
@@ -560,22 +544,22 @@ func (p *parser) parsePseudoclassSelector() (out Sel, pseudoElement string, err 
 		out = linkPseudoClassSelector{}
 	case "lang":
 		if !p.consumeParenthesis() {
-			return out, "", errExpectedParenthesis
+			return out, "", ErrInvalidSelector
 		}
 		if p.i == len(p.s) {
-			return out, "", errUnmatchedParenthesis
+			return out, "", ErrInvalidSelector
 		}
 		val, err := p.parseIdentifier()
 		if err != nil {
 			return out, "", err
 		}
-		val = strings.ToLower(val)
+		val = p.lowerUnicode(val)
 		p.skipWhitespace()
 		if p.i >= len(p.s) {
-			return out, "", errors.New("unexpected EOF in pseudo selector")
+			return out, "", ErrInvalidSelector
 		}
 		if !p.consumeClosingParenthesis() {
-			return out, "", errExpectedClosingParenthesis
+			return out, "", ErrInvalidSelector
 		}
 		out = langPseudoClassSelector{lang: val}
 	case "enabled":
@@ -590,27 +574,29 @@ func (p *parser) parsePseudoclassSelector() (out Sel, pseudoElement string, err 
 	case "after", "backdrop", "before", "cue", "first-letter", "first-line", "grammar-error", "marker", "placeholder", "selection", "spelling-error":
 		return nil, name, nil
 	default:
-		return out, "", fmt.Errorf("unknown pseudoclass or pseudoelement :%s", name)
+		return out, "", ErrInvalidSelector
 	}
 	return
 }
 
-// parseInteger parses a  decimal integer.
+// parseInteger parses a non-negative decimal integer without error allocations.
 func (p *parser) parseInteger() (int, error) {
 	i := p.i
 	start := i
+	const maxInt = int(^uint(0) >> 1)
+	val := 0
 	for i < len(p.s) && '0' <= p.s[i] && p.s[i] <= '9' {
+		digit := int(p.s[i] - '0')
+		if val > (maxInt-digit)/10 {
+			return 0, ErrInvalidSelector
+		}
+		val = val*10 + digit
 		i++
 	}
 	if i == start {
-		return 0, errors.New("expected integer, but didn't find it")
+		return 0, ErrInvalidSelector
 	}
 	p.i = i
-
-	val, err := strconv.Atoi(p.s[start:i])
-	if err != nil {
-		return 0, err
-	}
 
 	return val, nil
 }
@@ -639,14 +625,14 @@ func (p *parser) parseNth() (a, b int, err error) {
 		if nameErr != nil {
 			return 0, 0, nameErr
 		}
-		id = toLowerASCII(id)
+		id = p.lowerASCII(id)
 		if id == "odd" {
 			return 2, 1, nil
 		}
 		if id == "even" {
 			return 2, 0, nil
 		}
-		return 0, 0, fmt.Errorf("expected 'odd' or 'even', but found '%s' instead", id)
+		return 0, 0, ErrInvalidSelector
 	default:
 		goto invalid
 	}
@@ -730,10 +716,10 @@ readN:
 	}
 
 eof:
-	return 0, 0, errors.New("unexpected EOF while attempting to parse expression of form an+b")
+	return 0, 0, ErrInvalidSelector
 
 invalid:
-	return 0, 0, errors.New("unexpected character while attempting to parse expression of form an+b")
+	return 0, 0, ErrInvalidSelector
 }
 
 // parseSimpleSelectorSequence parses a selector sequence that applies to
@@ -742,7 +728,7 @@ func (p *parser) parseSimpleSelectorSequence() (Sel, error) {
 	var selectors []Sel
 
 	if p.i >= len(p.s) {
-		return nil, errors.New("expected selector, found EOF instead")
+		return nil, ErrInvalidSelector
 	}
 	switch p.s[p.i] {
 	case '*':
@@ -808,15 +794,15 @@ loop:
 		// represents the subjects of the selector.""
 		if ns == nil { // we found a pseudo-element
 			if pseudoElement != "" {
-				return nil, fmt.Errorf("only one pseudo-element is accepted per selector, got %s and %s", pseudoElement, newPseudoElement)
+				return nil, ErrInvalidSelector
 			}
 			if !p.acceptPseudoElements {
-				return nil, fmt.Errorf("pseudo-element %s found, but pseudo-elements support is disabled", newPseudoElement)
+				return nil, ErrInvalidSelector
 			}
 			pseudoElement = newPseudoElement
 		} else {
 			if pseudoElement != "" {
-				return nil, fmt.Errorf("pseudo-element %s must be at the end of selector", pseudoElement)
+				return nil, ErrInvalidSelector
 			}
 			selectors = append(selectors, ns)
 		}
@@ -875,7 +861,7 @@ func (p *parser) parseSelectorGroup() (SelectorGroup, error) {
 	p.depth++
 	if p.depth > maxSelectorDepth {
 		p.depth--
-		return nil, fmt.Errorf("selector exceeds nesting depth %d", maxSelectorDepth)
+		return nil, ErrInvalidSelector
 	}
 	defer func() { p.depth-- }()
 	current, err := p.parseSelector()
@@ -896,4 +882,44 @@ func (p *parser) parseSelectorGroup() (SelectorGroup, error) {
 		result = append(result, c)
 	}
 	return result, nil
+}
+
+func (p *parser) writeString(b *strings.Builder, text string) {
+	if len(text) > b.Cap()-b.Len() {
+		reserveSelector(p.memory, int64(2*b.Cap()+len(text)))
+		b.Grow(len(text))
+	}
+	b.WriteString(text)
+}
+func (p *parser) lowerASCII(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			reserveSelector(p.memory, 2*int64(len(s)))
+			break
+		}
+	}
+	return toLowerASCII(s)
+}
+
+// lowerUnicode preserves strings.ToLower semantics, including replacement of
+// malformed UTF-8, while admitting one exactly sized output buffer.
+func (p *parser) lowerUnicode(s string) string {
+	size, changed := 0, false
+	for _, r := range s {
+		lower := unicode.ToLower(r)
+		size += utf8.RuneLen(lower)
+		changed = changed || lower != r
+	}
+	// A malformed byte becomes a three-byte RuneError. Valid RuneError runes
+	// retain their original size and do not require a copy.
+	if !changed && size == len(s) {
+		return s
+	}
+	reserveSelector(p.memory, int64(size))
+	var b strings.Builder
+	b.Grow(size)
+	for _, r := range s {
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
 }

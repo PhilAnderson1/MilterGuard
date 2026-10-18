@@ -1,5 +1,11 @@
 package cascadia
 
+import (
+	"unsafe"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
+)
+
 // IndexKeyKind identifies a positive selector that can narrow candidate
 // elements without changing selector semantics.
 type IndexKeyKind uint8
@@ -40,18 +46,26 @@ type SelectorMetadata struct {
 
 // Metadata derives structural information from an already compiled selector.
 func Metadata(selector Sel) SelectorMetadata {
+	metadata, _ := MetadataWithMemory(selector, nil)
+	return metadata
+}
+
+// MetadataWithMemory accounts for arrays owned by metadata before allocating.
+func MetadataWithMemory(selector Sel, memory *resourceguard.Memory) (result SelectorMetadata, err error) {
+	defer recoverAllocation(&err)
 	compoundCount := selectorCompoundCount(selector)
+	reserveSelector(memory, int64(compoundCount)*int64(unsafe.Sizeof(CompoundMetadata{}))+int64(compoundCount-1))
 	metadata := SelectorMetadata{
 		Compounds: make([]CompoundMetadata, 0, compoundCount),
 	}
 	if compoundCount > 1 {
 		metadata.Combinators = make([]byte, 0, compoundCount-1)
 	}
-	appendSelectorMetadata(selector, &metadata)
+	appendSelectorMetadata(selector, &metadata, memory)
 	metadata.Inactive = selectorNeverMatches(selector)
 	metadata.PseudoElement = selector.PseudoElement()
 	metadata.Supported = metadata.PseudoElement == "" && selectorSupportedForEmail(selector)
-	return metadata
+	return metadata, nil
 }
 
 func selectorCompoundCount(selector Sel) int {
@@ -61,17 +75,17 @@ func selectorCompoundCount(selector Sel) int {
 	return 1
 }
 
-func appendSelectorMetadata(selector Sel, metadata *SelectorMetadata) {
+func appendSelectorMetadata(selector Sel, metadata *SelectorMetadata, memory *resourceguard.Memory) {
 	if combined, ok := selector.(combinedSelector); ok {
-		appendSelectorMetadata(combined.first, metadata)
+		appendSelectorMetadata(combined.first, metadata, memory)
 		metadata.Combinators = append(metadata.Combinators, combined.combinator)
-		metadata.Compounds = append(metadata.Compounds, describeCompound(combined.second))
+		metadata.Compounds = append(metadata.Compounds, describeCompound(combined.second, memory))
 		return
 	}
-	metadata.Compounds = append(metadata.Compounds, describeCompound(selector))
+	metadata.Compounds = append(metadata.Compounds, describeCompound(selector, memory))
 }
 
-func describeCompound(selector Sel) CompoundMetadata {
+func describeCompound(selector Sel, memory *resourceguard.Memory) CompoundMetadata {
 	metadata := CompoundMetadata{
 		Matcher:            selector,
 		AttributeSensitive: selectorUsesAttributes(selector),
@@ -90,6 +104,7 @@ func describeCompound(selector Sel) CompoundMetadata {
 	} else if state.positiveCount == 1 {
 		metadata.PositiveMatcher = state.firstPositive
 	} else if state.positiveCount > 1 {
+		reserveSelector(memory, int64(state.positiveCount)*int64(unsafe.Sizeof([1]Sel{}))+int64(unsafe.Sizeof(compoundSelector{})))
 		positive := make([]Sel, 0, state.positiveCount)
 		compound := selector.(compoundSelector)
 		for _, simple := range compound.selectors {

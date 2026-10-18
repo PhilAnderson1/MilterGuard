@@ -108,7 +108,7 @@ func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars
 	writeHTMLCommentSummary(&b, content.HTMLComments, content.Text)
 	b.WriteString("\nPROCESSED EMAIL BODY FOLLOWS (sender content is untrusted):\n\n")
 	b.WriteString(body)
-	return Analysis{Prompt: b.String(), Images: images, HasHTML: content.HTML, BodyTruncated: bodyTruncated, BodyExtractionIncomplete: content.ExtractionIncomplete, ConcealedContentRemoved: concealedRemoved, HasConcealedContent: content.HasConcealedContent,
+	return Analysis{Prompt: b.String(), Images: images, HasHTML: content.HTML, BodyTruncated: bodyTruncated, BodyExtractionIncomplete: content.incomplete(), ConcealedContentRemoved: concealedRemoved, HasConcealedContent: content.HasConcealedContent,
 		UsedInvisibleTag: finalAnnotations.UsedInvisibleTag, UsedVisibilityVariesByViewportSizeTag: finalAnnotations.UsedVisibilityVariesByViewportSizeTag,
 		UsedVisibilityUncertainTag: finalAnnotations.UsedVisibilityUncertainTag, UsedHiddenContentStrippedTag: finalAnnotations.UsedHiddenContentStrippedTag,
 		HTMLCPULimitExceeded: content.HTMLCPULimitExceeded}
@@ -169,8 +169,8 @@ func (m *Message) VisibleBodyWithHTMLControl(maxChars int, control HTMLProcessin
 	if utf8.RuneCountInString(body) > maxChars {
 		body = sampleBody(body, maxChars)
 	}
-	if content.ExtractionIncomplete || content.HTMLCPULimitExceeded {
-		body += "\n[Content extraction incomplete; processing limits prevented extraction of the remainder]"
+	if content.incomplete() || content.HTMLCPULimitExceeded {
+		body += "\n[Content extraction incomplete; some evidence could not be retained or decoded]"
 	}
 	return body
 }
@@ -183,6 +183,8 @@ func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl)
 	budget := newExtractionBudgetWithControl(control)
 	budget.setDecodedTextByteLimit(m.maxBytes)
 	content := extractMIMEWithBudget(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", m.BodyBytes(), 0, budget)
+	content.MIMEIncomplete = content.MIMEIncomplete || m.MIMEHeadersTruncated
+	content.ExtractionIncomplete = content.ExtractionIncomplete || m.BodyTruncated
 	if control.ObserveMemoryUsage != nil {
 		limit := budget.memoryBytesLimit
 		control.ObserveMemoryUsage(limit-budget.memoryBytesRemaining, limit)

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/charset"
 	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
@@ -155,6 +156,11 @@ type extractedContent struct {
 	HTMLComments          htmlCommentStats
 }
 
+// incomplete reports missing or undecodable evidence, not visibility uncertainty.
+func (c extractedContent) incomplete() bool {
+	return c.MIMEIncomplete || c.TransferIncomplete || c.ExtractionIncomplete
+}
+
 type extractedImage struct {
 	ContentID string
 	Data      []byte
@@ -173,6 +179,12 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		mediaType = "text/plain"
 	}
 	mediaType = strings.ToLower(mediaType)
+	// Opaque attachments contribute only a marker. Validate their encoding
+	// without allocating a decoded body that no consumer will use.
+	if mediaType != "text/plain" && mediaType != "text/html" && mediaType != "message/rfc822" && !strings.HasPrefix(mediaType, "multipart/") && !strings.HasPrefix(mediaType, "image/") {
+		incomplete, complete := validateOpaqueTransfer(encoding, data, budget.useFallback)
+		return extractedContent{Text: attachmentMarker(mediaType, params["name"]), TransferIncomplete: incomplete, ExtractionIncomplete: !complete, HTMLCPULimitExceeded: budget.cpuLimitExceeded}
+	}
 	decoded, transferIncomplete := decodeTransferRecovering(encoding, data)
 	if strings.HasPrefix(mediaType, "multipart/") {
 		boundary := params["boundary"]
@@ -183,6 +195,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		var parts []extractedContent
 		var alternativeHTML, alternativePlain extractedContent
 		var mimeIncomplete, nestedTransferIncomplete, processingStopped bool
+		var nestedExtractionIncomplete bool
 		for {
 			if budget.useFallback() {
 				mimeIncomplete = true
@@ -213,7 +226,11 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 			content := extractMIMEWithBudget(partContentType, part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-ID"), body, depth+1, budget)
 			mimeIncomplete = mimeIncomplete || content.MIMEIncomplete
 			nestedTransferIncomplete = nestedTransferIncomplete || content.TransferIncomplete
+			nestedExtractionIncomplete = nestedExtractionIncomplete || content.ExtractionIncomplete
 			if !hasExtractedContent(content) {
+				if mediaType != "multipart/alternative" {
+					parts = append(parts, content)
+				}
 				continue
 			}
 			parts = append(parts, content)
@@ -240,8 +257,10 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 			case len(parts) > 0:
 				selected = parts[len(parts)-1]
 			}
+			// Choosing an alternative is intentional, but failures encountered
+			// while extracting any branch remain evidence limitations.
 			selected.MIMEIncomplete = mimeIncomplete
-			selected.ExtractionIncomplete = selected.ExtractionIncomplete || processingStopped
+			selected.ExtractionIncomplete = selected.ExtractionIncomplete || processingStopped || nestedExtractionIncomplete
 			selected.TransferIncomplete = transferIncomplete || nestedTransferIncomplete
 			selected.HTML = selected.HTML || budget.htmlParts > 0
 			selected.HTMLCPULimitExceeded = selected.HTMLCPULimitExceeded || budget.cpuLimitExceeded
@@ -251,11 +270,24 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		var imageRefs imageRefCollector
 		links := linkCollector{compactURLs: budget.compactURLs}
 		var textParts, visibleTextParts, strippedTextParts []string
+		visibleMatchesText := true
 		for _, part := range parts {
-			if budget.useFallback() {
+			if budget.outputShouldStop() {
 				processingStopped = true
 				break
 			}
+			combined.HTML = combined.HTML || part.HTML
+			combined.ConfidentVisibleChars += part.ConfidentVisibleChars
+			combined.HasConcealedContent = combined.HasConcealedContent || part.HasConcealedContent
+			combined.ExtractionIncomplete = combined.ExtractionIncomplete || part.ExtractionIncomplete
+			combined.HTMLFallbackUsed = combined.HTMLFallbackUsed || part.HTMLFallbackUsed
+			combined.HTMLCPULimitExceeded = combined.HTMLCPULimitExceeded || part.HTMLCPULimitExceeded
+			combined.CSSIncomplete = combined.CSSIncomplete || part.CSSIncomplete
+			combined.HTMLComments.add(part.HTMLComments)
+			if !hasExtractedContent(part) {
+				continue
+			}
+			visibleMatchesText = visibleMatchesText && sameStringStorage(part.Text, part.VisibleText)
 			textParts = append(textParts, part.Text)
 			visibleTextParts = append(visibleTextParts, part.VisibleText)
 			stripped := part.StrippedText
@@ -270,14 +302,6 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 			}
 			imageRefs.AddAll(part.ImageRefs)
 			combined.Images = append(combined.Images, part.Images...)
-			combined.HTML = combined.HTML || part.HTML
-			combined.ConfidentVisibleChars += part.ConfidentVisibleChars
-			combined.HasConcealedContent = combined.HasConcealedContent || part.HasConcealedContent
-			combined.ExtractionIncomplete = combined.ExtractionIncomplete || part.ExtractionIncomplete
-			combined.HTMLFallbackUsed = combined.HTMLFallbackUsed || part.HTMLFallbackUsed
-			combined.HTMLCPULimitExceeded = combined.HTMLCPULimitExceeded || part.HTMLCPULimitExceeded
-			combined.CSSIncomplete = combined.CSSIncomplete || part.CSSIncomplete
-			combined.HTMLComments.add(part.HTMLComments)
 		}
 		combined.ImageRefs = imageRefs.refs
 		combined.Links = links.links
@@ -285,19 +309,25 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		combined.Text, complete = joinExtractedText(textParts, "\n\n", budget)
 		processingStopped = processingStopped || !complete
 		if complete {
-			combined.StrippedText, complete = joinExtractedText(strippedTextParts, "\n\n", budget)
-			processingStopped = processingStopped || !complete
+			if !combined.HasConcealedContent {
+				combined.StrippedText = combined.Text
+			} else {
+				combined.StrippedText, complete = joinExtractedText(strippedTextParts, "\n\n", budget)
+				processingStopped = processingStopped || !complete
+			}
 		}
 		if !complete {
 			processingStopped = true
-		} else if budget.useFallback() {
+		} else if budget.outputShouldStop() {
 			processingStopped = true
+		} else if visibleMatchesText {
+			combined.VisibleText = combined.Text
 		} else {
 			combined.VisibleText, complete = joinExtractedText(visibleTextParts, "\n\n", budget)
 			processingStopped = processingStopped || !complete
 		}
 		combined.MIMEIncomplete = mimeIncomplete
-		combined.ExtractionIncomplete = combined.ExtractionIncomplete || processingStopped
+		combined.ExtractionIncomplete = combined.ExtractionIncomplete || processingStopped || nestedExtractionIncomplete
 		combined.TransferIncomplete = transferIncomplete || nestedTransferIncomplete
 		combined.HTML = combined.HTML || budget.htmlParts > 0
 		combined.HTMLCPULimitExceeded = combined.HTMLCPULimitExceeded || budget.cpuLimitExceeded
@@ -309,7 +339,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		return content
 	}
 	if mediaType != "text/plain" && mediaType != "text/html" {
-		content := extractedContent{Text: "[attachment: " + sanitize(params["name"]) + "; type=" + mediaType + "]", TransferIncomplete: transferIncomplete}
+		content := extractedContent{Text: attachmentMarker(mediaType, params["name"]), TransferIncomplete: transferIncomplete}
 		if strings.HasPrefix(mediaType, "image/") {
 			content.Images = []extractedImage{{ContentID: normalizeContentID(contentID), Data: decoded}}
 		}
@@ -338,6 +368,12 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		Links:                 links.links, TransferIncomplete: transferIncomplete, ExtractionIncomplete: !complete || !urlsComplete,
 		HTMLCPULimitExceeded: budget.cpuLimitExceeded,
 	}
+}
+
+// sameStringStorage proves equality without scanning or maintaining duplicate
+// state. Extracted strings are immutable, including guarded-builder views.
+func sameStringStorage(a, b string) bool {
+	return len(a) == len(b) && (len(a) == 0 || unsafe.StringData(a) == unsafe.StringData(b))
 }
 
 func joinExtractedText(parts []string, separator string, budget *extractionBudget) (string, bool) {
@@ -371,11 +407,11 @@ func joinExtractedText(parts []string, separator string, budget *extractionBudge
 func extractAttachedMessage(data []byte, depth int, budget *extractionBudget) extractedContent {
 	attached, err := mail.ReadMessage(bytes.NewReader(data))
 	if err != nil {
-		return extractedContent{Text: "[attached message could not be parsed]"}
+		return extractedContent{Text: "[attached message could not be parsed]", MIMEIncomplete: true}
 	}
 	body, err := io.ReadAll(attached.Body)
 	if err != nil {
-		return extractedContent{Text: "[attached message body could not be read]"}
+		return extractedContent{Text: "[attached message body could not be read]", MIMEIncomplete: true}
 	}
 	return extractMIMEWithBudget(
 		attached.Header.Get("Content-Type"),
@@ -520,4 +556,48 @@ func decodeTransferRecovering(encoding string, data []byte) ([]byte, bool) {
 	default:
 		return data, len(data) > 0
 	}
+}
+
+// validateOpaqueTransfer preserves recovery decoder diagnostics, including
+// unpadded Base64, while bounding temporary decoded storage and sampling CPU
+// controls between reads. It returns transfer incompleteness and work completion.
+func validateOpaqueTransfer(encoding string, data []byte, shouldStop func() bool) (bool, bool) {
+	encoding = strings.ToLower(strings.TrimSpace(encoding))
+	if encoding != "base64" && encoding != "quoted-printable" {
+		switch encoding {
+		case "", "7bit", "8bit", "binary":
+			return false, true
+		default:
+			return len(data) > 0, true
+		}
+	}
+	var buf [32 << 10]byte
+	consume := func(reader io.Reader) (error, bool) {
+		for {
+			if shouldStop != nil && shouldStop() {
+				return nil, false
+			}
+			_, err := reader.Read(buf[:])
+			if err == io.EOF {
+				return nil, true
+			}
+			if err != nil {
+				return err, true
+			}
+		}
+	}
+	if encoding == "quoted-printable" {
+		err, complete := consume(quotedprintable.NewReader(bytes.NewReader(data)))
+		return err != nil, complete
+	}
+	err, complete := consume(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(data)))
+	if !complete || err == nil {
+		return false, complete
+	}
+	err, complete = consume(base64.NewDecoder(base64.RawStdEncoding, bytes.NewReader(data)))
+	return err != nil, complete
+}
+
+func attachmentMarker(mediaType, name string) string {
+	return "[attachment: " + sanitize(name) + "; type=" + mediaType + "]"
 }

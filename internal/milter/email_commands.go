@@ -173,7 +173,10 @@ func commandMessageLinesWithHTMLControl(m *message.Message, maxBytes int64, cont
 	if mediaType != "text/plain" && mediaType != "text/html" && mediaType != "multipart/alternative" {
 		return nil, fmt.Errorf("command email must contain plain text or HTML without attachments")
 	}
-	text := m.CommandTextWithHTMLControl(maxBytes, control)
+	text, complete := m.CommandTextResult(maxBytes, control)
+	if !complete {
+		return nil, &commandBodyProcessingError{reason: "command body extraction was incomplete"}
+	}
 	if strings.ContainsRune(text, '\x00') {
 		return nil, fmt.Errorf("command body contains invalid characters")
 	}

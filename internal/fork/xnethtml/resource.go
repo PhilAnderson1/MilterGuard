@@ -2,7 +2,6 @@ package html
 
 import (
 	"errors"
-	"fmt"
 	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
@@ -26,16 +25,15 @@ type ResourceLimitError struct {
 }
 
 func (e *ResourceLimitError) Error() string {
-	return fmt.Sprintf("html: resource limit: %s > %d", e.Resource, e.Limit)
+	return "html: resource limit exceeded"
 }
 
 type resourceAbort struct{ err error }
 
 type resourceGuard struct {
-	limits                     ResourceLimits
-	bytes                      uint64
-	stopChecks                 uint32
-	oeCap, afeCap, templateCap int
+	limits     ResourceLimits
+	bytes      uint64
+	stopChecks uint32
 }
 
 func (g *resourceGuard) reserve(bytes int64) {
@@ -74,63 +72,36 @@ func (g *resourceGuard) readByte() (err error) {
 	return nil
 }
 
-func (g *resourceGuard) node(n Node) {
+func (g *resourceGuard) node() {
 	if g == nil {
 		return
 	}
-	g.reserve(int64(unsafe.Sizeof(Node{})) + int64(len(n.Data)+len(n.Namespace)))
+	g.reserve(int64(unsafe.Sizeof(Node{})))
 }
 
-func (g *resourceGuard) attributes(n int) (err error) {
-	if g == nil || n == 0 {
-		return nil
-	}
-	g.reserve(int64(n) * int64(unsafe.Sizeof(Attribute{})))
-	return nil
-}
-
-func (g *resourceGuard) tokenizerAttribute(keyBytes, valueBytes int) (err error) {
-	if g == nil {
-		return nil
-	}
-	// Charge the copied source strings. The per-tag source-attribute cap bounds
-	// tokenizer spans and duplicate-detection entries independently of their Go
-	// allocator representation.
-	g.reserve(int64(keyBytes) + int64(valueBytes))
-	return nil
-}
+// Map allowances cover buckets, growth and allocator rounding; source key
+// copies are charged separately. The entry allowance includes old bucket
+// arrays replaced during growth, not just the final retained table. Cleared
+// tokenizer maps retain their allowance.
+const attributeMapBaseBytes int64 = 256
+const attributeMapEntryBytes int64 = 128
 
 func (g *resourceGuard) mustAttributes(n int) {
-	if err := g.attributes(n); err != nil {
-		panic(resourceAbort{err})
-	}
+	g.reserve(int64(n) * int64(unsafe.Sizeof(Attribute{})))
 }
 
-func (g *resourceGuard) stacks(p *parser) {
-	if g == nil {
-		return
+// growResourceSlice reserves the entire new array before allocation. Old arrays
+// remain charged: the budget measures monotonic allocation, not live storage.
+func growResourceSlice[T any](s []T, extra int, g *resourceGuard) []T {
+	if len(s)+extra <= cap(s) {
+		return s
 	}
-	g.stop()
-	if cap(p.oe) > g.oeCap {
-		g.reserve(int64(cap(p.oe)-g.oeCap) * int64(unsafe.Sizeof((*Node)(nil))))
-		g.oeCap = cap(p.oe)
-	}
-	if cap(p.afe) > g.afeCap {
-		g.reserve(int64(cap(p.afe)-g.afeCap) * int64(unsafe.Sizeof((*Node)(nil))))
-		g.afeCap = cap(p.afe)
-	}
-	if cap(p.templateStack) > g.templateCap {
-		g.reserve(int64(cap(p.templateStack)-g.templateCap) * int64(unsafe.Sizeof(insertionMode(nil))))
-		g.templateCap = cap(p.templateStack)
-	}
-}
-
-func (g *resourceGuard) openElement(p *parser, next *Node) {
-	// Stack growth is charged by stacks. This hook remains at the construction
-	// point so upstream tree-builder changes cannot bypass the guard.
-	if g != nil {
-		g.stop()
-	}
+	capacity := max(len(s)+extra, max(1, cap(s)*2))
+	var value T
+	g.reserve(int64(capacity) * int64(unsafe.Sizeof(value)))
+	grown := make([]T, len(s), capacity)
+	copy(grown, s)
+	return grown
 }
 
 func (g *resourceGuard) textMerge(oldBytes, addedBytes int) {
@@ -141,13 +112,26 @@ func (g *resourceGuard) textMerge(oldBytes, addedBytes int) {
 }
 
 // ParseOptionResourceLimits installs direct tokenizer and tree-builder limits.
-// If usage is non-nil it is updated as parsing proceeds, including on error.
 func ParseOptionResourceLimits(limits ResourceLimits) ParseOption {
 	return func(p *parser) {
 		p.guard = &resourceGuard{limits: limits}
 		if limits.Memory != nil {
-			limits.Memory.Reserve(int64(cap(p.tokenizer.buf)))
+			p.guard.reserve(int64(cap(p.tokenizer.buf)))
 		}
 		p.tokenizer.guard = p.guard
+	}
+}
+
+// check samples immediately inside a long byte scan. Operation-level callers
+// use stop instead, so short tokens do not each incur a clock syscall.
+func (g *resourceGuard) check() {
+	if g == nil {
+		return
+	}
+	if g.limits.Memory.Exhausted() {
+		panic(resourceAbort{&ResourceLimitError{"memory bytes", g.limits.Memory.Limit()}})
+	}
+	if g.limits.ShouldStop != nil && g.limits.ShouldStop() {
+		panic(resourceAbort{ErrResourceStopped})
 	}
 }

@@ -124,9 +124,13 @@ strike.
 
 Set `ai.incomplete_body_action` to `scan` (the default) to classify the retained
 body with an explicit limitation notice. Set it to `reject` to record a
-rejection without asking the model when final truncation or an extraction
-processing limit loses body evidence. As with every rejection decision, accept
-mode records the decision but still accepts the message.
+rejection without asking the model when retained-body or final truncation,
+MIME/header limits, malformed MIME, incomplete transfer decoding, or extraction
+limits leave evidence incomplete. Failures encountered in an unselected MIME
+alternative also remain limitations; choosing between complete alternatives is
+not a failure. Visibility uncertainty alone does not trigger this policy. As
+with every rejection decision, accept mode records the decision but still
+accepts the message.
 
 Image analysis detects scams that conceal their message inside images. Set
 `vision_mode` to `off`, `fallback` to inspect images when insufficient text is
@@ -766,9 +770,11 @@ sudo milterguard --command-mode < commands.txt
 
 The optional email command interface supports the same commands and sends the
 results back by email. HTML command bodies use the configured HTML CPU and
-memory limits; a processing-limit failure executes no commands and produces a
-command-failed reply. `ACTIVITY` and IP commands are administrator-only. For
-ordinary authenticated users, the local recipient address is inferred from the
+memory limits; incomplete MIME, transfer decoding, or resource-limited
+extraction executes no commands and produces a command-failed reply. The command
+byte limit still selects a raw prefix, allowing oversized quoted replies; the
+selected prefix must itself parse and decode completely. `ACTIVITY` and IP
+commands are administrator-only. For ordinary authenticated users, the local recipient address is inferred from the
 authenticated envelope sender, so it is omitted
 from `WHITELIST`, `BLOCKLIST`, and `REJECTIONS` commands. Administrators may specify another
 recipient or use `*`.

@@ -3,11 +3,12 @@ package parse
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"sync"
 )
+
+var errBinaryInput = errors.New("parse: invalid binary input or operation")
 
 const PageSize = 4096
 
@@ -42,7 +43,7 @@ func (r *binaryReaderBytes) Len() int64 {
 func (r *binaryReaderBytes) Bytes(b []byte, n, off int64) ([]byte, error) {
 	var err error
 	if off < 0 || n < 0 {
-		return nil, fmt.Errorf("bytes: invalid range %d--%d", off, off+n)
+		return nil, errBinaryInput
 	} else if n == 0 {
 		return nil, nil
 	} else if int64(len(r.data)) <= off {
@@ -91,7 +92,7 @@ func (r *binaryReaderReader) Bytes(b []byte, n, off int64) ([]byte, error) {
 	r.mu.Lock()
 	if off != r.pos {
 		r.mu.Unlock()
-		return nil, errors.New("reader: does not implement io.Seeker or io.ReaderAt")
+		return nil, errBinaryInput
 	} else if n == 0 {
 		r.mu.Unlock()
 		return nil, nil
@@ -108,7 +109,7 @@ func (r *binaryReaderReader) Bytes(b []byte, n, off int64) ([]byte, error) {
 			return b[:i], err
 		} else if m == 0 {
 			r.mu.Unlock()
-			return b[:i], errors.New("reader: could not read all bytes")
+			return b[:i], errBinaryInput
 		}
 	}
 	r.mu.Unlock()
@@ -158,7 +159,7 @@ func (r *binaryReaderSeeker) Bytes(b []byte, n, off int64) ([]byte, error) {
 			return b[:i], err
 		} else if m == 0 {
 			r.mu.Unlock()
-			return b[:i], errors.New("reader: could not read all bytes")
+			return b[:i], errBinaryInput
 		}
 	}
 	r.mu.Unlock()
@@ -197,7 +198,7 @@ func (r *binaryReaderReaderAt) Bytes(b []byte, n, off int64) ([]byte, error) {
 	if m, err := r.r.ReadAt(b, off); err != nil {
 		return b[:m], err
 	} else if int64(m) != n {
-		return b[:m], errors.New("reader: could not read all bytes")
+		return b[:m], errBinaryInput
 	}
 	return b, nil
 }
@@ -332,21 +333,21 @@ func (r *BinaryReader) Len() int64 {
 func (r *BinaryReader) Seek(off int64, whence int) (int64, error) {
 	if whence == 0 {
 		if off < 0 || r.f.Len() < off {
-			return 0, fmt.Errorf("invalid offset")
+			return 0, errBinaryInput
 		}
 		r.pos = off
 	} else if whence == 1 {
 		if r.pos+off < 0 || r.f.Len() < r.pos+off {
-			return 0, fmt.Errorf("invalid offset")
+			return 0, errBinaryInput
 		}
 		r.pos += off
 	} else if whence == 2 {
 		if off < -r.f.Len() || 0 < off {
-			return 0, fmt.Errorf("invalid offset")
+			return 0, errBinaryInput
 		}
 		r.pos = r.f.Len() + off
 	} else {
-		return 0, fmt.Errorf("invalid whence")
+		return 0, errBinaryInput
 	}
 	return r.pos, nil
 }

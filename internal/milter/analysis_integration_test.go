@@ -577,3 +577,52 @@ func TestPostDecisionUpdatesDoNotInheritExpiredAnalysisContext(t *testing.T) {
 		t.Fatalf("rejection history after expired analysis context = %#v", entries)
 	}
 }
+
+func TestIncompleteEvidencePolicy(t *testing.T) {
+	nested := "Content-Type: text/plain\r\n\r\nevidence"
+	for i := 0; i < 10; i++ {
+		nested = "Content-Type: message/rfc822\r\n\r\n" + nested
+	}
+	cases := []struct {
+		name, ctype, encoding, body string
+		limit                       int64
+	}{
+		{"parts", `multipart/mixed; boundary="x"`, "", strings.Repeat("--x\r\nContent-Type: text/plain\r\n\r\na\r\n", 257) + "--x--\r\n", 100000},
+		{"depth", "message/rfc822", "", nested, 100000},
+		{"retention", "text/plain", "", strings.Repeat("a", 200), 100},
+		{"transfer", "text/plain", "base64", "aGVsbG8=!!", 1000},
+		{"attached-message", "message/rfc822", "", "invalid header\r\n\r\n", 1000},
+	}
+	for _, tc := range cases {
+		for _, policy := range []string{"reject", "scan"} {
+			for _, mode := range []string{"enforce", "accept"} {
+				t.Run(tc.name+"/"+policy+"/"+mode, func(t *testing.T) {
+					analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+					service := &analysisService{analyzer: analyzer, ai: config.AIConfig{Timeout: config.Duration(time.Second), MaxBodyChars: 50000, IncompleteBodyAction: policy, VisionMode: "off"}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+					msg := message.New(tc.limit)
+					msg.AddHeader("Content-Type", tc.ctype)
+					msg.AddHeader("Content-Transfer-Encoding", tc.encoding)
+					msg.AddBody([]byte(tc.body))
+					result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, mode, .9, "accept", false)
+					want := actionAccept
+					if policy == "reject" {
+						if analyzer.calls.Load() != 0 {
+							t.Fatal("incomplete evidence sent to AI")
+						}
+						if result.proposed != actionReject {
+							t.Fatalf("proposed=%v", result.proposed)
+						}
+						if mode == "enforce" {
+							want = actionReject
+						}
+					} else if analyzer.calls.Load() != 1 {
+						t.Fatal("scan did not call AI")
+					}
+					if result.selected != want {
+						t.Fatalf("selected=%v want=%v", result.selected, want)
+					}
+				})
+			}
+		}
+	}
+}

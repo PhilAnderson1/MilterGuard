@@ -4,7 +4,6 @@ package css
 // TODO: \uFFFD replacement character for NULL bytes in strings for example, or atleast don't end the string early
 
 import (
-	"bytes"
 	"io"
 	"strconv"
 
@@ -152,8 +151,8 @@ func NewLexer(r *parse.Input) *Lexer {
 	}
 }
 
-// NewLexerWithLimits returns a lexer that charges each emitted token to the
-// shared allocation budget and cooperatively stops while advancing its input.
+// NewLexerWithLimits returns a lexer that checks cancellation while advancing
+// input. Tokens borrow input storage; callers account for copies they retain.
 func NewLexerWithLimits(r *parse.Input, limits ResourceLimits) *Lexer {
 	if limits.ShouldStop != nil {
 		r.SetProgressCheck(func() error {
@@ -180,6 +179,10 @@ func (l *Lexer) Next() (tt TokenType, data []byte) {
 		return ErrorToken, nil
 	}
 	defer func() {
+		if l.resourceErr != nil {
+			tt, data = ErrorToken, nil
+			return
+		}
 		if tt == ErrorToken {
 			return
 		}
@@ -189,7 +192,7 @@ func (l *Lexer) Next() (tt TokenType, data []byte) {
 			tt, data = ErrorToken, nil
 			return
 		}
-		if err := l.guard.token(data); err != nil {
+		if err := l.guard.step(); err != nil {
 			l.resourceErr = err
 			tt, data = ErrorToken, nil
 		}
@@ -526,9 +529,10 @@ func (l *Lexer) consumeUnicodeRangeToken() bool {
 	mark := l.r.Pos()
 	l.r.Move(2)
 
-	// consume up to 6 hexDigits
+	// Inspect at most seven digits so overlong ranges are rejected without
+	// scanning the rest of the token before rewinding.
 	k := 0
-	for l.consumeHexDigit() {
+	for k <= 6 && l.consumeHexDigit() {
 		k++
 	}
 
@@ -542,7 +546,7 @@ func (l *Lexer) consumeUnicodeRangeToken() bool {
 		// consume another up to 6 hexDigits
 		if l.consumeHexDigit() {
 			k = 1
-			for l.consumeHexDigit() {
+			for k <= 6 && l.consumeHexDigit() {
 				k++
 			}
 		} else {
@@ -552,7 +556,7 @@ func (l *Lexer) consumeUnicodeRangeToken() bool {
 	} else if l.consumeByte('?') {
 		// could be filled up to 6 characters with question marks or else regular hexDigits
 		k++
-		for l.consumeByte('?') {
+		for k <= 6 && l.consumeByte('?') {
 			k++
 		}
 	}
@@ -711,7 +715,7 @@ func (l *Lexer) consumeIdentlike() TokenType {
 	if l.consumeIdentToken() {
 		if l.r.Peek(0) != '(' {
 			return IdentToken
-		} else if !parse.EqualFold(bytes.Replace(l.r.Lexeme(), []byte{'\\'}, nil, -1), []byte{'u', 'r', 'l'}) {
+		} else if !l.isURLName(l.r.Lexeme()) {
 			l.r.Move(1)
 			return FunctionToken
 		}
@@ -738,4 +742,31 @@ func (l *Lexer) consumeIdentlike() TokenType {
 		return URLToken
 	}
 	return ErrorToken
+}
+
+// isURLName preserves the upstream backslash-stripping comparison without
+// creating a transformed identifier. Most non-URL names fail on their first byte.
+func (l *Lexer) isURLName(name []byte) bool {
+	matched := 0
+	nextCheck := 1024
+	for i, c := range name {
+		if i >= nextCheck {
+			nextCheck = i + 1024
+			if err := l.r.CheckProgress(); err != nil {
+				l.resourceErr = err
+				return false
+			}
+		}
+		if c == '\\' {
+			continue
+		}
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if matched == 3 || c != "url"[matched] {
+			return false
+		}
+		matched++
+	}
+	return matched == 3
 }

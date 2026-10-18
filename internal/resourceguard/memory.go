@@ -47,3 +47,21 @@ func (m *Memory) Limit() int64 {
 	}
 	return m.limit
 }
+
+// TryReserve admits optional memoization without poisoning required work when
+// it does not fit. Like Reserve, it is owned by one operation, not concurrent.
+func (m *Memory) TryReserve(bytes int64) bool {
+	if m == nil {
+		return true
+	}
+	if m.exhausted {
+		return false
+	}
+	if bytes <= 0 {
+		return true
+	}
+	if m.limit <= 0 || m.used > m.limit || bytes > m.limit-m.used {
+		return false
+	}
+	return m.Reserve(bytes)
+}

@@ -314,6 +314,14 @@ func (m *Message) CommandText(maxBytes int64) string {
 // CommandTextWithHTMLControl applies explicit HTML resource controls while
 // extracting an authenticated command message.
 func (m *Message) CommandTextWithHTMLControl(maxBytes int64, control HTMLProcessingControl) string {
+	text, _ := m.CommandTextResult(maxBytes, control)
+	return text
+}
+
+// CommandTextResult extracts the configured command prefix and reports whether
+// extraction of that prefix completed. Deliberate raw prefix selection is not
+// an extraction failure; malformed MIME and decoding/resource failures are.
+func (m *Message) CommandTextResult(maxBytes int64, control HTMLProcessingControl) (text string, complete bool) {
 	body := m.BodyBytes()
 	if maxBytes >= 0 && int64(len(body)) > maxBytes {
 		body = body[:maxBytes]
@@ -325,5 +333,5 @@ func (m *Message) CommandTextWithHTMLControl(maxBytes int64, control HTMLProcess
 	}
 	budget.setDecodedTextByteLimit(textLimit)
 	content := extractMIMEWithBudget(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", body, 0, budget)
-	return stripInvisibleFormatting(content.VisibleText)
+	return stripInvisibleFormatting(content.VisibleText), !content.incomplete() && !m.MIMEHeadersTruncated
 }

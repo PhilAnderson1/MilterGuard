@@ -1,9 +1,6 @@
 package cascadia
 
 import (
-	"fmt"
-	"strings"
-
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
@@ -39,7 +36,7 @@ func Parse(sel string) (Sel, error) {
 	}
 
 	if p.i < len(sel) {
-		return nil, fmt.Errorf("parsing %q: %d bytes left over", sel, len(sel)-p.i)
+		return nil, ErrInvalidSelector
 	}
 
 	return compiled, nil
@@ -58,7 +55,7 @@ func ParseWithPseudoElement(sel string) (Sel, error) {
 	}
 
 	if p.i < len(sel) {
-		return nil, fmt.Errorf("parsing %q: %d bytes left over", sel, len(sel)-p.i)
+		return nil, ErrInvalidSelector
 	}
 
 	return compiled, nil
@@ -71,34 +68,34 @@ func ParseGroup(sel string) (SelectorGroup, error) {
 	return ParseGroupWithMemory(sel, nil)
 }
 
-// ParseGroupWithMemory parses a selector and charges its retained source-sized
-// data. Explicit byte, component, group and nesting limits bound structural
-// amplification independently of Go allocator details.
+// ParseGroupWithMemory charges source retention, component storage, copied
+// strings and substring tables. Structural limits independently bound work.
 func ParseGroupWithMemory(sel string, memory *resourceguard.Memory) (SelectorGroup, error) {
 	return parseGroup(sel, memory, false)
 }
 
 // ParseGroupWithPseudoElementsAndMemory parses a selector group including
-// pseudo-elements and charges retained source-sized data to memory.
+// pseudo-elements and charges its compilation allocations to memory.
 func ParseGroupWithPseudoElementsAndMemory(sel string, memory *resourceguard.Memory) (SelectorGroup, error) {
 	return parseGroup(sel, memory, true)
 }
 
-func parseGroup(sel string, memory *resourceguard.Memory, acceptPseudoElements bool) (SelectorGroup, error) {
+func parseGroup(sel string, memory *resourceguard.Memory, acceptPseudoElements bool) (result SelectorGroup, err error) {
+	defer recoverAllocation(&err)
 	if err := validateSelectorInput(sel); err != nil {
 		return nil, err
 	}
 	if memory != nil && !memory.Reserve(int64(len(sel))) {
-		return nil, fmt.Errorf("cascadia: memory limit exceeded")
+		return nil, errSelectorMemory
 	}
-	p := &parser{s: sel, acceptPseudoElements: acceptPseudoElements}
+	p := &parser{s: sel, acceptPseudoElements: acceptPseudoElements, memory: memory}
 	compiled, err := p.parseSelectorGroup()
 	if err != nil {
 		return nil, err
 	}
 
 	if p.i < len(sel) {
-		return nil, fmt.Errorf("parsing %q: %d bytes left over", sel, len(sel)-p.i)
+		return nil, ErrInvalidSelector
 	}
 
 	return compiled, nil
@@ -266,7 +263,7 @@ func (t classSelector) Match(n *html.Node) bool {
 
 func (t classSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 	return matchAttributeResource(n, "class", func(s string) bool {
-		return matchInclude(t.class, s, false)
+		return matchIncludeResource(t.class, s, false, guard)
 	}, guard)
 }
 
@@ -304,6 +301,7 @@ func (c idSelector) PseudoElement() string {
 type attrSelector struct {
 	key, val, operation string
 	insensitive         bool
+	failure             []int // immutable substring prefix table, prepared at compilation
 }
 
 // Matches elements by attribute value.
@@ -312,43 +310,32 @@ func (t attrSelector) Match(n *html.Node) bool {
 }
 
 func (t attrSelector) matchResource(n *html.Node, guard *MatchControl) bool {
-	switch t.operation {
-	case "":
+	if t.operation == "" {
 		return hasAttributeResource(n, t.key, guard)
-	case "=":
-		return matchAttributeResource(n, t.key, func(s string) bool { return matchInsensitiveValue(s, t.val, t.insensitive) }, guard)
-	case "!=":
-		return attributeNotEqualMatchResource(t.key, t.val, n, t.insensitive, guard)
-	case "~=":
-		// matches elements where the attribute named key is a whitespace-separated list that includes val.
-		return matchAttributeResource(n, t.key, func(s string) bool { return matchIncludeResource(t.val, s, t.insensitive, guard) }, guard)
-	case "|=":
-		return attributeDashMatchResource(t.key, t.val, n, t.insensitive, guard)
-	case "^=":
-		return attributePrefixMatchResource(t.key, t.val, n, t.insensitive, guard)
-	case "$=":
-		return attributeSuffixMatchResource(t.key, t.val, n, t.insensitive, guard)
-	case "*=":
-		return attributeSubstringMatchResource(t.key, t.val, n, t.insensitive, guard)
-	default:
-		panic(fmt.Sprintf("unsuported operation : %s", t.operation))
 	}
-}
-
-// matches elements where we ignore (or not) the case of the attribute value
-// the user attribute is the value set by the user to match elements
-// the real attribute is the attribute value found in the code parsed
-func matchInsensitiveValue(userAttr string, realAttr string, ignoreCase bool) bool {
-	if ignoreCase {
-		return equalASCIIFold(userAttr, realAttr)
+	if n.Type != html.ElementNode {
+		return false
 	}
-	return userAttr == realAttr
-
-}
-
-// matches elements where the attribute named key satisifes the function f.
-func matchAttribute(n *html.Node, key string, f func(string) bool) bool {
-	return matchAttributeResource(n, key, f, nil)
+	for _, a := range n.Attr {
+		if guard.step() {
+			return false
+		}
+		if a.Key != t.key {
+			continue
+		}
+		matched := t.matchValue(a.Val, guard)
+		if guard != nil && guard.stopped {
+			return false
+		}
+		if t.operation == "!=" {
+			if matched {
+				return false
+			}
+		} else if matched {
+			return true
+		}
+	}
+	return t.operation == "!="
 }
 
 func matchAttributeResource(n *html.Node, key string, f func(string) bool, guard *MatchControl) bool {
@@ -359,144 +346,11 @@ func matchAttributeResource(n *html.Node, key string, f func(string) bool, guard
 		if guard.step() {
 			return false
 		}
-		if a.Key != key {
-			continue
-		}
-		if guard.checkNow() {
-			return false
-		}
-		if f(a.Val) {
+		if a.Key == key && f(a.Val) {
 			return true
 		}
 	}
 	return false
-}
-
-// attributeNotEqualMatch matches elements where
-// the attribute named key does not have the value val.
-func attributeNotEqualMatch(key, val string, n *html.Node, ignoreCase bool) bool {
-	return attributeNotEqualMatchResource(key, val, n, ignoreCase, nil)
-}
-
-func attributeNotEqualMatchResource(key, val string, n *html.Node, ignoreCase bool, guard *MatchControl) bool {
-	if n.Type != html.ElementNode {
-		return false
-	}
-	for _, a := range n.Attr {
-		if guard.step() {
-			return false
-		}
-		if a.Key != key {
-			continue
-		}
-		if guard.checkNow() {
-			return false
-		}
-		if matchInsensitiveValue(a.Val, val, ignoreCase) {
-			return false
-		}
-	}
-	return true
-}
-
-// returns true if s is a whitespace-separated list that includes val.
-func matchInclude(val string, s string, ignoreCase bool) bool {
-	return matchIncludeResource(val, s, ignoreCase, nil)
-}
-
-func matchIncludeResource(val string, s string, ignoreCase bool, guard *MatchControl) bool {
-	for s != "" {
-		if guard.step() {
-			return false
-		}
-		i := strings.IndexAny(s, " \t\r\n\f")
-		if i == -1 {
-			return matchInsensitiveValue(s, val, ignoreCase)
-		}
-		if matchInsensitiveValue(s[:i], val, ignoreCase) {
-			return true
-		}
-		s = s[i+1:]
-	}
-	return false
-}
-
-// matches elements where the attribute named key equals val or starts with val plus a hyphen.
-func attributeDashMatch(key, val string, n *html.Node, ignoreCase bool) bool {
-	return attributeDashMatchResource(key, val, n, ignoreCase, nil)
-}
-
-func attributeDashMatchResource(key, val string, n *html.Node, ignoreCase bool, guard *MatchControl) bool {
-	return matchAttributeResource(n, key,
-		func(s string) bool {
-			if matchInsensitiveValue(s, val, ignoreCase) {
-				return true
-			}
-			if len(s) <= len(val) {
-				return false
-			}
-			if matchInsensitiveValue(s[:len(val)], val, ignoreCase) && s[len(val)] == '-' {
-				return true
-			}
-			return false
-		}, guard)
-}
-
-// attributePrefixMatch returns a Selector that matches elements where
-// the attribute named key starts with val.
-func attributePrefixMatch(key, val string, n *html.Node, ignoreCase bool) bool {
-	return attributePrefixMatchResource(key, val, n, ignoreCase, nil)
-}
-
-func attributePrefixMatchResource(key, val string, n *html.Node, ignoreCase bool, guard *MatchControl) bool {
-	return matchAttributeResource(n, key,
-		func(s string) bool {
-			if strings.TrimSpace(s) == "" {
-				return false
-			}
-			if ignoreCase {
-				return hasPrefixASCIIFold(s, val)
-			}
-			return strings.HasPrefix(s, val)
-		}, guard)
-}
-
-// attributeSuffixMatch matches elements where
-// the attribute named key ends with val.
-func attributeSuffixMatch(key, val string, n *html.Node, ignoreCase bool) bool {
-	return attributeSuffixMatchResource(key, val, n, ignoreCase, nil)
-}
-
-func attributeSuffixMatchResource(key, val string, n *html.Node, ignoreCase bool, guard *MatchControl) bool {
-	return matchAttributeResource(n, key,
-		func(s string) bool {
-			if strings.TrimSpace(s) == "" {
-				return false
-			}
-			if ignoreCase {
-				return hasSuffixASCIIFold(s, val)
-			}
-			return strings.HasSuffix(s, val)
-		}, guard)
-}
-
-// attributeSubstringMatch matches nodes where
-// the attribute named key contains val.
-func attributeSubstringMatch(key, val string, n *html.Node, ignoreCase bool) bool {
-	return attributeSubstringMatchResource(key, val, n, ignoreCase, nil)
-}
-
-func attributeSubstringMatchResource(key, val string, n *html.Node, ignoreCase bool, guard *MatchControl) bool {
-	return matchAttributeResource(n, key,
-		func(s string) bool {
-			if strings.TrimSpace(s) == "" {
-				return false
-			}
-			if ignoreCase {
-				return containsASCIIFold(s, val)
-			}
-			return strings.Contains(s, val)
-		}, guard)
 }
 
 func hasAttributeResource(n *html.Node, key string, guard *MatchControl) bool {
@@ -509,66 +363,6 @@ func hasAttributeResource(n *html.Node, key string, guard *MatchControl) bool {
 		}
 		if attribute.Key == key {
 			return true
-		}
-	}
-	return false
-}
-
-func equalASCIIFold(left, right string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range len(left) {
-		if foldASCII(left[i]) != foldASCII(right[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func hasPrefixASCIIFold(value, prefix string) bool {
-	return len(value) >= len(prefix) && equalASCIIFold(value[:len(prefix)], prefix)
-}
-
-func hasSuffixASCIIFold(value, suffix string) bool {
-	return len(value) >= len(suffix) && equalASCIIFold(value[len(value)-len(suffix):], suffix)
-}
-
-// containsASCIIFold uses KMP so hostile repeated prefixes cannot turn a
-// case-insensitive substring selector into quadratic work. Most CSS needles
-// fit in the stack-backed failure table.
-func containsASCIIFold(value, needle string) bool {
-	if len(needle) == 0 {
-		return true
-	}
-	if len(needle) > len(value) {
-		return false
-	}
-	var localFailure [64]int
-	failure := localFailure[:0]
-	if len(needle) <= len(localFailure) {
-		failure = localFailure[:len(needle)]
-	} else {
-		failure = make([]int, len(needle))
-	}
-	for i, matched := 1, 0; i < len(needle); i++ {
-		for matched > 0 && foldASCII(needle[i]) != foldASCII(needle[matched]) {
-			matched = failure[matched-1]
-		}
-		if foldASCII(needle[i]) == foldASCII(needle[matched]) {
-			matched++
-		}
-		failure[i] = matched
-	}
-	for i, matched := 0, 0; i < len(value); i++ {
-		for matched > 0 && foldASCII(value[i]) != foldASCII(needle[matched]) {
-			matched = failure[matched-1]
-		}
-		if foldASCII(value[i]) == foldASCII(needle[matched]) {
-			matched++
-			if matched == len(needle) {
-				return true
-			}
 		}
 	}
 	return false
@@ -688,6 +482,9 @@ func descendantMatchResource(a, d Matcher, n *html.Node, guard *MatchControl) bo
 	}
 
 	for p := n.Parent; p != nil; p = p.Parent {
+		if guard != nil && guard.stopped {
+			return false
+		}
 		if matchResource(a, p, guard) {
 			return true
 		}
@@ -731,6 +528,9 @@ func siblingMatchResource(s1, s2 Matcher, adjacent bool, n *html.Node, guard *Ma
 
 	// Walk backwards looking for element that matches s1
 	for c := n.PrevSibling; c != nil; c = c.PrevSibling {
+		if guard != nil && guard.stopped {
+			return false
+		}
 		if matchResource(s1, c, guard) {
 			return true
 		}
@@ -767,6 +567,9 @@ func (s SelectorGroup) Match(n *html.Node) bool {
 
 func (s SelectorGroup) matchResource(n *html.Node, guard *MatchControl) bool {
 	for _, sel := range s {
+		if guard != nil && guard.stopped {
+			return false
+		}
 		if matchResource(sel, n, guard) {
 			return true
 		}

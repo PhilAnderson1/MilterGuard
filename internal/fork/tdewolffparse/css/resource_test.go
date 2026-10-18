@@ -2,6 +2,7 @@ package css
 
 import (
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -48,7 +49,7 @@ func TestProgressGuardStopsUnknownAtRuleBody(t *testing.T) {
 	}
 }
 
-func TestSharedMemoryBudgetStopsCSSLexer(t *testing.T) {
+func TestCSSLexerDoesNotChargeBorrowedTokens(t *testing.T) {
 	memory := resourceguard.NewMemory(512)
 	l := NewLexerWithLimits(parse.NewInputString(strings.Repeat(`()`, 200)), ResourceLimits{Memory: memory})
 	for {
@@ -56,9 +57,8 @@ func TestSharedMemoryBudgetStopsCSSLexer(t *testing.T) {
 			break
 		}
 	}
-	var limitErr *ResourceLimitError
-	if !errors.As(l.Err(), &limitErr) || !memory.Exhausted() {
-		t.Fatalf("err=%v exhausted=%v", l.Err(), memory.Exhausted())
+	if !errors.Is(l.Err(), io.EOF) || memory.Used() != 0 || memory.Exhausted() {
+		t.Fatalf("borrowed tokens charged: err=%v used=%d", l.Err(), memory.Used())
 	}
 }
 

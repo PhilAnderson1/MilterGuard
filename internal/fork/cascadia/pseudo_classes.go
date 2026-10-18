@@ -1,10 +1,6 @@
 package cascadia
 
 import (
-	"bytes"
-	"fmt"
-	"strings"
-
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/atom"
 )
@@ -38,7 +34,8 @@ func (s relativePseudoClassSelector) matchResource(n *html.Node, guard *MatchCon
 	switch s.name {
 	case "not":
 		// matches elements that do not match a.
-		return !matchResource(s.match, n, guard)
+		matched := matchResource(s.match, n, guard)
+		return !matched && (guard == nil || !guard.stopped)
 	case "has":
 		//  matches elements with any descendant that matches a.
 		return hasDescendantMatchResource(n, s.match, guard)
@@ -46,7 +43,7 @@ func (s relativePseudoClassSelector) matchResource(n *html.Node, guard *MatchCon
 		// matches elements with a child that matches a.
 		return hasChildMatchResource(n, s.match, guard)
 	default:
-		panic(fmt.Sprintf("unsupported relative pseudo class selector : %s", s.name))
+		panic("cascadia: unsupported relative pseudo class")
 	}
 }
 
@@ -57,6 +54,9 @@ func hasChildMatch(n *html.Node, a SelectorGroup) bool {
 
 func hasChildMatchResource(n *html.Node, a SelectorGroup, guard *MatchControl) bool {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if guard != nil && guard.stopped {
+			return false
+		}
 		if matchResource(a, c, guard) {
 			return true
 		}
@@ -99,83 +99,6 @@ func (s relativePseudoClassSelector) Specificity() Specificity {
 
 func (c relativePseudoClassSelector) PseudoElement() string {
 	return ""
-}
-
-type containsPseudoClassSelector struct {
-	abstractPseudoClass
-	value string
-	own   bool
-}
-
-func (s containsPseudoClassSelector) Match(n *html.Node) bool {
-	return s.matchResource(n, nil)
-}
-
-func (s containsPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl) bool {
-	var text string
-	if s.own {
-		// matches nodes that directly contain the given text
-		text = strings.ToLower(nodeOwnTextResource(n, guard))
-	} else {
-		// matches nodes that contain the given text.
-		text = strings.ToLower(nodeTextResource(n, guard))
-	}
-	if guard.step() {
-		return false
-	}
-	return strings.Contains(text, s.value)
-}
-
-// writeNodeText writes the text contained in n and its descendants to b.
-func writeNodeText(n *html.Node, b *bytes.Buffer) {
-	writeNodeTextResource(n, b, nil)
-}
-
-func writeNodeTextResource(n *html.Node, b *bytes.Buffer, guard *MatchControl) {
-	if guard.step() {
-		return
-	}
-	switch n.Type {
-	case html.TextNode:
-		b.WriteString(n.Data)
-	case html.ElementNode:
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			writeNodeTextResource(c, b, guard)
-			if guard != nil && guard.stopped {
-				return
-			}
-		}
-	}
-}
-
-// nodeText returns the text contained in n and its descendants.
-func nodeText(n *html.Node) string {
-	return nodeTextResource(n, nil)
-}
-
-func nodeTextResource(n *html.Node, guard *MatchControl) string {
-	var b bytes.Buffer
-	writeNodeTextResource(n, &b, guard)
-	return b.String()
-}
-
-// nodeOwnText returns the contents of the text nodes that are direct
-// children of n.
-func nodeOwnText(n *html.Node) string {
-	return nodeOwnTextResource(n, nil)
-}
-
-func nodeOwnTextResource(n *html.Node, guard *MatchControl) string {
-	var b bytes.Buffer
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if guard.step() {
-			return b.String()
-		}
-		if c.Type == html.TextNode {
-			b.WriteString(c.Data)
-		}
-	}
-	return b.String()
 }
 
 type nthPseudoClassSelector struct {
@@ -390,7 +313,7 @@ func (s emptyElementPseudoClassSelector) matchResource(n *html.Node, guard *Matc
 		case html.ElementNode:
 			return false
 		case html.TextNode:
-			if strings.TrimSpace(c.Data) == "" {
+			if !nonBlankAttribute(c.Data, guard) {
 				continue
 			} else {
 				return false
@@ -454,7 +377,7 @@ func (s langPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl
 		return false
 	}
 	own := matchAttributeResource(n, "lang", func(val string) bool {
-		return val == s.lang || strings.HasPrefix(val, s.lang+"-")
+		return equalAttribute(val, s.lang, false, guard) || len(val) > len(s.lang) && val[len(s.lang)] == '-' && equalAttribute(val[:len(s.lang)], s.lang, false, guard)
 	}, guard)
 	if n.Parent == nil {
 		return own
@@ -555,8 +478,7 @@ func (s checkedPseudoClassSelector) matchResource(n *html.Node, guard *MatchCont
 	switch n.DataAtom {
 	case atom.Input, atom.Menuitem:
 		return hasAttrResource(n, "checked", guard) && matchAttributeResource(n, "type", func(val string) bool {
-			t := toLowerASCII(val)
-			return t == "checkbox" || t == "radio"
+			return equalAttribute(val, "checkbox", true, guard) || equalAttribute(val, "radio", true, guard)
 		}, guard)
 	case atom.Option:
 		return hasAttrResource(n, "selected", guard)

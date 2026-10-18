@@ -17,7 +17,7 @@ type Input struct {
 	restore func()
 
 	progressCheck func() error
-	nextProgress  int
+	progressLeft  int
 }
 
 // NewInput returns a new Input for a given io.Input and uses io.ReadAll to read it into a byte slice.
@@ -45,7 +45,14 @@ func NewInput(r io.Reader) *Input {
 
 // NewInputString returns a new Input for a given string and appends NULL at the end.
 func NewInputString(s string) *Input {
-	return NewInputBytes([]byte(s))
+	if len(s) == 0 {
+		return NewInputBytes(nil)
+	}
+	// Own one mutable, NUL-terminated copy; avoid copying again when the string
+	// length happens to fill the allocation's capacity exactly.
+	b := make([]byte, len(s)+1)
+	copy(b, s)
+	return &Input{buf: b}
 }
 
 // NewInputBytes returns a new Input for a given byte slice and appends NULL at the end.
@@ -127,32 +134,42 @@ func (z *Input) PeekRune(pos int) (rune, int) {
 // Move advances the position.
 func (z *Input) Move(n int) {
 	z.pos += n
-	if n > 0 && z.progressCheck != nil && z.pos >= z.nextProgress {
-		z.nextProgress = z.pos + 1024
-		if err := z.progressCheck(); err != nil {
-			z.err = err
+	if n > 0 && z.progressCheck != nil {
+		z.progressLeft -= n
+		if z.progressLeft <= 0 {
+			z.progressLeft = 1024
+			z.CheckProgress()
 		}
 	}
 }
 
 // SetProgressCheck installs an allocation-free callback sampled while input is
-// consumed. Returning an error stops subsequent peeks and makes Err report it.
+// consumed, including rereads after rewinding. Backward movement does not
+// refund work. Returning an error stops subsequent peeks and makes Err report it.
 func (z *Input) SetProgressCheck(check func() error) {
 	z.progressCheck = check
-	z.nextProgress = z.pos + 1024
+	z.progressLeft = 1024
+}
+
+// CheckProgress checks cancellation during scans that do not advance input.
+func (z *Input) CheckProgress() error {
+	if z.err == nil && z.progressCheck != nil {
+		z.err = z.progressCheck()
+	}
+	return z.err
 }
 
 // MoveRune advances the position by the length of the current rune.
 func (z *Input) MoveRune() {
 	c := z.Peek(0)
 	if c < 0xC0 || len(z.buf)-1-z.pos < 2 {
-		z.pos++
+		z.Move(1)
 	} else if c < 0xE0 || len(z.buf)-1-z.pos < 3 {
-		z.pos += 2
+		z.Move(2)
 	} else if c < 0xF0 || len(z.buf)-1-z.pos < 4 {
-		z.pos += 3
+		z.Move(3)
 	} else {
-		z.pos += 4
+		z.Move(4)
 	}
 }
 

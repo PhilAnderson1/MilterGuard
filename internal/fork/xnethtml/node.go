@@ -134,12 +134,14 @@ func (n *Node) RemoveChild(c *Node) {
 }
 
 // reparentChildren reparents all of src's child nodes to dst.
-func reparentChildren(dst, src *Node) {
+func reparentChildren(dst, src *Node) { reparentChildrenWithGuard(dst, src, nil) }
+func reparentChildrenWithGuard(dst, src *Node, guard *resourceGuard) {
 	for {
 		child := src.FirstChild
 		if child == nil {
 			break
 		}
+		guard.stop()
 		src.RemoveChild(child)
 		dst.AppendChild(child)
 	}

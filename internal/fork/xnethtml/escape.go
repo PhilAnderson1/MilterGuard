@@ -6,7 +6,6 @@ package html
 
 import (
 	"bytes"
-	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -56,7 +55,7 @@ var replacementTable = [...]rune{
 // (which indicates the length of the character reference). It is assumed that
 // the first byte of s is '&'. attribute should be true if parsing an attribute
 // value.
-func unescapeEntity(s []byte, attribute bool) (rune, rune, int) {
+func unescapeEntity(s []byte, attribute bool, guard *resourceGuard) (rune, rune, int) {
 	// https://html.spec.whatwg.org/multipage/syntax.html#consume-a-character-reference
 
 	// i starts at 1 because we already know that s[0] == '&'.
@@ -80,7 +79,12 @@ func unescapeEntity(s []byte, attribute bool) (rune, rune, int) {
 
 		i0 := i
 		x := '\x00'
+		nextCheck := 1024
 		for i < len(s) {
+			if i >= nextCheck {
+				nextCheck = i + 1024
+				guard.check()
+			}
 			c = s[i]
 			var d rune
 			var mult rune
@@ -131,7 +135,9 @@ func unescapeEntity(s []byte, attribute bool) (rune, rune, int) {
 	// Consume the maximum number of characters possible, with the
 	// consumed characters matching one of the named references.
 
-	for i < len(s) {
+	// No entity name is longer than 32 bytes. Unknown suffixes are emitted
+	// by the outer loop; only the bounded prefix is needed for lookup.
+	for i < len(s) && i <= longestEntityName {
 		c := s[i]
 		i++
 		// Lower-cased characters are more common in entities, so we check for them first.
@@ -165,64 +171,84 @@ func unescapeEntity(s []byte, attribute bool) (rune, rune, int) {
 	return '&', 0, 1
 }
 
-// unescape unescapes b's entites, so that "a&lt;b" becomes "a<b". It attempts
-// to do so in place, but if the unescaped value is longer than the input it
-// allocates a new slice. attribute should be true if parsing an attribute
-// value.
+// longestEntityName includes the semicolon. A table invariant test keeps the
+// bound in sync with upstream's entity vocabulary.
+const longestEntityName = 32
+
+// unescape decodes entities in place where possible, allocating owned storage
+// only when output would overwrite unread input. attribute selects the HTML
+// attribute-context rules for references without semicolons.
 func unescape(b []byte, attribute bool) []byte {
-	firstAmp := slices.Index(b, '&')
-	if firstAmp == -1 {
+	return unescapeWithGuard(b, attribute, nil)
+}
+
+func unescapeWithGuard(b []byte, attribute bool, guard *resourceGuard) []byte {
+	firstAmp := -1
+	for start := 0; start < len(b); start += 1024 {
+		if start > 0 {
+			guard.check()
+		}
+		end := min(start+1024, len(b))
+		if i := bytes.IndexByte(b[start:end], '&'); i >= 0 {
+			firstAmp = start + i
+			break
+		}
+	}
+	if firstAmp < 0 {
 		return b
 	}
-
 	out := b[:firstAmp]
-	src := firstAmp
 	reusingB := true
-	for src < len(b) {
+	nextCheck := firstAmp + 1024
+	for src := firstAmp; src < len(b); {
+		if src >= nextCheck {
+			guard.check()
+			nextCheck = src + 1024
+		}
 		if b[src] != '&' {
+			if !reusingB {
+				out = growResourceSlice(out, 1, guard)
+			}
 			out = append(out, b[src])
 			src++
 			continue
 		}
-
-		r1, r2, entityNameLen := unescapeEntity(b[src:], attribute)
-		if entityNameLen == 1 && r1 == '&' {
-			// Not an entity
-			out = append(out, '&')
-			src++
-			continue
-		}
-
-		// Compute replacement length
-		replLen := utf8.RuneLen(r1)
+		r1, r2, consumed := unescapeEntity(b[src:], attribute, guard)
+		width := utf8.RuneLen(r1)
 		if r2 != 0 {
-			replLen += utf8.RuneLen(r2)
+			width += utf8.RuneLen(r2)
 		}
-
-		// If the name of the entity is shorter than the width of the
-		// replacement runes then we need to expand the output slice to
-		// fit the replacement.
-		if replLen > entityNameLen {
-			if reusingB {
-				out = slices.Clone(out)
-				reusingB = false
-			}
-			out = slices.Grow(out, replLen)
+		// Do not overwrite unread source when a reference expands. After this
+		// transition every growth (including ordinary suffix bytes) is admitted.
+		if reusingB && len(out)+width > src+consumed {
+			capacity := max(len(b), len(out)+width)
+			guard.reserve(int64(capacity))
+			owned := make([]byte, len(out), capacity)
+			copy(owned, out)
+			out, reusingB = owned, false
+		}
+		if !reusingB {
+			out = growResourceSlice(out, width, guard)
 		}
 		out = utf8.AppendRune(out, r1)
 		if r2 != 0 {
 			out = utf8.AppendRune(out, r2)
 		}
-
-		src += entityNameLen
+		src += consumed
 	}
-
 	return out
 }
 
 // lower lower-cases the A-Z bytes in b in-place, so that "aBc" becomes "abc".
-func lower(b []byte) []byte {
+func lower(b []byte) []byte { return lowerWithGuard(b, nil) }
+
+func lowerWithGuard(b []byte, guard *resourceGuard) []byte {
+	nextCheck := 1024
 	for i, c := range b {
+		if i >= nextCheck {
+			nextCheck = i + 1024
+			guard.check()
+		}
 		if 'A' <= c && c <= 'Z' {
 			b[i] = c + 'a' - 'A'
 		}

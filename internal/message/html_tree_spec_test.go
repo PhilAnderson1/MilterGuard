@@ -448,3 +448,16 @@ func TestBoundedHTMLFallbackCapsSingleTextToken(t *testing.T) {
 		t.Fatalf("fallback flags = %+v", got)
 	}
 }
+
+func TestForeignAncestorUncertaintyDoesNotSuppressVision(t *testing.T) {
+	body := `<style>foreignObject div{display:none}</style><foreignObject><div>` + strings.Repeat("padding ", 50) + `</div></foreignObject><img src="cid:scam-image">`
+	got := htmlToText(body)
+	if got.ConfidentVisibleChars != 0 {
+		t.Fatalf("uncertain text counted as confident: %d", got.ConfidentVisibleChars)
+	}
+	m := multipartRelatedMessage("", body, "<scam-image>")
+	analysis := m.BuildAnalysis(AnalysisContext{}, 10000, VisionOptions{Mode: "fallback", MinTextChars: 200, MaxImages: 2, MaxBytes: 1 << 20, MaxPixels: 100})
+	if len(analysis.Images) != 1 {
+		t.Fatalf("uncertain padding suppressed vision: %d", len(analysis.Images))
+	}
+}

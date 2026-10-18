@@ -6,6 +6,7 @@ package html
 
 import (
 	"strings"
+	"unicode"
 )
 
 // parseDoctype parses the data from a DoctypeToken into a name,
@@ -13,11 +14,13 @@ import (
 // is DoctypeNode, whose Data is the name, and which has attributes
 // named "system" and "public" for the two identifiers if they were present.
 // quirks is whether the document should be parsed in "quirks mode".
-func parseDoctype(s string) (n *Node, quirks bool) {
+func parseDoctype(s string) (*Node, bool) { return parseDoctypeWithGuard(s, nil) }
+
+func parseDoctypeWithGuard(s string, guard *resourceGuard) (n *Node, quirks bool) {
 	n = &Node{Type: DoctypeNode}
 
 	// Find the name.
-	space := strings.IndexAny(s, whitespace)
+	space := indexAnyWithGuard(s, whitespace, guard)
 	if space == -1 {
 		space = len(s)
 	}
@@ -26,8 +29,8 @@ func parseDoctype(s string) (n *Node, quirks bool) {
 	if n.Data != "html" {
 		quirks = true
 	}
-	n.Data = strings.ToLower(n.Data)
-	s = strings.TrimLeft(s[space:], whitespace)
+	n.Data = mapStringWithGuard(n.Data, unicode.ToLower, guard)
+	s = trimLeftWithGuard(s[space:], whitespace, guard)
 
 	if len(s) < 6 {
 		// It can't start with "PUBLIC" or "SYSTEM".
@@ -35,10 +38,10 @@ func parseDoctype(s string) (n *Node, quirks bool) {
 		return n, quirks || s != ""
 	}
 
-	key := strings.ToLower(s[:6])
+	key := mapStringWithGuard(s[:6], unicode.ToLower, guard)
 	s = s[6:]
 	for key == "public" || key == "system" {
-		s = strings.TrimLeft(s, whitespace)
+		s = trimLeftWithGuard(s, whitespace, guard)
 		if s == "" {
 			break
 		}
@@ -47,7 +50,7 @@ func parseDoctype(s string) (n *Node, quirks bool) {
 			break
 		}
 		s = s[1:]
-		q := strings.IndexRune(s, rune(quote))
+		q := indexAnyWithGuard(s, string(quote), guard)
 		var id string
 		if q == -1 {
 			id = s
@@ -56,7 +59,7 @@ func parseDoctype(s string) (n *Node, quirks bool) {
 			id = s[:q]
 			s = s[q+1:]
 		}
-		n.Attr = append(n.Attr, Attribute{Key: key, Val: id})
+		n.Attr = append(growResourceSlice(n.Attr, 1, guard), Attribute{Key: key, Val: id})
 		if key == "public" {
 			key = "system"
 		} else {
@@ -68,7 +71,7 @@ func parseDoctype(s string) (n *Node, quirks bool) {
 		quirks = true
 	} else if len(n.Attr) > 0 {
 		if n.Attr[0].Key == "public" {
-			public := strings.ToLower(n.Attr[0].Val)
+			public := mapStringWithGuard(n.Attr[0].Val, unicode.ToLower, guard)
 			switch public {
 			case "-//w3o//dtd w3 html strict 3.0//en//", "-/w3d/dtd html 4.0 transitional/en", "html":
 				quirks = true

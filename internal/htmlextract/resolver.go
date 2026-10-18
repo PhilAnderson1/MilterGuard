@@ -112,22 +112,25 @@ func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
 	if s.runtime.matchCacheEntries >= maxMatchCacheEntries {
 		return
 	}
+	cost := matchCacheEntryBytes
+	var cache map[*html.Node]uint8
 	if s.runtime.matchCaches == nil {
-		if !s.memory.Reserve(int64(s.index.count) * int64(unsafe.Sizeof(map[*html.Node]uint8{}))) {
-			return
-		}
+		cost += int64(s.index.count) * int64(unsafe.Sizeof(map[*html.Node]uint8{}))
+	} else {
+		cache = s.runtime.matchCaches[plan.sequence]
+	}
+	if cache == nil {
+		cost += matchCacheMapBytes
+	}
+	if !s.memory.TryReserve(cost) {
+		return
+	}
+	if s.runtime.matchCaches == nil {
 		s.runtime.matchCaches = make([]map[*html.Node]uint8, s.index.count)
 	}
-	cache := s.runtime.matchCaches[plan.sequence]
 	if cache == nil {
-		if !s.memory.Reserve(matchCacheMapBytes) {
-			return
-		}
 		cache = make(map[*html.Node]uint8)
 		s.runtime.matchCaches[plan.sequence] = cache
-	}
-	if !s.memory.Reserve(matchCacheEntryBytes) {
-		return
 	}
 	cache[n] = 1
 	if matched {

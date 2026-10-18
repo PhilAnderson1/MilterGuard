@@ -1,6 +1,34 @@
 package cascadia
 
-import "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+import (
+	"errors"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
+)
+
+// ErrInvalidSelector reports rejected selector syntax without allocating diagnostics.
+var ErrInvalidSelector = errors.New("cascadia: invalid selector")
+
+var errSelectorMemory = errors.New("cascadia: memory limit exceeded")
+
+type allocationAbort struct{}
+
+func reserveSelector(memory *resourceguard.Memory, bytes int64) {
+	if !memory.Reserve(bytes) {
+		panic(allocationAbort{})
+	}
+}
+
+// Only allocation aborts are recovered; programming errors remain visible.
+func recoverAllocation(err *error) {
+	if value := recover(); value != nil {
+		if _, ok := value.(allocationAbort); !ok {
+			panic(value)
+		}
+		*err = errSelectorMemory
+	}
+}
 
 // MatchControl carries cooperative cancellation across successive selector
 // matches so the caller's CPU-time check is sampled periodically across the
@@ -28,8 +56,7 @@ func (g *MatchControl) step() bool {
 	return false
 }
 
-// checkNow samples the caller immediately before an operation whose cost is
-// proportional to attacker-controlled input rather than to one matching step.
+// checkNow samples the caller at an operation checkpoint or within a long scan.
 func (g *MatchControl) checkNow() bool {
 	if g == nil || g.stopped {
 		return g != nil && g.stopped
@@ -42,7 +69,7 @@ func (g *MatchControl) checkNow() bool {
 // operation. Once stopped, the control remains stopped for later calls.
 func (g *MatchControl) Match(m Matcher, n *html.Node) (matched, stopped bool) {
 	matched = matchResource(m, n, g)
-	return matched, g.stopped
+	return matched && !g.stopped, g.stopped
 }
 
 type resourceMatcher interface {

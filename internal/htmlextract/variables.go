@@ -27,10 +27,8 @@ type valueToken struct {
 }
 
 func lexValue(s string, budget *cpuGuard) ([]valueToken, valueStatus) {
-	// NewInputString copies the immutable string to a byte buffer and may grow
-	// that buffer once to append its terminal NUL. Reserve the conservative
-	// worst case before either allocation occurs.
-	if budget != nil && !budget.reserve(int64(len(s))*2) {
+	// NewInputString owns one mutable copy including its terminal NUL.
+	if budget != nil && !budget.reserve(int64(len(s))+1) {
 		return nil, valueUnsupported
 	}
 	limits := css.ResourceLimits{}
@@ -63,6 +61,9 @@ func lexValue(s string, budget *cpuGuard) ([]valueToken, valueStatus) {
 			next := make([]valueToken, len(ts), capacity)
 			copy(next, ts)
 			ts = next
+		}
+		if !budget.reserve(int64(len(v))) {
+			return nil, valueUnsupported
 		}
 		ts = append(ts, valueToken{k, string(v)})
 	}

@@ -7,7 +7,6 @@ package html
 import (
 	"bufio"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 )
@@ -53,6 +52,8 @@ func Render(w io.Writer, n *Node) error {
 	return buf.Flush()
 }
 
+var errRender = errors.New("html: cannot render node")
+
 // plaintextAbort is returned from render1 when a <plaintext> element
 // has been rendered. No more end tags should be rendered after that.
 var plaintextAbort = errors.New("html: internal error (plaintext abort)")
@@ -69,7 +70,7 @@ func render1(w writer, n *Node) error {
 	// Render non-element nodes; these are the easy cases.
 	switch n.Type {
 	case ErrorNode:
-		return errors.New("html: cannot render an ErrorNode node")
+		return errRender
 	case TextNode:
 		return escape(w, n.Data)
 	case DocumentNode:
@@ -138,7 +139,7 @@ func render1(w writer, n *Node) error {
 		_, err := w.WriteString(n.Data)
 		return err
 	default:
-		return errors.New("html: unknown node type")
+		return errRender
 	}
 
 	// Render the <xxx> opening tag.
@@ -175,7 +176,7 @@ func render1(w writer, n *Node) error {
 	}
 	if voidElements[n.Data] {
 		if n.FirstChild != nil {
-			return fmt.Errorf("html: void element <%s> has child nodes", n.Data)
+			return errRender
 		}
 		_, err := w.WriteString("/>")
 		return err
@@ -279,7 +280,7 @@ func writeDoctypeQuoted(w writer, s string) error {
 		// parseDoctype will never produce a Node with both quote types, but a user
 		// can construct their own Node that violates this assumption.
 		if strings.Contains(s, `'`) {
-			return errors.New("doctype contains both quote types, cannot be safely rendered")
+			return errRender
 		}
 		q = '\''
 	}

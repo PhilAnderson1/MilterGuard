@@ -65,9 +65,19 @@ const (
 
 var widthFeature = regexp.MustCompile(`^\(\s*(min|max)-(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(px)?\s*\)$`)
 
-func parseMedia(src string) mediaCondition {
-	if len(src) > 4096 || strings.Count(src, ",") > 31 {
+func parseMedia(src string) mediaCondition { return parseMediaBudgeted(src, nil) }
+
+// Only retained conditions need the operation budget. Transient applicability
+// parsing has the same per-query bounds and keeps no document-wide cache.
+func parseMediaBudgeted(src string, memory *resourceguard.Memory) mediaCondition {
+	unknown := func() mediaCondition {
+		if !memory.Reserve(int64(unsafe.Sizeof(mediaAlternative{}))) {
+			return nil
+		}
 		return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
+	}
+	if len(src) > 4096 || strings.Count(src, ",") > 31 {
+		return unknown()
 	}
 	var result mediaCondition
 	for _, raw := range strings.Split(asciiLower(src), ",") {
@@ -76,7 +86,7 @@ func parseMedia(src string) mediaCondition {
 		// The supported subset has no functions or nested query parentheses.
 		parts := regexpAnd.Split(raw, -1)
 		if len(parts) > 16 {
-			return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
+			return unknown()
 		}
 		for _, part := range parts {
 			part = trimCSSWhitespace(part)
@@ -99,11 +109,21 @@ func parseMedia(src string) mediaCondition {
 					a.unknown = true
 					continue
 				}
+				var ok bool
+				a.bounds, ok = growSlice(a.bounds, 1, memory)
+				if !ok {
+					return nil
+				}
 				a.bounds = append(a.bounds, widthBound{m[1] == "min", v})
 			}
 		}
 		if a.schemes == 0 {
 			a.never = true
+		}
+		var ok bool
+		result, ok = growSlice(result, 1, memory)
+		if !ok {
+			return nil
 		}
 		result = append(result, a)
 	}

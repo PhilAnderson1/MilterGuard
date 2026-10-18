@@ -137,7 +137,6 @@ type selectorPlan struct {
 	uncertain       bool
 	generatedPseudo bool
 	foreignCaseType bool
-	foreignTypeName string
 }
 
 func (p *selectorPlan) makeUncertain(memory *resourceguard.Memory) {
@@ -158,7 +157,10 @@ func (p *selectorPlan) makeForeignCaseUncertain(memory *resourceguard.Memory) {
 	// target itself is a canonical mixed-case SVG type, match that local name
 	// with HTML/foreign namespace case rules instead of Cascadia's lowercase
 	// type matcher.
-	name := p.foreignTypeName
+	name := p.complexity.compounds[len(p.complexity.compounds)-1].OriginalTypeName
+	if _, ok := canonicalSVGTagNames[name]; !ok {
+		name = ""
+	}
 	if name == "" {
 		name, _ = canonicalSVGTypeSelector(p.scopePrefix)
 	}
@@ -175,7 +177,10 @@ func (p *selectorPlan) makeForeignCaseUncertain(memory *resourceguard.Memory) {
 		})
 		return
 	}
-	p.scope = compileConservativeScope(p.scopePrefix, memory)
+	p.scope = p.complexity.compounds[len(p.complexity.compounds)-1].PositiveMatcher
+	if p.scope == nil {
+		p.scope = compileConservativeScope(p.scopePrefix, memory)
+	}
 }
 
 // conservativeScope retains only conditions that are necessary for the full
@@ -214,7 +219,7 @@ func (p *selectorPlan) conservativeScope(memory *resourceguard.Memory) cascadia.
 // Cascadia remains authoritative for each compound; evaluating relationships
 // ourselves avoids recursive backtracking and samples cancellation while
 // inspecting each node and compound.
-func compileAncestorChain(complexity selectorComplexity) []cascadia.Matcher {
+func compileAncestorChain(complexity selectorComplexity, memory *resourceguard.Memory) []cascadia.Matcher {
 	if len(complexity.combinators) == 0 {
 		return nil
 	}
@@ -230,6 +235,9 @@ func compileAncestorChain(complexity selectorComplexity) []cascadia.Matcher {
 	// Tag-only selectors with at most one descendant search have a cheap exact
 	// Cascadia bound and do not need per-node attribute accounting.
 	if descendants < 2 && !complexity.attributeSensitive() {
+		return nil
+	}
+	if !memory.Reserve(int64(len(complexity.compounds)) * int64(unsafe.Sizeof([1]cascadia.Matcher{}))) {
 		return nil
 	}
 	matchers := make([]cascadia.Matcher, len(complexity.compounds))
@@ -280,8 +288,13 @@ type selectorIndex struct {
 	ancestorCount   int
 }
 
-func planSelectorList(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int) (plans []selectorPlan, branches int, exceeded bool) {
-	iterator := cascadia.NewSelectorListIterator(source)
+func planSelectorList(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int) ([]selectorPlan, int, bool) {
+	plans, branches, exceeded, _ := planSelectorListWithStop(source, nextSequence, memory, remainingBranches, nil)
+	return plans, branches, exceeded
+}
+
+func planSelectorListWithStop(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int, shouldStop func() bool) (plans []selectorPlan, branches int, exceeded, stopped bool) {
+	iterator := cascadia.NewSelectorListIteratorWithStop(source, shouldStop)
 	for {
 		branch, ok := iterator.Next()
 		if !ok {
@@ -297,13 +310,19 @@ func planSelectorList(source string, nextSequence *int, memory *resourceguard.Me
 			(*nextSequence)++
 		}
 	}
-	return plans, branches, exceeded
+	return plans, branches, exceeded, iterator.Stopped()
 }
 
 func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memory) (selectorPlan, bool) {
 	group, err := cascadia.ParseGroupWithPseudoElementsAndMemory(branch, memory)
+	if memory.Exhausted() {
+		return selectorPlan{}, false
+	}
 	if err == nil && len(group) == 1 {
-		metadata := cascadia.Metadata(group[0])
+		metadata, err := cascadia.MetadataWithMemory(group[0], memory)
+		if err != nil {
+			return selectorPlan{}, false
+		}
 		if metadata.Inactive {
 			return selectorPlan{}, false
 		}
@@ -314,7 +333,10 @@ func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memor
 		return plan, true
 	}
 
-	fallback := cascadia.ConservativeFallback(branch)
+	fallback, fallbackErr := cascadia.ConservativeFallbackWithMemory(branch, memory)
+	if fallbackErr != nil {
+		return selectorPlan{}, false
+	}
 	compound := compoundComplexity{FullyPositive: true}
 	plan := selectorPlan{
 		source:          branch,
@@ -362,7 +384,6 @@ func planCompiledSelector(branch string, sequence int, selector cascadia.Sel, me
 	for _, compound := range metadata.Compounds {
 		if _, ok := canonicalSVGTagNames[compound.OriginalTypeName]; ok {
 			plan.foreignCaseType = true
-			plan.foreignTypeName = compound.OriginalTypeName
 			break
 		}
 	}
@@ -370,7 +391,7 @@ func planCompiledSelector(branch string, sequence int, selector cascadia.Sel, me
 		plan.makeForeignCaseUncertain(memory)
 		return plan
 	}
-	plan.ancestorChain = compileAncestorChain(complexity)
+	plan.ancestorChain = compileAncestorChain(complexity, memory)
 	if len(plan.ancestorChain) > maxAncestorChainCompounds {
 		plan.makeUncertain(memory)
 	}

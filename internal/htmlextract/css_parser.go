@@ -221,8 +221,19 @@ func (p *cssParseSession) beginRuleset(s *sheet, values []css.Token) bool {
 	if !s.checkCPU() {
 		return true
 	}
-	plans, branches, exceeded := planSelectorList(selector, &s.planCount, s.memory, maxSelectorBranches-s.selectorBranches)
+	plans, branches, exceeded, stopped := planSelectorListWithStop(selector, &s.planCount, s.memory, maxSelectorBranches-s.selectorBranches, s.shouldStop)
+	if stopped {
+		s.stopped = true
+		return true
+	}
 	s.selectorBranches += branches
+	if s.stopped {
+		return true
+	}
+	if s.memory.Exhausted() {
+		s.abandonCascade()
+		return true
+	}
 	if exceeded {
 		s.abandonCascade()
 		return true

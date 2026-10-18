@@ -155,7 +155,10 @@ ai:
   # line; NUL and newline characters are removed.
   html_dos_reject_message: Message rejected due to suspected HTML/CSS denial-of-service attack
 
-  # Handling when extraction limits or final prefix truncation omit body text.
+  # Handling when retained-body/final truncation, MIME/header limits, malformed
+  # MIME, transfer decoding, or extraction limits leave evidence incomplete.
+  # Failures in unselected MIME alternatives remain limitations. Choosing
+  # complete alternatives or visibility uncertainty alone is not a failure.
   # scan submits the retained prefix with a limitation notice; reject records a
   # rejection decision (enforced only while mode is enforce).
   incomplete_body_action: scan
