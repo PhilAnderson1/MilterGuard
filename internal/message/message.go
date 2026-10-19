@@ -113,25 +113,27 @@ type Analysis struct {
 	UsedHiddenContentStrippedTag          bool
 	HTMLCPULimitExceeded                  bool
 	HTMLMemoryLimitExceeded               bool
+	HTMLPrimaryMemoryLimitExceeded        bool
+	HTMLFallbackMemoryLimitExceeded       bool
 }
 
-// HTMLProcessingControl carries the historical HTML CPU-limit controls through
-// all message-content preparation. ShouldFallback stops MIME and plain-text
-// work and switches HTML parts to bounded lexical fallback when the external
-// budget expires. FallbackShouldStop provides the fallback tokenizer's separate
-// message-wide budget. MemoryLimitExceeded reports a failed memory reservation;
-// StopOnMemoryLimit prevents further processing or fallback after that failure.
-// ObserveMemoryUsage is an optional diagnostic callback invoked once
-// extraction has completed. A positive MemoryBytes overrides the default
-// cumulative allocation budget. All callbacks must be inexpensive.
+// HTMLProcessingControl supplies cooperative CPU checks and a per-stage memory
+// allowance. BeginFallback admits the transition once; FallbackShouldStop must
+// check only the fallback CPU allowance. Each stage shares its memory allowance
+// across all of its MIME parts. StopOnMemoryLimit prevents fallback after a
+// primary memory failure. Memory callbacks report each stage independently;
+// observation callbacks run after extraction. Callbacks must be inexpensive.
 type HTMLProcessingControl struct {
-	ShouldFallback       func() bool
-	FallbackShouldStop   func() bool
-	MemoryLimitExceeded  func()
-	StopOnMemoryLimit    bool
-	ObserveMemoryUsage   func(usedBytes, limitBytes int64)
-	MemoryBytes          int64
-	DisableURLCompaction bool
+	ShouldFallback              func() bool
+	FallbackShouldStop          func() bool
+	BeginFallback               func() bool
+	MemoryLimitExceeded         func()
+	FallbackMemoryLimitExceeded func()
+	StopOnMemoryLimit           bool
+	ObserveMemoryUsage          func(usedBytes, limitBytes int64)
+	ObserveFallbackMemoryUsage  func(usedBytes, limitBytes int64)
+	MemoryBytes                 int64
+	DisableURLCompaction        bool
 }
 
 const (

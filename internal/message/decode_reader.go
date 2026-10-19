@@ -34,6 +34,7 @@ func stoppedMIMEContent() extractedContent {
 type decodeControl struct {
 	shouldStop func() bool
 	stopped    bool
+	memory     func() *resourceguard.Memory
 }
 
 func (c *decodeControl) check() bool {
@@ -41,4 +42,47 @@ func (c *decodeControl) check() bool {
 		c.stopped = c.shouldStop()
 	}
 	return c.stopped
+}
+
+// The coordinator selects an allocation owner; decoding never needs the
+// primary ledger. Fixed-size decoder scratch remains outside the ledger.
+func (c *decodeControl) allocationMemory() *resourceguard.Memory {
+	if c.memory == nil {
+		return nil
+	}
+	return c.memory()
+}
+func (c *decodeControl) copyString(value []byte) string {
+	if c.check() {
+		return ""
+	}
+	text, ok := resourceguard.CopyString(c.allocationMemory(), value, c.check)
+	if !ok {
+		c.stopped = true
+	}
+	return text
+}
+func (c *decodeControl) readAll(reader io.Reader) ([]byte, error) {
+	if c.memory == nil {
+		return io.ReadAll(reader)
+	}
+	var scratch [resourceguard.WorkChunk]byte
+	buffer := newGuardedBuilder(nil)
+	for {
+		if c.check() {
+			return buffer.Bytes(), resourceguard.ErrStopped
+		}
+		n, err := reader.Read(scratch[:])
+		buffer.memory = c.allocationMemory()
+		if _, writeErr := buffer.Write(scratch[:n]); writeErr != nil {
+			c.stopped = true
+			return buffer.Bytes(), writeErr
+		}
+		if err == io.EOF {
+			return buffer.Bytes(), nil
+		}
+		if err != nil {
+			return buffer.Bytes(), err
+		}
+	}
 }

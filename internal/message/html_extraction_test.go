@@ -1183,8 +1183,8 @@ func TestLinkCollectorCachesRenderedDestination(t *testing.T) {
 	if first == raw || second != first {
 		t.Fatalf("rendered destinations: first=%q second=%q", first, second)
 	}
-	if len(collector.links) != 1 || len(collector.rendered) != 1 {
-		t.Fatalf("links=%d cached=%d, want 1/1", len(collector.links), len(collector.rendered))
+	if len(collector.links) != 1 || collector.rendered.Len() != 1 {
+		t.Fatalf("links=%d cached=%d, want 1/1", len(collector.links), collector.rendered.Len())
 	}
 }
 

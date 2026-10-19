@@ -358,10 +358,11 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 }
 
 func (budget *extractionBudget) extractFallback(source string) extractedContent {
-	if budget.memoryStopped() {
-		return extractedContent{ExtractionIncomplete: true, HTMLMemoryLimitExceeded: true}
+	if !budget.beginFallback() {
+		return extractedContent{ExtractionIncomplete: true, HTMLMemoryLimitExceeded: budget.memoryLimitExceeded, HTMLCPULimitExceeded: budget.cpuLimitExceeded}
 	}
-	content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallbackStop)
+	content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallback)
+	budget.observeFallback()
 	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
 	return content
 }
@@ -1273,12 +1274,22 @@ func normalizeHTMLText(value string) string {
 }
 
 func normalizeHTMLTextGuarded(value string, memory *resourceguard.Memory) (string, bool) {
+	return normalizeHTMLTextWithResources(value, memory, nil)
+}
+func normalizeHTMLTextWithResources(value string, memory *resourceguard.Memory, stop func() bool) (string, bool) {
 	b := newGuardedBuilder(memory)
 	if !b.Grow(len(value)) {
 		return "", false
 	}
 	space, newlines := false, 0
+	nextCheck := 0
 	for offset := 0; offset < len(value); {
+		if offset >= nextCheck {
+			if stop != nil && stop() {
+				return "", false
+			}
+			nextCheck = offset + resourceguard.WorkChunk
+		}
 		r, size := utf8.DecodeRuneInString(value[offset:])
 		offset += size
 		if r == utf8.RuneError && size == 1 {
@@ -1324,7 +1335,7 @@ func (collector *linkCollector) AddDestination(candidate string) string {
 	if candidate == "" {
 		return ""
 	}
-	if rendered, exists := collector.rendered[candidate]; exists {
+	if rendered, exists := collector.rendered.Get(candidate); exists {
 		return rendered
 	}
 	if collector.Full() {
@@ -1336,10 +1347,7 @@ func (collector *linkCollector) AddDestination(candidate string) string {
 	if !ok {
 		return ""
 	}
-	if collector.seen == nil {
-		collector.seen = make(map[string]struct{})
-	}
-	if _, exists := collector.seen[candidate]; exists {
+	if _, exists := collector.seen.Get(candidate); exists {
 		return candidate
 	}
 	characters := utf8.RuneCountInString(candidate)
@@ -1347,12 +1355,14 @@ func (collector *linkCollector) AddDestination(candidate string) string {
 		collector.full = true
 		return candidate
 	}
-	if collector.rendered == nil {
-		collector.rendered = make(map[string]string)
+	if !collector.rendered.Set(collector.memory, raw, candidate) || !collector.seen.Set(collector.memory, candidate, struct{}{}) {
+		return ""
 	}
-	collector.rendered[raw] = candidate
-	collector.seen[candidate] = struct{}{}
-	collector.links = append(collector.links, candidate)
+	grown, ok := growGuardedSlice(collector.links, len(collector.links)+1, collector.memory)
+	if !ok {
+		return ""
+	}
+	collector.links = append(grown, candidate)
 	collector.chars += characters
 	return candidate
 }

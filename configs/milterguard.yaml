@@ -129,7 +129,8 @@ ai:
   max_html_parse_cpu_ms: 250
 
   # Limit memory allocations tracked during message extraction, in bytes
-  # (8-512 MiB). Shared across the message; not a total process memory limit.
+  # (8-512 MiB). Full extraction and fallback each get this allowance, shared
+  # across their MIME parts. This is not a total process memory limit.
   # If exhausted, html_resource_limit_action determines how to proceed.
   max_html_parse_memory_bytes: 67108864
 

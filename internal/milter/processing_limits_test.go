@@ -61,7 +61,7 @@ func TestNonCPUFailureGetsFreshFallbackAllowance(t *testing.T) {
 			msg := message.New(32 << 10)
 			msg.AddHeader("Content-Type", `multipart/mixed; boundary="stages"`)
 			msg.AddBody([]byte("--stages\r\nContent-Type: text/html\r\n\r\n" + strings.Repeat("<div>", 700) + "first evidence\r\n--stages\r\nContent-Type: text/html\r\n\r\n<p>second evidence</p>\r\n--stages\r\nContent-Type: text/plain\r\n\r\nthird evidence\r\n--stages--\r\n"))
-			service.threadCPUTime = fallbackClock(5 * time.Millisecond)
+			service.threadCPUTime = fallbackClock(30 * time.Microsecond)
 			result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
 			if result.selected != actionAccept || result.htmlCPUExceeded || result.htmlMemoryExceeded || result.htmlPrimaryCPUTime != 240*time.Millisecond || result.htmlFallbackCPUTime <= 10*time.Millisecond {
 				t.Fatalf("result=%+v", result)
@@ -161,7 +161,7 @@ func TestFallbackCPUAllowanceIsSharedAcrossMIMEParts(t *testing.T) {
 	for _, parts := range []int{1, 16} {
 		analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 		service := processingTestService("dos-reject", analyzer)
-		service.threadCPUTime = fallbackClock(5 * time.Millisecond)
+		service.threadCPUTime = fallbackClock(30 * time.Microsecond)
 		var body strings.Builder
 		for range parts {
 			body.WriteString("--shared\r\nContent-Type: text/html\r\n\r\n" + strings.Repeat("<div>", 700) + "evidence\r\n")
@@ -177,5 +177,30 @@ func TestFallbackCPUAllowanceIsSharedAcrossMIMEParts(t *testing.T) {
 		if parts > 1 && (result.selected != actionReject || analyzer.calls.Load() != 0) {
 			t.Fatalf("parts=%d result=%+v", parts, result)
 		}
+	}
+}
+
+func TestFallbackMemoryExhaustionPolicy(t *testing.T) {
+	for _, action := range []string{"reject", "dos-reject", "fallback"} {
+		t.Run(action, func(t *testing.T) {
+			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
+			service := processingTestService(action, analyzer)
+			service.ai.MaxHTMLParseMemoryBytes = 96 << 10
+			service.threadCPUTime = func() (time.Duration, bool) { return time.Second, true }
+			msg := message.New(256 << 10)
+			msg.AddHeader("Content-Type", "text/html")
+			msg.AddBody([]byte(strings.Repeat("<div>", 700) + strings.Repeat("x", 128<<10)))
+			result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
+			if result.htmlPrimaryMemoryExceeded || !result.htmlFallbackMemoryExceeded || !result.htmlMemoryExceeded || result.htmlCPUExceeded || result.htmlFallbackMemoryBytes != 96<<10 {
+				t.Fatalf("result=%+v", result)
+			}
+			if action == "fallback" {
+				if result.selected != actionAccept || analyzer.calls.Load() != 1 {
+					t.Fatalf("result=%+v calls=%d", result, analyzer.calls.Load())
+				}
+			} else if result.selected != actionReject || analyzer.calls.Load() != 0 {
+				t.Fatalf("result=%+v calls=%d", result, analyzer.calls.Load())
+			}
+		})
 	}
 }

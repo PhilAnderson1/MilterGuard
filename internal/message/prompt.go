@@ -8,6 +8,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 const (
@@ -111,7 +113,7 @@ func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars
 	return Analysis{Prompt: b.String(), Images: images, HasHTML: content.HTML, BodyTruncated: bodyTruncated, BodyExtractionIncomplete: content.incomplete(), ConcealedContentRemoved: concealedRemoved, HasConcealedContent: content.HasConcealedContent,
 		UsedInvisibleTag: finalAnnotations.UsedInvisibleTag, UsedVisibilityVariesByViewportSizeTag: finalAnnotations.UsedVisibilityVariesByViewportSizeTag,
 		UsedVisibilityUncertainTag: finalAnnotations.UsedVisibilityUncertainTag, UsedHiddenContentStrippedTag: finalAnnotations.UsedHiddenContentStrippedTag,
-		HTMLCPULimitExceeded: content.HTMLCPULimitExceeded, HTMLMemoryLimitExceeded: content.HTMLMemoryLimitExceeded}
+		HTMLCPULimitExceeded: content.HTMLCPULimitExceeded, HTMLMemoryLimitExceeded: content.HTMLMemoryLimitExceeded, HTMLPrimaryMemoryLimitExceeded: content.HTMLPrimaryMemoryLimitExceeded, HTMLFallbackMemoryLimitExceeded: content.HTMLFallbackMemoryLimitExceeded}
 }
 
 func writeHTMLCommentSummary(b *strings.Builder, comments htmlCommentStats, body string) {
@@ -185,29 +187,36 @@ func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl)
 	content := extractMIMEWithBudget(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", m.BodyBytes(), 0, budget)
 	content.MIMEIncomplete = content.MIMEIncomplete || m.MIMEHeadersTruncated
 	content.ExtractionIncomplete = content.ExtractionIncomplete || m.BodyTruncated
-	if control.ObserveMemoryUsage != nil {
-		limit := budget.memoryBytesLimit
-		control.ObserveMemoryUsage(limit-budget.memoryBytesRemaining, limit)
-	}
 	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
 	normalizeExtractedUTF8(&content, budget)
+	budget.observeFallback()
+	if control.ObserveMemoryUsage != nil {
+		control.ObserveMemoryUsage(budget.memoryBytesLimit-budget.memoryBytesRemaining, budget.memoryBytesLimit)
+	}
+	if control.ObserveFallbackMemoryUsage != nil && budget.fallback != nil {
+		control.ObserveFallbackMemoryUsage(budget.fallback.memory.Used(), budget.fallback.memory.Limit())
+	}
 	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
-	content.HTMLMemoryLimitExceeded = budget.memoryLimitExceeded
+	content.HTMLPrimaryMemoryLimitExceeded = budget.memoryLimitExceeded
+	content.HTMLFallbackMemoryLimitExceeded = budget.fallbackMemoryExceeded
+	content.HTMLMemoryLimitExceeded = budget.memoryLimitExceeded || budget.fallbackMemoryExceeded
 	return content
 }
 
-// normalizeExtractedUTF8 checks the shared CPU control before each complete
-// string scan. Once the limit trips, fields which have not been normalized are
-// discarded rather than allowing invalid UTF-8 into later prompt processing.
+// Preserve already-valid output without allocating. Invalid UTF-8 requires a
+// guarded replacement; if that cannot finish, discard only the invalid fields.
 func normalizeExtractedUTF8(content *extractedContent, budget *extractionBudget) {
 	fields := []*string{&content.Text, &content.VisibleText, &content.StrippedText}
-	for i, field := range fields {
-		if budget.outputShouldStop() {
-			for _, remaining := range fields[i:] {
-				*remaining = ""
-			}
+	stopped := false
+	for _, field := range fields {
+		if utf8.ValidString(*field) {
+			continue
+		}
+		if stopped || budget.outputShouldStop() || !budget.fallbackMemory().Reserve(int64(len(*field))*3) {
+			stopped = true
+			*field = ""
 			content.ExtractionIncomplete = true
-			return
+			continue
 		}
 		*field = strings.ToValidUTF8(*field, "�")
 	}
@@ -513,7 +522,11 @@ func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shoul
 	if links.Full() {
 		return text, true
 	}
-	var rewritten strings.Builder
+	var memory *resourceguard.Memory
+	if links != nil {
+		memory = links.memory
+	}
+	rewritten := newGuardedBuilder(memory)
 	last := 0
 	changed := false
 	compactionStopped := false
@@ -537,10 +550,15 @@ func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shoul
 			return !links.Full()
 		}
 		if !changed {
-			rewritten.Grow(len(text))
+			if !rewritten.Grow(len(text)) {
+				compactionStopped = true
+				return false
+			}
 		}
-		rewritten.WriteString(text[last:start])
-		rewritten.WriteString(displayed)
+		if !rewritten.WriteString(text[last:start]) || !rewritten.WriteString(displayed) {
+			compactionStopped = true
+			return false
+		}
 		last = end
 		changed = true
 		return !links.Full()
@@ -549,7 +567,9 @@ func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shoul
 	if !changed {
 		return text, complete
 	}
-	rewritten.WriteString(text[last:])
+	if !rewritten.WriteString(text[last:]) {
+		return text, false
+	}
 	return rewritten.String(), complete
 }
 

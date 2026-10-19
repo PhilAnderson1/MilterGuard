@@ -15,7 +15,7 @@ func TestMemoryPolicyStopsBeforeLexicalFallback(t *testing.T) {
 		msg.AddHeader("Content-Type", "text/html")
 		msg.AddBody([]byte("<p>retained evidence</p>"))
 		got := msg.BuildAnalysisWithHTMLControl(AnalysisContext{}, 4096, VisionOptions{Mode: "off"}, HTMLProcessingControl{
-			MemoryBytes: 1, StopOnMemoryLimit: stop,
+			MemoryBytes: 8192, StopOnMemoryLimit: stop,
 			MemoryLimitExceeded: func() { memoryCalls++ },
 			FallbackShouldStop:  func() bool { fallbackCalls++; return false },
 		})

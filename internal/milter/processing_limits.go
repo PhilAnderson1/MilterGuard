@@ -5,12 +5,16 @@ import "time"
 // CPU durations are the most recent cooperative samples for each stage. There
 // is no combined duration or completion-time budget check.
 type htmlProcessingUsage struct {
-	primaryCPUTime      time.Duration
-	fallbackCPUTime     time.Duration
-	primaryCPUExceeded  bool
-	fallbackCPUExceeded bool
-	memoryExceeded      bool
-	measured            bool
+	primaryCPUTime         time.Duration
+	fallbackCPUTime        time.Duration
+	primaryCPUExceeded     bool
+	fallbackCPUExceeded    bool
+	memoryExceeded         bool
+	primaryMemoryExceeded  bool
+	fallbackMemoryExceeded bool
+	primaryMemoryBytes     int64
+	fallbackMemoryBytes    int64
+	measured               bool
 }
 
 func (u htmlProcessingUsage) cpuExceeded() bool { return u.primaryCPUExceeded || u.fallbackCPUExceeded }

@@ -20,23 +20,27 @@ type Analyzer interface {
 }
 
 type evaluationResult struct {
-	proposed                action
-	selected                action
-	classification          ai.Classification
-	score                   float64
-	reasons                 []string
-	visionImages            int
-	tokenCost               float64
-	htmlPrimaryCPUTime      time.Duration
-	htmlFallbackCPUTime     time.Duration
-	htmlPrimaryCPUExceeded  bool
-	htmlFallbackCPUExceeded bool
-	htmlMemoryExceeded      bool
-	htmlCPUExceeded         bool
-	htmlCPUAction           string
-	rejectMessage           string
-	err                     error
-	latency                 time.Duration
+	proposed                   action
+	selected                   action
+	classification             ai.Classification
+	score                      float64
+	reasons                    []string
+	visionImages               int
+	tokenCost                  float64
+	htmlPrimaryCPUTime         time.Duration
+	htmlFallbackCPUTime        time.Duration
+	htmlPrimaryCPUExceeded     bool
+	htmlFallbackCPUExceeded    bool
+	htmlMemoryExceeded         bool
+	htmlPrimaryMemoryExceeded  bool
+	htmlFallbackMemoryExceeded bool
+	htmlPrimaryMemoryBytes     int64
+	htmlFallbackMemoryBytes    int64
+	htmlCPUExceeded            bool
+	htmlCPUAction              string
+	rejectMessage              string
+	err                        error
+	latency                    time.Duration
 }
 
 func (s *analysisService) analysisTimeout() time.Duration {
@@ -75,6 +79,10 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		result.htmlPrimaryCPUExceeded = usage.primaryCPUExceeded
 		result.htmlFallbackCPUExceeded = usage.fallbackCPUExceeded
 		result.htmlMemoryExceeded = usage.memoryExceeded
+		result.htmlPrimaryMemoryExceeded = usage.primaryMemoryExceeded
+		result.htmlFallbackMemoryExceeded = usage.fallbackMemoryExceeded
+		result.htmlPrimaryMemoryBytes = usage.primaryMemoryBytes
+		result.htmlFallbackMemoryBytes = usage.fallbackMemoryBytes
 		result.htmlCPUExceeded = htmlCPUExceeded
 		result.htmlCPUAction = s.ai.HTMLResourceLimitAction
 		if result.htmlCPUAction == "" {
@@ -157,10 +165,13 @@ func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Messag
 	var usage htmlProcessingUsage
 	continueAfterLimit := s.ai.HTMLResourceLimitAction == "fallback"
 	control := message.HTMLProcessingControl{
-		DisableURLCompaction: !s.ai.CompactPromptURLs,
-		MemoryBytes:          s.ai.MaxHTMLParseMemoryBytes,
-		StopOnMemoryLimit:    !continueAfterLimit,
-		MemoryLimitExceeded:  func() { usage.memoryExceeded = true },
+		DisableURLCompaction:        !s.ai.CompactPromptURLs,
+		MemoryBytes:                 s.ai.MaxHTMLParseMemoryBytes,
+		StopOnMemoryLimit:           !continueAfterLimit,
+		MemoryLimitExceeded:         func() { usage.memoryExceeded = true; usage.primaryMemoryExceeded = true },
+		FallbackMemoryLimitExceeded: func() { usage.memoryExceeded = true; usage.fallbackMemoryExceeded = true },
+		ObserveMemoryUsage:          func(used, limit int64) { usage.primaryMemoryBytes = used },
+		ObserveFallbackMemoryUsage:  func(used, limit int64) { usage.fallbackMemoryBytes = used },
 	}
 	contextStopped := func() bool { return ctx.Err() != nil }
 	if s.ai.MaxHTMLParseCPUMilliseconds == 0 {
@@ -193,26 +204,23 @@ func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Messag
 		current, ok := clock()
 		return primary.check(current, ok, maximum)
 	}
+	control.BeginFallback = func() bool {
+		if contextStopped() || (primary.exceeded || usage.primaryMemoryExceeded) && !continueAfterLimit {
+			return false
+		}
+		current, ok := clock()
+		fallbackActive = true
+		fallback = cpuAllowance{started: current, available: ok}
+		return true
+	}
 	control.FallbackShouldStop = func() bool {
-		if contextStopped() || usage.memoryExceeded && !continueAfterLimit {
-			return true
-		}
-		// Reject immediately for a violation detected in the primary stage. A
-		// non-resource failure may instead start a fresh fallback allowance.
-		if primary.exceeded && !continueAfterLimit {
-			return true
-		}
-		if fallback.exceeded {
+		if contextStopped() || fallback.exceeded {
 			return true
 		}
 		current, ok := clock()
-		if !fallbackActive {
-			fallbackActive = true
-			fallback = cpuAllowance{started: current, available: ok}
-			return false
-		}
 		return fallback.check(current, ok, maximum)
 	}
+
 	prepared := msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control)
 	// Use completed output. No clock sample or elapsed-time veto at completion.
 	usage.primaryCPUTime, usage.fallbackCPUTime = primary.elapsed, fallback.elapsed
@@ -273,6 +281,10 @@ func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, 
 			"html_primary_cpu_limit_exceeded", result.htmlPrimaryCPUExceeded,
 			"html_fallback_cpu_limit_exceeded", result.htmlFallbackCPUExceeded,
 			"html_memory_limit_exceeded", result.htmlMemoryExceeded,
+			"html_primary_memory_limit_exceeded", result.htmlPrimaryMemoryExceeded,
+			"html_fallback_memory_limit_exceeded", result.htmlFallbackMemoryExceeded,
+			"html_primary_memory_bytes", result.htmlPrimaryMemoryBytes,
+			"html_fallback_memory_bytes", result.htmlFallbackMemoryBytes,
 		}
 		if responseErr != nil {
 			attrs = append(attrs, "response_error", responseErr)
@@ -306,6 +318,10 @@ func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, 
 		"html_primary_cpu_limit_exceeded", result.htmlPrimaryCPUExceeded,
 		"html_fallback_cpu_limit_exceeded", result.htmlFallbackCPUExceeded,
 		"html_memory_limit_exceeded", result.htmlMemoryExceeded,
+		"html_primary_memory_limit_exceeded", result.htmlPrimaryMemoryExceeded,
+		"html_fallback_memory_limit_exceeded", result.htmlFallbackMemoryExceeded,
+		"html_primary_memory_bytes", result.htmlPrimaryMemoryBytes,
+		"html_fallback_memory_bytes", result.htmlFallbackMemoryBytes,
 		"html_cpu_limit_exceeded", result.htmlCPUExceeded,
 	}
 	if includeSubject {

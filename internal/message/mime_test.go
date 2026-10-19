@@ -620,7 +620,7 @@ func TestCompleteAlternativeAndFallbackAreNotMissingEvidence(t *testing.T) {
 	if a.BodyExtractionIncomplete || !strings.Contains(a.Prompt, "HTML") {
 		t.Fatalf("analysis=%+v", a)
 	}
-	content := extractBoundedHTMLFallback("<p>complete evidence</p>", true, nil)
+	content := extractBoundedHTMLFallback("<p>complete evidence</p>", true, testFallbackResources(nil))
 	if content.incomplete() || !content.HTMLFallbackUsed {
 		t.Fatalf("fallback=%+v", content)
 	}
