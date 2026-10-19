@@ -3,6 +3,7 @@ package message
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/charset"
 	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 const (
@@ -84,6 +86,15 @@ func (b *extractionBudget) outputShouldStop() bool {
 		return b.useFallback()
 	}
 	return b.fallbackShouldStop != nil && b.fallbackShouldStop()
+}
+
+// Decoding is also needed by lexical HTML fallback. Switch to its allowance
+// without restarting the decoder when the primary CPU window expires.
+func (b *extractionBudget) decodingShouldStop() bool {
+	if !b.useFallback() {
+		return false
+	}
+	return b.fallbackShouldStop == nil || b.fallbackShouldStop()
 }
 
 func (b *extractionBudget) takePart() bool {
@@ -185,7 +196,10 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		incomplete, complete := validateOpaqueTransfer(encoding, data, budget.useFallback)
 		return extractedContent{Text: attachmentMarker(mediaType, params["name"]), TransferIncomplete: incomplete, ExtractionIncomplete: !complete, HTMLCPULimitExceeded: budget.cpuLimitExceeded}
 	}
-	decoded, transferIncomplete := decodeTransferRecovering(encoding, data)
+	decoded, transferIncomplete := decodeTransferRecoveringWithStop(encoding, data, budget.decodingShouldStop)
+	if decoded == nil && transferIncomplete && budget.cpuLimitExceeded {
+		return stoppedMIMEContent()
+	}
 	if strings.HasPrefix(mediaType, "multipart/") {
 		boundary := params["boundary"]
 		if boundary == "" {
@@ -268,7 +282,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		}
 		var combined extractedContent
 		var imageRefs imageRefCollector
-		links := linkCollector{compactURLs: budget.compactURLs}
+		links := linkCollector{compactURLs: budget.compactURLs, shouldStop: budget.outputShouldStop}
 		var textParts, visibleTextParts, strippedTextParts []string
 		visibleMatchesText := true
 		for _, part := range parts {
@@ -346,13 +360,19 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		return content
 	}
 	if mediaType == "text/html" {
-		text := decodeHTMLCharset(params["charset"], decoded, budget.htmlBytesRemaining)
+		text := decodeHTMLCharsetWithStop(params["charset"], decoded, budget.htmlBytesRemaining, budget.decodingShouldStop)
+		if text == "" && len(decoded) > 0 && budget.cpuLimitExceeded {
+			return stoppedMIMEContent()
+		}
 		content := htmlToTextWithBudget(text, budget)
 		content.HTML = true
 		content.TransferIncomplete = transferIncomplete
 		return content
 	}
-	text, complete := decodeCharset(params["charset"], decoded, budget.decodedTextBytesRemaining)
+	text, complete := decodeCharsetWithStop(params["charset"], decoded, budget.decodedTextBytesRemaining, budget.decodingShouldStop)
+	if text == "" && len(decoded) > 0 && budget.cpuLimitExceeded {
+		return stoppedMIMEContent()
+	}
 	budget.decodedTextBytesRemaining -= int64(len(text))
 	if budget.useFallback() {
 		return extractedContent{
@@ -360,7 +380,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 			TransferIncomplete: transferIncomplete, ExtractionIncomplete: true, HTMLCPULimitExceeded: true,
 		}
 	}
-	links := linkCollector{compactURLs: budget.compactURLs}
+	links := linkCollector{compactURLs: budget.compactURLs, shouldStop: budget.outputShouldStop}
 	promptText, urlsComplete := rewritePlainTextURLs(text, budget.compactURLs, &links, budget.useFallback)
 	return extractedContent{
 		Text: promptText, VisibleText: text,
@@ -429,6 +449,11 @@ func extractAttachedMessage(data []byte, depth int, budget *extractionBudget) ex
 // message body. The boolean reports whether the complete decoded value fit in
 // maxBytes; truncation always ends at a UTF-8 boundary.
 func decodeCharset(label string, data []byte, maxBytes int64) (string, bool) {
+	return decodeCharsetWithStop(label, data, maxBytes, nil)
+}
+
+func decodeCharsetWithStop(label string, data []byte, maxBytes int64, shouldStop func() bool) (string, bool) {
+	control := decodeControl{shouldStop: shouldStop}
 	if maxBytes < 0 {
 		maxBytes = 0
 	}
@@ -455,11 +480,17 @@ func decodeCharset(label string, data []byte, maxBytes int64) (string, bool) {
 			return bounded(data)
 		}
 	}
-	reader, err := charset.NewReaderLabel(label, bytes.NewReader(data))
+	reader, err := charset.NewReaderLabel(label, newDecodeReader(bytes.NewReader(data), control.check))
+	if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
+		return "", false
+	}
 	if err != nil {
 		return bounded(data)
 	}
-	decoded, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	decoded, err := io.ReadAll(newDecodeReader(io.LimitReader(reader, maxBytes+1), control.check))
+	if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
+		return "", false
+	}
 	if err != nil {
 		return bounded(data)
 	}
@@ -470,6 +501,11 @@ func decodeCharset(label string, data []byte, maxBytes int64) (string, bool) {
 // one, HTML's own BOM or early meta declaration can identify its encoding;
 // this does not parse the document or change the HTML extractor.
 func decodeHTMLCharset(label string, data []byte, maxBytes int) string {
+	return decodeHTMLCharsetWithStop(label, data, maxBytes, nil)
+}
+
+func decodeHTMLCharsetWithStop(label string, data []byte, maxBytes int, shouldStop func() bool) string {
+	control := decodeControl{shouldStop: shouldStop}
 	if maxBytes < 0 {
 		maxBytes = 0
 	}
@@ -489,21 +525,33 @@ func decodeHTMLCharset(label string, data []byte, maxBytes int) string {
 		if canonical == "utf-8" && utf8.Valid(data) {
 			return bounded(data)
 		}
-		reader, err := charset.NewReaderLabel(label, bytes.NewReader(data))
+		reader, err := charset.NewReaderLabel(label, newDecodeReader(bytes.NewReader(data), control.check))
+		if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
+			return ""
+		}
 		if err != nil {
 			return bounded(data)
 		}
-		decoded, err := io.ReadAll(io.LimitReader(reader, readLimit))
+		decoded, err := io.ReadAll(newDecodeReader(io.LimitReader(reader, readLimit), control.check))
+		if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
+			return ""
+		}
 		if err != nil {
 			return bounded(data)
 		}
 		return bounded(decoded)
 	}
-	reader, err := charset.NewReader(bytes.NewReader(data), "text/html")
+	reader, err := charset.NewReader(newDecodeReader(bytes.NewReader(data), control.check), "text/html")
+	if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
+		return ""
+	}
 	if err != nil {
 		return bounded(data)
 	}
-	decoded, err := io.ReadAll(io.LimitReader(reader, readLimit))
+	decoded, err := io.ReadAll(newDecodeReader(io.LimitReader(reader, readLimit), control.check))
+	if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
+		return ""
+	}
 	if err != nil {
 		return bounded(data)
 	}
@@ -530,15 +578,27 @@ func normalizeContentID(value string) string {
 // padding. Attachment inspection uses a separate strict decoder so incomplete
 // data cannot be reported as successfully scanned.
 func decodeTransferRecovering(encoding string, data []byte) ([]byte, bool) {
+	return decodeTransferRecoveringWithStop(encoding, data, nil)
+}
+
+func decodeTransferRecoveringWithStop(encoding string, data []byte, shouldStop func() bool) ([]byte, bool) {
+	control := decodeControl{shouldStop: shouldStop}
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":
-		decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(data)))
+		decoded, err := io.ReadAll(newDecodeReader(base64.NewDecoder(base64.StdEncoding, newDecodeReader(bytes.NewReader(data), control.check)), control.check))
+		if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
+			return nil, true
+		}
 		if err == nil {
 			return decoded, false
 		}
 		// Some senders omit the final MIME padding. RawStdEncoding accepts that
 		// specific variation without ignoring arbitrary corrupt characters.
-		if unpadded, rawErr := io.ReadAll(base64.NewDecoder(base64.RawStdEncoding, bytes.NewReader(data))); rawErr == nil {
+		unpadded, rawErr := io.ReadAll(newDecodeReader(base64.NewDecoder(base64.RawStdEncoding, newDecodeReader(bytes.NewReader(data), control.check)), control.check))
+		if control.stopped || errors.Is(rawErr, resourceguard.ErrStopped) {
+			return nil, true
+		}
+		if rawErr == nil {
 			return unpadded, false
 		}
 		if len(decoded) > 0 {
@@ -546,7 +606,10 @@ func decodeTransferRecovering(encoding string, data []byte) ([]byte, bool) {
 		}
 		return data, true
 	case "quoted-printable":
-		decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(data)))
+		decoded, err := io.ReadAll(newDecodeReader(quotedprintable.NewReader(newDecodeReader(bytes.NewReader(data), control.check)), control.check))
+		if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
+			return nil, true
+		}
 		if err == nil || len(decoded) > 0 {
 			return decoded, err != nil
 		}

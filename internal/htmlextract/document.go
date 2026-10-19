@@ -197,7 +197,9 @@ func (w *documentWalker) visit(frame *documentFrame) error {
 		w.document.treeDepth = frame.depth
 	}
 	w.nodeCount++
-	if w.nodeCount&255 == 0 && w.processor.stopped() {
+	// Inner loops may already have observed the CPU limit. Honour that stop
+	// on every node without increasing the frequency of clock sampling.
+	if w.processor.cpu.stopNow(false) || (w.nodeCount&255 == 0 && w.processor.stopped()) {
 		return errStopped
 	}
 	if node.Type == html.CommentNode && (frame.scope == scopeActive || frame.scope == scopeHead) {

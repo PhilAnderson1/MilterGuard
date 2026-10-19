@@ -12,6 +12,20 @@ import (
 // Library adapters own admission and the allocating call together. These
 // conservative allowances cover implementation-dependent temporary work; they
 // are not exact allocator layouts. Revalidate them on Go upgrades.
+// ParseURL includes the allowance for callers obtaining EscapedPath and
+// EscapedFragment: decoding, re-escaping and error strings can copy the input.
+func ParseURL(m *Memory, text string) (*url.URL, error) {
+	size, ok := storageBytes(len(text), 8)
+	if !ok || size > int64(^uint64(0)>>1)-1024 {
+		m.reject()
+		return nil, ErrMemory
+	}
+	if m.Exhausted() || !m.Reserve(size+1024) {
+		return nil, ErrMemory
+	}
+	return url.Parse(text)
+}
+
 func ParseFloat(m *Memory, text string, bits int) (float64, error) {
 	size := int64(len(text))
 	if size > (int64(^uint64(0)>>1)-128)/2 {

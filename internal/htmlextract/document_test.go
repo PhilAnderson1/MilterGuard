@@ -64,6 +64,32 @@ func TestProductionTextResultIsCompact(t *testing.T) {
 	}
 }
 
+func TestDocumentWalkerHonoursRecordedCPUStop(t *testing.T) {
+	for _, visited := range []int{0, 1, 254, 255} {
+		t.Run(strconv.Itoa(visited), func(t *testing.T) {
+			budget := &cpuGuard{shouldStop: func() bool { return true }}
+			if !budget.stopNow(true) {
+				t.Fatal("failed to record CPU stop")
+			}
+			walker := documentWalker{
+				processor: processor{cpu: budget, shouldStop: func() bool {
+					t.Fatal("recorded stop should not require another clock sample")
+					return false
+				}},
+				document:  &parsedDocument{},
+				nodeCount: visited,
+			}
+			frame := documentFrame{n: &html.Node{Type: html.TextNode, Data: "text"}, scope: scopeActive}
+			if err := walker.visit(&frame); !IsStopped(err) {
+				t.Fatalf("visit after CPU stop = %v, want stopped", err)
+			}
+			if walker.document.extractableTextCount != 0 {
+				t.Fatal("processed text after CPU stop")
+			}
+		})
+	}
+}
+
 func TestASCIIKeywordHelpers(t *testing.T) {
 	if got := normalizeCSSKeyword(" \tBLaCK\r\n"); got != "black" {
 		t.Fatalf("normalized keyword = %q", got)

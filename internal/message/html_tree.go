@@ -292,7 +292,7 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		states:      make(map[*xhtml.Node]*htmlextract.Text, len(inspection.Text)),
 		elements:    make(map[*xhtml.Node]*htmlextract.Element, len(inspection.Elements)),
 		compactURLs: budget.compactURLs,
-		links:       linkCollector{compactURLs: budget.compactURLs},
+		links:       linkCollector{compactURLs: budget.compactURLs, memory: memory, shouldStop: budget.useFallback},
 		shouldStop:  budget.useFallback,
 		memory:      memory,
 	}
@@ -706,7 +706,7 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 		return
 	}
 	content := newGuardedBuilder(e.memory)
-	walk := conditionalWalk{links: linkCollector{compactURLs: e.compactURLs}, memory: e.memory, shouldStop: e.shouldStop}
+	walk := conditionalWalk{links: linkCollector{compactURLs: e.compactURLs, memory: e.memory, shouldStop: e.shouldStop}, memory: e.memory, shouldStop: e.shouldStop}
 	for _, node := range fragment {
 		if !e.walkConditionalNode(node, &content, &walk, 0) {
 			e.omitConditionalComment(out)
@@ -1324,7 +1324,11 @@ func (collector *linkCollector) AddDestination(candidate string) string {
 		return candidate
 	}
 	raw := candidate
-	candidate = promptURL(raw, collector.compactURLs)
+	var ok bool
+	candidate, ok = promptURLWithBudget(raw, collector.compactURLs, collector.memory, collector.shouldStop)
+	if !ok {
+		return ""
+	}
 	if collector.seen == nil {
 		collector.seen = make(map[string]struct{})
 	}

@@ -1080,7 +1080,7 @@
   "internal/htmlextract/css_whitespace.go::trimCSSWhitespaceWithBudget:1": "891e3430345049362c8647bed39607c579c10dc9eedf4bd5a674d2831e944eb3",
   "internal/htmlextract/document.go::(*documentWalker).prepareElement:1": "cfa90a57c07765c9349d4f3a85f4c867045b4cb8cffb67f8ce760f38f86b2ca9",
   "internal/htmlextract/document.go::(*documentWalker).run:1": "d35f1015956773eb312377c0570c2fcf910caae90462fa2e9afce0c7fca24dd0",
-  "internal/htmlextract/document.go::(*documentWalker).visit:1": "dffd8e560e8415535a7a9ac4ec32a5dfebca034b549b93c5188f26ce9cc3117c",
+  "internal/htmlextract/document.go::(*documentWalker).visit:1": "bc719dc839fcba611c54bcff866defd9f34fa7b2de31a91b16eebc9516845a42",
   "internal/htmlextract/document.go::(*documentWalker).visitComment:1": "7dea7f1fc04a65620f49ccf036e3fe426b349367d47d6b6910615bf9dba3cd54",
   "internal/htmlextract/document.go::(*parsedDocument).storePreparation:1": "24cd0b575a7b4ec8d85249515f6068d5cbccbe9dd111ccc6fbaa9adeb2d70676",
   "internal/htmlextract/document.go::(processor).parseDocument:1": "3ff9e52f44a2ea0e08488525f9796ae5c8661686d65f5aff27edac6976fab2fb",

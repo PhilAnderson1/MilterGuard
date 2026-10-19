@@ -519,12 +519,22 @@ func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shoul
 	var rewritten strings.Builder
 	last := 0
 	changed := false
+	compactionStopped := false
 	complete := walkPlainHTTPURLs(text, -1, shouldStop, func(link string, start, end int) bool {
 		var displayed string
 		if links != nil {
 			displayed = links.AddDestination(link)
 		} else {
-			displayed = promptURL(link, compact)
+			var ok bool
+			displayed, ok = promptURLWithBudget(link, compact, nil, shouldStop)
+			if !ok {
+				compactionStopped = true
+				return false
+			}
+		}
+		if displayed == "" {
+			compactionStopped = true
+			return false
 		}
 		if displayed == link {
 			return !links.Full()
@@ -538,6 +548,7 @@ func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shoul
 		changed = true
 		return !links.Full()
 	})
+	complete = complete && !compactionStopped
 	if !changed {
 		return text, complete
 	}
