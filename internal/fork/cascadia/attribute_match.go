@@ -3,6 +3,8 @@ package cascadia
 import (
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // Long attribute scans sample every 1024 processed bytes. Short operations are
@@ -103,7 +105,10 @@ func (t attrSelector) matchValue(value string, guard *MatchControl) bool {
 // KMP keeps adversarial repeated prefixes linear. The table belongs to the
 // immutable compiled selector, not to any match or document cache.
 func substringFailure(needle string, insensitive bool) []int {
-	table := make([]int, len(needle))
+	return substringFailureWithMemory(needle, insensitive, nil)
+}
+func substringFailureWithMemory(needle string, insensitive bool, memory *resourceguard.Memory) []int {
+	table := selectorSlice[int](memory, len(needle), len(needle))
 	for i, matched := 1, 0; i < len(needle); i++ {
 		for matched > 0 && !sameAttributeByte(needle[i], needle[matched], insensitive) {
 			matched = table[matched-1]

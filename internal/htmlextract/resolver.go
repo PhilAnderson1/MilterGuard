@@ -1,17 +1,9 @@
 package htmlextract
 
 import (
-	"unsafe"
-
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
-)
-
-// These conservative estimates cover Go map buckets and per-entry overhead
-// which unsafe.Sizeof cannot observe through a map value.
-const (
-	mediaCacheMapBytes int64 = 128
-	matchCacheMapBytes int64 = 128
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 type mediaCacheKey struct {
@@ -21,7 +13,11 @@ type mediaCacheKey struct {
 
 func (s *sheet) matchSelector(m cascadia.Matcher, n *html.Node) (bool, bool) {
 	if s.selectorControl == nil {
-		s.selectorControl = cascadia.NewMatchControl(s.shouldStop)
+		var ok bool
+		s.selectorControl, ok = cascadia.NewMatchControlWithMemory(s.shouldStop, s.memory)
+		if !ok {
+			return false, false
+		}
 	}
 	matched, stopped := s.selectorControl.Match(m, n)
 	if stopped {
@@ -36,45 +32,32 @@ func (s *sheet) mediaStates(width float64, fallback bool, work *cpuGuard) ([]uin
 		return nil, false
 	}
 	key := mediaCacheKey{width: width, fallback: fallback}
-	if states := s.runtime.mediaCache[key]; states != nil {
+	if states := s.runtime.mediaCache.View()[key]; states != nil {
 		return states, true
 	}
-	if s.runtime.mediaCache == nil {
-		if !s.memory.Reserve(mediaCacheMapBytes) {
-			return nil, false
-		}
-		s.runtime.mediaCache = make(map[mediaCacheKey][]uint8)
-	}
 	if work != nil && !work.check() {
-		return nil, false
-	}
-	if !s.memory.Reserve(mapEntryAllocationBytes[mediaCacheKey, []uint8]()) {
 		return nil, false
 	}
 	states, ok := makeBudgetedBytes(len(s.runtime.mediaGroups), s.memory)
 	if !ok {
 		return nil, false
 	}
-	var frameStates map[*conditionFrame]conditionFrameState
+	var admittedFrames resourceguard.Table[*conditionFrame, conditionFrameState]
 	if len(s.runtime.mediaGroups) > 1 {
-		if !s.memory.Reserve(mediaFrameStateMapBytes) {
-			return nil, false
-		}
-		frameStates = make(map[*conditionFrame]conditionFrameState)
-		// Reserve each distinct frame before evaluation can populate the map.
 		for _, group := range s.runtime.mediaGroups {
 			for f := group; f != nil; f = f.parent {
-				if _, seen := frameStates[f]; seen {
+				if _, seen := admittedFrames.Get(f); seen {
 					break
 				}
-				if !work.check() || !s.memory.Reserve(mapEntryAllocationBytes[*conditionFrame, conditionFrameState]()) {
+				if !work.check() || !admittedFrames.Set(s.memory, f, conditionFrameState{}) {
 					return nil, false
 				}
-				frameStates[f] = conditionFrameState{}
 			}
 		}
-		clear(frameStates)
 	}
+	// Evaluation writes only keys enumerated and admitted above.
+	frameStates := admittedFrames.View()
+	clear(frameStates)
 	for i, group := range s.runtime.mediaGroups {
 		if !work.check() {
 			return nil, false
@@ -85,7 +68,9 @@ func (s *sheet) mediaStates(width float64, fallback bool, work *cpuGuard) ([]uin
 	if work.stopNow(false) {
 		return nil, false
 	}
-	s.runtime.mediaCache[key] = states
+	if !s.runtime.mediaCache.Set(s.memory, key, states) {
+		return nil, false
+	}
 	return states, true
 }
 
@@ -97,47 +82,20 @@ func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
 	if !s.runtime.cacheMatches {
 		return
 	}
+	exists := false
 	if s.runtime.matchCaches != nil {
-		cache := s.runtime.matchCaches[plan.sequence]
-		if state, exists := cache[n]; exists {
-			if matched {
-				cache[n] = 2
-			} else if state == 0 {
-				cache[n] = 1
-			}
-			return
-		}
+		_, exists = s.runtime.matchCaches[plan.sequence].Get(n)
 	}
-	// A full cache remains useful for its existing entries. New combinations
-	// are evaluated normally instead of growing attacker-controlled maps.
-	if s.runtime.matchCacheEntries >= maxMatchCacheEntries {
+	if !exists && s.runtime.matchCacheEntries >= maxMatchCacheEntries {
 		return
 	}
-	cost := mapEntryAllocationBytes[*html.Node, uint8]()
-	var cache map[*html.Node]uint8
-	if s.runtime.matchCaches == nil {
-		cost += int64(s.index.count) * int64(unsafe.Sizeof(map[*html.Node]uint8{}))
-	} else {
-		cache = s.runtime.matchCaches[plan.sequence]
-	}
-	if cache == nil {
-		cost += matchCacheMapBytes
-	}
-	if !s.memory.TryReserve(cost) {
-		return
-	}
-	if s.runtime.matchCaches == nil {
-		s.runtime.matchCaches = make([]map[*html.Node]uint8, s.index.count)
-	}
-	if cache == nil {
-		cache = make(map[*html.Node]uint8)
-		s.runtime.matchCaches[plan.sequence] = cache
-	}
-	cache[n] = 1
+	state := uint8(1)
 	if matched {
-		cache[n] = 2
+		state = 2
 	}
-	s.runtime.matchCacheEntries++
+	if resourceguard.TryCacheEntry(s.memory, &s.runtime.matchCaches, s.index.count, plan.sequence, n, state) && !exists {
+		s.runtime.matchCacheEntries++
+	}
 }
 
 type candidate struct {
@@ -221,7 +179,7 @@ type cascadeWinners struct {
 	layout                       [layoutProperties]layoutCandidate
 	variables                    map[string]candidate
 	alternateColourSchemeReasons concealmentReason
-	alternateColourSchemeVars    map[string]bool
+	alternateColourSchemeVars    resourceguard.Table[string, bool]
 	animation                    candidate
 }
 
@@ -366,16 +324,9 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 			}
 			if source.colourSchemeDependent {
 				if d.custom != "" {
-					if winners.alternateColourSchemeVars == nil {
-						if !s.memory.Reserve(128) {
-							return false
-						}
-						winners.alternateColourSchemeVars = make(map[string]bool)
-					}
-					if !winners.alternateColourSchemeVars[d.custom] && !s.memory.Reserve(mapEntryAllocationBytes[string, bool]()) {
+					if !winners.alternateColourSchemeVars.Set(s.memory, d.custom, true) {
 						return false
 					}
-					winners.alternateColourSchemeVars[d.custom] = true
 				} else {
 					winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(d)
 				}
@@ -386,25 +337,14 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 			if d.custom != "" {
 				c := candidate{d: d, property: d.prop, set: true, inline: source.inline, uncertainOrigin: source.uncertain, spec: source.specificity}
 				if winners.variables == nil {
-					if s.runtime.variableScratch == nil {
-						if !s.memory.Reserve(128) {
-							return false
-						}
-						s.runtime.variableScratch = make(map[string]candidate)
-					} else {
-						clear(s.runtime.variableScratch)
-					}
-					winners.variables = s.runtime.variableScratch
+					s.runtime.variableScratch.Reset()
 				}
 				if c.beats(winners.variables[d.custom]) {
-					if _, exists := winners.variables[d.custom]; !exists && len(winners.variables) >= s.runtime.variableScratchCapacity {
-						if !s.memory.Reserve(96) {
-							return false
-						}
-						s.runtime.variableScratchCapacity++
+					if !s.runtime.variableScratch.Set(s.memory, d.custom, c) {
+						return false
 					}
-					winners.variables[d.custom] = c
 				}
+				winners.variables = s.runtime.variableScratch.View()
 			} else if d.prop == allShorthandProperty {
 				for property := 0; property < declarationProperties; property++ {
 					applyProperty(d, property)
@@ -434,7 +374,7 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 		}
 		matched, cached := false, false
 		if s.runtime.cacheMatches && plan.sequence < len(s.runtime.matchCaches) {
-			state := s.runtime.matchCaches[plan.sequence][n]
+			state := s.runtime.matchCaches[plan.sequence].View()[n]
 			matched, cached = state == 2, state != 0
 		}
 		if !cached {
@@ -523,11 +463,11 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	if !complete {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}
 	}
-	scope := buildVariables(parentVars, winners.variables, winners.alternateColourSchemeVars, work)
+	scope := buildVariables(parentVars, winners.variables, winners.alternateColourSchemeVars.View(), work)
 	// Variable scopes never retain the cascade map, so it can be reused by the
 	// next element even when expression evaluation was abandoned.
 	if winners.variables != nil {
-		s.runtime.variableScratch = winners.variables
+		// variableScratch already owns the borrowed winners map.
 	}
 	if work.stopped {
 		return elementStyleResult{style: unresolvedStyle(), variables: parentVars}

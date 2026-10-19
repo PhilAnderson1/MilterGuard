@@ -170,8 +170,8 @@ func indexKeyFromPositiveSourceWithMemory(source string, memory *resourceguard.M
 			}
 			tag = source[start:i]
 			if !isLowerName(tag) {
-				reserveSelector(memory, int64(len(tag)))
-				tag = strings.ToLower(tag)
+				p := parser{memory: memory}
+				tag = p.lowerASCII(tag)
 			}
 		}
 	}

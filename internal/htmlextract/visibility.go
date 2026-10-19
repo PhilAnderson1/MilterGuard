@@ -1,6 +1,6 @@
 package htmlextract
 
-import "unsafe"
+import "github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 
 type visibilityLabel uint8
 
@@ -152,10 +152,10 @@ func concealmentReasonStringsWithBudget(mask concealmentReason, budget *cpuGuard
 			count++
 		}
 	}
-	if !budget.reserve(int64(count) * int64(unsafe.Sizeof(string("")))) {
+	out, ok := resourceguard.MakeSlice[string](budget.allocationMemory(), count, count)
+	if !ok {
 		return nil
 	}
-	out := make([]string, count)
 	copy(out, reasons[:count])
 	return out
 }

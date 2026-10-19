@@ -2,14 +2,13 @@ package htmlextract
 
 import (
 	"encoding/base64"
-	"mime"
-	"net/url"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 const (
@@ -50,10 +49,7 @@ func cssTypeAttributeAppliesWithBudget(n *html.Node, budget *cpuGuard) bool {
 	if typ == "" {
 		return true
 	}
-	if !reserveMediaType(typ, budget) {
-		return false
-	}
-	mediaType, _, err := mime.ParseMediaType(typ)
+	mediaType, _, err := resourceguard.ParseMediaType(budget.allocationMemory(), typ)
 	return err == nil && equalASCIIFold(mediaType, "text/css")
 }
 
@@ -109,7 +105,7 @@ func (s *sheet) hasStylesheetRelation(rel string) bool {
 
 func (s *sheet) parseMediaCondition(value string) mediaCondition {
 	if !s.checkCPU() {
-		return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
+		return unknownMedia[:]
 	}
 	return parseMediaWithBudget(value, s.resourceBudget())
 }
@@ -151,10 +147,7 @@ func (s *sheet) loadStylesheetReference(href, media string) {
 		s.unresolvedStylesheet = true
 		return
 	}
-	if !s.memory.Reserve(int64(len(data))) {
-		return
-	}
-	s.parseImportedStylesheet(string(data), media)
+	s.parseImportedStylesheet(ownedString(data, s.resourceBudget()), media)
 }
 
 func (s *sheet) parseImportedStylesheet(text, media string) {
@@ -209,10 +202,7 @@ func importReferenceWithBudget(values []css.Token, budget *cpuGuard) cssImportRe
 		start++
 	}
 	if start < len(values) {
-		if !budget.reserve(int64(len(values[start].Data))) {
-			return cssImportReference{}
-		}
-		first, _ := normalizeCSSKeywordWithBudget(string(values[start].Data), budget)
+		first, _ := normalizeCSSKeywordWithBudget(ownedString(values[start].Data, budget), budget)
 		if first == "layer" || strings.HasPrefix(first, "layer(") || strings.HasPrefix(first, "supports(") {
 			// Cascade layers and supports() need semantics the extractor does not
 			// model. Do not apply the imported sheet unconditionally.
@@ -225,10 +215,7 @@ func importReferenceWithBudget(values []css.Token, budget *cpuGuard) cssImportRe
 
 func cssURL(token css.Token) (string, bool) { return cssURLWithBudget(token, nil) }
 func cssURLWithBudget(token css.Token, budget *cpuGuard) (string, bool) {
-	if !budget.reserve(int64(len(token.Data))) {
-		return "", false
-	}
-	raw := trimCSSWhitespace(string(token.Data))
+	raw := trimCSSWhitespace(ownedString(token.Data, budget))
 	switch token.TokenType {
 	case css.StringToken:
 		return unquoteCSSURLWithBudget(raw, budget)
@@ -284,14 +271,11 @@ func decodeCSSDataURLWithBudget(reference string, maxBytes int, budget *cpuGuard
 		base64Encoded = true
 		metadata = metadata[:separator]
 	}
-	if !reserveMediaType(metadata, budget) {
-		return nil, true, false
-	}
-	mediaType, params, err := mime.ParseMediaType(metadata)
+	mediaType, params, err := resourceguard.ParseMediaType(budget.allocationMemory(), metadata)
 	if err != nil || !equalASCIIFold(mediaType, "text/css") {
 		return nil, true, false
 	}
-	if charset := asciiLower(strings.TrimSpace(params["charset"])); charset != "" && charset != "utf-8" && charset != "us-ascii" {
+	if charset := asciiLowerWithBudget(strings.TrimSpace(params["charset"]), budget); charset != "" && charset != "utf-8" && charset != "us-ascii" {
 		return nil, true, false
 	}
 	payload := reference[comma+1:]
@@ -299,25 +283,12 @@ func decodeCSSDataURLWithBudget(reference string, maxBytes int, budget *cpuGuard
 		if base64.StdEncoding.DecodedLen(len(payload)) > maxBytes {
 			return nil, true, false
 		}
-		if !budget.reserve(int64(base64.StdEncoding.DecodedLen(len(payload)))) {
-			return nil, true, false
-		}
-		decoded, err := base64.StdEncoding.DecodeString(payload)
+		decoded, err := resourceguard.DecodeBase64(budget.allocationMemory(), payload)
 		return decoded, true, err == nil && len(decoded) <= maxBytes
 	}
 	if len(payload) > maxBytes*3 {
 		return nil, true, false
 	}
-	if !budget.reserve(int64(len(payload)) * 2) {
-		return nil, true, false
-	}
-	decoded, err := url.PathUnescape(payload)
-	return []byte(decoded), true, err == nil && len(decoded) <= maxBytes
-}
-
-// MIME parameter parsing owns a map and decoded strings. The input is capped
-// at maxCSSMediaTypeBytes; this conservative allowance includes map growth and
-// short parameters whose entry overhead exceeds their source length.
-func reserveMediaType(value string, budget *cpuGuard) bool {
-	return budget.reserve(256 + int64(len(value))*32)
+	decoded, err := resourceguard.UnescapePathBytes(budget.allocationMemory(), payload, budget.allocationStop)
+	return decoded, true, err == nil && len(decoded) <= maxBytes
 }

@@ -42,25 +42,15 @@ func (s *sheet) recordKeyframeName(tokens []css.Token) {
 		if found {
 			return // A keyframes prelude contains exactly one name.
 		}
-		if !s.cpu.reserve(int64(len(token.Data))) {
-			return
-		}
 		var ok bool
-		name, ok = animationName(token.TokenType, string(token.Data), s.cpu)
+		name, ok = animationName(token.TokenType, ownedString(token.Data, s.cpu), s.cpu)
 		if !ok {
 			return
 		}
 		found = true
 	}
 	if found {
-		// Charge each distinct retained registry entry as well as its name.
-		if _, exists := s.keyframeNames[name]; !exists && !s.memory.Reserve(128) {
-			return
-		}
-		if s.keyframeNames == nil {
-			s.keyframeNames = make(map[string]struct{})
-		}
-		s.keyframeNames[name] = struct{}{}
+		s.keyframeNames.Set(s.memory, name, struct{}{})
 	}
 }
 
@@ -112,7 +102,7 @@ func parseAnimationValue(value string, shorthand bool, budget *cpuGuard) animati
 		}
 		if named {
 			var admitted bool
-			result.names, admitted = growSlice(result.names, 1, budget.allocationMemory())
+			result.names, admitted = growSlice(result.names, 1, budget.allocationMemory(), budget.allocationStop)
 			if !admitted {
 				return animationValue{unresolved: true}
 			}
@@ -279,7 +269,7 @@ func animationTimingFunction(tokens []valueToken, start int, budget *cpuGuard) (
 }
 
 func (s *sheet) potentiallyActiveAnimation(c candidate, context evaluationContext, work *cpuGuard) bool {
-	if !c.set || (len(s.keyframeNames) == 0 && !s.unresolvedStylesheet) {
+	if !c.set || (s.keyframeNames.Len() == 0 && !s.unresolvedStylesheet) {
 		return false
 	}
 	if c.uncertainOrigin || c.d.unsupported {
@@ -304,7 +294,7 @@ func (s *sheet) potentiallyActiveAnimation(c candidate, context evaluationContex
 		if !work.check() {
 			return true
 		}
-		if _, found := s.keyframeNames[name]; found || s.unresolvedStylesheet {
+		if _, found := s.keyframeNames.View()[name]; found || s.unresolvedStylesheet {
 			return true
 		}
 	}

@@ -44,11 +44,12 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 			style = style[:0]
 			return true
 		}
-		if !s.memory.Reserve(int64(len(style))) {
+		text := ownedString(style, s.resourceBudget())
+		if s.memory.Exhausted() {
 			s.abandonCascade()
 			return false
 		}
-		s.parseStylesheet(string(style), attr(&styleNode, "media"), uncertainStylesheetOrigin)
+		s.parseStylesheet(text, attr(&styleNode, "media"), uncertainStylesheetOrigin)
 		style = style[:0]
 		return !s.cascadeIncomplete && !s.stopped
 	}
@@ -74,7 +75,7 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 			styleNode = html.Node{Type: html.ElementNode, Data: "style"}
 			for hasAttributes {
 				key, value, more := z.TagAttr()
-				if !retainConditionalStyleAttribute(&styleNode, key, value, s.memory) {
+				if !retainConditionalStyleAttribute(&styleNode, key, value, s.memory, s.shouldStop) {
 					s.abandonCascade()
 					return
 				}
@@ -92,7 +93,7 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 				return
 			}
 			var admitted bool
-			style, admitted = growSlice(style, len(raw), s.memory)
+			style, admitted = growSlice(style, len(raw), s.memory, s.shouldStop)
 			if !admitted {
 				s.abandonCascade()
 				return
@@ -113,7 +114,11 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 // comment allocate a large synthetic html.Node outside the document's normal
 // attribute accounting. Keep the first occurrence, matching x/net/html's tree
 // builder treatment of duplicate HTML attributes.
-func retainConditionalStyleAttribute(style *html.Node, key, value []byte, memory *resourceguard.Memory) bool {
+func retainConditionalStyleAttribute(style *html.Node, key, value []byte, memory *resourceguard.Memory, stops ...resourceguard.Stop) bool {
+	var stop resourceguard.Stop
+	if len(stops) != 0 {
+		stop = stops[0]
+	}
 	var name string
 	switch string(key) {
 	case "type":
@@ -126,15 +131,16 @@ func retainConditionalStyleAttribute(style *html.Node, key, value []byte, memory
 	if hasAttr(style, name) {
 		return true
 	}
-	if !memory.Reserve(int64(len(value))) {
+	text, ok := resourceguard.CopyString(memory, value, stop)
+	if !ok {
 		return false
 	}
 	var admitted bool
-	style.Attr, admitted = growSlice(style.Attr, 1, memory)
+	style.Attr, admitted = growSlice(style.Attr, 1, memory, nil)
 	if !admitted {
 		return false
 	}
-	style.Attr = append(style.Attr, html.Attribute{Key: name, Val: string(value)})
+	style.Attr = append(style.Attr, html.Attribute{Key: name, Val: text})
 	return true
 }
 
@@ -288,7 +294,12 @@ func (p *msoConditionParser) parseAtom() uint32 {
 			p.failed = true
 			return 0
 		}
-		return msoVersionMask(asciiLower(word), version)
+		for _, op := range [...]string{"lt", "lte", "gt", "gte"} {
+			if equalASCIIFold(word, op) {
+				return msoVersionMask(op, version)
+			}
+		}
+		return 0
 	default:
 		p.failed = true
 		return 0
@@ -445,7 +456,7 @@ func (s *msoRevealedState) update(marker msoRevealedMarker, budget *cpuGuard) bo
 	switch marker {
 	case msoRevealedStart, msoRevealedUniversalStart:
 		var ok bool
-		s.stack, ok = growSlice(s.stack, 1, budget.allocationMemory())
+		s.stack, ok = growSlice(s.stack, 1, budget.allocationMemory(), budget.allocationStop)
 		if !ok {
 			return false
 		}

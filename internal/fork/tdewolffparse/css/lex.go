@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // TokenType determines the type of token, eg. a number or a semicolon.
@@ -146,29 +147,37 @@ const maxCSSTokens = 131_072
 
 // NewLexer returns a new Lexer for a given io.Reader.
 func NewLexer(r *parse.Input) *Lexer {
-	return &Lexer{
-		r: r,
-	}
+	return newLexer(r, nil)
 }
 
 // NewLexerWithLimits returns a lexer that checks cancellation while advancing
 // input. Tokens borrow input storage; callers account for copies they retain.
 func NewLexerWithLimits(r *parse.Input, limits ResourceLimits) *Lexer {
-	if limits.ShouldStop != nil {
-		r.SetProgressCheck(func() error {
-			if limits.ShouldStop() {
-				return ErrResourceStopped
-			}
-			return nil
-		})
+	check, ok := resourceguard.ErrorCheck(limits.Memory, limits.ShouldStop, ErrResourceStopped)
+	if !ok {
+		return &Lexer{resourceErr: &ResourceLimitError{"memory bytes", int(limits.Memory.Limit())}}
 	}
-	return &Lexer{r: r, guard: newResourceGuard(limits)}
+	if check != nil {
+		r.SetProgressCheck(check)
+	}
+	return newLexer(r, newResourceGuard(limits))
+}
+
+func newLexer(r *parse.Input, g *resourceGuard) *Lexer {
+	l, ok := resourceguard.New(g.memory(), Lexer{r: r, guard: g})
+	if !ok {
+		return &Lexer{resourceErr: g.allocationError()}
+	}
+	return l
 }
 
 // Err returns the error encountered during lexing, this is often io.EOF but also other errors can be returned.
 func (l *Lexer) Err() error {
 	if l.resourceErr != nil {
 		return l.resourceErr
+	}
+	if l.r.Err() == resourceguard.ErrStopped {
+		return ErrResourceStopped
 	}
 	return l.r.Err()
 }

@@ -2,12 +2,13 @@ package css
 
 import (
 	"errors"
-	parse "github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
-	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 	"io"
 	"strings"
 	"testing"
 	"unsafe"
+
+	parse "github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 func consumeGuardedCSS(p *Parser) error {
@@ -77,7 +78,7 @@ func TestCSSStackGrowthReservesFullArrayBeforeAppend(t *testing.T) {
 	if memory.Used()-before != int64(cap(p.state))*int64(unsafe.Sizeof(State(nil))) {
 		t.Fatal("growth charged only capacity delta")
 	}
-	memory = resourceguard.NewMemory(int64(oldCap) * int64(unsafe.Sizeof(State(nil))))
+	memory = resourceguard.NewMemory(before)
 	p = NewParserWithLimits(parse.NewInputString(""), false, ResourceLimits{Memory: memory})
 	for len(p.state) < cap(p.state) {
 		p.pushState((*Parser).parseStylesheet)

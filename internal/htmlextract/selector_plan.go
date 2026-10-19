@@ -2,7 +2,6 @@ package htmlextract
 
 import (
 	"strings"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
@@ -63,12 +62,12 @@ type selectorAncestorActivation struct {
 
 func (a *activeAncestorBuckets) reset(selectorCount int, memory *resourceguard.Memory) bool {
 	if len(a.counts) < selectorCount {
-		if !memory.Reserve(int64(selectorCount) * (2*int64(unsafe.Sizeof(int(0))) + int64(unsafe.Sizeof([]selectorRef{})))) {
+		a.buckets = allocatedSlice[[]selectorRef](memory, 0, selectorCount)
+		a.counts = allocatedSlice[int](memory, selectorCount, selectorCount)
+		a.positions = allocatedSlice[int](memory, selectorCount, selectorCount)
+		if memory.Exhausted() {
 			return false
 		}
-		a.buckets = make([][]selectorRef, 0, selectorCount)
-		a.counts = make([]int, selectorCount)
-		a.positions = make([]int, selectorCount)
 	} else {
 		clear(a.counts)
 		clear(a.positions)
@@ -165,16 +164,15 @@ func (p *selectorPlan) makeForeignCaseUncertain(memory *resourceguard.Memory) {
 		name, _ = canonicalSVGTypeSelector(p.scopePrefix)
 	}
 	if name != "" {
-		lower := asciiLower(name)
-		p.scope = cascadia.Selector(func(n *html.Node) bool {
-			if n.Type != html.ElementNode {
-				return false
-			}
-			if n.Namespace == "" {
-				return n.Data == lower
-			}
-			return n.Data == name
-		})
+		lower, ok := resourceguard.LowerASCII(memory, name, nil)
+		if !ok {
+			return
+		}
+		matcher, ok := resourceguard.New(memory, foreignTypeMatcher{name: name, lower: lower})
+		if !ok {
+			return
+		}
+		p.scope = matcher
 		return
 	}
 	p.scope = p.complexity.compounds[len(p.complexity.compounds)-1].PositiveMatcher
@@ -207,7 +205,7 @@ func (p *selectorPlan) conservativeScope(memory *resourceguard.Memory) cascadia.
 	if !rightmost.FullyPositive || !left.FullyPositive || left.PositiveMatcher == nil {
 		return rightMatcher
 	}
-	scope := cascadia.CombinePositiveMatchers(left.PositiveMatcher, rightMatcher, combinator)
+	scope := cascadia.CombinePositiveMatchersWithMemory(left.PositiveMatcher, rightMatcher, combinator, memory)
 	if scope == nil {
 		return rightMatcher
 	}
@@ -237,10 +235,10 @@ func compileAncestorChain(complexity selectorComplexity, memory *resourceguard.M
 	if descendants < 2 && !complexity.attributeSensitive() {
 		return nil
 	}
-	if !memory.Reserve(int64(len(complexity.compounds)) * int64(unsafe.Sizeof([1]cascadia.Matcher{}))) {
+	matchers, ok := resourceguard.MakeSlice[cascadia.Matcher](memory, len(complexity.compounds), len(complexity.compounds))
+	if !ok {
 		return nil
 	}
-	matchers := make([]cascadia.Matcher, len(complexity.compounds))
 	for i, compound := range complexity.compounds {
 		if compound.Matcher == nil {
 			return nil
@@ -307,9 +305,9 @@ func planSelectorListWithStop(source string, nextSequence *int, memory *resource
 		branches++
 		if plan, keep := planSelectorBranch(branch, *nextSequence, memory); keep {
 			var admitted bool
-			plans, admitted = growSlice(plans, 1, memory)
+			plans, admitted = growSlice(plans, 1, memory, shouldStop)
 			if !admitted {
-				return plans, branches, false, iterator.Stopped()
+				return plans, branches, false, iterator.Stopped() || !memory.Exhausted()
 			}
 			plans = append(plans, plan)
 			(*nextSequence)++
@@ -342,10 +340,14 @@ func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memor
 	if fallbackErr != nil {
 		return selectorPlan{}, false
 	}
-	compound := compoundComplexity{FullyPositive: true}
+	compounds, ok := resourceguard.MakeSlice[compoundComplexity](memory, 1, 1)
+	if !ok {
+		return selectorPlan{}, false
+	}
+	compounds[0] = compoundComplexity{FullyPositive: true}
 	plan := selectorPlan{
 		source:          branch,
-		complexity:      selectorComplexity{compounds: []compoundComplexity{compound}},
+		complexity:      selectorComplexity{compounds: compounds},
 		key:             localSelectorKey(fallback.Key),
 		scopePrefix:     fallback.PositiveSource,
 		sequence:        sequence,
@@ -455,4 +457,16 @@ func compileConservativeScope(prefix string, memory *resourceguard.Memory) casca
 		return universalScopeMatcher
 	}
 	return group[0]
+}
+
+type foreignTypeMatcher struct{ name, lower string }
+
+func (m *foreignTypeMatcher) Match(n *html.Node) bool {
+	if n.Type != html.ElementNode {
+		return false
+	}
+	if n.Namespace == "" {
+		return n.Data == m.lower
+	}
+	return n.Data == m.name
 }

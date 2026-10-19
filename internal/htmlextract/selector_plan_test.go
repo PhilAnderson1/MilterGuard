@@ -18,8 +18,8 @@ func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 	if !plan.uncertain {
 		t.Fatalf("unexpected conservative plan: %+v", plan)
 	}
-	if used := memory.Used(); used != 0 {
-		t.Fatalf("compiled conservative scope charged %d bytes, want matcher reuse", used)
+	if used := memory.Used(); used <= 0 || used > 128 {
+		t.Fatalf("compiled conservative scope charged %d bytes, want only the combined matcher object", used)
 	}
 
 	ordinary := &html.Node{Type: html.ElementNode, Data: "img"}

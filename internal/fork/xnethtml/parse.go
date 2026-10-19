@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	a "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/atom"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 var (
@@ -21,7 +22,9 @@ var (
 // A parser implements the HTML5 parsing algorithm:
 // https://html.spec.whatwg.org/multipage/syntax.html#tree-construction
 type parser struct {
-	guard *resourceGuard
+	guard       *resourceGuard
+	textNode    *Node
+	textBuilder strings.Builder
 	// implied is non-zero while processing a tree-builder-generated token.
 	implied int
 	// tokenizer provides the tokens for the parser.
@@ -44,8 +47,8 @@ type parser struct {
 	// Repeated html and body start tags merge previously unseen attributes
 	// into their existing nodes. Retain the name sets so each merge does not
 	// rebuild them from every attribute accumulated so far.
-	htmlAttributeNames map[string]struct{}
-	bodyAttributeNames map[string]struct{}
+	htmlAttributeNames resourceguard.Table[string, struct{}]
+	bodyAttributeNames resourceguard.Table[string, struct{}]
 	// The stack of template insertion modes
 	templateStack insertionModeStack
 	// im is the current insertion mode.
@@ -307,7 +310,7 @@ func (p *parser) fosterParent(n *Node) {
 		prev = parent.LastChild
 	}
 	if prev != nil && prev.Type == TextNode && n.Type == TextNode {
-		prev.Data = p.guard.mergeText(prev.Data, n.Data)
+		p.appendText(prev, n.Data)
 		return
 	}
 
@@ -331,7 +334,7 @@ func (p *parser) addText(text string) {
 
 	t := p.top()
 	if n := t.LastChild; n != nil && n.Type == TextNode {
-		n.Data = p.guard.mergeText(n.Data, text)
+		p.appendText(n, text)
 		return
 	}
 	p.addChild(p.newNode(Node{
@@ -353,15 +356,14 @@ func (p *parser) addElement() {
 
 func (p *parser) newNode(n Node) *Node {
 	p.takeNode()
-	p.guard.node()
-	return &n
+	return newResourceNode(p.guard, n)
 }
 
 func (p *parser) cloneNode(n *Node) *Node {
 	p.takeNode()
-	p.guard.node()
-	p.guard.mustAttributes(len(n.Attr))
-	clone := n.clone()
+	attrs := makeResourceSlice[Attribute](len(n.Attr), len(n.Attr), p.guard)
+	copy(attrs, n.Attr)
+	clone := newResourceNode(p.guard, Node{Type: n.Type, DataAtom: n.DataAtom, Data: n.Data, Attr: attrs})
 	clone.parserImplied = true
 	return clone
 }
@@ -551,7 +553,6 @@ func initialIM(p *parser) bool {
 		return true
 	case DoctypeToken:
 		p.takeNode()
-		p.guard.node()
 		n, quirks := parseDoctypeWithGuard(p.tok.Data, p.guard)
 		p.doc.AppendChild(n)
 		p.quirks = quirks
@@ -877,7 +878,7 @@ func (p *parser) copyAttributes(dst *Node, src Token) {
 	if len(src.Attr) == 0 {
 		return
 	}
-	var names *map[string]struct{}
+	var names *resourceguard.Table[string, struct{}]
 	switch dst.DataAtom {
 	case a.Html:
 		names = &p.htmlAttributeNames
@@ -886,18 +887,16 @@ func (p *parser) copyAttributes(dst *Node, src Token) {
 	default:
 		panic("html: copyAttributes called for non-html/body node")
 	}
-	if *names == nil {
-		p.guard.reserve(attributeMapBaseBytes + int64(len(dst.Attr))*attributeMapEntryBytes)
-		*names = make(map[string]struct{}, len(dst.Attr))
+	if names.View() == nil {
+		p.guard.must(names.Init(p.guard.memory(), len(dst.Attr)))
 		for _, attribute := range dst.Attr {
-			(*names)[attribute.Key] = struct{}{}
+			p.guard.must(names.Set(p.guard.memory(), attribute.Key, struct{}{}))
 		}
 	}
 	for _, t := range src.Attr {
-		if _, ok := (*names)[t.Key]; !ok {
-			p.guard.reserve(attributeMapEntryBytes)
+		if _, ok := names.Get(t.Key); !ok {
+			p.guard.must(names.Set(p.guard.memory(), t.Key, struct{}{}))
 			dst.Attr = append(growResourceSlice(dst.Attr, 1, p.guard), t)
-			(*names)[t.Key] = struct{}{}
 		}
 	}
 }
@@ -2308,15 +2307,35 @@ func ParseFragment(r io.Reader, context *Node) ([]*Node, error) {
 }
 
 // ParseOption configures a parser.
-type ParseOption func(p *parser)
+type parseConfig struct {
+	scripting bool
+	limits    ResourceLimits
+}
+type ParseOption func(c *parseConfig)
+
+func newParserWithOptions(opts []ParseOption, value parser) *parser {
+	c := parseConfig{scripting: true}
+	for _, option := range opts {
+		option(&c)
+	}
+	g, ok := resourceguard.New(c.limits.Memory, resourceGuard{limits: c.limits})
+	if !ok {
+		panic(resourceAbort{&ResourceLimitError{"memory bytes", c.limits.Memory.Limit()}})
+	}
+	value.guard = g
+	value.scripting = c.scripting
+	p, ok := resourceguard.New(c.limits.Memory, value)
+	g.must(ok)
+	return p
+}
 
 // ParseOptionEnableScripting configures the scripting flag.
 // https://html.spec.whatwg.org/multipage/webappapis.html#enabling-and-disabling-scripting
 //
 // By default, scripting is enabled.
 func ParseOptionEnableScripting(enable bool) ParseOption {
-	return func(p *parser) {
-		p.scripting = enable
+	return func(c *parseConfig) {
+		c.scripting = enable
 	}
 }
 
@@ -2331,16 +2350,12 @@ func ParseWithOptions(r io.Reader, opts ...ParseOption) (node *Node, err error) 
 			panic(panicErr)
 		}
 	}()
-	p := &parser{
-		tokenizer:  NewTokenizer(r),
-		scripting:  true,
-		framesetOK: true,
-		im:         initialIM,
+	p := newParserWithOptions(opts, parser{framesetOK: true, im: initialIM})
+	p.tokenizer = newTokenizer(r, "", p.guard)
+	if p.tokenizer.err != nil {
+		return nil, p.tokenizer.err
 	}
 
-	for _, f := range opts {
-		f(p)
-	}
 	p.doc = p.newNode(Node{Type: DocumentNode})
 
 	if err := p.parse(); err != nil {
@@ -2373,20 +2388,15 @@ func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) (
 		}
 		contextTag = context.DataAtom.String()
 	}
-	p := &parser{
-		scripting: true,
-		fragment:  true,
-		context:   context,
-	}
+	p := newParserWithOptions(opts, parser{fragment: true, context: context})
 	if context != nil && context.Namespace != "" {
-		p.tokenizer = NewTokenizer(r)
-	} else {
-		p.tokenizer = NewTokenizerFragment(r, contextTag)
+		contextTag = ""
+	}
+	p.tokenizer = newTokenizer(r, contextTag, p.guard)
+	if p.tokenizer.err != nil {
+		return nil, p.tokenizer.err
 	}
 
-	for _, f := range opts {
-		f(p)
-	}
 	p.doc = p.newNode(Node{Type: DocumentNode})
 
 	root := p.newNode(Node{
@@ -2429,4 +2439,17 @@ func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) (
 		c = next
 	}
 	return result, nil
+}
+
+// appendText publishes an immutable prefix after each append. Observers always
+// see current Node.Data, including recovery, reparenting and foster parenting.
+// A destination change retires the builder; its published strings remain valid.
+func (p *parser) appendText(n *Node, text string) {
+	if p.textNode != n {
+		p.textBuilder.Reset()
+		p.textNode = n
+		p.guard.must(resourceguard.WriteString(p.guard.memory(), &p.textBuilder, n.Data, p.guard.checkpoint))
+	}
+	p.guard.must(resourceguard.WriteString(p.guard.memory(), &p.textBuilder, text, p.guard.checkpoint))
+	n.Data = p.textBuilder.String()
 }

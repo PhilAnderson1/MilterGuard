@@ -1,8 +1,6 @@
 package cascadia
 
 import (
-	"unsafe"
-
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
@@ -54,12 +52,11 @@ func Metadata(selector Sel) SelectorMetadata {
 func MetadataWithMemory(selector Sel, memory *resourceguard.Memory) (result SelectorMetadata, err error) {
 	defer recoverAllocation(&err)
 	compoundCount := selectorCompoundCount(selector)
-	reserveSelector(memory, int64(compoundCount)*int64(unsafe.Sizeof(CompoundMetadata{}))+int64(compoundCount-1))
 	metadata := SelectorMetadata{
-		Compounds: make([]CompoundMetadata, 0, compoundCount),
+		Compounds: selectorSlice[CompoundMetadata](memory, 0, compoundCount),
 	}
 	if compoundCount > 1 {
-		metadata.Combinators = make([]byte, 0, compoundCount-1)
+		metadata.Combinators = selectorSlice[byte](memory, 0, compoundCount-1)
 	}
 	appendSelectorMetadata(selector, &metadata, memory)
 	metadata.Inactive = selectorNeverMatches(selector)
@@ -104,8 +101,7 @@ func describeCompound(selector Sel, memory *resourceguard.Memory) CompoundMetada
 	} else if state.positiveCount == 1 {
 		metadata.PositiveMatcher = state.firstPositive
 	} else if state.positiveCount > 1 {
-		reserveSelector(memory, int64(state.positiveCount)*int64(unsafe.Sizeof([1]Sel{}))+int64(unsafe.Sizeof(compoundSelector{})))
-		positive := make([]Sel, 0, state.positiveCount)
+		positive := selectorSlice[Sel](memory, 0, state.positiveCount)
 		compound := selector.(compoundSelector)
 		for _, simple := range compound.selectors {
 			switch simple.(type) {
@@ -113,7 +109,7 @@ func describeCompound(selector Sel, memory *resourceguard.Memory) CompoundMetada
 				positive = append(positive, simple)
 			}
 		}
-		metadata.PositiveMatcher = compoundSelector{selectors: positive}
+		metadata.PositiveMatcher = selectorObject(memory, compoundSelector{selectors: positive})
 	}
 	switch {
 	case state.id != "":

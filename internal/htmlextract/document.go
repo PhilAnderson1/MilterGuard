@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
@@ -111,7 +110,7 @@ func nodeContentScope(n *html.Node, parent nodeScope) nodeScope {
 type parsedDocument struct {
 	root                    *html.Node
 	styles                  sheet
-	elements                map[*html.Node]elementPreparation
+	elements                resourceguard.Table[*html.Node, elementPreparation]
 	treeDepth               int
 	extractableTextCount    int
 	extractableElementCount int
@@ -147,10 +146,11 @@ type documentWalker struct {
 
 func (w *documentWalker) run(root *html.Node) error {
 	const initialStackCapacity = 64
-	if !w.processor.memory.Reserve(initialStackCapacity * int64(unsafe.Sizeof(documentFrame{}))) {
+	var ok bool
+	w.stack, ok = resourceguard.MakeSlice[documentFrame](w.processor.memory, 1, initialStackCapacity)
+	if !ok {
 		return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
 	}
-	w.stack = make([]documentFrame, 1, initialStackCapacity)
 	w.stack[0] = documentFrame{n: root}
 	for len(w.stack) > 0 {
 		frame := &w.stack[len(w.stack)-1]
@@ -162,7 +162,7 @@ func (w *documentWalker) run(root *html.Node) error {
 			child := frame.next
 			frame.next = child.NextSibling
 			if frame.n.Type == html.ElementNode && child.Type == html.ElementNode {
-				prepared := w.document.elements[frame.n]
+				prepared := w.document.elements.View()[frame.n]
 				if !prepared.hasElementChild {
 					prepared.hasElementChild = true
 					if !w.document.storePreparation(frame.n, prepared) {
@@ -170,14 +170,9 @@ func (w *documentWalker) run(root *html.Node) error {
 					}
 				}
 			}
-			if len(w.stack) == cap(w.stack) {
-				newCapacity := max(1, cap(w.stack)*2)
-				if !w.processor.memory.Reserve(int64(newCapacity) * int64(unsafe.Sizeof(documentFrame{}))) {
-					return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
-				}
-				grown := make([]documentFrame, len(w.stack), newCapacity)
-				copy(grown, w.stack)
-				w.stack = grown
+			w.stack, ok = resourceguard.GrowSlice(w.processor.memory, w.stack, 1, w.processor.shouldStop)
+			if !ok {
+				return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
 			}
 			w.stack = append(w.stack, documentFrame{
 				n: child, depth: frame.depth + 1, scope: frame.scope,
@@ -294,8 +289,11 @@ func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) e
 	return nil
 }
 
-func (p processor) parseDocument(input []byte) (parsedDocument, error) {
-	document := parsedDocument{memory: p.memory}
+func (p processor) parseDocument(input []byte) (*parsedDocument, error) {
+	document, ok := resourceguard.New(p.memory, parsedDocument{memory: p.memory})
+	if !ok {
+		return nil, resourceguard.ErrMemory
+	}
 	if err := p.Limits.validate(); err != nil {
 		return document, err
 	}
@@ -327,15 +325,15 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 	}
 	document.styles = sheet{
 		limits: p.Limits, shouldStop: p.shouldStop,
-		selectorControl: cascadia.NewMatchControl(p.shouldStop),
-		cpu:             p.cpu,
-		memory:          p.memory,
+
+		cpu:    p.cpu,
+		memory: p.memory,
 	}
-	if !p.memory.Reserve(int64(unsafe.Sizeof(map[*html.Node]elementPreparation{}))) {
-		return document, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+	document.styles.selectorControl, ok = cascadia.NewMatchControlWithMemory(p.shouldStop, p.memory)
+	if !ok {
+		return document, resourceguard.ErrMemory
 	}
-	document.elements = make(map[*html.Node]elementPreparation)
-	walker := documentWalker{processor: p, document: &document}
+	walker := documentWalker{processor: p, document: document}
 	if err := walker.run(root); err != nil {
 		return document, err
 	}
@@ -346,17 +344,13 @@ func (p processor) parseDocument(input []byte) (parsedDocument, error) {
 		// No prepared per-element CSS can be used once global style analysis is
 		// incomplete. Release declarations and selector profiles collected before
 		// the failure rather than retaining them through result traversal.
-		document.elements = nil
+		document.elements.Release()
 	}
 	return document, nil
 }
 
 func (d *parsedDocument) storePreparation(n *html.Node, prepared elementPreparation) bool {
-	if _, exists := d.elements[n]; !exists && !d.memory.Reserve(mapEntryAllocationBytes[*html.Node, elementPreparation]()) {
-		return false
-	}
-	d.elements[n] = prepared
-	return true
+	return d.elements.Set(d.memory, n, prepared)
 }
 
 func boundedStyleText(style *html.Node, maximum int) (string, bool) {

@@ -9,9 +9,10 @@ import (
 	"errors"
 	"io"
 	"strconv"
-	"strings"
+	"unicode"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/atom"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // A TokenType is the type of a Token.
@@ -162,13 +163,11 @@ type Tokenizer struct {
 	// pendingAttr is the attribute key and value currently being tokenized.
 	// When complete, pendingAttr is pushed onto attr. nAttrReturned is
 	// incremented on each call to TagAttr.
-	pendingAttr [2]span
-	attr        [][2]span
-	// High-water entry count: clear(attrNames) keeps its allocated storage.
-	attrNameCapacity int
-	attrNames        map[string]bool
-	nAttrReturned    int
-	attributeCount   int
+	pendingAttr    [2]span
+	attr           [][2]span
+	attrNames      resourceguard.Table[string, bool]
+	nAttrReturned  int
+	attributeCount int
 	// rawTag is the "script" in "</script>" that closes the next token. If
 	// non-empty, the subsequent call to Next will return a raw or RCDATA text
 	// token: one that treats "<p>" as text instead of an element.
@@ -262,8 +261,7 @@ func (z *Tokenizer) readByte() byte {
 		d := z.raw.end - z.raw.start
 		var buf1 []byte
 		if 2*d > c {
-			z.guard.reserve(int64(2 * c))
-			buf1 = make([]byte, d, 2*c)
+			buf1 = makeResourceSlice[byte](d, 2*c, z.guard)
 		} else {
 			buf1 = z.buf[:d]
 		}
@@ -872,7 +870,12 @@ func (z *Tokenizer) readStartTag() TokenType {
 		raw = z.startTagIn("xmp")
 	}
 	if raw {
-		z.rawTag = strings.ToLower(string(z.buf[z.data.start:z.data.end]))
+		for _, name := range [...]string{"iframe", "noembed", "noframes", "noscript", "plaintext", "script", "style", "textarea", "title", "xmp"} {
+			if z.startTagIn(name) {
+				z.rawTag = name
+				break
+			}
+		}
 	}
 	// Look for a self-closing token (e.g. <br/>).
 	//
@@ -902,7 +905,7 @@ func (z *Tokenizer) readStartTag() TokenType {
 func (z *Tokenizer) readTag(saveAttr bool) {
 	z.attr = z.attr[:0]
 	z.nAttrReturned = 0
-	clear(z.attrNames)
+	z.attrNames.Reset()
 	attributeCount := 0
 	// Read the tag name and attribute key/value pairs.
 	z.readTagName()
@@ -933,17 +936,9 @@ func (z *Tokenizer) readTag(saveAttr bool) {
 		// Save pendingAttr if saveAttr and that attribute has a non-empty key, and the key hasn't been seen before.
 		keyBytes := z.buf[z.pendingAttr[0].start:z.pendingAttr[0].end]
 		key := z.guard.ownedString(lowerWithGuard(z.guard.copyBytes(keyBytes), z.guard))
-		if saveAttr && z.pendingAttr[0].start != z.pendingAttr[0].end && !z.attrNames[key] {
-			if z.attrNames == nil {
-				z.guard.reserve(attributeMapBaseBytes)
-				z.attrNames = make(map[string]bool)
-			}
-			if len(z.attrNames)+1 > z.attrNameCapacity {
-				z.guard.reserve(attributeMapEntryBytes)
-				z.attrNameCapacity = len(z.attrNames) + 1
-			}
+		if saveAttr && z.pendingAttr[0].start != z.pendingAttr[0].end && !z.attrNames.View()[key] {
+			z.guard.must(z.attrNames.Set(z.guard.memory(), key, true))
 			z.attr = append(growResourceSlice(z.attr, 1, z.guard), z.pendingAttr)
-			z.attrNames[key] = true
 		}
 		if z.skipWhiteSpace(); z.err != nil {
 			break
@@ -1351,8 +1346,7 @@ func (z *Tokenizer) Token() (t Token) {
 		name, moreAttr := z.TagName()
 		if moreAttr {
 			count := len(z.attr) - z.nAttrReturned
-			z.guard.mustAttributes(count)
-			t.Attr = make([]Attribute, 0, count)
+			t.Attr = makeResourceSlice[Attribute](0, count, z.guard)
 		}
 		for moreAttr {
 			var key, val []byte
@@ -1403,9 +1397,17 @@ func NewTokenizerWithStop(r io.Reader, shouldStop func() bool) *Tokenizer {
 //
 // The input is assumed to be UTF-8 encoded.
 func NewTokenizerFragment(r io.Reader, contextTag string) *Tokenizer {
-	z := &Tokenizer{
-		r:   r,
-		buf: make([]byte, 0, 4096),
+	return newTokenizer(r, contextTag, nil)
+}
+func newTokenizer(r io.Reader, contextTag string, g *resourceGuard) *Tokenizer {
+	z, ok := resourceguard.New(g.memory(), Tokenizer{r: r, guard: g})
+	if !ok {
+		return &Tokenizer{err: &ResourceLimitError{"memory bytes", g.memory().Limit()}}
+	}
+	z.buf, ok = resourceguard.MakeSlice[byte](g.memory(), 0, 4096)
+	if !ok {
+		z.err = &ResourceLimitError{"memory bytes", g.memory().Limit()}
+		return z
 	}
 	if contextTag != "" {
 		// Per the "Parsing HTML Fragments" portion of the spec:
@@ -1419,7 +1421,7 @@ func NewTokenizerFragment(r io.Reader, contextTag string) *Tokenizer {
 		//
 		// As such we just set everything to plaintext, which makes some complex parsing
 		// cases somewhat simpler.
-		switch s := strings.ToLower(contextTag); s {
+		switch s := mapStringWithGuard(contextTag, unicode.ToLower, g); s {
 		case "title", "textarea":
 			z.rawTag = s
 		case "style", "xmp", "iframe", "noembed", "noframes", "script", "noscript", "plaintext":

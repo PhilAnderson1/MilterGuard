@@ -2,8 +2,8 @@ package htmlextract
 
 import (
 	"math"
-	"strconv"
-	"unsafe"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // scanCSSNumber validates decimal CSS syntax and computes the base-10 order
@@ -114,11 +114,10 @@ func parseCSSNumber(s string, budget *cpuGuard) (float64, bool) {
 	// ParseFloat's range error clones its input and owns a NumError. Admit that
 	// possibility before conversion, including conservative size-class/page
 	// rounding. The monotonic charge remains even when no error is allocated.
-	bytes := int64(len(s))
-	if !budget.reserve(bytes + bytes/4 + 64 + int64(unsafe.Sizeof(strconv.NumError{})) + 16) {
+	value, err := resourceguard.ParseFloat(budget.allocationMemory(), s, 64)
+	if err == resourceguard.ErrMemory {
 		return 0, false
 	}
-	value, _ := strconv.ParseFloat(s, 64)
 	return value, !math.IsNaN(value)
 }
 

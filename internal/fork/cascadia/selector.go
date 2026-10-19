@@ -85,9 +85,8 @@ func parseGroup(sel string, memory *resourceguard.Memory, acceptPseudoElements b
 	if err := validateSelectorInput(sel); err != nil {
 		return nil, err
 	}
-	if memory != nil && !memory.Reserve(int64(len(sel))) {
-		return nil, errSelectorMemory
-	}
+	// Source substrings borrow the caller's immutable input; no allocation
+	// occurs here and its storage is already owned by the caller.
 	p := &parser{s: sel, acceptPseudoElements: acceptPseudoElements, memory: memory}
 	compiled, err := p.parseSelectorGroup()
 	if err != nil {
@@ -116,12 +115,20 @@ type Selector func(*html.Node) bool
 // CombinePositiveMatchers combines already compiled positive compounds for a
 // conservative descendant or child scope.
 func CombinePositiveMatchers(left, right Matcher, combinator byte) Matcher {
+	return CombinePositiveMatchersWithMemory(left, right, combinator, nil)
+}
+
+func CombinePositiveMatchersWithMemory(left, right Matcher, combinator byte, memory *resourceguard.Memory) Matcher {
 	leftSelector, leftOK := left.(Sel)
 	rightSelector, rightOK := right.(Sel)
 	if !leftOK || !rightOK || combinator != ' ' && combinator != '>' {
 		return nil
 	}
-	return combinedSelector{first: leftSelector, combinator: combinator, second: rightSelector}
+	value, ok := resourceguard.Box(memory, combinedSelector{first: leftSelector, combinator: combinator, second: rightSelector})
+	if !ok {
+		return nil
+	}
+	return value.(Matcher)
 }
 
 // Compile parses a selector and returns, if successful, a Selector object

@@ -11,14 +11,16 @@ func TestLanguageLowercaseAccounting(t *testing.T) {
 	for _, source := range []string{"", "en-us", "EN-US", "ȺİK", "\ufffd", "\xff", strings.Repeat("\xff", 4096)} {
 		t.Run(source[:min(len(source), 12)], func(t *testing.T) {
 			want := strings.ToLower(source)
-			memory := resourceguard.NewMemory(int64(len(want)))
+			memory := resourceguard.NewMemory(int64(len(want)) + 4096)
 			p := parser{memory: memory}
 			if got := p.lowerUnicode(source); got != want {
 				t.Fatalf("got %q, want %q", got, want)
 			}
 			charged := int64(0)
 			if source != want {
-				charged = int64(len(want))
+				var b strings.Builder
+				b.Grow(len(want))
+				charged = int64(b.Cap())
 			}
 			if memory.Used() != charged || memory.Exhausted() {
 				t.Fatalf("charged=%d want=%d exhausted=%v", memory.Used(), charged, memory.Exhausted())
@@ -55,9 +57,9 @@ func TestLanguageSelectorAdmitsLowercaseCopy(t *testing.T) {
 	if _, err := ParseGroupWithMemory(":lang(EN-US)", resourceguard.NewMemory(baseline)); err != errSelectorMemory {
 		t.Fatalf("missing lowercase admission: %v", err)
 	}
-	memory = resourceguard.NewMemory(baseline + 5)
+	memory = resourceguard.NewMemory(baseline + 8)
 	group, err := ParseGroupWithMemory(":lang(EN-US)", memory)
-	if err != nil || len(group) != 1 || group[0].String() != ":lang(en-us)" || memory.Used() != baseline+5 {
+	if err != nil || len(group) != 1 || group[0].String() != ":lang(en-us)" || memory.Used() != baseline+8 {
 		t.Fatalf("compiled=%v err=%v charged=%d", group, err, memory.Used())
 	}
 }

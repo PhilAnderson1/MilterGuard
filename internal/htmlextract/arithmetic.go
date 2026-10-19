@@ -3,9 +3,9 @@ package htmlextract
 import (
 	"math"
 	"strings"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 type quantity struct {
@@ -30,10 +30,10 @@ type mathLiteral struct {
 }
 
 func prepareMathLiterals(ts []valueToken, budget *cpuGuard) []mathLiteral {
-	if !budget.reserve(int64(len(ts)) * int64(unsafe.Sizeof(mathLiteral{}))) {
+	literals, ok := resourceguard.MakeSlice[mathLiteral](budget.allocationMemory(), len(ts), len(ts))
+	if !ok {
 		return nil
 	}
-	literals := make([]mathLiteral, len(ts))
 	for i, t := range ts {
 		if !budget.check() {
 			return nil

@@ -3,10 +3,10 @@ package htmlextract
 import (
 	"math"
 	"strings"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // RGBA is unassociated, encoded sRGB with all channels in [0,1]. Source-over
@@ -24,9 +24,6 @@ const colourThreshold = .005
 // plus CSS-wide keywords. It resets image as well as colour. Other syntax wins
 // as unresolved for both components; a later colour alone cannot reset an image.
 func backgroundDeclarations(value string, important bool, order int, budget *cpuGuard) []declaration {
-	if !budget.reserve(2 * int64(unsafe.Sizeof(declaration{}))) {
-		return nil
-	}
 	tokens, status := lexValue(value, budget)
 	return backgroundDeclarationsTokens(value, tokens, status, important, order, budget)
 }
@@ -41,7 +38,7 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 		image = value
 	default:
 		if tokenStatus != valueResolved {
-			return []declaration{{prop: background, value: value, important: important, order: order, unsupported: true}, {prop: backgroundImage, value: value, important: important, order: order, unsupported: true}}
+			return declarationList(budget, declaration{prop: background, value: value, important: important, order: order, unsupported: true}, declaration{prop: backgroundImage, value: value, important: important, order: order, unsupported: true})
 		}
 		// Tokenize to remove a standalone none, preserving spaces inside rgb().
 		var stack []css.TokenType
@@ -107,7 +104,7 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 		colourUnsupported = imageColourStatus != valueResolved
 		imageUnsupported = true
 	}
-	return []declaration{{prop: background, value: colourValue, important: important, order: order, unsupported: colourUnsupported}, {prop: backgroundImage, value: image, important: important, order: order, unsupported: imageUnsupported}}
+	return declarationList(budget, declaration{prop: background, value: colourValue, important: important, order: order, unsupported: colourUnsupported}, declaration{prop: backgroundImage, value: image, important: important, order: order, unsupported: imageUnsupported})
 }
 
 func backgroundFallbackColourTokens(tokens []valueToken, budget *cpuGuard) (string, valueStatus, bool) {
@@ -237,13 +234,10 @@ func legacyDimensionWithBudget(value string, budget *cpuGuard) (string, bool) {
 			return "", false
 		}
 	}
-	if !budget.reserve(int64(len(value) + 2)) {
-		return "", false
-	}
 	if percentage {
-		return value + "%", true
+		return concatString(value, "%", budget), !budget.stopNow(false)
 	}
-	return value + "px", true
+	return concatString(value, "px", budget), !budget.stopNow(false)
 }
 
 // Presentational hints precede all author rules, with specificity zero. Full
@@ -274,8 +268,9 @@ func legacyDeclarationsWithBudget(n *html.Node, budget *cpuGuard) []declaration 
 			return
 		}
 		if len(value) == 6 && !strings.HasPrefix(value, "#") {
-			if _, status := readColourWithBudget("#"+value, budget); status == valueResolved {
-				value = "#" + value
+			hex := concatString("#", value, budget)
+			if _, status := readColourWithBudget(hex, budget); status == valueResolved {
+				value = hex
 			}
 		}
 		_, status := readColourWithBudget(value, budget)
@@ -306,19 +301,16 @@ func legacyDeclarationsWithBudget(n *html.Node, budget *cpuGuard) []declaration 
 	switch n.Data {
 	case "body", "table", "td", "th":
 		if v := attr(n, "background"); v != "" {
-			if !budget.reserve(int64(len("legacy-image:") + len(v))) {
-				return nil
-			}
-			addDeclaration(declaration{prop: backgroundImage, value: "legacy-image:" + v, order: -1, unsupported: true})
+			addDeclaration(declaration{prop: backgroundImage, value: concatString("legacy-image:", v, budget), order: -1, unsupported: true})
 		}
 	}
 	if count == 0 {
 		return nil
 	}
-	if !budget.reserve(int64(count) * int64(unsafe.Sizeof(declaration{}))) {
+	result, ok := resourceguard.MakeSlice[declaration](budget.allocationMemory(), count, count)
+	if !ok {
 		return nil
 	}
-	result := make([]declaration, count)
 	copy(result, hints[:count])
 	return result
 }

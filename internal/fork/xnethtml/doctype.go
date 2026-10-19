@@ -17,7 +17,7 @@ import (
 func parseDoctype(s string) (*Node, bool) { return parseDoctypeWithGuard(s, nil) }
 
 func parseDoctypeWithGuard(s string, guard *resourceGuard) (n *Node, quirks bool) {
-	n = &Node{Type: DoctypeNode}
+	n = newResourceNode(guard, Node{Type: DoctypeNode})
 
 	// Find the name.
 	space := indexAnyWithGuard(s, whitespace, guard)

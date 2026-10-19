@@ -8,10 +8,7 @@ import "strconv"
 // are needed. Charge before copying, rounding up to a 16-byte size class (the
 // buffers and their outputs stay below 128 bytes).
 func formattedString(data []byte, budget *cpuGuard) string {
-	if budget.stopNow(false) || !budget.reserve(int64((len(data)+15)/16*16)) {
-		return ""
-	}
-	return string(data)
+	return ownedString(data, budget)
 }
 
 func numberStringWithBudget(value float64, unit string, budget *cpuGuard) string {

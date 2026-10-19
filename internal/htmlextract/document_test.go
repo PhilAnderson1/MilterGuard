@@ -195,7 +195,7 @@ func TestMatchCacheStopsGrowingAtEntryLimit(t *testing.T) {
 	plan := selectorPlan{sequence: 0}
 	first := &html.Node{Type: html.ElementNode, Data: "p"}
 	s.cacheMatch(&plan, first, true)
-	if s.runtime.matchCacheEntries != maxMatchCacheEntries || s.runtime.matchCaches[0][first] != 2 {
+	if s.runtime.matchCacheEntries != maxMatchCacheEntries || s.runtime.matchCaches[0].View()[first] != 2 {
 		t.Fatalf("last cache entry was not retained: runtime=%+v", s.runtime)
 	}
 	second := &html.Node{Type: html.ElementNode, Data: "p"}
@@ -203,7 +203,7 @@ func TestMatchCacheStopsGrowingAtEntryLimit(t *testing.T) {
 	if s.runtime.matchCacheEntries != maxMatchCacheEntries {
 		t.Fatalf("cache entries=%d, want %d", s.runtime.matchCacheEntries, maxMatchCacheEntries)
 	}
-	if _, exists := s.runtime.matchCaches[0][second]; exists {
+	if _, exists := s.runtime.matchCaches[0].View()[second]; exists {
 		t.Fatal("cache grew beyond its entry limit")
 	}
 }
@@ -293,10 +293,10 @@ func TestDocumentCollectionRecordsElementChildren(t *testing.T) {
 	if main == nil || section == nil || paragraph == nil {
 		t.Fatalf("missing parsed elements: main=%v section=%v paragraph=%v", main, section, paragraph)
 	}
-	if !parsed.elements[main].hasElementChild {
+	if !parsed.elements.View()[main].hasElementChild {
 		t.Fatal("main element child was not recorded")
 	}
-	if parsed.elements[section].hasElementChild || parsed.elements[paragraph].hasElementChild {
+	if parsed.elements.View()[section].hasElementChild || parsed.elements.View()[paragraph].hasElementChild {
 		t.Fatal("text-only element was recorded as having an element child")
 	}
 }

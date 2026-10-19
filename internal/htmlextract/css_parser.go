@@ -2,18 +2,9 @@ package htmlextract
 
 import (
 	"errors"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
-)
-
-// Input, lexer and parser objects are separate from their backing buffers.
-// Include a conservative allowance for the resource guard, captured callbacks
-// and allocation rounding. Buffer growth is charged separately by the parser.
-const (
-	cssLexerSetupBytes  = int64(unsafe.Sizeof(parse.Input{})+unsafe.Sizeof(css.Lexer{})) + 128
-	cssParserSetupBytes = cssLexerSetupBytes + int64(unsafe.Sizeof(css.Parser{}))
 )
 
 // cssParseSession owns state which is meaningful only while consuming one
@@ -54,7 +45,7 @@ func newCSSParseSession(s *sheet, text string, mode cssParseMode) cssParseSessio
 		session.finished = true
 		return session
 	}
-	session.parser = css.NewParserWithLimits(parse.NewInputString(text), inline, css.ResourceLimits{
+	session.parser = css.NewParserWithLimits(parse.NewInputStringWithMemory(text, s.memory, s.shouldStop), inline, css.ResourceLimits{
 		ShouldStop: s.shouldStop,
 		Memory:     s.memory,
 	})
@@ -158,14 +149,14 @@ func (p *cssParseSession) beginAtRule(s *sheet, name string, values []css.Token)
 	case "@media":
 		condition = s.parseMediaCondition(tokenStringWithBudget(values, s.cpu))
 	case "@font-face":
-		condition = mediaCondition{{schemes: colourSchemeBoth, never: true}}
+		condition = neverMedia[:]
 	case "@keyframes", "@-webkit-keyframes":
 		if !p.inline {
 			s.recordKeyframeName(values)
 		}
-		condition = mediaCondition{{schemes: colourSchemeBoth, never: true}}
+		condition = neverMedia[:]
 	default:
-		condition = mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
+		condition = unknownMedia[:]
 	}
 	p.conditions = newConditionFrame(condition, p.conditions, s.memory)
 	if p.conditions == nil {
@@ -174,7 +165,7 @@ func (p *cssParseSession) beginAtRule(s *sheet, name string, values []css.Token)
 	}
 	parentNested := len(p.atRules) > 0 && p.atRules[len(p.atRules)-1].nested
 	var ok bool
-	p.atRules, ok = growSlice(p.atRules, 1, s.memory)
+	p.atRules, ok = growSlice(p.atRules, 1, s.memory, s.shouldStop)
 	if !ok {
 		s.abandonCascade()
 		return true
@@ -257,7 +248,7 @@ func (p *cssParseSession) beginRuleset(s *sheet, values []css.Token) bool {
 		}
 	}
 	var ok bool
-	s.rules, ok = growSlice(s.rules, 1, s.memory)
+	s.rules, ok = growSlice(s.rules, 1, s.memory, s.shouldStop)
 	if !ok {
 		s.abandonCascade()
 		return true
@@ -307,23 +298,17 @@ func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, propert
 		s.abandonCascade()
 		return true
 	}
-	// Account for the temporary declaration slice separately from the retained
-	// inline/rule backing array grown below.
-	if !s.memory.Reserve(int64(len(declarations)) * int64(unsafe.Sizeof(declaration{}))) {
-		s.abandonCascade()
-		return true
-	}
 	s.declarationCount += len(declarations)
 	if p.inline {
 		var ok bool
-		p.out, ok = growSlice(p.out, len(declarations), s.memory)
+		p.out, ok = growSlice(p.out, len(declarations), s.memory, s.shouldStop)
 		if !ok {
 			s.abandonCascade()
 			return true
 		}
 		p.out = append(p.out, declarations...)
 	} else if p.current >= 0 {
-		out, ok := growSlice(s.rules[p.current].decls, len(declarations), s.memory)
+		out, ok := growSlice(s.rules[p.current].decls, len(declarations), s.memory, s.shouldStop)
 		if !ok {
 			s.abandonCascade()
 			return true

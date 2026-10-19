@@ -15,13 +15,13 @@ func TestGrowingStorageStaysWithinAllocationBudget(t *testing.T) {
 	cases := []allocationCase{
 		{"element metadata", strings.Repeat(strings.Repeat("<div>", 15)+"<p>x</p>"+strings.Repeat("</div>", 15), 15000), 64 << 20},
 		{"selector caches", "<style>.x .y .z{color:red}@media(min-width:500px){body{opacity:.9}}</style>" + strings.Repeat("<div class=x><div class=y><p class=z>x</p></div></div>", 20000), 32 << 20},
-		{"selector plans", "<style>" + strings.Repeat("p,", 4095) + "p{color:red}</style><p>x</p>", 4 << 20},
+		{"selector plans", "<style>" + strings.Repeat("p,", 4095) + "p{color:red}</style><p>x</p>", 3 << 20},
 	}
 	// Ignored end tags separate tokenizer text tokens that merge into the same
 	// DOM text node. Exercise ordinary and foster-parented table text.
 	for _, prefix := range []string{"<p>", "<table>"} {
 		input := prefix + strings.Repeat("x", 32769) + strings.Repeat("</unknown>x", 10000)
-		cases = append(cases, allocationCase{"text merges/" + prefix, input, 64 << 20})
+		cases = append(cases, allocationCase{"text merges/" + prefix, input, 256 << 10})
 	}
 	for _, tc := range []struct {
 		name, part string
@@ -75,9 +75,9 @@ func TestGrowingStorageStaysWithinAllocationBudget(t *testing.T) {
 			fmt.Fprintf(&css, "@media(min-width:%dpx){p{color:red}}", i)
 		}
 		css.WriteString("</style><p>x</p>")
-		limit := int64(64 << 20)
+		limit := int64(32 << 20)
 		if count == 256 {
-			limit = 1 << 20
+			limit = 768 << 10
 		}
 		cases = append(cases, allocationCase{fmt.Sprintf("media states/%d", count), css.String(), limit})
 	}

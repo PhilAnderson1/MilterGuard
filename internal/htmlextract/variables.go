@@ -5,23 +5,10 @@ import (
 	"io"
 	"sort"
 	"strings"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
-)
-
-// Fixed scope overhead. Map entries use the shared cumulative allocation
-// estimate in both the literal fast path and the general dependency graph.
-const (
-	variableScopeBaseBytes int64 = 256
-)
-
-// Maps have a substantial fixed cost even with just one entry. These are
-// conservative allowances, not a model of a particular Go map implementation.
-const (
-	literalVariableScopeBaseBytes int64 = 512
-	variableColourMapBaseBytes    int64 = 256
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 const maxCSSValueDepth = 256
@@ -32,16 +19,16 @@ type valueToken struct {
 }
 
 func lexValue(s string, budget *cpuGuard) ([]valueToken, valueStatus) {
-	// Admit the mutable input copy and lexer setup before constructing either.
-	if budget != nil && !budget.reserve(int64(len(s))+1+cssLexerSetupBytes) {
-		return nil, valueUnsupported
-	}
 	limits := css.ResourceLimits{}
 	if budget != nil {
 		limits.Memory = budget.memory
-		limits.ShouldStop = func() bool { return budget.stopNow(true) }
+		var ok bool
+		limits.ShouldStop, ok = resourceguard.BindStop(budget.memory, budget, stopCPU)
+		if !ok {
+			return nil, valueUnsupported
+		}
 	}
-	l := css.NewLexerWithLimits(parse.NewInputString(s), limits)
+	l := css.NewLexerWithLimits(parse.NewInputStringWithMemory(s, budget.allocationMemory(), limits.ShouldStop), limits)
 	var ts []valueToken
 	for {
 		k, v := l.Next()
@@ -54,23 +41,15 @@ func lexValue(s string, budget *cpuGuard) ([]valueToken, valueStatus) {
 		if k == css.BadStringToken || k == css.BadURLToken {
 			return nil, valueInvalid
 		}
-		if len(ts) == cap(ts) {
-			capacity := 16
-			if len(ts) != 0 {
-				capacity = len(ts) * 2
-			}
-			allocation := int64(capacity) * int64(unsafe.Sizeof(valueToken{}))
-			if budget != nil && !budget.reserve(allocation) {
-				return nil, valueUnsupported
-			}
-			next := make([]valueToken, len(ts), capacity)
-			copy(next, ts)
-			ts = next
-		}
-		if !budget.reserve(int64(len(v))) {
+		text := ownedString(v, budget)
+		if budget.stopNow(false) {
 			return nil, valueUnsupported
 		}
-		ts = append(ts, valueToken{k, string(v)})
+		grown, ok := resourceguard.GrowSliceFrom(budget.allocationMemory(), ts, 1, 16, budget.allocationStop)
+		if !ok {
+			return nil, valueUnsupported
+		}
+		ts = append(grown, valueToken{k, text})
 	}
 	return ts, valueResolved
 }
@@ -155,7 +134,7 @@ func isClosingToken(kind css.TokenType) bool {
 func advanceDelimiters(stack []css.TokenType, kind css.TokenType, budget *cpuGuard) ([]css.TokenType, bool) {
 	if closer, ok := expectedClosingToken(kind); ok {
 		var grown bool
-		stack, grown = growSlice(stack, 1, budget.allocationMemory())
+		stack, grown = growSlice(stack, 1, budget.allocationMemory(), budget.allocationStop)
 		if !grown {
 			return stack, false
 		}
@@ -247,7 +226,7 @@ func validVariableFunctions(ts []valueToken, budget *cpuGuard) bool {
 			// grammar and therefore makes that name invalid.
 			addNameToken(token)
 			var ok bool
-			stack, ok = growSlice(stack, 1, budget.allocationMemory())
+			stack, ok = growSlice(stack, 1, budget.allocationMemory(), budget.allocationStop)
 			if !ok {
 				return false
 			}
@@ -256,7 +235,7 @@ func validVariableFunctions(ts []valueToken, budget *cpuGuard) bool {
 			addNameToken(token)
 			closer, _ := expectedClosingToken(token.kind)
 			var ok bool
-			stack, ok = growSlice(stack, 1, budget.allocationMemory())
+			stack, ok = growSlice(stack, 1, budget.allocationMemory(), budget.allocationStop)
 			if !ok {
 				return false
 			}
@@ -302,7 +281,7 @@ func variableRefs(ts []valueToken, budget *cpuGuard) []string {
 			}
 			if j < len(ts) {
 				var ok bool
-				out, ok = growSlice(out, 1, budget.allocationMemory())
+				out, ok = growSlice(out, 1, budget.allocationMemory(), budget.allocationStop)
 				if !ok {
 					return nil
 				}
@@ -357,11 +336,13 @@ func (s *variableScope) colourSchemeDependent(name string, budget *cpuGuard) boo
 	return false
 }
 
-func unresolvedVariableScope(parent *variableScope) *variableScope {
+var unresolvedScope = variableScope{hasColourDependency: true, allUnresolved: true}
+
+func unresolvedVariableScope(_ *variableScope) *variableScope {
 	// Once variable evaluation has been abandoned, treating every lookup as
 	// unresolved is conservative and avoids copying an attacker-sized set of
 	// property names on the resource-exhaustion path.
-	return &variableScope{parent: parent, hasColourDependency: true, allUnresolved: true}
+	return &unresolvedScope
 }
 
 // buildLiteralVariables handles scopes whose winning custom properties cannot
@@ -379,10 +360,15 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 	if !budget.check() {
 		return unresolvedVariableScope(parent), true
 	}
-	if !budget.reserve(int64(len(defs))*mapEntryAllocationBytes[string, variableValue]() + literalVariableScopeBaseBytes) {
+	s, ok := resourceguard.New(budget.allocationMemory(), variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency})
+	if !ok {
 		return unresolvedVariableScope(parent), true
 	}
-	s := &variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency, values: make(map[string]variableValue, len(defs))}
+	s.values, ok = resourceguard.MakeMap[string, variableValue](budget.allocationMemory(), len(defs))
+	if !ok {
+		return unresolvedVariableScope(parent), true
+	}
+
 	for name, definition := range defs {
 		d := definition.d
 		var value variableValue
@@ -410,10 +396,10 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 	if !budget.check() {
 		return unresolvedVariableScope(parent), true
 	}
-	if !budget.reserve(int64(len(defs)+len(alternate))*mapEntryAllocationBytes[string, bool]() + variableColourMapBaseBytes) {
+	s.colourDependent, ok = resourceguard.MakeMap[string, bool](budget.allocationMemory(), len(defs)+len(alternate))
+	if !ok {
 		return unresolvedVariableScope(parent), true
 	}
-	s.colourDependent = make(map[string]bool, len(defs)+len(alternate))
 	for name := range alternate {
 		s.colourDependent[name] = true
 		s.hasColourDependency = true
@@ -441,17 +427,18 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	if scope, ok := buildLiteralVariables(parent, defs, alternate, budget); ok {
 		return scope
 	}
-	// Admit the four dependency maps and both string-index arrays before
-	// constructing them. The colour-dependency map has separate admission below.
-	definitionBytes := mapEntryAllocationBytes[string, variableValue]() +
-		mapEntryAllocationBytes[string, []valueToken]() +
-		mapEntryAllocationBytes[string, bool]() +
-		mapEntryAllocationBytes[string, uint8]() + int64(unsafe.Sizeof([2]string{}))
-	if !budget.reserve(int64(len(defs))*definitionBytes + int64(len(alternate))*mapEntryAllocationBytes[string, bool]() + variableScopeBaseBytes) {
+	s, ok := resourceguard.New(budget.allocationMemory(), variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency})
+	if !ok {
 		return unresolvedVariableScope(parent)
 	}
-	s := &variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency, values: make(map[string]variableValue, len(defs))}
-	ordered := make([]string, 0, len(defs))
+	s.values, ok = resourceguard.MakeMap[string, variableValue](budget.allocationMemory(), len(defs))
+	if !ok {
+		return unresolvedVariableScope(parent)
+	}
+	ordered, ok := resourceguard.MakeSlice[string](budget.allocationMemory(), 0, len(defs))
+	if !ok {
+		return unresolvedVariableScope(parent)
+	}
 	for n := range defs {
 		ordered = append(ordered, n)
 	}
@@ -459,10 +446,22 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		return unresolvedVariableScope(parent)
 	}
 	sort.Strings(ordered)
-	tokens := make(map[string][]valueToken, len(defs))
-	cyclic := make(map[string]bool, len(defs))
-	states := make(map[string]uint8, len(defs))
-	path := make([]string, 0, min(len(defs), maxCSSValueDepth))
+	tokens, ok := resourceguard.MakeMap[string, []valueToken](budget.allocationMemory(), len(defs))
+	if !ok {
+		return unresolvedVariableScope(parent)
+	}
+	cyclic, ok := resourceguard.MakeMap[string, bool](budget.allocationMemory(), len(defs))
+	if !ok {
+		return unresolvedVariableScope(parent)
+	}
+	states, ok := resourceguard.MakeMap[string, uint8](budget.allocationMemory(), len(defs))
+	if !ok {
+		return unresolvedVariableScope(parent)
+	}
+	path, ok := resourceguard.MakeSlice[string](budget.allocationMemory(), 0, min(len(defs), maxCSSValueDepth))
+	if !ok {
+		return unresolvedVariableScope(parent)
+	}
 	depthExceeded := false
 	for _, name := range ordered {
 		definition := defs[name]
@@ -564,10 +563,10 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	if len(alternate) == 0 && (parent == nil || !parent.hasColourDependency) {
 		return s
 	}
-	if !budget.reserve(int64(len(defs)+len(alternate))*mapEntryAllocationBytes[string, bool]() + variableColourMapBaseBytes) {
+	s.colourDependent, ok = resourceguard.MakeMap[string, bool](budget.allocationMemory(), len(defs)+len(alternate))
+	if !ok {
 		return unresolvedVariableScope(parent)
 	}
-	s.colourDependent = make(map[string]bool, len(defs)+len(alternate))
 	// Cycle detection is complete; reuse its scratch map for colour dependencies.
 	clear(states)
 	dependencyState := states
@@ -649,10 +648,10 @@ type valueBlock struct {
 }
 
 func indexValueBlocks(ts []valueToken, budget *cpuGuard) ([]valueBlock, bool) {
-	if !budget.reserve(int64(len(ts)) * int64(unsafe.Sizeof(valueBlock{}))) {
+	blocks, ok := resourceguard.MakeSlice[valueBlock](budget.allocationMemory(), len(ts), len(ts))
+	if !ok {
 		return nil, false
 	}
-	blocks := make([]valueBlock, len(ts))
 	var stack []int
 	for i, t := range ts {
 		if !budget.check() {
@@ -661,7 +660,7 @@ func indexValueBlocks(ts []valueToken, budget *cpuGuard) ([]valueBlock, bool) {
 		if _, open := expectedClosingToken(t.kind); open {
 			blocks[i] = valueBlock{end: len(ts), comma: -1}
 			var ok bool
-			stack, ok = growSlice(stack, 1, budget.allocationMemory())
+			stack, ok = growSlice(stack, 1, budget.allocationMemory(), budget.allocationStop)
 			if !ok {
 				return nil, false
 			}

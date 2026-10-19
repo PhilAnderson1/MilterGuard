@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
@@ -55,7 +56,8 @@ func TestOptionalMatchCacheDeclinesAtomically(t *testing.T) {
 		s := sheet{memory: m, index: selectorIndex{count: 1}, runtime: sheetRuntime{cacheMatches: true}}
 		first := &html.Node{}
 		if existing {
-			s.runtime.matchCaches = []map[*html.Node]uint8{{first: 1}}
+			s.runtime.matchCaches = make([]resourceguard.Table[*html.Node, uint8], 1)
+			s.runtime.matchCaches[0].Set(nil, first, 1)
 			m.Reserve(150)
 		}
 		before := m.Used()
@@ -65,7 +67,7 @@ func TestOptionalMatchCacheDeclinesAtomically(t *testing.T) {
 		}
 		if existing {
 			s.cacheMatch(&selectorPlan{}, first, true)
-			if s.runtime.matchCaches[0][first] != 2 {
+			if s.runtime.matchCaches[0].View()[first] != 2 {
 				t.Fatal("existing result lost")
 			}
 		}
@@ -94,7 +96,7 @@ func TestAncestorMatchingWithoutCacheCapacity(t *testing.T) {
 		leaf := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: "target"}}}
 		middle.AppendChild(leaf)
 		m := resourceguard.NewMemory(1)
-		s := sheet{memory: m}
+		s := sheet{memory: m, selectorControl: cascadia.NewMatchControl(nil)}
 		// Required traversal scratch is already owned; only optional caching is tight.
 		s.runtime.ancestorNodes = make([]*html.Node, 0, 8)
 		matched, complete := s.matchAncestorChain(plan, leaf, selectorMatchContext{}, &cpuGuard{memory: m})
@@ -188,7 +190,7 @@ func TestInertContentStillHasStructuralLimitsAndCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := parsedDocument{elements: make(map[*html.Node]elementPreparation)}
+	doc := parsedDocument{elements: resourceguard.Table[*html.Node, elementPreparation]{}}
 	p := processor{Limits: DefaultLimits(), shouldStop: func() bool { return true }}
 	walker := documentWalker{processor: p, document: &doc}
 	if err := walker.run(root); err != errStopped || walker.nodeCount != 256 {

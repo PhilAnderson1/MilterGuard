@@ -2,7 +2,6 @@ package css
 
 import (
 	"errors"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
@@ -39,15 +38,27 @@ type resourceGuard struct {
 	steps  uint32
 }
 
-func (g *resourceGuard) reserve(bytes int64) error {
-	if g != nil && g.limits.Memory != nil && !g.limits.Memory.Reserve(bytes) {
-		return &ResourceLimitError{"memory bytes", int(g.limits.Memory.Limit())}
+func (g *resourceGuard) memory() *resourceguard.Memory {
+	if g == nil {
+		return nil
 	}
-	return nil
+	return g.limits.Memory
 }
-
+func (g *resourceGuard) allocationError() error {
+	return &ResourceLimitError{"memory bytes", int(g.memory().Limit())}
+}
 func newResourceGuard(limits ResourceLimits) *resourceGuard {
-	return &resourceGuard{limits: limits}
+	g, ok := resourceguard.New(limits.Memory, resourceGuard{limits: limits})
+	if !ok {
+		return &resourceGuard{limits: limits}
+	}
+	return g
+}
+func (p *Parser) checkpoint() bool { p.checkWork(); return false }
+func (p *Parser) requireStorage(ok bool) {
+	if !ok {
+		p.abort(p.guard.allocationError())
+	}
 }
 
 func (g *resourceGuard) step() error {
@@ -67,16 +78,8 @@ func (g *resourceGuard) step() error {
 // Storage is charged only when it is allocated, including complete replacement
 // arrays. Borrowed tokens and reuse of existing buffers do not allocate.
 func growParserSlice[T any](slice []T, additional int, p *Parser) []T {
-	if len(slice)+additional <= cap(slice) {
-		return slice
-	}
-	capacity := max(len(slice)+additional, max(4, cap(slice)*2))
-	var value T
-	if err := p.guard.reserve(int64(capacity) * int64(unsafe.Sizeof(value))); err != nil {
-		p.abort(err)
-	}
-	grown := make([]T, len(slice), capacity)
-	copy(grown, slice)
+	grown, ok := resourceguard.GrowSliceFrom(p.guard.memory(), slice, additional, 4, p.checkpoint)
+	p.requireStorage(ok)
 	return grown
 }
 
@@ -98,8 +101,9 @@ func (p *Parser) checkWork() {
 	}
 }
 func (p *Parser) lowerCopy(data []byte) []byte {
-	// The caller admits the copy; chunking bounds both copying and casing work.
-	out := make([]byte, len(data))
+	// Own the copy here; chunking bounds both copying and casing work.
+	out, ok := resourceguard.MakeSlice[byte](p.guard.memory(), len(data), len(data))
+	p.requireStorage(ok)
 	for start := 0; start < len(data); start += 1024 {
 		if start > 0 {
 			p.checkWork()

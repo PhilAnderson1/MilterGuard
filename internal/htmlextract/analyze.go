@@ -3,7 +3,6 @@ package htmlextract
 import (
 	"errors"
 	"fmt"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
@@ -86,6 +85,7 @@ type viewingCaseRunner struct {
 	layers           []paintLayer
 	layerGeneration  uint64
 	colourMemo       colourMemo
+	rootStyle        Style
 	shouldStop       func() bool
 	visited          int
 }
@@ -160,15 +160,15 @@ func (r *viewingCaseRunner) recordElement(n *html.Node, f *viewingCaseFrame, sty
 
 func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, rootStyle *Style, media *mediaEvaluation, msoRevealedDepth int, elementIndex *int, initialize bool) error {
 	var prepared elementPreparation
-	if len(r.document.elements) != 0 {
-		prepared = r.document.elements[n]
+	if len(r.document.elements.View()) != 0 {
+		prepared = r.document.elements.View()[n]
 	}
 	parentStyle := &r.styleStack[f.styleIndex]
 	var resolved elementStyleResult
 	if prepared.inlineIncomplete {
 		resolved = elementStyleResult{style: unresolvedStyle(), variables: f.vars}
 	} else {
-		resolved = r.styles.elementStyle(n, parentStyle, rootStyle, f.vars, prepared.legacy, prepared.inline, media, selectorMatchContext{elements: r.document.elements}, r.work)
+		resolved = r.styles.elementStyle(n, parentStyle, rootStyle, f.vars, prepared.legacy, prepared.inline, media, selectorMatchContext{elements: r.document.elements.View()}, r.work)
 	}
 	if r.styles.stopped || r.work.stopNow(false) {
 		return errStopped
@@ -287,7 +287,7 @@ func (r *viewingCaseRunner) run(c viewingCase) error {
 	r.frames = r.frames[:0]
 	r.styleStack = append(r.styleStack[:0], initial())
 	r.frames = append(r.frames, viewingCaseFrame{n: r.document.root, presentationState: initialPresentationState()})
-	rootStyle := initial()
+	r.rootStyle = initial()
 	r.layers = r.layers[:0]
 	r.layerGeneration = 0
 	r.colourMemo.valid = false
@@ -315,7 +315,7 @@ func (r *viewingCaseRunner) run(c viewingCase) error {
 				}
 			}
 			if node.Type == html.ElementNode {
-				if err := r.enterElement(node, frame, &rootStyle, &media, mso.uncertain, &elementIndex, c.initialize); err != nil {
+				if err := r.enterElement(node, frame, &r.rootStyle, &media, mso.uncertain, &elementIndex, c.initialize); err != nil {
 					return err
 				}
 			}
@@ -347,30 +347,40 @@ func (r *viewingCaseRunner) run(c viewingCase) error {
 }
 
 func (p processor) process(input []byte) (result Document, resultErr error) {
-	if p.cpu == nil {
-		p.cpu = &cpuGuard{shouldStop: p.shouldStop}
-	}
 	if p.memory == nil {
 		p.memory = resourceguard.NewMemory(p.Limits.MemoryBytes)
 	}
+	var ok bool
+	if p.cpu == nil {
+		p.cpu, ok = resourceguard.New(p.memory, cpuGuard{shouldStop: p.shouldStop, memory: p.memory})
+		if !ok {
+			return Document{Usage: ResourceUsage{MemoryBytes: p.memory.Used()}}, resourceguard.ErrMemory
+		}
+	}
 	p.cpu.memory = p.memory
 	// Parsers and traversals share the same latched stop observation.
-	p.shouldStop = func() bool { return p.cpu.stopNow(true) }
+	p.shouldStop, ok = resourceguard.BindStop(p.memory, p.cpu, stopCPU)
+	if !ok {
+		return Document{Usage: ResourceUsage{MemoryBytes: p.memory.Used()}}, resourceguard.ErrMemory
+	}
 	defer func() {
 		if p.memory.Exhausted() {
 			resultErr = fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
 		}
 	}()
 	if p.stopped() {
-		return Document{}, errStopped
+		return Document{Usage: ResourceUsage{InputBytes: len(input), MemoryBytes: p.memory.Used()}}, errStopped
 	}
 	document, err := p.parseDocument(input)
+	if document == nil {
+		return Document{Usage: ResourceUsage{MemoryBytes: p.memory.Used()}}, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+	}
 	if err != nil {
 		if p.memory.Exhausted() {
 			err = fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
 		}
 		return Document{
-			Usage:                parsedResourceUsage(len(input), &document),
+			Usage:                parsedResourceUsage(len(input), document),
 			UnresolvedStylesheet: document.styles.unresolvedStylesheet,
 		}, err
 	}
@@ -378,7 +388,7 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 	s := &document.styles
 	in := Document{
 		Root:                 root,
-		Usage:                parsedResourceUsage(len(input), &document),
+		Usage:                parsedResourceUsage(len(input), document),
 		UnresolvedStylesheet: s.unresolvedStylesheet,
 	}
 	// Parsing establishes the document and its shared memory counter, but later
@@ -386,7 +396,7 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 	// Refresh usage after the return values have been assigned so every exit path
 	// reports the complete per-part charge to the message-wide budget.
 	defer func() {
-		result.Usage = parsedResourceUsage(len(input), &document)
+		result.Usage = parsedResourceUsage(len(input), document)
 	}()
 	if p.stopped() {
 		return in, errStopped
@@ -401,27 +411,27 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 	widths, fallback := s.viewingCases()
 	s.runtime.cacheMatches = len(widths) > 1
 	guard := p.cpu
-	resultBytes := int64(document.extractableTextCount)*(int64(unsafe.Sizeof(Text{}))+int64(unsafe.Sizeof(visibilityLabel(0)))+int64(unsafe.Sizeof(concealmentReason(0)))) +
-		int64(document.extractableElementCount)*(int64(unsafe.Sizeof(Element{}))+int64(unsafe.Sizeof(visibilityLabel(0)))+int64(unsafe.Sizeof(concealmentReason(0))))
-	frameBytes := int64(document.treeDepth+1) * (int64(unsafe.Sizeof(viewingCaseFrame{})) + int64(unsafe.Sizeof(Style{})) + int64(unsafe.Sizeof(paintLayer{})))
-	if !p.memory.Reserve(resultBytes + frameBytes) {
-		return in, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
+	results, ok := resourceguard.New(p.memory, viewingCaseResults{
+		text:           allocatedSlice[Text](p.memory, 0, document.extractableTextCount),
+		elements:       allocatedSlice[Element](p.memory, 0, document.extractableElementCount),
+		textLabels:     allocatedSlice[visibilityLabel](p.memory, 0, document.extractableTextCount),
+		elementLabels:  allocatedSlice[visibilityLabel](p.memory, 0, document.extractableElementCount),
+		textReasons:    allocatedSlice[concealmentReason](p.memory, 0, document.extractableTextCount),
+		elementReasons: allocatedSlice[concealmentReason](p.memory, 0, document.extractableElementCount),
+	})
+	if !ok {
+		return in, resourceguard.ErrMemory
 	}
-	results := viewingCaseResults{
-		text:           make([]Text, 0, document.extractableTextCount),
-		elements:       make([]Element, 0, document.extractableElementCount),
-		textLabels:     make([]visibilityLabel, 0, document.extractableTextCount),
-		elementLabels:  make([]visibilityLabel, 0, document.extractableElementCount),
-		textReasons:    make([]concealmentReason, 0, document.extractableTextCount),
-		elementReasons: make([]concealmentReason, 0, document.extractableElementCount),
-	}
-	runner := viewingCaseRunner{
-		document: &document, styles: s, retainInspection: p.retainInspection,
-		work: guard, results: &results,
-		frames:     make([]viewingCaseFrame, 0, document.treeDepth+1),
-		styleStack: make([]Style, 0, document.treeDepth+1),
-		layers:     make([]paintLayer, 0, document.treeDepth),
+	runner, ok := resourceguard.New(p.memory, viewingCaseRunner{
+		document: document, styles: s, retainInspection: p.retainInspection,
+		work: guard, results: results,
+		frames:     allocatedSlice[viewingCaseFrame](p.memory, 0, document.treeDepth+1),
+		styleStack: allocatedSlice[Style](p.memory, 0, document.treeDepth+1),
+		layers:     allocatedSlice[paintLayer](p.memory, 0, document.treeDepth),
 		shouldStop: p.shouldStop,
+	})
+	if !ok || p.memory.Exhausted() {
+		return in, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
 	}
 	for caseIndex, width := range widths {
 		if p.stopped() {

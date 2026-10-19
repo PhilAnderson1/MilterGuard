@@ -5,16 +5,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
-)
-
-// Conservative estimates for the temporary and retained maps built while
-// reducing media-query widths to distinct activation vectors.
-const (
-	mediaFrameStateMapBytes   int64 = 128
-	mediaViewingCaseMapsBytes int64 = 256
 )
 
 // A condition is a disjunction of alternatives; nested conditions are ANDed.
@@ -39,10 +31,8 @@ type conditionFrame struct {
 }
 
 func newConditionFrame(condition mediaCondition, parent *conditionFrame, memory *resourceguard.Memory) *conditionFrame {
-	if !memory.Reserve(int64(unsafe.Sizeof(conditionFrame{}))) {
-		return nil
-	}
-	return &conditionFrame{condition: condition, parent: parent}
+	frame, _ := resourceguard.New(memory, conditionFrame{condition: condition, parent: parent})
+	return frame
 }
 
 const (
@@ -71,19 +61,18 @@ func parseMediaBudgeted(src string, memory *resourceguard.Memory) mediaCondition
 func parseMediaWithBudget(src string, budget *cpuGuard) mediaCondition {
 	memory := budget.allocationMemory()
 	unknown := func() mediaCondition {
-		if !memory.Reserve(int64(unsafe.Sizeof(mediaAlternative{}))) {
+		out, ok := resourceguard.MakeSlice[mediaAlternative](memory, 1, 1)
+		if !ok {
 			return nil
 		}
-		return mediaCondition{{schemes: colourSchemeBoth, unknown: true}}
+		out[0] = mediaAlternative{schemes: colourSchemeBoth, unknown: true}
+		return out
 	}
 	if len(src) > 4096 || strings.Count(src, ",") > 31 {
 		return unknown()
 	}
-	if !budget.reserve(int64(strings.Count(src, ",")+1) * 16) {
-		return nil
-	}
 	var result mediaCondition
-	for _, raw := range strings.Split(asciiLowerWithBudget(src, budget), ",") {
+	for raw := range strings.SplitSeq(asciiLowerWithBudget(src, budget), ",") {
 		if !budget.check() {
 			return nil
 		}
@@ -94,10 +83,11 @@ func parseMediaWithBudget(src string, budget *cpuGuard) mediaCondition {
 		if strings.Contains(raw, "and") {
 			// At most 17 results and bounded regexp match-index scratch. The extra
 			// result detects excessive clauses without splitting the entire query.
-			if !budget.reserve(17 * 128) {
+			var ok bool
+			parts, ok = resourceguard.RegexpSplit(memory, regexpAnd, raw, 17)
+			if !ok {
 				return nil
 			}
-			parts = regexpAnd.Split(raw, 17)
 		}
 		if len(parts) > 16 {
 			return unknown()
@@ -116,10 +106,10 @@ func parseMediaWithBudget(src string, budget *cpuGuard) mediaCondition {
 			case "(prefers-color-scheme:dark)", "(prefers-color-scheme: dark)":
 				a.schemes &= colourSchemeDark
 			default:
-				if !budget.reserve(256) {
+				m, ok := resourceguard.RegexpSubmatch(memory, widthFeature, part)
+				if !ok {
 					return nil
 				}
-				m := widthFeature.FindStringSubmatch(part)
 				if m == nil {
 					a.unknown = true
 					continue
@@ -130,8 +120,7 @@ func parseMediaWithBudget(src string, budget *cpuGuard) mediaCondition {
 					a.unknown = true
 					continue
 				}
-				var ok bool
-				a.bounds, ok = growSlice(a.bounds, 1, memory)
+				a.bounds, ok = growSlice(a.bounds, 1, memory, budget.allocationStop)
 				if !ok {
 					return nil
 				}
@@ -142,7 +131,7 @@ func parseMediaWithBudget(src string, budget *cpuGuard) mediaCondition {
 			a.never = true
 		}
 		var ok bool
-		result, ok = growSlice(result, 1, memory)
+		result, ok = growSlice(result, 1, memory, budget.allocationStop)
 		if !ok {
 			return nil
 		}
@@ -245,135 +234,119 @@ func intersectMediaState(left, right int) int {
 
 // Width-independent property values make activation vectors sufficient. Exact
 // endpoints are separate from open intervals, so a one-point rule is covered.
+// The fallback width is immutable and shared; callers only iterate it.
+var defaultViewingWidths = [...]float64{1024}
+
 func (s *sheet) viewingCases() ([]float64, bool) {
-	// No media decision can make an unusable cascade trustworthy. Retain one
-	// traversal so text and elements are still extracted and labelled unknown,
-	// but do not spend more work constructing activation vectors.
+	fallback := func() ([]float64, bool) { return defaultViewingWidths[:], true }
 	if s.cascadeIncomplete || s.stopped || !s.prepareMediaGroups() {
-		return []float64{1024}, true
+		return fallback()
 	}
 	var bounds []float64
-	unique := map[float64]bool{}
-	seenFrames := map[*conditionFrame]bool{}
-	charge := func() bool { return s.checkCPU() }
+	var unique resourceguard.Table[float64, bool]
+	var seenFrames resourceguard.Table[*conditionFrame, bool]
 	for _, group := range s.runtime.mediaGroups {
-		if !charge() {
-			return []float64{1024}, true
+		if !s.checkCPU() {
+			return fallback()
 		}
 		for frame := group; frame != nil; frame = frame.parent {
 			if !s.checkCPU() {
-				return []float64{1024}, true
+				return fallback()
 			}
-			if seenFrames[frame] {
+			if _, seen := seenFrames.Get(frame); seen {
 				break
 			}
-			if !s.memory.Reserve(mapEntryAllocationBytes[*conditionFrame, bool]()) {
-				return []float64{1024}, true
+			if !seenFrames.Set(s.memory, frame, true) {
+				return fallback()
 			}
-			seenFrames[frame] = true
-			c := frame.condition
-			for _, a := range c {
+			for _, a := range frame.condition {
 				for _, b := range a.bounds {
-					if !unique[b.value] {
-						if !s.memory.Reserve(mapEntryAllocationBytes[float64, bool]()) {
-							return []float64{1024}, true
+					if _, seen := unique.Get(b.value); !seen {
+						if !unique.Set(s.memory, b.value, true) {
+							return fallback()
 						}
-						unique[b.value] = true
 						var ok bool
-						bounds, ok = growSlice(bounds, 1, s.memory)
+						bounds, ok = resourceguard.Append(s.memory, bounds, s.shouldStop, b.value)
 						if !ok {
-							return []float64{1024}, true
+							return fallback()
 						}
-						bounds = append(bounds, b.value)
 					}
 				}
 			}
 		}
 	}
-	var candidates []float64
-	if len(bounds) == 0 {
-		if !s.memory.Reserve(int64(len(seenFrames))*mapEntryAllocationBytes[*conditionFrame, conditionFrameState]() + mediaFrameStateMapBytes + mediaCacheMapBytes + mapEntryAllocationBytes[mediaCacheKey, []uint8]()) {
-			return []float64{1024}, true
-		}
-		states, ok := makeBudgetedBytes(len(s.runtime.mediaGroups), s.memory)
-		if !ok {
-			return []float64{1024}, true
-		}
-		states = states[:0]
-		var frameStates map[*conditionFrame]conditionFrameState
-		if len(seenFrames) > 0 {
-			frameStates = make(map[*conditionFrame]conditionFrameState, len(seenFrames))
-		}
-		for _, group := range s.runtime.mediaGroups {
-			if !charge() {
-				return []float64{1024}, true
-			}
-			light, dark := evaluateConditionFrame(group, 1024, false, frameStates, s.cpu)
-			states = append(states, uint8(combinedMediaState(light, dark)))
-		}
-		s.runtime.mediaCache = map[mediaCacheKey][]uint8{{width: 1024}: states}
-		return []float64{1024}, false
-	} else {
-		if !s.memory.Reserve(int64(len(bounds)*2+2) * int64(unsafe.Sizeof(float64(0)))) {
-			return []float64{1024}, true
-		}
-		sort.Float64s(bounds)
-		candidates = make([]float64, 1, len(bounds)*2+2)
-		prev := 0.0
-		for _, b := range bounds {
-			if b > prev {
-				candidates = append(candidates, prev+(b-prev)/2, b)
-				prev = b
-			}
-		}
-		if after := math.Nextafter(prev, math.Inf(1)); !math.IsInf(after, 0) {
-			candidates = append(candidates, after)
-		}
+	frameStates, ok := resourceguard.MakeMap[*conditionFrame, conditionFrameState](s.memory, seenFrames.Len())
+	if !ok {
+		return fallback()
 	}
-	// Each activation vector becomes one string key. The shared memory budget
-	// accounts for candidates, state vectors, and retained cache entries.
-	if !s.memory.Reserve(int64(len(seenFrames))*mapEntryAllocationBytes[*conditionFrame, conditionFrameState]() + mediaViewingCaseMapsBytes) {
-		return []float64{1024}, true
+	scratch, ok := makeBudgetedBytes(len(s.runtime.mediaGroups), s.memory)
+	if !ok {
+		return fallback()
 	}
-	seen := map[string]bool{}
-	var widths []float64
-	s.runtime.mediaCache = make(map[mediaCacheKey][]uint8)
-	var frameStates map[*conditionFrame]conditionFrameState
-	if len(seenFrames) > 0 {
-		frameStates = make(map[*conditionFrame]conditionFrameState, len(seenFrames))
-	}
-	work := s.resourceBudget()
-	for _, w := range candidates {
+	evaluate := func(width float64) ([]byte, bool) {
+		// All possible keys were counted in seenFrames; this map is bounded scratch.
 		clear(frameStates)
-		states, ok := makeBudgetedBytes(len(s.runtime.mediaGroups), s.memory)
-		if !ok {
-			return []float64{1024}, true
-		}
-		states = states[:0]
-		for _, group := range s.runtime.mediaGroups {
-			if !charge() {
-				return []float64{1024}, true
+		states := scratch
+		for i, group := range s.runtime.mediaGroups {
+			if !s.checkCPU() {
+				return nil, false
 			}
-			light, dark := evaluateConditionFrame(group, w, false, frameStates, s.cpu)
-			states = append(states, uint8(combinedMediaState(light, dark)))
+			light, dark := evaluateConditionFrame(group, width, false, frameStates, s.cpu)
+			states[i] = uint8(combinedMediaState(light, dark))
 		}
-		k := ownedString(states[1:], work)
-		if work.stopNow(false) {
-			return []float64{1024}, true
+		return states, true
+	}
+	if len(bounds) == 0 {
+		states, ok := evaluate(1024)
+		if !ok || !s.runtime.mediaCache.Set(s.memory, mediaCacheKey{width: 1024}, states) {
+			return fallback()
 		}
-		if seen[k] {
+		return defaultViewingWidths[:], false
+	}
+	candidates, ok := resourceguard.MakeSlice[float64](s.memory, 1, len(bounds)*2+2)
+	if !ok {
+		return fallback()
+	}
+	sort.Float64s(bounds)
+	prev := 0.0
+	for _, b := range bounds {
+		if b > prev {
+			candidates = append(candidates, prev+(b-prev)/2, b)
+			prev = b
+		}
+	}
+	if after := math.Nextafter(prev, math.Inf(1)); !math.IsInf(after, 0) {
+		candidates = append(candidates, after)
+	}
+	var seen resourceguard.Table[string, bool]
+	var widths []float64
+	s.runtime.mediaCache.Release()
+	work := s.resourceBudget()
+	for _, width := range candidates {
+		states, ok := evaluate(width)
+		if !ok {
+			return fallback()
+		}
+		// Lookup borrows scratch only for this expression. Retained signatures
+		// and cached vectors get independent ownership before the next evaluation.
+		if seen.View()[string(states[1:])] {
 			continue
 		}
-		if !s.memory.Reserve(mapEntryAllocationBytes[string, bool]() + mapEntryAllocationBytes[mediaCacheKey, []uint8]()) {
-			return []float64{1024}, true
+		key := ownedString(states[1:], work)
+		if work.stopNow(false) {
+			return fallback()
 		}
-		seen[k] = true
-		widths, ok = growSlice(widths, 1, s.memory)
+		states, ok = resourceguard.CloneBytes(s.memory, states, s.shouldStop)
 		if !ok {
-			return []float64{1024}, true
+			return fallback()
 		}
-		widths = append(widths, w)
-		s.runtime.mediaCache[mediaCacheKey{width: w}] = states
+		if !seen.Set(s.memory, key, true) || !s.runtime.mediaCache.Set(s.memory, mediaCacheKey{width: width}, states) {
+			return fallback()
+		}
+		widths, ok = resourceguard.Append(s.memory, widths, s.shouldStop, width)
+		if !ok {
+			return fallback()
+		}
 	}
 	return widths, false
 }
@@ -384,13 +357,13 @@ func (s *sheet) prepareMediaGroups() bool {
 	if s.runtime.mediaGroups != nil {
 		return true
 	}
-	if !s.memory.Reserve(mediaFrameStateMapBytes) {
+	var ids resourceguard.Table[*conditionFrame, int]
+	if !ids.Set(s.memory, nil, 0) {
 		return false
 	}
-	ids := map[*conditionFrame]int{nil: 0}
 	groups := []*conditionFrame(nil)
 	var ok bool
-	groups, ok = growSlice(groups, 1, s.memory)
+	groups, ok = growSlice(groups, 1, s.memory, s.shouldStop)
 	if !ok {
 		return false
 	}
@@ -400,14 +373,13 @@ func (s *sheet) prepareMediaGroups() bool {
 			return false
 		}
 		frame := s.rules[i].conditions
-		id, found := ids[frame]
+		id, found := ids.Get(frame)
 		if !found {
-			if !s.memory.Reserve(mapEntryAllocationBytes[*conditionFrame, int]()) {
+			id = len(groups)
+			if !ids.Set(s.memory, frame, id) {
 				return false
 			}
-			id = len(groups)
-			ids[frame] = id
-			groups, ok = growSlice(groups, 1, s.memory)
+			groups, ok = growSlice(groups, 1, s.memory, s.shouldStop)
 			if !ok {
 				return false
 			}
@@ -418,3 +390,6 @@ func (s *sheet) prepareMediaGroups() bool {
 	s.runtime.mediaGroups = groups
 	return true
 }
+
+var neverMedia = [...]mediaAlternative{{schemes: colourSchemeBoth, never: true}}
+var unknownMedia = [...]mediaAlternative{{schemes: colourSchemeBoth, unknown: true}}

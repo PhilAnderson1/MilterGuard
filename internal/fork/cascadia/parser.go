@@ -6,7 +6,6 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
@@ -42,10 +41,6 @@ func (p *parser) takeComponent() error {
 	if p.components > maxSelectorComponents {
 		return ErrInvalidSelector
 	}
-	// Allow a simple selector, compound/combinator wrappers and amortized
-	// interface-array growth (both compound and group arrays). Variable
-	// strings, KMP tables and metadata have separate allocation owners.
-	reserveSelector(p.memory, int64(unsafe.Sizeof(attrSelector{}))+int64(unsafe.Sizeof(compoundSelector{}))+int64(unsafe.Sizeof(combinedSelector{}))+8*int64(unsafe.Sizeof([1]Sel{})))
 	return nil
 }
 
@@ -79,8 +74,11 @@ func (p *parser) parseEscape() (result string, err error) {
 			}
 		}
 		p.i = i
-		reserveSelector(p.memory, 4)
-		return string(rune(v)), nil
+		var encoded [4]byte
+		n := utf8.EncodeRune(encoded[:], rune(v))
+		text, ok := resourceguard.CopyString(p.memory, encoded[:n], nil)
+		requireSelectorStorage(ok)
+		return text, nil
 	}
 
 	// Return the literal character after the backslash.
@@ -89,25 +87,8 @@ func (p *parser) parseEscape() (result string, err error) {
 	return result, nil
 }
 
-// toLowerASCII returns s with all ASCII capital letters lowercased.
-func toLowerASCII(s string) string {
-	var b []byte
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; 'A' <= c && c <= 'Z' {
-			if b == nil {
-				b = make([]byte, len(s))
-				copy(b, s)
-			}
-			b[i] = s[i] + ('a' - 'A')
-		}
-	}
-
-	if b == nil {
-		return s
-	}
-
-	return string(b)
-}
+// toLowerASCII is retained for unguarded package callers and tests.
+func toLowerASCII(s string) string { out, _ := resourceguard.LowerASCII(nil, s, nil); return out }
 
 func hexDigit(c byte) bool {
 	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
@@ -146,8 +127,13 @@ func (p *parser) parseIdentifier() (result string, err error) {
 
 	result, err = p.parseName()
 	if numPrefix > 0 && err == nil {
-		reserveSelector(p.memory, int64(2*numPrefix+len(result)))
-		result = strings.Repeat(string(prefix), numPrefix) + result
+		var b strings.Builder
+		requireSelectorStorage(resourceguard.GrowText(p.memory, &b, numPrefix+len(result), nil))
+		for range numPrefix {
+			b.WriteByte(prefix)
+		}
+		p.writeString(&b, result)
+		result = b.String()
 	}
 	return
 }
@@ -444,8 +430,7 @@ func (p *parser) parseAttributeSelector() (attrSelector, error) {
 	case "=", "!=", "~=", "|=", "^=", "$=", "*=":
 		selector := attrSelector{key: key, val: val, operation: op, insensitive: ignoreCase}
 		if op == "*=" && len(val) > 0 {
-			reserveSelector(p.memory, int64(len(val))*int64(unsafe.Sizeof(int(0))))
-			selector.failure = substringFailure(val, ignoreCase)
+			selector.failure = substringFailureWithMemory(val, ignoreCase, p.memory)
 		}
 		return selector, nil
 	default:
@@ -499,7 +484,7 @@ func (p *parser) parsePseudoclassSelector() (out Sel, pseudoElement string, err 
 			return out, "", ErrInvalidSelector
 		}
 
-		out = relativePseudoClassSelector{name: name, match: sel}
+		out = selectorObject(p.memory, relativePseudoClassSelector{name: name, match: sel})
 
 	case "contains", "containsown":
 		return out, "", ErrInvalidSelector
@@ -520,28 +505,28 @@ func (p *parser) parsePseudoclassSelector() (out Sel, pseudoElement string, err 
 		}
 		last := name == "nth-last-child" || name == "nth-last-of-type"
 		ofType := name == "nth-of-type" || name == "nth-last-of-type"
-		out = nthPseudoClassSelector{a: a, b: b, last: last, ofType: ofType}
+		out = selectorObject(p.memory, nthPseudoClassSelector{a: a, b: b, last: last, ofType: ofType})
 
 	case "first-child":
-		out = nthPseudoClassSelector{a: 0, b: 1, ofType: false, last: false}
+		out = selectorObject(p.memory, nthPseudoClassSelector{a: 0, b: 1, ofType: false, last: false})
 	case "last-child":
-		out = nthPseudoClassSelector{a: 0, b: 1, ofType: false, last: true}
+		out = selectorObject(p.memory, nthPseudoClassSelector{a: 0, b: 1, ofType: false, last: true})
 	case "first-of-type":
-		out = nthPseudoClassSelector{a: 0, b: 1, ofType: true, last: false}
+		out = selectorObject(p.memory, nthPseudoClassSelector{a: 0, b: 1, ofType: true, last: false})
 	case "last-of-type":
-		out = nthPseudoClassSelector{a: 0, b: 1, ofType: true, last: true}
+		out = selectorObject(p.memory, nthPseudoClassSelector{a: 0, b: 1, ofType: true, last: true})
 	case "only-child":
-		out = onlyChildPseudoClassSelector{ofType: false}
+		out = selectorObject(p.memory, onlyChildPseudoClassSelector{ofType: false})
 	case "only-of-type":
-		out = onlyChildPseudoClassSelector{ofType: true}
+		out = selectorObject(p.memory, onlyChildPseudoClassSelector{ofType: true})
 	case "input":
-		out = inputPseudoClassSelector{}
+		out = selectorObject(p.memory, inputPseudoClassSelector{})
 	case "empty":
-		out = emptyElementPseudoClassSelector{}
+		out = selectorObject(p.memory, emptyElementPseudoClassSelector{})
 	case "root":
-		out = rootPseudoClassSelector{}
+		out = selectorObject(p.memory, rootPseudoClassSelector{})
 	case "link":
-		out = linkPseudoClassSelector{}
+		out = selectorObject(p.memory, linkPseudoClassSelector{})
 	case "lang":
 		if !p.consumeParenthesis() {
 			return out, "", ErrInvalidSelector
@@ -561,16 +546,16 @@ func (p *parser) parsePseudoclassSelector() (out Sel, pseudoElement string, err 
 		if !p.consumeClosingParenthesis() {
 			return out, "", ErrInvalidSelector
 		}
-		out = langPseudoClassSelector{lang: val}
+		out = selectorObject(p.memory, langPseudoClassSelector{lang: val})
 	case "enabled":
-		out = enabledPseudoClassSelector{}
+		out = selectorObject(p.memory, enabledPseudoClassSelector{})
 	case "disabled":
-		out = disabledPseudoClassSelector{}
+		out = selectorObject(p.memory, disabledPseudoClassSelector{})
 	case "checked":
-		out = checkedPseudoClassSelector{}
+		out = selectorObject(p.memory, checkedPseudoClassSelector{})
 	case "visited", "hover", "active", "focus", "target":
 		// Not applicable in a static context: never match.
-		out = neverMatchSelector{value: ":" + name}
+		out = selectorObject(p.memory, neverMatchSelector{value: p.concat(":", name)})
 	case "after", "backdrop", "before", "cue", "first-letter", "first-line", "grammar-error", "marker", "placeholder", "selection", "spelling-error":
 		return nil, name, nil
 	default:
@@ -750,7 +735,7 @@ func (p *parser) parseSimpleSelectorSequence() (Sel, error) {
 		if err != nil {
 			return nil, err
 		}
-		selectors = append(selectors, r)
+		selectors = selectorAppend(p.memory, selectors, selectorObject(p.memory, r))
 	}
 
 	var pseudoElement string
@@ -766,17 +751,29 @@ loop:
 			if err = p.takeComponent(); err != nil {
 				return nil, err
 			}
-			ns, err = p.parseIDSelector()
+			value, parseErr := p.parseIDSelector()
+			err = parseErr
+			if err == nil {
+				ns = selectorObject(p.memory, value)
+			}
 		case '.':
 			if err = p.takeComponent(); err != nil {
 				return nil, err
 			}
-			ns, err = p.parseClassSelector()
+			value, parseErr := p.parseClassSelector()
+			err = parseErr
+			if err == nil {
+				ns = selectorObject(p.memory, value)
+			}
 		case '[':
 			if err = p.takeComponent(); err != nil {
 				return nil, err
 			}
-			ns, err = p.parseAttributeSelector()
+			value, parseErr := p.parseAttributeSelector()
+			err = parseErr
+			if err == nil {
+				ns = selectorObject(p.memory, value)
+			}
 		case ':':
 			if err = p.takeComponent(); err != nil {
 				return nil, err
@@ -804,14 +801,14 @@ loop:
 			if pseudoElement != "" {
 				return nil, ErrInvalidSelector
 			}
-			selectors = append(selectors, ns)
+			selectors = selectorAppend(p.memory, selectors, ns)
 		}
 
 	}
 	if len(selectors) == 1 && pseudoElement == "" { // no need wrap the selectors in compoundSelector
 		return selectors[0], nil
 	}
-	return compoundSelector{selectors: selectors, pseudoElement: pseudoElement}, nil
+	return selectorObject(p.memory, compoundSelector{selectors: selectors, pseudoElement: pseudoElement}), nil
 }
 
 // parseSelector parses a selector that may include combinators.
@@ -852,7 +849,7 @@ func (p *parser) parseSelector() (Sel, error) {
 		if err != nil {
 			return nil, err
 		}
-		result = combinedSelector{first: result, combinator: combinator, second: c}
+		result = selectorObject(p.memory, combinedSelector{first: result, combinator: combinator, second: c})
 	}
 }
 
@@ -868,7 +865,7 @@ func (p *parser) parseSelectorGroup() (SelectorGroup, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := SelectorGroup{current}
+	result := SelectorGroup(selectorAppend(p.memory, []Sel(nil), current))
 
 	for p.i < len(p.s) {
 		if p.s[p.i] != ',' {
@@ -879,26 +876,23 @@ func (p *parser) parseSelectorGroup() (SelectorGroup, error) {
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, c)
+		result = selectorAppend(p.memory, result, c)
 	}
 	return result, nil
 }
 
 func (p *parser) writeString(b *strings.Builder, text string) {
-	if len(text) > b.Cap()-b.Len() {
-		reserveSelector(p.memory, int64(2*b.Cap()+len(text)))
-		b.Grow(len(text))
-	}
-	b.WriteString(text)
+	requireSelectorStorage(resourceguard.WriteString(p.memory, b, text, nil))
+}
+func (p *parser) concat(left, right string) string {
+	s, ok := resourceguard.Concat(p.memory, left, right, nil)
+	requireSelectorStorage(ok)
+	return s
 }
 func (p *parser) lowerASCII(s string) string {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 'A' && s[i] <= 'Z' {
-			reserveSelector(p.memory, 2*int64(len(s)))
-			break
-		}
-	}
-	return toLowerASCII(s)
+	out, ok := resourceguard.LowerASCII(p.memory, s, nil)
+	requireSelectorStorage(ok)
+	return out
 }
 
 // lowerUnicode preserves strings.ToLower semantics, including replacement of
@@ -915,9 +909,8 @@ func (p *parser) lowerUnicode(s string) string {
 	if !changed && size == len(s) {
 		return s
 	}
-	reserveSelector(p.memory, int64(size))
 	var b strings.Builder
-	b.Grow(size)
+	requireSelectorStorage(resourceguard.GrowText(p.memory, &b, size, nil))
 	for _, r := range s {
 		b.WriteRune(unicode.ToLower(r))
 	}

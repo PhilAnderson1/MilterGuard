@@ -150,19 +150,19 @@ func unescapeEntity(s []byte, attribute bool, guard *resourceGuard) (rune, rune,
 		break
 	}
 
-	entityName := string(s[1:i])
-	if entityName == "" {
+	entityName := s[1:i]
+	if len(entityName) == 0 {
 		// No-op.
 	} else if attribute && entityName[len(entityName)-1] != ';' && len(s) > i && s[i] == '=' {
 		// No-op.
-	} else if x := entity[entityName]; x != 0 {
+	} else if x := entity[string(entityName)]; x != 0 {
 		return x, 0, i
-	} else if x := entity2[entityName]; x[0] != 0 {
+	} else if x := entity2[string(entityName)]; x[0] != 0 {
 		return x[0], x[1], i
 	} else if !attribute {
 		maxLen := min(len(entityName)-1, longestEntityWithoutSemicolon)
 		for j := maxLen; j > 1; j-- {
-			if x := entity[entityName[:j]]; x != 0 {
+			if x := entity[string(entityName[:j])]; x != 0 {
 				return x, 0, j + 1
 			}
 		}
@@ -222,8 +222,7 @@ func unescapeWithGuard(b []byte, attribute bool, guard *resourceGuard) []byte {
 		// transition every growth (including ordinary suffix bytes) is admitted.
 		if reusingB && len(out)+width > src+consumed {
 			capacity := max(len(b), len(out)+width)
-			guard.reserve(int64(capacity))
-			owned := make([]byte, len(out), capacity)
+			owned := makeResourceSlice[byte](len(out), capacity, guard)
 			copy(owned, out)
 			out, reusingB = owned, false
 		}

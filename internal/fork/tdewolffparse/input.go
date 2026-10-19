@@ -2,6 +2,8 @@ package parse
 
 import (
 	"io"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 var nullBuffer = []byte{0}
@@ -53,6 +55,24 @@ func NewInputString(s string) *Input {
 	b := make([]byte, len(s)+1)
 	copy(b, s)
 	return &Input{buf: b}
+}
+
+// NewInputStringWithMemory owns and admits the mutable NUL-terminated input.
+// A failed input remains safe to pass to a lexer: peeking observes EOF/error.
+func NewInputStringWithMemory(s string, m *resourceguard.Memory, stop resourceguard.Stop) *Input {
+	b, ok := resourceguard.StringBytes(m, s, true, stop)
+	if !ok {
+		err := resourceguard.ErrMemory
+		if !m.Exhausted() {
+			err = resourceguard.ErrStopped
+		}
+		return &Input{buf: nullBuffer, err: err}
+	}
+	z, ok := resourceguard.New(m, Input{buf: b})
+	if !ok {
+		return &Input{buf: nullBuffer, err: resourceguard.ErrMemory}
+	}
+	return z
 }
 
 // NewInputBytes returns a new Input for a given byte slice and appends NULL at the end.

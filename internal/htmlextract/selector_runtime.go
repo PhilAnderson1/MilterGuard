@@ -1,18 +1,8 @@
 package htmlextract
 
 import (
-	"unsafe"
-
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
-)
-
-// Conservative estimates for retained selector maps and their entries. Slice
-// and struct payloads whose sizes are known continue to use unsafe.Sizeof.
-const (
-	ancestorStateMapBytes      int64 = 128
-	selectorIndexMapEntryBytes int64 = 48
-	selectorIndexMapsBytes     int64 = 768
-	attributeCandidateMapBytes int64 = 128
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 type ancestorChainState struct {
@@ -51,11 +41,13 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 	var recent *ancestorStateEntry
 	if mapStates {
 		if len(s.runtime.ancestorStates) >= ancestorCount {
-			states = s.runtime.ancestorStates[plan.ancestorCache]
+			states = s.runtime.ancestorStates[plan.ancestorCache].View()
 		}
 	} else {
-		if len(s.runtime.ancestorRecent) < ancestorCount && s.memory.TryReserve(int64(ancestorCount)*int64(unsafe.Sizeof(ancestorStateEntry{}))) {
-			s.runtime.ancestorRecent = make([]ancestorStateEntry, ancestorCount)
+		if len(s.runtime.ancestorRecent) < ancestorCount {
+			if recent, ok := resourceguard.TryMakeSlice[ancestorStateEntry](s.memory, ancestorCount, ancestorCount); ok {
+				s.runtime.ancestorRecent = recent
+			}
 		}
 		if len(s.runtime.ancestorRecent) >= ancestorCount {
 			recent = &s.runtime.ancestorRecent[plan.ancestorCache]
@@ -80,7 +72,7 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 			break
 		}
 		var ok bool
-		nodes, ok = growSlice(nodes, 1, s.memory)
+		nodes, ok = growSlice(nodes, 1, s.memory, s.shouldStop)
 		if !ok {
 			return false, false
 		}
@@ -131,24 +123,18 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 		}
 		if hasElementChild {
 			if mapStates {
-				cost := mapEntryAllocationBytes[*html.Node, ancestorChainState]()
-				if states == nil {
-					cost += ancestorStateMapBytes
-				}
 				if len(s.runtime.ancestorStates) < ancestorCount {
-					cost += int64(ancestorCount) * int64(unsafe.Sizeof(map[*html.Node]ancestorChainState{}))
+					grown, ok := resourceguard.TryMakeSlice[resourceguard.Table[*html.Node, ancestorChainState]](s.memory, ancestorCount, ancestorCount)
+					if !ok {
+						continue
+					}
+					copy(grown, s.runtime.ancestorStates)
+					s.runtime.ancestorStates = grown
 				}
-				if !s.memory.TryReserve(cost) {
-					continue
+				cache := &s.runtime.ancestorStates[plan.ancestorCache]
+				if cache.TrySet(s.memory, node, state) {
+					states = cache.View()
 				}
-				if len(s.runtime.ancestorStates) < ancestorCount {
-					s.runtime.ancestorStates = make([]map[*html.Node]ancestorChainState, ancestorCount)
-				}
-				if states == nil {
-					states = make(map[*html.Node]ancestorChainState)
-					s.runtime.ancestorStates[plan.ancestorCache] = states
-				}
-				states[node] = state
 			} else if recent != nil {
 				*recent = ancestorStateEntry{node: node, state: state}
 			}
@@ -171,18 +157,8 @@ func (s *sheet) buildSelectorIndex() {
 	}
 	clear(original[len(kept):])
 	s.rules = kept
-	index := selectorIndex{
-		tags: map[string][]selectorRef{}, ids: map[string][]selectorRef{}, classes: map[string][]selectorRef{},
-		ancestorTags: map[string][]selectorRef{}, ancestorIDs: map[string][]selectorRef{}, ancestorClasses: map[string][]selectorRef{},
-	}
-	planCount := 0
-	for i := range s.rules {
-		planCount += len(s.rules[i].plans)
-	}
-	if !s.memory.Reserve(int64(planCount)*(int64(unsafe.Sizeof(selectorRef{}))+selectorIndexMapEntryBytes) + selectorIndexMapsBytes) {
-		s.abandonCascade()
-		return
-	}
+	var index selectorIndex
+	var buckets [6]resourceguard.Table[string, []selectorRef]
 	for ruleIndex := range s.rules {
 		for branchIndex := range s.rules[ruleIndex].plans {
 			plan := &s.rules[ruleIndex].plans[branchIndex]
@@ -195,29 +171,46 @@ func (s *sheet) buildSelectorIndex() {
 				plan.ancestorCache = index.ancestorCount
 				index.ancestorCount++
 			}
+			bucket := -1
 			switch plan.key.kind {
 			case selectorTag:
-				index.tags[plan.key.value] = append(index.tags[plan.key.value], ref)
+				bucket = 0
 			case selectorID:
-				index.ids[plan.key.value] = append(index.ids[plan.key.value], ref)
+				bucket = 1
 			case selectorClass:
-				index.classes[plan.key.value] = append(index.classes[plan.key.value], ref)
+				bucket = 2
 			case selectorAncestorTag:
-				index.ancestorTags[plan.key.value] = append(index.ancestorTags[plan.key.value], ref)
+				bucket = 3
 			case selectorAncestorID:
-				index.ancestorIDs[plan.key.value] = append(index.ancestorIDs[plan.key.value], ref)
+				bucket = 4
 			case selectorAncestorClass:
-				index.ancestorClasses[plan.key.value] = append(index.ancestorClasses[plan.key.value], ref)
-			default:
-				index.universal = append(index.universal, ref)
+				bucket = 5
+			}
+			if bucket < 0 {
+				var ok bool
+				index.universal, ok = resourceguard.Append(s.memory, index.universal, s.shouldStop, ref)
+				if !ok {
+					s.abandonCascade()
+					return
+				}
+			} else {
+				table := &buckets[bucket]
+				refs, _ := table.Get(plan.key.value)
+				refs, ok := resourceguard.Append(s.memory, refs, s.shouldStop, ref)
+				if !ok || !table.Set(s.memory, plan.key.value, refs) {
+					s.abandonCascade()
+					return
+				}
 			}
 		}
 	}
+	index.tags, index.ids, index.classes = buckets[0].View(), buckets[1].View(), buckets[2].View()
+	index.ancestorTags, index.ancestorIDs, index.ancestorClasses = buckets[3].View(), buckets[4].View(), buckets[5].View()
 	s.index = index
 	s.runtime.matchCaches = nil
 	s.runtime.ancestorRecent = nil
 	s.runtime.ancestorStates = nil
-	s.runtime.attributeCandidates = nil
+	s.runtime.attributeCandidates.Release()
 }
 
 // A generated pseudo-element has no existing text of its own. A rule whose
@@ -251,17 +244,18 @@ func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *cpuGuard) (se
 	if len(node.Attr) == 0 || !needID && !needClass {
 		return result, true
 	}
-	if cached, ok := s.runtime.attributeCandidates[node]; ok {
+	if cached, ok := s.runtime.attributeCandidates.View()[node]; ok {
 		return cached, true
 	}
 	if !budget.check() {
 		return result, false
 	}
 	if len(s.runtime.attributeMarks) < s.index.count {
-		if !s.memory.Reserve(int64(s.index.count) * 4) {
+		var ok bool
+		s.runtime.attributeMarks, ok = resourceguard.MakeSlice[uint32](s.memory, s.index.count, s.index.count)
+		if !ok {
 			return result, false
 		}
-		s.runtime.attributeMarks = make([]uint32, s.index.count)
 	}
 	s.runtime.attributeGeneration++
 	if s.runtime.attributeGeneration == 0 {
@@ -274,7 +268,7 @@ func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *cpuGuard) (se
 			return true
 		}
 		s.runtime.attributeMarks[bucket[0].sequence] = generation
-		grown, ok := growSlice(*out, 1, s.memory)
+		grown, ok := growSlice(*out, 1, s.memory, s.shouldStop)
 		if !ok {
 			return false
 		}
@@ -331,17 +325,9 @@ func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *cpuGuard) (se
 	if len(result.direct)+len(result.ancestor) == 0 && !s.runtime.cacheMatches && !s.hasAncestorSelectorIndex() {
 		return result, true
 	}
-	bytes := mapEntryAllocationBytes[*html.Node, selectorAttributeCandidates]()
-	if s.runtime.attributeCandidates == nil {
-		bytes += attributeCandidateMapBytes
-	}
-	if !s.memory.Reserve(bytes) {
+	if !s.runtime.attributeCandidates.Set(s.memory, node, result) {
 		return result, false
 	}
-	if s.runtime.attributeCandidates == nil {
-		s.runtime.attributeCandidates = make(map[*html.Node]selectorAttributeCandidates)
-	}
-	s.runtime.attributeCandidates[node] = result
 	return result, true
 }
 
@@ -412,10 +398,11 @@ func (s *sheet) collectCandidates(n *html.Node, budget *cpuGuard) ([]selectorRef
 		return nil, true
 	}
 	if len(s.runtime.candidateMarks) < s.index.count {
-		if !s.memory.Reserve(int64(s.index.count) * int64(unsafe.Sizeof(uint32(0)))) {
+		var ok bool
+		s.runtime.candidateMarks, ok = resourceguard.MakeSlice[uint32](s.memory, s.index.count, s.index.count)
+		if !ok {
 			return nil, false
 		}
-		s.runtime.candidateMarks = make([]uint32, s.index.count)
 	}
 	s.runtime.candidateGeneration++
 	if s.runtime.candidateGeneration == 0 {
@@ -433,7 +420,7 @@ func (s *sheet) collectCandidates(n *html.Node, budget *cpuGuard) ([]selectorRef
 		}
 		s.runtime.candidateMarks[bucket[0].sequence] = generation
 		var ok bool
-		refs, ok = growSlice(refs, len(bucket), s.memory)
+		refs, ok = growSlice(refs, len(bucket), s.memory, s.shouldStop)
 		if !ok {
 			return false
 		}

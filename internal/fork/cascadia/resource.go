@@ -14,10 +14,25 @@ var errSelectorMemory = errors.New("cascadia: memory limit exceeded")
 
 type allocationAbort struct{}
 
-func reserveSelector(memory *resourceguard.Memory, bytes int64) {
-	if !memory.Reserve(bytes) {
+func requireSelectorStorage(ok bool) {
+	if !ok {
 		panic(allocationAbort{})
 	}
+}
+func selectorObject[T Sel](memory *resourceguard.Memory, value T) Sel {
+	out, ok := resourceguard.Box(memory, value)
+	requireSelectorStorage(ok)
+	return out.(Sel)
+}
+func selectorSlice[T any](memory *resourceguard.Memory, length, capacity int) []T {
+	out, ok := resourceguard.MakeSlice[T](memory, length, capacity)
+	requireSelectorStorage(ok)
+	return out
+}
+func selectorAppend[T any](memory *resourceguard.Memory, s []T, value T) []T {
+	out, ok := resourceguard.Append(memory, s, nil, value)
+	requireSelectorStorage(ok)
+	return out
 }
 
 // Only allocation aborts are recovered; programming errors remain visible.
@@ -40,7 +55,8 @@ type MatchControl struct {
 }
 
 func NewMatchControl(shouldStop func() bool) *MatchControl {
-	return &MatchControl{shouldStop: shouldStop}
+	g, _ := NewMatchControlWithMemory(shouldStop, nil)
+	return g
 }
 
 // step samples the caller's relatively expensive CPU-time callback rather
@@ -91,4 +107,9 @@ func matchResource(m Matcher, n *html.Node, guard *MatchControl) bool {
 // ordinary non-match.
 func MatchWithStop(m Matcher, n *html.Node, shouldStop func() bool) (matched, stopped bool) {
 	return NewMatchControl(shouldStop).Match(m, n)
+}
+
+// NewMatchControlWithMemory admits the state retained across selector matches.
+func NewMatchControlWithMemory(stop func() bool, m *resourceguard.Memory) (*MatchControl, bool) {
+	return resourceguard.New(m, MatchControl{shouldStop: stop})
 }

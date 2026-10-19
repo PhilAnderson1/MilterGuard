@@ -2,11 +2,13 @@ package css
 
 import (
 	"errors"
-	parse "github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
-	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
+
+	parse "github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 func TestURLRecognitionNoCopyAndCancellation(t *testing.T) {
@@ -42,6 +44,8 @@ func TestSyntaxErrorsDoNotAllocateDiagnostics(t *testing.T) {
 			// Exclude source ownership from the parser allocation comparison.
 			data := make([]byte, len(source), len(source)+1)
 			copy(data, source)
+			// Isolate the comparison from GC work left by earlier tests.
+			runtime.GC()
 			return testing.AllocsPerRun(3, func() {
 				input := parse.NewInputBytes(data)
 				var p *Parser

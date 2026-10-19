@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
@@ -94,8 +93,13 @@ func (d *declaration) recordVariableDependencies(budget *cpuGuard) {
 	d.dependenciesReady = true
 }
 
-func (d *declaration) setPrepared(value Value, status valueStatus) {
-	d.prepared = &preparedDeclaration{value: value, status: status}
+func (d *declaration) setPrepared(value Value, status valueStatus, budget *cpuGuard) {
+	var ok bool
+	d.prepared, ok = resourceguard.New(budget.allocationMemory(), preparedDeclaration{value: value, status: status})
+	if !ok {
+		d.discardTransientState()
+		return
+	}
 	d.validity = status
 	d.validityReady = true
 	// The prepared value is the complete runtime representation. Keeping the
@@ -167,10 +171,7 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 		// that the conservative hasVars fast path initially treated as dynamic.
 		if !d.hasVars || (d.tokensReady && !tokensHaveVariables(d.valueTokens)) {
 			value := parseAnimationValue(d.value, d.animationShorthand, budget)
-			if !budget.reserve(int64(unsafe.Sizeof(value))) {
-				return d
-			}
-			d.animation = &value
+			d.animation, _ = resourceguard.New(budget.allocationMemory(), value)
 		}
 		return d
 	}
@@ -182,11 +183,7 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 		} else {
 			prepared.value, prepared.status = resolveWithBudget(d.prop, d.value, &initialStyle, &initialStyle, budget)
 		}
-		if !budget.reserve(int64(unsafe.Sizeof(preparedDeclaration{}))) {
-			d.discardTransientState()
-			return d
-		}
-		d.setPrepared(prepared.value, prepared.status)
+		d.setPrepared(prepared.value, prepared.status, budget)
 	} else if d.custom == "" && !d.hasVars && !d.shorthand && !d.unsupported {
 		value, _ := normalizeCSSKeywordWithBudget(d.value, budget)
 		if (d.prop == fontSize || d.prop == opacity) && isMath(value) && d.tokensReady && d.valueStatus == valueResolved {
@@ -235,24 +232,23 @@ type rule struct {
 // declarations and selector plans remain immutable once selector and media
 // grouping preparation completes.
 type sheetRuntime struct {
-	variableMemo            declarationScopeMemo
-	mediaGroups             []*conditionFrame
-	mediaCache              map[mediaCacheKey][]uint8
-	cacheMatches            bool
-	matchCaches             []map[*html.Node]uint8
-	matchCacheEntries       int
-	attributeCandidates     map[*html.Node]selectorAttributeCandidates
-	attributeMarks          []uint32
-	attributeGeneration     uint32
-	candidateScratch        []selectorRef
-	candidateMarks          []uint32
-	candidateGeneration     uint32
-	ancestorNodes           []*html.Node
-	ancestorRecent          []ancestorStateEntry
-	ancestorStates          []map[*html.Node]ancestorChainState
-	activeAncestors         activeAncestorBuckets
-	variableScratch         map[string]candidate
-	variableScratchCapacity int
+	variableMemo        declarationScopeMemo
+	mediaGroups         []*conditionFrame
+	mediaCache          resourceguard.Table[mediaCacheKey, []uint8]
+	cacheMatches        bool
+	matchCaches         []resourceguard.Table[*html.Node, uint8]
+	matchCacheEntries   int
+	attributeCandidates resourceguard.Table[*html.Node, selectorAttributeCandidates]
+	attributeMarks      []uint32
+	attributeGeneration uint32
+	candidateScratch    []selectorRef
+	candidateMarks      []uint32
+	candidateGeneration uint32
+	ancestorNodes       []*html.Node
+	ancestorRecent      []ancestorStateEntry
+	ancestorStates      []resourceguard.Table[*html.Node, ancestorChainState]
+	activeAncestors     activeAncestorBuckets
+	variableScratch     resourceguard.Table[string, candidate]
 }
 
 type sheet struct {
@@ -265,7 +261,7 @@ type sheet struct {
 	declarationCount     int
 	index                selectorIndex
 	cssBytes             int
-	keyframeNames        map[string]struct{}
+	keyframeNames        resourceguard.Table[string, struct{}]
 	unresolvedStylesheet bool
 	unsupportedNesting   bool
 	unsupportedColours   int
@@ -284,13 +280,6 @@ func (s *sheet) admitCSS(text string) bool {
 		return false
 	}
 	if len(text) > s.limits.CSSBytes || s.cssBytes > s.limits.CSSBytes-len(text) {
-		s.abandonCascade()
-		return false
-	}
-	// Admit parser setup and its mutable input copy. Tokens, parser
-	// states, selectors and retained application objects are bounded or charged
-	// at the points where they are created.
-	if !s.memory.Reserve(int64(len(text)) + 1 + cssParserSetupBytes) {
 		s.abandonCascade()
 		return false
 	}
@@ -317,7 +306,7 @@ func (s *sheet) checkCPU() bool {
 func (s *sheet) abandonCascade() {
 	s.cascadeIncomplete = true
 	s.rules = nil
-	s.keyframeNames = nil
+	s.keyframeNames.Release()
 	s.planCount = 0
 	s.selectorBranches = 0
 	s.index = selectorIndex{}
@@ -397,7 +386,7 @@ func opaqueRuleBearingAtRule(name string) bool {
 }
 
 func (s *sheet) invalidateMediaCache() {
-	s.runtime.mediaCache = nil
+	s.runtime.mediaCache.Release()
 	s.runtime.mediaGroups = nil
 }
 
@@ -717,10 +706,10 @@ func (s *sheet) declarations(prop, value string) []declaration {
 }
 
 func ownedValueTokens(values []css.Token, raw string, budget *cpuGuard) ([]valueToken, valueStatus) {
-	if !budget.reserve(int64(len(values)) * int64(unsafe.Sizeof(valueToken{}))) {
+	tokens, ok := resourceguard.MakeSlice[valueToken](budget.allocationMemory(), 0, len(values))
+	if !ok {
 		return nil, valueUnsupported
 	}
-	tokens := make([]valueToken, 0, len(values))
 	offset := 0
 	for _, token := range values {
 		next := offset + len(token.Data)
@@ -816,17 +805,17 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	}
 	s.order++
 	if custom {
-		return []declaration{prepared(declaration{prop: -1, custom: prop, value: value, important: imp, order: s.order})}
+		return declarationList(s.cpu, prepared(declaration{prop: -1, custom: prop, value: value, important: imp, order: s.order}))
 	}
 	if prop == "animation" || prop == "animation-name" {
 		// Keep the animation shorthand and longhand in one cascade slot. Values
 		// are interpreted only as active/inactive after variable substitution;
 		// keyframe declarations themselves remain outside the presentation
 		// cascade.
-		return []declaration{prepared(declaration{
+		return declarationList(s.cpu, prepared(declaration{
 			prop: animationProperty, value: value, important: imp, order: s.order,
 			shorthand: true, animationShorthand: prop == "animation", unsupported: parsed.unsafeIdentifier,
-		})}
+		}))
 	}
 	if prop == "margin" {
 		values, ok, uncertain := marginShorthandValuesWithBudget(value, s.cpu)
@@ -834,7 +823,10 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 			return nil
 		}
 		properties := [...]int{marginTop, marginRight, marginBottom, marginLeft}
-		out := make([]declaration, 0, len(properties))
+		out, ok := resourceguard.MakeSlice[declaration](s.memory, 0, len(properties))
+		if !ok {
+			return nil
+		}
 		for i, property := range properties {
 			componentTokens, componentStatus := lexValue(values[i], s.cpu)
 			d := declaration{
@@ -852,7 +844,10 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 			return nil
 		}
 		properties := [...]int{overflowX, overflowY}
-		out := make([]declaration, 0, len(properties))
+		out, ok := resourceguard.MakeSlice[declaration](s.memory, 0, len(properties))
+		if !ok {
+			return nil
+		}
 		for i, property := range properties {
 			d := declaration{
 				prop: property, value: value, important: imp, order: s.order, shorthand: true,
@@ -867,36 +862,33 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	}
 	for p, n := range names {
 		if n == prop {
-			return []declaration{prepared(declaration{prop: p, value: value, important: imp, order: s.order, unsupported: parsed.unsafeIdentifier})}
+			return declarationList(s.cpu, prepared(declaration{prop: p, value: value, important: imp, order: s.order, unsupported: parsed.unsafeIdentifier}))
 		}
 	}
 	if prop == "background" {
 		if parsed.unsafeIdentifier {
-			return []declaration{
-				prepared(declaration{prop: background, value: value, important: imp, order: s.order, shorthand: true, unsupported: true}),
-				prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true, unsupported: true}),
-			}
+			return declarationList(s.cpu, prepared(declaration{prop: background, value: value, important: imp, order: s.order, shorthand: true, unsupported: true}), prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true, unsupported: true}))
 		}
 		if tokensHaveVariables(parsed.tokens) {
-			return []declaration{
-				prepared(declaration{prop: background, value: value, important: imp, order: s.order, shorthand: true}),
-				prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true}),
-			}
+			return declarationList(s.cpu, prepared(declaration{prop: background, value: value, important: imp, order: s.order, shorthand: true}), prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true}))
 		}
 		return s.prepareDeclarations(backgroundDeclarationsTokens(asciiLowerWithBudget(value, s.cpu), parsed.tokens, parsed.status, imp, s.order, s.cpu))
 	}
 	if prop == "mask" {
-		return []declaration{prepared(declaration{prop: maskImage, value: value, important: imp, order: s.order, unsupported: true})}
+		return declarationList(s.cpu, prepared(declaration{prop: maskImage, value: value, important: imp, order: s.order, unsupported: true}))
 	}
 	var affected []int
 	switch prop {
 	case "font":
 		affected = []int{fontSize}
 	case "all":
-		return []declaration{prepared(declaration{prop: allShorthandProperty, value: value, important: imp, order: s.order, unsupported: true})}
+		return declarationList(s.cpu, prepared(declaration{prop: allShorthandProperty, value: value, important: imp, order: s.order, unsupported: true}))
 	}
 	if len(affected) > 0 {
-		out := make([]declaration, 0, len(affected))
+		out, ok := resourceguard.MakeSlice[declaration](s.memory, 0, len(affected))
+		if !ok {
+			return nil
+		}
 		for _, p := range affected {
 			out = append(out, prepared(declaration{prop: p, value: value, important: imp, order: s.order, unsupported: true}))
 		}
@@ -1049,25 +1041,20 @@ func (s *sheet) attachMediaCondition(firstRule int, media string) {
 		return
 	}
 	condition := s.parseMediaCondition(media)
-	if !s.memory.Reserve(mediaFrameStateMapBytes) {
-		s.abandonCascade()
-		return
-	}
-	frames := make(map[*conditionFrame]*conditionFrame)
+	var frames resourceguard.Table[*conditionFrame, *conditionFrame]
 	for i := firstRule; i < len(s.rules); i++ {
 		parent := s.rules[i].conditions
-		frame := frames[parent]
+		frame, _ := frames.Get(parent)
 		if frame == nil {
-			if !s.memory.Reserve(mapEntryAllocationBytes[*conditionFrame, *conditionFrame]()) {
-				s.abandonCascade()
-				return
-			}
 			frame = newConditionFrame(condition, parent, s.memory)
 			if frame == nil {
 				s.abandonCascade()
 				return
 			}
-			frames[parent] = frame
+			if !frames.Set(s.memory, parent, frame) {
+				s.abandonCascade()
+				return
+			}
 		}
 		s.rules[i].conditions = frame
 	}

@@ -173,8 +173,8 @@ func TestRepeatedHTMLAndBodyAttributeCachesAreIndependent(t *testing.T) {
 	if htmlNode.Attr[0].Val != "en" || bodyNode.Attr[0].Val != "original" {
 		t.Fatalf("original attributes were replaced: html=%q body=%q", htmlNode.Attr[0].Val, bodyNode.Attr[0].Val)
 	}
-	if len(p.htmlAttributeNames) != 101 || len(p.bodyAttributeNames) != 101 {
-		t.Fatalf("cache sizes: html=%d body=%d", len(p.htmlAttributeNames), len(p.bodyAttributeNames))
+	if p.htmlAttributeNames.Len() != 101 || p.bodyAttributeNames.Len() != 101 {
+		t.Fatalf("cache sizes: html=%d body=%d", p.htmlAttributeNames.Len(), p.bodyAttributeNames.Len())
 	}
 }
 

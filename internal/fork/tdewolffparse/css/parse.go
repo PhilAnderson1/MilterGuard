@@ -5,9 +5,9 @@ import (
 	"errors"
 	"io"
 	"strconv"
-	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // ErrSyntax reports a recoverable CSS syntax error without retaining diagnostics.
@@ -113,33 +113,27 @@ func NewParser(r *parse.Input, isInline bool) *Parser {
 // that retain construct tokens, copy custom-property values, and grow stacks.
 func NewParserWithLimits(r *parse.Input, isInline bool, limits ResourceLimits) *Parser {
 	guard := newResourceGuard(limits)
-	if limits.ShouldStop != nil {
-		// Parser-loop invariant: every iteration must either pass a token
-		// through a progress checkpoint or advance this guarded input. The progress
-		// callback is the cancellation backstop for grammar paths, such as
-		// unknown at-rule bodies, that intentionally do not retain tokens.
-		r.SetProgressCheck(func() error {
-			if limits.ShouldStop() {
-				return ErrResourceStopped
-			}
-			return nil
-		})
+	check, ok := resourceguard.ErrorCheck(limits.Memory, limits.ShouldStop, ErrResourceStopped)
+	if !ok {
+		return &Parser{resourceErr: &ResourceLimitError{"memory bytes", int(limits.Memory.Limit())}}
+	}
+	if check != nil {
+		r.SetProgressCheck(check)
 	}
 	return newParser(r, isInline, guard)
 }
 
 func newParser(r *parse.Input, isInline bool, guard *resourceGuard) *Parser {
-	l := NewLexer(r)
-	p := &Parser{
-		l:     l,
-		guard: guard,
+	l := newLexer(r, guard)
+	p, ok := resourceguard.New(guard.memory(), Parser{l: l, guard: guard})
+	if !ok {
+		return &Parser{resourceErr: guard.allocationError()}
 	}
-
-	if err := guard.reserve(4 * int64(unsafe.Sizeof(State(nil)))); err != nil {
-		p.resourceErr = err
+	p.state, ok = resourceguard.MakeSlice[State](guard.memory(), 0, 4)
+	if !ok {
+		p.resourceErr = guard.allocationError()
 		return p
 	}
-	p.state = make([]State, 0, 4)
 	if isInline {
 		p.state = append(p.state, (*Parser).parseDeclarationList)
 	} else {
@@ -395,9 +389,6 @@ func (p *Parser) parseAtRule() GrammarType {
 	if err := p.guard.step(); err != nil {
 		p.abort(err)
 	}
-	if err := p.guard.reserve(int64(len(p.data))); err != nil {
-		p.abort(err)
-	}
 	p.data = p.lowerCopy(p.data)
 	atRuleName := p.data
 	if len(atRuleName) > 1 && atRuleName[1] == '-' {
@@ -631,9 +622,6 @@ func (p *Parser) parseDeclaration() GrammarType {
 			}
 			p.buf = p.buf[:j]
 			p.originalData = p.data
-			if err := p.guard.reserve(int64(len(p.data))); err != nil {
-				p.abort(err)
-			}
 			p.data = p.lowerCopy(p.data)
 			p.prevEnd = (tt == RightBraceToken)
 			return DeclarationGrammar

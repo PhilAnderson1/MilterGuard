@@ -1,5 +1,11 @@
 package resourceguard
 
+import "errors"
+
+// ErrMemory is allocation-free failure reporting for storage constructors.
+var ErrMemory = errors.New("allocation budget exhausted")
+var ErrStopped = errors.New("allocation operation stopped")
+
 // Memory is a monotonic per-operation allocation budget. It deliberately does
 // not release charges: unreachable Go objects remain allocated until a later
 // garbage collection, and repeated temporary allocation is itself hostile
