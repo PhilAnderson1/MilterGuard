@@ -24,6 +24,10 @@ const (
 	clip
 	clipPath
 	lineHeight
+	scale
+	translate
+	rotate
+	fontSizeAdjust
 	properties
 )
 
@@ -58,6 +62,8 @@ const (
 	marginInlineEnd
 	marginBlockStart
 	marginBlockEnd
+	overflowInline
+	overflowBlock
 	declarationProperties
 	layoutProperties = declarationProperties - properties
 	// allShorthandProperty is an internal sentinel. Keep one declaration for
@@ -71,4 +77,4 @@ const (
 	animationProperty = allShorthandProperty + 1
 )
 
-var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "line-height", "overflow-x", "overflow-y", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "letter-spacing", "word-spacing", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom", "inline-size", "block-size", "max-inline-size", "max-block-size", "inset-inline-start", "inset-inline-end", "inset-block-start", "inset-block-end", "margin-inline-start", "margin-inline-end", "margin-block-start", "margin-block-end"}
+var names = [declarationProperties]string{"display", "visibility", "content-visibility", "mso-hide", "opacity", "font-size", "color", "background-color", "background-image", "filter", "mix-blend-mode", "backdrop-filter", "background-blend-mode", "mask-image", "background-clip", "text-shadow", "-webkit-text-fill-color", "transform", "position", "-webkit-text-stroke", "clip", "clip-path", "line-height", "scale", "translate", "rotate", "font-size-adjust", "overflow-x", "overflow-y", "width", "height", "max-width", "max-height", "left", "top", "right", "bottom", "text-indent", "letter-spacing", "word-spacing", "margin-top", "margin-right", "margin-bottom", "margin-left", "zoom", "inline-size", "block-size", "max-inline-size", "max-block-size", "inset-inline-start", "inset-inline-end", "inset-block-start", "inset-block-end", "margin-inline-start", "margin-inline-end", "margin-block-start", "margin-block-end", "overflow-inline", "overflow-block"}

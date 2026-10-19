@@ -982,8 +982,8 @@ func TestUnsupportedSelectorUncertaintyIsLimitedToRelevantDeclarations(t *testin
 	}
 
 	in = inspectHTML(t, `<style>p[data-value#=(a+) ]{display:none}</style><p data-value="aaaa">regex target</p><div>unrelated</div>`)
-	if got := findText(t, in, "regex target").Label; got != "unknown" {
-		t.Fatalf("regex target label = %q, want unknown", got)
+	if got := findText(t, in, "regex target").Label; got != "visible" {
+		t.Fatalf("regex target label = %q, want visible", got)
 	}
 	if got := findText(t, in, "unrelated").Label; got != "visible" {
 		t.Fatalf("regex-unrelated label = %q, want visible", got)

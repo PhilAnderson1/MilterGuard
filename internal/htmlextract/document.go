@@ -31,10 +31,11 @@ type textInspection struct {
 	colour colourInspection
 }
 
-// Element describes an image-like element. Label and ConcealmentReasons are
+// Element describes an image or input control. FontSize is used for input labels. Label and ConcealmentReasons are
 // aggregated across viewing cases. EffectiveOpacity begins with the
 // narrowest-case value and retains the lowest concealing opacity encountered.
 type Element struct {
+	FontSize           string
 	Node               *html.Node
 	Label              string
 	ConcealmentReasons ConcealmentReason

@@ -1149,7 +1149,7 @@ func explicitTrackingPixel(n *xhtml.Node) bool {
 }
 
 func elementConcealmentReason(state *htmlextract.Element) (string, string) {
-	return formatConcealmentReason(state.ConcealmentReasons, state.EffectiveOpacity, "")
+	return formatConcealmentReason(state.ConcealmentReasons, state.EffectiveOpacity, state.FontSize)
 }
 
 func (e *htmlExtraction) findBase(n *xhtml.Node) bool {

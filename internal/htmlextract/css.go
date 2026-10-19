@@ -38,21 +38,24 @@ const (
 // Once prepareDeclaration returns, these fields and the retained token slices
 // are immutable; cascade candidates safely retain pointers to declarations.
 type declaration struct {
-	prop                 int
-	value                string
-	prepared             *preparedDeclaration
-	validity             valueStatus
-	validityReady        bool
-	valueTokens          []valueToken
-	mathLiterals         []mathLiteral
-	valueStatus          valueStatus
-	tokensReady          bool
-	hasVars              bool
-	keyword              string
-	important            bool
-	order                int
-	unsupported          bool
-	custom               string
+	prop          int
+	value         string
+	prepared      *preparedDeclaration
+	validity      valueStatus
+	validityReady bool
+	valueTokens   []valueToken
+	mathLiterals  []mathLiteral
+	valueStatus   valueStatus
+	tokensReady   bool
+	hasVars       bool
+	keyword       string
+	important     bool
+	order         int
+	unsupported   bool
+	custom        string
+	// Deferred edge shorthands borrow their source until variable substitution.
+	edgeCount            uint8
+	edgeIndex            uint8
 	shorthand            bool
 	animationShorthand   bool
 	animation            *animationValue
@@ -851,7 +854,13 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 		if !ok {
 			return nil
 		}
+		hasVariables := tokensHaveVariables(parsed.tokens)
 		for i, property := range properties {
+			if hasVariables {
+				d := declaration{prop: property, value: value, important: imp, order: s.order, shorthand: true, edgeCount: uint8(count), edgeIndex: uint8(i)}
+				out = append(out, prepared(d))
+				continue
+			}
 			componentTokens, componentStatus := lexValue(values[i], s.cpu)
 			d := declaration{
 				prop: property, value: values[i], important: imp, order: s.order,

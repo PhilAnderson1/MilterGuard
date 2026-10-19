@@ -319,6 +319,9 @@ func planSelectorListWithStop(source string, nextSequence *int, memory *resource
 			(*nextSequence)++
 		}
 	}
+	if iterator.EmptyBranch() {
+		return nil, branches, exceeded, iterator.Stopped()
+	}
 	// Ordinary comma lists are not forgiving. A parser rejection of unknown
 	// validity must make every surviving branch conservative, not just itself.
 	for _, p := range plans {
@@ -335,7 +338,7 @@ func planSelectorListWithStop(source string, nextSequence *int, memory *resource
 }
 
 func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memory) (selectorPlan, bool) {
-	group, err := cascadia.ParseGroupWithPseudoElementsAndMemory(branch, memory)
+	group, err := cascadia.ParseCSSGroupWithMemory(branch, memory)
 	if memory.Exhausted() {
 		return selectorPlan{}, false
 	}
@@ -354,7 +357,7 @@ func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memor
 		return plan, true
 	}
 
-	if err == cascadia.ErrInvalidAttributeValue {
+	if err == cascadia.ErrInvalidAttributeValue || err == cascadia.ErrInvalidAttributeOperator {
 		return selectorPlan{invalidSyntax: true}, false
 	}
 	fallback, fallbackErr := cascadia.ConservativeFallbackWithMemory(branch, memory)

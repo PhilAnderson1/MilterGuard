@@ -82,7 +82,7 @@ func initialPresentationState() presentationState {
 }
 
 func elementPaintKnown(style *Style) bool {
-	for _, property := range [...]int{filter, blend, maskImage, transform} {
+	for _, property := range [...]int{filter, blend, maskImage, transform, scale, translate, rotate} {
 		if !style[property].Known {
 			return false
 		}
@@ -111,13 +111,13 @@ func decideVisibility(style *Style, state presentationState, colour *colourResul
 
 	known := state.displayKnown && style[visibility].Known && state.alphaKnown && state.clipKnown && state.contentKnown && state.msoKnown && !state.layoutUncertain && !state.textLayout[0] && !state.textLayout[1] && !state.textLayout[2]
 	if colour != nil {
-		if (!state.fontScaleUncertain || style[fontSize].Number == 0) && style[fontSize].Known && style[fontSize].Number <= 2 {
+		if (!(state.fontScaleUncertain || !style[fontSizeAdjust].Known) || style[fontSize].Number == 0) && style[fontSize].Known && style[fontSize].Number <= 2 {
 			mask |= reasonFontSize
 		}
 		if colour.known && colourConcealed(colour.distance) {
 			mask |= reasonColour
 		}
-		known = known && style[fontSize].Known && colour.known && !state.fontScaleUncertain
+		known = known && style[fontSize].Known && colour.known && !state.fontScaleUncertain && style[fontSizeAdjust].Known
 	}
 
 	decision := visibilityDecision{label: labelVisible, reasons: mask}

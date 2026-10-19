@@ -3,10 +3,11 @@ package cascadia
 // SelectorListIterator yields top-level selector branches without allocating
 // an intermediate slice.
 type SelectorListIterator struct {
-	source    string
-	offset    int
-	control   MatchControl
-	nextCheck int
+	source      string
+	offset      int
+	control     MatchControl
+	nextCheck   int
+	emptyBranch bool
 }
 
 func NewSelectorListIterator(source string) SelectorListIterator {
@@ -20,6 +21,9 @@ func NewSelectorListIteratorWithStop(source string, shouldStop func() bool) Sele
 func (iterator *SelectorListIterator) Stopped() bool {
 	return iterator.control.stopped
 }
+
+// EmptyBranch reports invalid empty branches without changing splitting semantics.
+func (iterator *SelectorListIterator) EmptyBranch() bool { return iterator.emptyBranch }
 
 func (iterator *SelectorListIterator) Next() (string, bool) {
 	if iterator.Stopped() {
@@ -97,6 +101,7 @@ func (iterator *SelectorListIterator) Next() (string, bool) {
 		if branch != "" {
 			return branch, true
 		}
+		iterator.emptyBranch = true
 	}
 	return "", false
 }

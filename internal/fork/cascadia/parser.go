@@ -21,6 +21,7 @@ type parser struct {
 	// if `false`, parsing a pseudo-element
 	// returns an error.
 	acceptPseudoElements bool
+	strictCSS            bool
 }
 
 const (
@@ -387,8 +388,8 @@ func (p *parser) parseAttributeSelector() (attrSelector, error) {
 	} else if op[1] != '=' {
 		return attrSelector{}, ErrInvalidSelector
 	}
-	if op == "#=" {
-		return attrSelector{}, ErrInvalidSelector
+	if op == "#=" || p.strictCSS && op == "!=" {
+		return attrSelector{}, ErrInvalidAttributeOperator
 	}
 	p.i += len(op)
 

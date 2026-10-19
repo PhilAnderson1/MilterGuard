@@ -415,7 +415,7 @@ func layerWithClipOverride(s *Style, ignoreClipPath bool) paintLayer {
 	// contrast test. Text shadows can only add painted pixels, so they matter
 	// when the base result would otherwise look concealed, not when it already
 	// has clear contrast.
-	for _, p := range []int{filter, blend, backdropFilter, backgroundBlend, maskImage, backgroundClip, transform} {
+	for _, p := range []int{filter, blend, backdropFilter, backgroundBlend, maskImage, backgroundClip, transform, scale, translate, rotate} {
 		known = known && s[p].Known
 	}
 	return paintLayer{

@@ -25,7 +25,7 @@ func makeInitialStyle() Style {
 	s[fontSize] = Value{Text: "16px", Number: 16, Known: true}
 	s[color] = Value{Text: "rgba(0,0,0,1)", Known: true, RGBA: RGBA{A: 1}}
 	s[background] = Value{Text: "rgba(0,0,0,0)", Known: true}
-	for _, p := range []int{backgroundImage, filter, backdropFilter, maskImage, textShadow, transform} {
+	for _, p := range []int{backgroundImage, filter, backdropFilter, maskImage, textShadow, transform, scale, translate, rotate, fontSizeAdjust} {
 		s[p] = Value{Text: "none", Known: true}
 	}
 	for _, p := range []int{blend, backgroundBlend} {
@@ -43,7 +43,7 @@ func makeInitialStyle() Style {
 
 func initial() Style { return initialStyle }
 func inherits(p int) bool {
-	return p == visibility || p == fontSize || p == lineHeight || p == color || p == textShadow || p == textFill || p == textStroke
+	return p == fontSizeAdjust || p == visibility || p == fontSize || p == lineHeight || p == color || p == textShadow || p == textFill || p == textStroke
 }
 
 // number parses the decimal syntax accepted by CSS <number>. strconv.ParseFloat
@@ -215,6 +215,11 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 			return Value{Text: s, Known: true}, valueResolved
 		}
 		return Value{}, valueInvalid
+	case scale, translate, rotate, fontSizeAdjust:
+		if s == "none" || p == scale && (s == "1" || s == "100%") || p == translate && (s == "0" || s == "0px") || p == rotate && (s == "0" || s == "0deg") {
+			return Value{Text: s, Known: true}, valueResolved
+		}
+		return Value{Text: s}, valueUnsupported
 	case backgroundImage, maskImage, textShadow, transform:
 		if s == "none" {
 			return Value{Text: s, Known: true}, valueResolved
@@ -266,6 +271,8 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 }
 func resolveLayoutPropertyWithBudget(property int, value string, budget *cpuGuard) (Value, valueStatus) {
 	switch property {
+	case overflowInline, overflowBlock:
+		property = overflowX
 	case inlineSize, blockSize:
 		property = width
 	case maxInlineSize, maxBlockSize:

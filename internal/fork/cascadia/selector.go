@@ -71,23 +71,29 @@ func ParseGroup(sel string) (SelectorGroup, error) {
 // ParseGroupWithMemory charges source retention, component storage, copied
 // strings and substring tables. Structural limits independently bound work.
 func ParseGroupWithMemory(sel string, memory *resourceguard.Memory) (SelectorGroup, error) {
-	return parseGroup(sel, memory, false)
+	return parseGroup(sel, memory, false, false)
 }
 
 // ParseGroupWithPseudoElementsAndMemory parses a selector group including
 // pseudo-elements and charges its compilation allocations to memory.
 func ParseGroupWithPseudoElementsAndMemory(sel string, memory *resourceguard.Memory) (SelectorGroup, error) {
-	return parseGroup(sel, memory, true)
+	return parseGroup(sel, memory, true, false)
 }
 
-func parseGroup(sel string, memory *resourceguard.Memory, acceptPseudoElements bool) (result SelectorGroup, err error) {
+// ParseCSSGroupWithMemory excludes non-CSS selector extensions, including nested ones.
+// The caller validates ordinary list branches with SelectorListIterator.
+func ParseCSSGroupWithMemory(sel string, memory *resourceguard.Memory) (SelectorGroup, error) {
+	return parseGroup(sel, memory, true, true)
+}
+
+func parseGroup(sel string, memory *resourceguard.Memory, acceptPseudoElements, strictCSS bool) (result SelectorGroup, err error) {
 	defer recoverAllocation(&err)
 	if err := validateSelectorInput(sel); err != nil {
 		return nil, err
 	}
 	// Source substrings borrow the caller's immutable input; no allocation
 	// occurs here and its storage is already owned by the caller.
-	p := &parser{s: sel, acceptPseudoElements: acceptPseudoElements, memory: memory}
+	p := &parser{s: sel, acceptPseudoElements: acceptPseudoElements, strictCSS: strictCSS, memory: memory}
 	compiled, err := p.parseSelectorGroup()
 	if err != nil {
 		return nil, err

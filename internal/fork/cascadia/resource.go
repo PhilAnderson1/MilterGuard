@@ -12,6 +12,9 @@ import (
 // rather than a selector feature this parser does not support.
 var ErrInvalidAttributeValue = errors.New("cascadia: invalid attribute value")
 
+// ErrInvalidAttributeOperator distinguishes non-CSS extensions from unsupported syntax.
+var ErrInvalidAttributeOperator = errors.New("cascadia: invalid attribute operator")
+
 var ErrInvalidSelector = errors.New("cascadia: invalid selector")
 
 var errSelectorMemory = errors.New("cascadia: memory limit exceeded")

@@ -185,6 +185,7 @@ type cascadeWinners struct {
 	variables                    map[string]candidate
 	alternateColourSchemeReasons concealmentReason
 	alternateColourSchemeVars    resourceguard.Table[string, bool]
+	alternateVariables           resourceguard.Table[string, candidate]
 	animation                    candidate
 }
 
@@ -211,6 +212,9 @@ func resolvedDeclaration(d *declaration, property int, context evaluationContext
 	hadVar := d.hasVars
 	v := context.substitute(d)
 	if v.status == valueInvalid {
+		if d.edgeCount != 0 {
+			return resolve(property, "initial", context.parent, context.root)
+		}
 		return resolve(property, "unset", context.parent, context.root)
 	}
 	if v.status == valueUnsupported {
@@ -221,7 +225,20 @@ func resolvedDeclaration(d *declaration, property int, context evaluationContext
 		return Value{Text: v.text}, valueUnsupported
 	}
 	if d.shorthand {
-		if property == overflowX || property == overflowY {
+		if d.edgeCount != 0 {
+			values, ok, uncertain := marginShorthandValuesWithBudget(value, context.budget)
+			if d.edgeCount == 2 && !uncertain {
+				var scratch [4]string
+				ok = ok && len(splitCSSWhitespace(value, scratch[:])) <= 2
+			}
+			if !ok {
+				return resolve(property, "initial", context.parent, context.root)
+			}
+			if uncertain {
+				return Value{Text: value}, valueUnsupported
+			}
+			value = values[d.edgeIndex]
+		} else if property == overflowX || property == overflowY {
 			values, ok, uncertain := overflowShorthandValues(value)
 			if !ok {
 				return Value{}, valueInvalid
@@ -337,8 +354,11 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 			if source.colourSchemeDependent {
 				hasColourSchemeDeclarations = true
 				if d.custom != "" {
-					if !winners.alternateColourSchemeVars.Set(s.memory, d.custom, true) {
-						return false
+					c := candidate{d: d, property: d.prop, set: true, inline: source.inline, uncertainOrigin: source.uncertain, spec: source.specificity, colourSchemeDependent: true}
+					if c.beats(winners.alternateVariables.View()[d.custom]) {
+						if !winners.alternateVariables.Set(s.memory, d.custom, c) {
+							return false
+						}
 					}
 				} else {
 					if !source.retain && d.prop < properties && d.prop >= 0 {
@@ -448,6 +468,17 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 		return cascadeWinners{}, false
 	}
 	if hasColourSchemeDeclarations {
+		for name, alternate := range winners.alternateVariables.View() {
+			if !work.check() {
+				return cascadeWinners{}, false
+			}
+			c := winners.variables[name]
+			if c.set && c.colourSchemeDependent || alternate.beats(c) {
+				if !winners.alternateColourSchemeVars.Set(s.memory, name, true) {
+					return cascadeWinners{}, false
+				}
+			}
+		}
 		for p, c := range winners.properties {
 			alternate := winners.alternateProperties[p]
 			if c.set && c.colourSchemeDependent || alternate.set && alternate.beats(c) {
@@ -479,6 +510,25 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 			if hasAttr(n, "href") {
 				st[color] = Value{Text: "link-default", Known: true, RGBA: RGBA{B: 238.0 / 255, A: 1}}
 			}
+		case "h1", "h2", "h3", "h4", "h5", "h6", "small", "big", "sub", "sup":
+			value := "smaller"
+			switch n.Data {
+			case "h1":
+				value = "2em"
+			case "h2":
+				value = "1.5em"
+			case "h3":
+				value = "1.17em"
+			case "h4":
+				value = "1em"
+			case "h5":
+				value = ".83em"
+			case "h6":
+				value = ".67em"
+			case "big":
+				value = "larger"
+			}
+			st[fontSize], _ = resolveWithBudget(fontSize, value, parent, root, work)
 		case "dialog":
 			if !hasAttr(n, "open") {
 				st[display] = Value{Text: "native-closed"}
@@ -576,15 +626,19 @@ func alternateColourSchemeEffects(d *declaration) concealmentReason {
 		return reasonContentVisibility
 	case opacity:
 		return reasonOpacity
-	case fontSize:
+	case fontSize, fontSizeAdjust:
 		return reasonFontSize
+	case scale, transform, zoom:
+		return reasonFontSize | reasonEmptyClip | reasonColour
+	case translate, rotate:
+		return reasonEmptyClip | reasonColour
 	case color, background, backgroundImage, filter, blend, backdropFilter,
 		backgroundBlend, maskImage, backgroundClip, textShadow, textFill, textStroke:
 		return reasonColour
-	case clip, clipPath, overflowX, overflowY, width, height, maxWidth, maxHeight,
+	case clip, clipPath, overflowX, overflowY, overflowInline, overflowBlock, width, height, maxWidth, maxHeight,
 		left, top, right, bottom, textIndent, letterSpacing, wordSpacing, lineHeight,
 		marginTop, marginRight, marginBottom,
-		marginLeft, zoom, transform, position:
+		marginLeft, position:
 		return reasonEmptyClip
 	default:
 		return 0

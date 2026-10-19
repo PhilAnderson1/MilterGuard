@@ -40,6 +40,16 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 		// overflow clipping boundary.
 		clipX, clipY, clipsX, clipsY = false, false, false, false
 	}
+	logicalClip := false
+	for _, p := range [...]int{overflowInline, overflowBlock} {
+		v := resolveLayoutCandidate(&wins[p-properties], context)
+		logicalClip = logicalClip || overflowClips(v) || wins[p-properties].uncertainOrigin
+	}
+	if style[display].Known && style[display].Text == "contents" {
+		logicalClip = false
+	}
+	// Without a writing-mode model either logical axis can clip a zero dimension.
+	clipX, clipY = clipX || logicalClip, clipY || logicalClip
 	isImage := node != nil && node.Namespace == "" && node.Data == "img"
 	var widthResult, heightResult, maxWidthResult, maxHeightResult layoutResult
 	if clipX || wins[overflowX-properties].uncertainOrigin || isImage {
@@ -85,7 +95,7 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 			((wins[height-properties].uncertainOrigin || wins[maxHeight-properties].uncertainOrigin) && clipY) ||
 			(isImage && (tinyWidth && wins[width-properties].uncertainOrigin || tinyHeight && wins[height-properties].uncertainOrigin))
 
-	positioned := style[position].Known && (style[position].Text == "absolute" || style[position].Text == "fixed")
+	positioned := style[position].Known && (style[position].Text == "absolute" || style[position].Text == "fixed" || style[position].Text == "relative")
 	positionedWithinClip := style[position].Known &&
 		(style[position].Text == "relative" || style[position].Text == "absolute" ||
 			style[position].Text == "fixed" || style[position].Text == "sticky")

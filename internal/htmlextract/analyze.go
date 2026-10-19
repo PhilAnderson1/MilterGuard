@@ -154,15 +154,26 @@ func (r *viewingCaseRunner) recordElement(n *html.Node, f *viewingCaseFrame, sty
 	if hiddenInput(n) {
 		elementState.none = true
 	}
-	decision := decideVisibility(style, elementState, nil)
+	var colour *colourResult
+	if n.Data == "input" {
+		switch asciiLowerWithBudget(trimCSSWhitespace(attr(n, "type")), r.work) {
+		case "button", "submit", "reset":
+			result := r.evaluateColour(style[color])
+			colour = &result
+		}
+	}
+	decision := decideVisibility(style, elementState, colour)
 	if initialize {
 		r.results.elementLabels = append(r.results.elementLabels, decision.label)
 		r.results.elementReasons = append(r.results.elementReasons, decision.reasons)
-		r.results.elements = append(r.results.elements, Element{Node: n, EffectiveOpacity: f.alpha})
+		r.results.elements = append(r.results.elements, Element{Node: n, EffectiveOpacity: f.alpha, FontSize: style[fontSize].Text})
 	} else if !mergeViewingCaseLabel(r.results.elementLabels, *elementIndex, decision.label) {
 		return fmt.Errorf("internal: viewing-case element count exceeded first case")
 	} else {
 		r.results.elementReasons[*elementIndex] |= decision.reasons
+		if decision.reasons&reasonFontSize != 0 {
+			r.results.elements[*elementIndex].FontSize = style[fontSize].Text
+		}
 		if decision.reasons&reasonOpacity != 0 && f.alpha < r.results.elements[*elementIndex].EffectiveOpacity {
 			r.results.elements[*elementIndex].EffectiveOpacity = f.alpha
 		}
@@ -223,7 +234,7 @@ func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, root
 	if f.clipsDescendantsX && resolved.offsetWithinClippedAncestorX || f.clipsDescendantsY && resolved.offsetWithinClippedAncestorY {
 		f.layoutUncertain = true
 	}
-	f.layoutUncertain = f.layoutUncertain || resolved.layoutUncertain
+	f.layoutUncertain = f.layoutUncertain || resolved.layoutUncertain || !style[translate].Known || !style[rotate].Known || !style[scale].Known || style[display].Text == "table-column" || style[display].Text == "table-column-group"
 	f.clipsDescendantsX = f.clipsDescendantsX || resolved.clipsDescendantsX
 	f.clipsDescendantsY = f.clipsDescendantsY || resolved.clipsDescendantsY
 	for i, set := range resolved.textLayoutSet {
@@ -231,7 +242,7 @@ func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, root
 			f.textLayout[i] = resolved.textLayout[i]
 		}
 	}
-	f.fontScaleUncertain = f.fontScaleUncertain || resolved.fontScaleUncertain || !style[transform].Known
+	f.fontScaleUncertain = f.fontScaleUncertain || resolved.fontScaleUncertain || !style[transform].Known || !style[scale].Known
 	f.stableDisplayNone = f.stableDisplayNone || resolved.stableDisplayNone
 	f.animationUncertain = f.animationUncertain || resolved.animationActive
 	f.alternateColourSchemeReasons |= resolved.alternateColourSchemeReasons
