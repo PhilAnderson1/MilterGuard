@@ -777,7 +777,7 @@ func relevantNormalizedDeclarationProperty(prop string) bool {
 		}
 	}
 	switch prop {
-	case "margin", "overflow", "background", "mask", "font", "all", "animation", "animation-name":
+	case "margin", "inset", "inset-inline", "inset-block", "margin-inline", "margin-block", "overflow", "background", "mask", "font", "all", "animation", "animation-name":
 		return true
 	default:
 		return false
@@ -817,12 +817,36 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 			shorthand: true, animationShorthand: prop == "animation", unsupported: parsed.unsafeIdentifier,
 		}))
 	}
-	if prop == "margin" {
+	if prop == "margin" || prop == "inset" || prop == "inset-inline" || prop == "inset-block" || prop == "margin-inline" || prop == "margin-block" {
 		values, ok, uncertain := marginShorthandValuesWithBudget(value, s.cpu)
 		if !ok {
 			return nil
 		}
-		properties := [...]int{marginTop, marginRight, marginBottom, marginLeft}
+		propertyList := [4]int{marginTop, marginRight, marginBottom, marginLeft}
+		count := 4
+		switch prop {
+		case "inset":
+			propertyList = [4]int{top, right, bottom, left}
+		case "inset-inline":
+			propertyList = [4]int{insetInlineStart, insetInlineEnd}
+			count = 2
+		case "inset-block":
+			propertyList = [4]int{insetBlockStart, insetBlockEnd}
+			count = 2
+		case "margin-inline":
+			propertyList = [4]int{marginInlineStart, marginInlineEnd}
+			count = 2
+		case "margin-block":
+			propertyList = [4]int{marginBlockStart, marginBlockEnd}
+			count = 2
+		}
+		if count == 2 && !uncertain {
+			var scratch [4]string
+			if len(splitCSSWhitespace(value, scratch[:])) > 2 {
+				return nil
+			}
+		}
+		properties := propertyList[:count]
 		out, ok := resourceguard.MakeSlice[declaration](s.memory, 0, len(properties))
 		if !ok {
 			return nil
@@ -867,10 +891,10 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	}
 	if prop == "background" {
 		if parsed.unsafeIdentifier {
-			return declarationList(s.cpu, prepared(declaration{prop: background, value: value, important: imp, order: s.order, shorthand: true, unsupported: true}), prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true, unsupported: true}))
+			return declarationList(s.cpu, prepared(declaration{prop: background, value: value, important: imp, order: s.order, shorthand: true, unsupported: true}), prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true, unsupported: true}), prepared(declaration{prop: backgroundClip, value: value, important: imp, order: s.order, shorthand: true, unsupported: true}))
 		}
 		if tokensHaveVariables(parsed.tokens) {
-			return declarationList(s.cpu, prepared(declaration{prop: background, value: value, important: imp, order: s.order, shorthand: true}), prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true}))
+			return declarationList(s.cpu, prepared(declaration{prop: background, value: value, important: imp, order: s.order, shorthand: true}), prepared(declaration{prop: backgroundImage, value: value, important: imp, order: s.order, shorthand: true}), prepared(declaration{prop: backgroundClip, value: value, important: imp, order: s.order, shorthand: true}))
 		}
 		return s.prepareDeclarations(backgroundDeclarationsTokens(asciiLowerWithBudget(value, s.cpu), parsed.tokens, parsed.status, imp, s.order, s.cpu))
 	}
@@ -882,6 +906,12 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	case "font":
 		affected = []int{fontSize}
 	case "all":
+		if !tokensHaveVariables(parsed.tokens) {
+			keyword, ok := normalizeCSSKeywordWithBudget(value, s.cpu)
+			if ok && keyword != "initial" && keyword != "inherit" && keyword != "unset" && keyword != "revert" && keyword != "revert-layer" {
+				return nil
+			}
+		}
 		return declarationList(s.cpu, prepared(declaration{prop: allShorthandProperty, value: value, important: imp, order: s.order, unsupported: true}))
 	}
 	if len(affected) > 0 {

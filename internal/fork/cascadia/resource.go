@@ -8,6 +8,10 @@ import (
 )
 
 // ErrInvalidSelector reports rejected selector syntax without allocating diagnostics.
+// ErrInvalidAttributeValue identifies a missing or malformed attribute value,
+// rather than a selector feature this parser does not support.
+var ErrInvalidAttributeValue = errors.New("cascadia: invalid attribute value")
+
 var ErrInvalidSelector = errors.New("cascadia: invalid selector")
 
 var errSelectorMemory = errors.New("cascadia: memory limit exceeded")

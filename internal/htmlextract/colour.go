@@ -29,16 +29,17 @@ func backgroundDeclarations(value string, important bool, order int, budget *cpu
 }
 
 func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus valueStatus, important bool, order int, budget *cpuGuard) []declaration {
-	colourValue, image := "transparent", "none"
+	colourValue, image, clipValue := "transparent", "none", "border-box"
 	unsupported := false
 	imageColourStatus := valueResolved
 	switch value {
 	case "inherit", "initial", "unset", "revert", "revert-layer":
 		colourValue = value
 		image = value
+		clipValue = value
 	default:
 		if tokenStatus != valueResolved {
-			return declarationList(budget, declaration{prop: background, value: value, important: important, order: order, unsupported: true}, declaration{prop: backgroundImage, value: value, important: important, order: order, unsupported: true})
+			return declarationList(budget, declaration{prop: background, value: value, important: important, order: order, unsupported: true}, declaration{prop: backgroundImage, value: value, important: important, order: order, unsupported: true}, declaration{prop: backgroundClip, value: value, important: important, order: order, unsupported: true})
 		}
 		// Tokenize to remove a standalone none, preserving spaces inside rgb().
 		var stack []css.TokenType
@@ -104,7 +105,7 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 		colourUnsupported = imageColourStatus != valueResolved
 		imageUnsupported = true
 	}
-	return declarationList(budget, declaration{prop: background, value: colourValue, important: important, order: order, unsupported: colourUnsupported}, declaration{prop: backgroundImage, value: image, important: important, order: order, unsupported: imageUnsupported})
+	return declarationList(budget, declaration{prop: background, value: colourValue, important: important, order: order, unsupported: colourUnsupported}, declaration{prop: backgroundImage, value: image, important: important, order: order, unsupported: imageUnsupported}, declaration{prop: backgroundClip, value: clipValue, important: important, order: order, unsupported: unsupported})
 }
 
 func backgroundFallbackColourTokens(tokens []valueToken, budget *cpuGuard) (string, valueStatus, bool) {
@@ -245,11 +246,15 @@ func legacyDimensionWithBudget(value string, budget *cpuGuard) (string, bool) {
 // legacy spellings are unresolved, and cannot prove colour concealment.
 func legacyDeclarations(n *html.Node) []declaration { return legacyDeclarationsWithBudget(n, nil) }
 func legacyDeclarationsWithBudget(n *html.Node, budget *cpuGuard) []declaration {
+	return legacyDeclarationsWithBody(n, nil, budget)
+}
+
+func legacyDeclarationsWithBody(n, body *html.Node, budget *cpuGuard) []declaration {
 	if n.Namespace != "" {
 		return nil
 	}
 	// At most hidden, background colour, two dimensions and background image.
-	var hints [5]declaration
+	var hints [6]declaration
 	count := 0
 	addDeclaration := func(d declaration) { hints[count] = d; count++ }
 	if hasAttr(n, "hidden") && equalASCIIFold(strings.TrimSpace(attr(n, "hidden")), "until-found") {
@@ -279,6 +284,19 @@ func legacyDeclarationsWithBudget(n *html.Node, budget *cpuGuard) []declaration 
 	switch n.Data {
 	case "body", "table", "tr", "td", "th":
 		add(background, attr(n, "bgcolor"))
+	}
+	if n.Data == "body" {
+		add(color, attr(n, "text"))
+	}
+	if (n.Data == "a" || n.Data == "area") && hasAttr(n, "href") && body != nil {
+		link, visited := attr(body, "link"), attr(body, "vlink")
+		if link != "" || visited != "" {
+			if equalASCIIFold(link, visited) {
+				add(color, link)
+			} else {
+				addDeclaration(declaration{prop: color, value: "legacy-link-colours", order: -1, unsupported: true})
+			}
+		}
 	}
 	if n.Data == "font" {
 		add(color, attr(n, "color"))
@@ -352,6 +370,7 @@ type paintLayer struct {
 	opacity                        float64
 	opacityKnown, compositionKnown bool
 	enhancementKnown               bool
+	glyphKnown, shadowKnown        bool
 	displayNone                    bool
 }
 
@@ -396,7 +415,7 @@ func layerWithClipOverride(s *Style, ignoreClipPath bool) paintLayer {
 	// contrast test. Text shadows can only add painted pixels, so they matter
 	// when the base result would otherwise look concealed, not when it already
 	// has clear contrast.
-	for _, p := range []int{filter, blend, backdropFilter, backgroundBlend, maskImage, backgroundClip, textFill, transform, textStroke} {
+	for _, p := range []int{filter, blend, backdropFilter, backgroundBlend, maskImage, backgroundClip, transform} {
 		known = known && s[p].Known
 	}
 	return paintLayer{
@@ -406,7 +425,9 @@ func layerWithClipOverride(s *Style, ignoreClipPath bool) paintLayer {
 		opacity:          s[opacity].Number,
 		opacityKnown:     s[opacity].Known,
 		compositionKnown: known,
-		enhancementKnown: s[position].Known && s[position].Text == "static" && s[textShadow].Known,
+		enhancementKnown: s[position].Known && s[position].Text == "static",
+		glyphKnown:       s[textFill].Known && s[textStroke].Known,
+		shadowKnown:      s[textShadow].Known,
 		displayNone:      s[display].Known && s[display].Text == "none",
 	}
 }
@@ -450,6 +471,13 @@ func evaluateColour(foreground Value, layers []paintLayer, work *cpuGuard) colou
 	}
 	ink, ground := foreground.RGBA, RGBA{}
 	uncertainEnhancement := false
+	if len(layers) > 0 {
+		owner := layers[len(layers)-1]
+		if !owner.glyphKnown {
+			return colourResult{uncertainty: "unsupported glyph effect"}
+		}
+		uncertainEnhancement = !owner.shadowKnown
+	}
 	unresolvedGroundImage := false
 	for i := len(layers) - 1; i >= 0; i-- {
 		if !work.check() {

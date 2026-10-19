@@ -1056,25 +1056,27 @@ func annotationWhitespaceOnlyBytes(value []byte) bool {
 }
 
 func concealmentReason(state *htmlextract.Text) (string, string) {
-	for _, reason := range state.ConcealmentReasons {
-		switch reason {
-		case "display-none":
-			return "display:none", ""
-		case "visibility-hidden":
-			return "visibility:hidden", ""
-		case "visibility-collapse":
-			return "visibility:collapse", ""
-		case "content-visibility-hidden":
-			return "content-visibility:hidden", ""
-		case "opacity":
-			return "opacity", strconv.FormatFloat(state.EffectiveOpacity, 'g', 6, 64)
-		case "font-size":
-			return "font-size", state.FontSize
-		case "colour-distance":
-			return "color-match", ""
-		case "empty-clip":
-			return "empty-clip", ""
-		}
+	return formatConcealmentReason(state.ConcealmentReasons, state.EffectiveOpacity, state.FontSize)
+}
+
+func formatConcealmentReason(reasons htmlextract.ConcealmentReason, opacity float64, fontSize string) (string, string) {
+	switch reasons.Primary() {
+	case htmlextract.ReasonDisplayNone:
+		return "display:none", ""
+	case htmlextract.ReasonVisibilityHidden:
+		return "visibility:hidden", ""
+	case htmlextract.ReasonVisibilityCollapse:
+		return "visibility:collapse", ""
+	case htmlextract.ReasonOpacity:
+		return "opacity", strconv.FormatFloat(opacity, 'g', 6, 64)
+	case htmlextract.ReasonFontSize:
+		return "font-size", fontSize
+	case htmlextract.ReasonColour:
+		return "color-match", ""
+	case htmlextract.ReasonEmptyClip:
+		return "empty-clip", ""
+	case htmlextract.ReasonContentVisibility:
+		return "content-visibility:hidden", ""
 	}
 	return "display:none", ""
 }
@@ -1147,23 +1149,7 @@ func explicitTrackingPixel(n *xhtml.Node) bool {
 }
 
 func elementConcealmentReason(state *htmlextract.Element) (string, string) {
-	for _, reason := range state.ConcealmentReasons {
-		switch reason {
-		case "display-none":
-			return "display:none", ""
-		case "visibility-hidden":
-			return "visibility:hidden", ""
-		case "visibility-collapse":
-			return "visibility:collapse", ""
-		case "content-visibility-hidden":
-			return "content-visibility:hidden", ""
-		case "opacity":
-			return "opacity", strconv.FormatFloat(state.EffectiveOpacity, 'g', 6, 64)
-		case "empty-clip":
-			return "empty-clip", ""
-		}
-	}
-	return "display:none", ""
+	return formatConcealmentReason(state.ConcealmentReasons, state.EffectiveOpacity, "")
 }
 
 func (e *htmlExtraction) findBase(n *xhtml.Node) bool {
@@ -1253,7 +1239,7 @@ func attrPresent(n *xhtml.Node, key string) (string, bool) {
 
 func omittedHTMLElement(name string) bool {
 	switch name {
-	case "head", "style", "script", "title", "template", "iframe", "object":
+	case "head", "style", "script", "title", "template", "iframe":
 		return true
 	}
 	return false

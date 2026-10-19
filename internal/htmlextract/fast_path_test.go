@@ -34,3 +34,41 @@ func TestInheritanceFastPathAgreesWithFullCascade(t *testing.T) {
 		})
 	}
 }
+
+func TestStableConcealmentFastPathPreservesPrimaryEvidence(t *testing.T) {
+	for _, source := range []string{
+		`<div style="display:none;color:white"><p>T</p></div>`,
+		`<style>@keyframes k{to{color:red}}</style><div style="display:none"><p style="animation:k 1s">T</p></div>`,
+		`<div style="display:none"><p style="font-size:0;opacity:0">T</p></div>`,
+		`<style>div{display:none}@media(min-width:600px){div{display:block;color:white}}</style><div>T</div>`,
+		`<style>@keyframes k{to{display:block}}</style><p style="display:none;animation:k 1s">T</p>`,
+	} {
+		t.Run(source, func(t *testing.T) {
+			fast, err := Analyze([]byte(source), DefaultLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			diagnostic := inspectHTML(t, source)
+			a, b := findText(t, fast, "T"), findText(t, diagnostic, "T")
+			if a.Label != b.Label || a.ConcealmentReasons.Primary() != b.ConcealmentReasons.Primary() || a.FontSize != b.FontSize || a.EffectiveOpacity != b.EffectiveOpacity {
+				t.Fatalf("annotation evidence differs: fast=%+v diagnostic=%+v", a, b)
+			}
+		})
+	}
+}
+
+func TestInertPresentationPruningPreservesSelectorDOM(t *testing.T) {
+	for _, c := range []struct{ source, want string }{
+		{`<body><style>template + p{display:none}</style><template><div style="color:red">INERT</div></template><p>T</p>`, "concealed"},
+		// :has remains conservative, exactly as before presentation pruning.
+		{`<style>div:has(.needle){display:none}</style><div><template><i class=needle>INERT</i></template><p>T</p></div>`, "unknown"},
+	} {
+		d, err := Analyze([]byte(c.source), DefaultLimits())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.Text) != 1 || findText(t, d, "T").Label != c.want {
+			t.Fatalf("inert DOM changed selector result for %s: %+v", c.source, d.Text)
+		}
+	}
+}

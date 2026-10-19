@@ -49,9 +49,10 @@ type viewingCaseResults struct {
 }
 
 type viewingCaseFrame struct {
-	n, next    *html.Node
-	entered    bool
-	styleIndex int
+	n, next     *html.Node
+	entered     bool
+	summarySeen bool
+	styleIndex  int
 	// colourContextChanged records whether this element's paint layer changed
 	// colour composition, so leaving it invalidates the one-entry memo too.
 	colourContextChanged bool
@@ -98,6 +99,14 @@ func (r *viewingCaseRunner) evaluateColour(foreground Value) colourResult {
 		return r.colourMemo.result
 	}
 	result := evaluateColour(foreground, r.layers, r.work)
+	if foreground.Text == "link-default" && result.known {
+		visited := foreground
+		visited.RGBA = RGBA{R: 85.0 / 255, G: 26.0 / 255, B: 139.0 / 255, A: 1}
+		alternate := evaluateColour(visited, r.layers, r.work)
+		if !alternate.known || colourConcealed(result.distance) != colourConcealed(alternate.distance) {
+			result = colourResult{uncertainty: "visited link colour"}
+		}
+	}
 	r.colourMemo = colourMemo{foreground: foreground, result: result, generation: r.layerGeneration, valid: true}
 	return result
 }
@@ -105,6 +114,10 @@ func (r *viewingCaseRunner) evaluateColour(foreground Value) colourResult {
 func (r *viewingCaseRunner) enterPaintLayer(n *html.Node, paint paintLayer) bool {
 	r.layers = append(r.layers, paint)
 	changed := !paint.colourNeutral()
+	if len(r.layers) > 1 {
+		parent := r.layers[len(r.layers)-2]
+		changed = changed || parent.glyphKnown != paint.glyphKnown || parent.shadowKnown != paint.shadowKnown
+	}
 	if n.Namespace == "" && n.Data == "body" && n.Parent != nil && n.Parent.Namespace == "" && n.Parent.Data == "html" {
 		// Canvas propagation can mutate both the root and body layers. Treat the
 		// body boundary conservatively even when its original layer was neutral.
@@ -213,6 +226,13 @@ func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, root
 	f.layoutUncertain = f.layoutUncertain || resolved.layoutUncertain
 	f.clipsDescendantsX = f.clipsDescendantsX || resolved.clipsDescendantsX
 	f.clipsDescendantsY = f.clipsDescendantsY || resolved.clipsDescendantsY
+	for i, set := range resolved.textLayoutSet {
+		if set {
+			f.textLayout[i] = resolved.textLayout[i]
+		}
+	}
+	f.fontScaleUncertain = f.fontScaleUncertain || resolved.fontScaleUncertain || !style[transform].Known
+	f.stableDisplayNone = f.stableDisplayNone || resolved.stableDisplayNone
 	f.animationUncertain = f.animationUncertain || resolved.animationActive
 	f.alternateColourSchemeReasons |= resolved.alternateColourSchemeReasons
 	opacityValue := style[opacity]
@@ -229,7 +249,7 @@ func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, root
 	if err := r.recordElement(n, f, style, resolved, msoRevealedDepth, elementIndex, initialize); err != nil {
 		return err
 	}
-	if n.Namespace == "" && n.Data == "noscript" {
+	if n.Namespace == "" && (n.Data == "noscript" || n.Data == "canvas" || n.Data == "object") {
 		f.layoutUncertain = true
 	}
 	if !r.work.stopped && prepared.hasElementChild {
@@ -243,7 +263,12 @@ func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, root
 
 func (r *viewingCaseRunner) recordText(n *html.Node, f *viewingCaseFrame, msoRevealedDepth int, textIndex *int, initialize bool) error {
 	style := &r.styleStack[f.styleIndex]
-	colour := r.evaluateColour(style[color])
+	var colour colourResult
+	// Stable display:none already determines the annotation. Only diagnostic
+	// inspection needs additional contrast evidence for this text.
+	if !f.stableDisplayNone || r.retainInspection {
+		colour = r.evaluateColour(style[color])
+	}
 	if r.work.stopNow(false) {
 		return errStopped
 	}
@@ -306,6 +331,12 @@ func (r *viewingCaseRunner) run(c viewingCase) error {
 		}
 		frame := &r.frames[len(r.frames)-1]
 		node := frame.n
+		// Preserve the parsed DOM for selectors, but presentation inside inert
+		// containers cannot contribute extraction results. No stack was entered.
+		if !frame.entered && nodeContentScope(node, frame.scope) == scopeInert {
+			r.frames = r.frames[:len(r.frames)-1]
+			continue
+		}
 		if !frame.entered {
 			frame.entered = true
 			frame.next = node.FirstChild
@@ -335,8 +366,16 @@ func (r *viewingCaseRunner) run(c viewingCase) error {
 		}
 		child := frame.next
 		frame.next = child.NextSibling
+		childState := frame.presentationState
+		if node.Namespace == "" && node.Data == "details" && !hasAttr(node, "open") {
+			// Only the first summary escapes closed disclosure content. Track it
+			// during the existing walk instead of rescanning siblings per child.
+			firstSummary := child.Type == html.ElementNode && child.Namespace == "" && child.Data == "summary" && !frame.summarySeen
+			frame.summarySeen = frame.summarySeen || firstSummary
+			childState.layoutUncertain = childState.layoutUncertain || !firstSummary
+		}
 		r.frames = append(r.frames, viewingCaseFrame{
-			n: child, styleIndex: frame.styleIndex, scope: frame.scope, presentationState: frame.presentationState,
+			n: child, styleIndex: frame.styleIndex, scope: frame.scope, presentationState: childState,
 			vars: frame.vars,
 		})
 	}
@@ -463,7 +502,7 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 		label := aggregateLabel(bits)
 		results.text[i].Label = label
 		if label == "concealed" {
-			results.text[i].ConcealmentReasons = concealmentReasonStringsWithBudget(results.textReasons[i], guard)
+			results.text[i].ConcealmentReasons = results.textReasons[i]
 		}
 	}
 	in.Text = results.text
@@ -473,7 +512,7 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 		}
 		results.elements[i].Label = aggregateLabel(bits)
 		if results.elements[i].Label == "concealed" {
-			results.elements[i].ConcealmentReasons = concealmentReasonStringsWithBudget(results.elementReasons[i], guard)
+			results.elements[i].ConcealmentReasons = results.elementReasons[i]
 		}
 	}
 	in.Elements = results.elements

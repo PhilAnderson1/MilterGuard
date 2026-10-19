@@ -1,7 +1,5 @@
 package htmlextract
 
-import "github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
-
 type visibilityLabel uint8
 
 const (
@@ -10,7 +8,13 @@ const (
 	labelUnknown
 )
 
-type concealmentReason uint8
+// ConcealmentReason is a compact set of reasons for a concealed result.
+// Primary returns the reason with the same priority used by output annotations.
+type ConcealmentReason uint8
+
+type concealmentReason = ConcealmentReason
+
+func (r ConcealmentReason) Primary() ConcealmentReason { return r & -r }
 
 func concealedVisibilityReason(value Value) concealmentReason {
 	if !value.Known {
@@ -37,6 +41,19 @@ const (
 	reasonContentVisibility
 )
 
+// Exported reasons let consumers format annotations without allocating or
+// reparsing an intermediate list of names.
+const (
+	ReasonDisplayNone        = reasonDisplayNone
+	ReasonVisibilityHidden   = reasonVisibilityHidden
+	ReasonVisibilityCollapse = reasonVisibilityCollapse
+	ReasonOpacity            = reasonOpacity
+	ReasonFontSize           = reasonFontSize
+	ReasonColour             = reasonColour
+	ReasonEmptyClip          = reasonEmptyClip
+	ReasonContentVisibility  = reasonContentVisibility
+)
+
 type visibilityDecision struct {
 	label   visibilityLabel
 	reasons concealmentReason
@@ -44,6 +61,7 @@ type visibilityDecision struct {
 
 type presentationState struct {
 	none, displayKnown           bool
+	stableDisplayNone            bool
 	alpha                        float64
 	alphaKnown                   bool
 	clipped, clipKnown           bool
@@ -53,6 +71,8 @@ type presentationState struct {
 	clipsDescendantsX            bool
 	clipsDescendantsY            bool
 	animationUncertain           bool
+	fontScaleUncertain           bool
+	textLayout                   [3]bool
 	clientDependentReasons       concealmentReason
 	alternateColourSchemeReasons concealmentReason
 }
@@ -89,15 +109,15 @@ func decideVisibility(style *Style, state presentationState, colour *colourResul
 		mask |= reasonContentVisibility
 	}
 
-	known := state.displayKnown && style[visibility].Known && state.alphaKnown && state.clipKnown && state.contentKnown && state.msoKnown && !state.layoutUncertain
+	known := state.displayKnown && style[visibility].Known && state.alphaKnown && state.clipKnown && state.contentKnown && state.msoKnown && !state.layoutUncertain && !state.textLayout[0] && !state.textLayout[1] && !state.textLayout[2]
 	if colour != nil {
-		if style[fontSize].Known && style[fontSize].Number <= 2 {
+		if (!state.fontScaleUncertain || style[fontSize].Number == 0) && style[fontSize].Known && style[fontSize].Number <= 2 {
 			mask |= reasonFontSize
 		}
 		if colour.known && colourConcealed(colour.distance) {
 			mask |= reasonColour
 		}
-		known = known && style[fontSize].Known && colour.known
+		known = known && style[fontSize].Known && colour.known && !state.fontScaleUncertain
 	}
 
 	decision := visibilityDecision{label: labelVisible, reasons: mask}
@@ -125,39 +145,10 @@ func decideVisibility(style *Style, state presentationState, colour *colourResul
 	if state.animationUncertain {
 		decision.label = labelUnknown
 	}
+	if state.stableDisplayNone {
+		decision.label = labelConcealed
+	}
 	return decision
-}
-
-func concealmentReasonStrings(mask concealmentReason) []string {
-	return concealmentReasonStringsWithBudget(mask, nil)
-}
-func concealmentReasonStringsWithBudget(mask concealmentReason, budget *cpuGuard) []string {
-	var reasons [8]string
-	count := 0
-	for _, reason := range []struct {
-		bit  concealmentReason
-		name string
-	}{
-		{reasonDisplayNone, "display-none"},
-		{reasonVisibilityHidden, "visibility-hidden"},
-		{reasonVisibilityCollapse, "visibility-collapse"},
-		{reasonOpacity, "opacity"},
-		{reasonFontSize, "font-size"},
-		{reasonColour, "colour-distance"},
-		{reasonEmptyClip, "empty-clip"},
-		{reasonContentVisibility, "content-visibility-hidden"},
-	} {
-		if mask&reason.bit != 0 {
-			reasons[count] = reason.name
-			count++
-		}
-	}
-	out, ok := resourceguard.MakeSlice[string](budget.allocationMemory(), count, count)
-	if !ok {
-		return nil
-	}
-	copy(out, reasons[:count])
-	return out
 }
 
 func aggregateLabel(bits visibilityLabel) string {

@@ -99,11 +99,12 @@ func (s *sheet) cacheMatch(plan *selectorPlan, n *html.Node, matched bool) {
 }
 
 type candidate struct {
-	d               *declaration
-	property        int
-	set, inline     bool
-	uncertainOrigin bool
-	spec            cascadia.Specificity
+	d                     *declaration
+	property              int
+	set, inline           bool
+	uncertainOrigin       bool
+	colourSchemeDependent bool
+	spec                  cascadia.Specificity
 }
 
 type layoutCandidate = candidate
@@ -172,10 +173,14 @@ type elementStyleResult struct {
 	displayDeclared              bool
 	alternateColourSchemeReasons concealmentReason
 	animationActive              bool
+	stableDisplayNone            bool
+	fontScaleUncertain           bool
+	textLayout, textLayoutSet    [3]bool
 }
 
 type cascadeWinners struct {
 	properties                   [properties]candidate
+	alternateProperties          [properties]candidate
 	layout                       [layoutProperties]layoutCandidate
 	variables                    map[string]candidate
 	alternateColourSchemeReasons concealmentReason
@@ -272,6 +277,7 @@ func (c evaluationContext) substitute(d *declaration) variableValue {
 // discard partial winners rather than exposing a partially trusted cascade.
 func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline []declaration, media *mediaEvaluation, selectorContext selectorMatchContext, work *cpuGuard, context evaluationContext) (cascadeWinners, bool) {
 	var winners cascadeWinners
+	var hasColourSchemeDeclarations bool
 	type cascadeSource struct {
 		specificity           cascadia.Specificity
 		inline                bool
@@ -288,7 +294,13 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 			return false
 		}
 		applyProperty := func(d *declaration, property int) {
-			c := candidate{d: d, property: property, set: true, inline: source.inline, uncertainOrigin: source.uncertain, spec: source.specificity}
+			c := candidate{d: d, property: property, set: true, inline: source.inline, uncertainOrigin: source.uncertain, spec: source.specificity, colourSchemeDependent: source.colourSchemeDependent}
+			if source.colourSchemeDependent && !source.retain && property < properties {
+				if c.beats(winners.alternateProperties[property]) {
+					winners.alternateProperties[property] = c
+				}
+				return
+			}
 			if property == animationProperty {
 				if c.beats(winners.animation) {
 					winners.animation = c
@@ -323,19 +335,30 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 				}
 			}
 			if source.colourSchemeDependent {
+				hasColourSchemeDeclarations = true
 				if d.custom != "" {
 					if !winners.alternateColourSchemeVars.Set(s.memory, d.custom, true) {
 						return false
 					}
 				} else {
-					winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(d)
+					if !source.retain && d.prop < properties && d.prop >= 0 {
+						applyProperty(d, d.prop)
+					}
+					if !source.retain && d.prop == allShorthandProperty {
+						for p := 0; p < properties; p++ {
+							applyProperty(d, p)
+						}
+					}
+					if d.prop >= properties && d.prop != allShorthandProperty {
+						winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(d)
+					}
 				}
 			}
 			if !source.retain {
 				continue
 			}
 			if d.custom != "" {
-				c := candidate{d: d, property: d.prop, set: true, inline: source.inline, uncertainOrigin: source.uncertain, spec: source.specificity}
+				c := candidate{d: d, property: d.prop, set: true, inline: source.inline, uncertainOrigin: source.uncertain, spec: source.specificity, colourSchemeDependent: source.colourSchemeDependent}
 				if winners.variables == nil {
 					s.runtime.variableScratch.Reset()
 				}
@@ -424,6 +447,14 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 	if !apply(inline, cascadeSource{inline: true, retain: true}) {
 		return cascadeWinners{}, false
 	}
+	if hasColourSchemeDeclarations {
+		for p, c := range winners.properties {
+			alternate := winners.alternateProperties[p]
+			if c.set && c.colourSchemeDependent || alternate.set && alternate.beats(c) {
+				winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(&declaration{prop: p})
+			}
+		}
+	}
 	return winners, true
 }
 
@@ -438,6 +469,22 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	for i := range st {
 		if inherits(i) {
 			st[i] = parent[i]
+		}
+	}
+	// UA presentation differs across email clients. Unknown defaults are
+	// overridable by author declarations through the normal cascade.
+	if n.Namespace == "" {
+		switch n.Data {
+		case "a", "area":
+			if hasAttr(n, "href") {
+				st[color] = Value{Text: "link-default", Known: true, RGBA: RGBA{B: 238.0 / 255, A: 1}}
+			}
+		case "dialog":
+			if !hasAttr(n, "open") {
+				st[display] = Value{Text: "native-closed"}
+			}
+		case "datalist", "rp":
+			st[display] = Value{Text: "native-hidden"}
 		}
 	}
 	refs, complete := s.collectCandidates(n, work)
@@ -496,6 +543,12 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	}
 	layout := layoutVisibility(&winners.layout, &st, context, n)
 	animationActive := s.potentiallyActiveAnimation(winners.animation, context, work)
+	// A literal display:none on this element is independent of animation on
+	// another element. Do not make this claim for inherited or variable values.
+	displayWinner := winners.properties[display]
+	stableDisplayNone := st[display].Known && st[display].Text == "none" && !animationActive &&
+		winners.alternateColourSchemeReasons&reasonDisplayNone == 0 && displayWinner.set &&
+		!displayWinner.d.hasVars && equalASCIIFold(trimCSSWhitespace(displayWinner.d.value), "none")
 	return elementStyleResult{
 		style: st, variables: scope, layoutUncertain: layout.uncertain, elementGeometryConcealed: layout.elementConcealed,
 		clipsDescendantsX: layout.clipsX, clipsDescendantsY: layout.clipsY,
@@ -503,6 +556,9 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 		displayDeclared:              winners.properties[display].set,
 		alternateColourSchemeReasons: winners.alternateColourSchemeReasons,
 		animationActive:              animationActive,
+		stableDisplayNone:            stableDisplayNone,
+		fontScaleUncertain:           layout.fontScaleUncertain,
+		textLayout:                   layout.textLayout, textLayoutSet: layout.textLayoutSet,
 	}
 }
 

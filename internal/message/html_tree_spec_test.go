@@ -461,3 +461,34 @@ func TestForeignAncestorUncertaintyDoesNotSuppressVision(t *testing.T) {
 		t.Fatalf("uncertain padding suppressed vision: %d", len(analysis.Images))
 	}
 }
+
+func TestObjectFallbackRetainsUncertainText(t *testing.T) {
+	got := htmlToText(`<object data="missing.png" type="image/png"><p>Fallback text</p></object>`)
+	if !strings.Contains(got.Text, `<visibility-uncertain>Fallback text</visibility-uncertain>`) {
+		t.Fatalf("fallback missing or confidently classified: %q", got.Text)
+	}
+	if got.ConfidentVisibleChars != 0 {
+		t.Fatalf("fallback counted as confidently visible: %d", got.ConfidentVisibleChars)
+	}
+}
+
+func TestCompactConcealmentReasonPriority(t *testing.T) {
+	for _, c := range []struct {
+		mask        htmlextract.ConcealmentReason
+		name, value string
+	}{
+		{htmlextract.ReasonDisplayNone | htmlextract.ReasonColour, "display:none", ""},
+		{htmlextract.ReasonVisibilityHidden | htmlextract.ReasonOpacity, "visibility:hidden", ""},
+		{htmlextract.ReasonVisibilityCollapse | htmlextract.ReasonContentVisibility, "visibility:collapse", ""},
+		{htmlextract.ReasonOpacity | htmlextract.ReasonFontSize, "opacity", "0.001"},
+		{htmlextract.ReasonFontSize | htmlextract.ReasonColour, "font-size", "1px"},
+		{htmlextract.ReasonColour | htmlextract.ReasonEmptyClip, "color-match", ""},
+		{htmlextract.ReasonEmptyClip | htmlextract.ReasonContentVisibility, "empty-clip", ""},
+		{htmlextract.ReasonContentVisibility, "content-visibility:hidden", ""},
+	} {
+		name, value := formatConcealmentReason(c.mask, .001, "1px")
+		if name != c.name || value != c.value {
+			t.Fatalf("mask %d: got (%s,%s), want (%s,%s)", c.mask, name, value, c.name, c.value)
+		}
+	}
+}

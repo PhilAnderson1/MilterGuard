@@ -19,7 +19,7 @@ type Text struct {
 	Label              string
 	FontSize           string
 	EffectiveOpacity   float64
-	ConcealmentReasons []string
+	ConcealmentReasons ConcealmentReason
 	Node               *html.Node
 	inspection         *textInspection
 }
@@ -37,7 +37,7 @@ type textInspection struct {
 type Element struct {
 	Node               *html.Node
 	Label              string
-	ConcealmentReasons []string
+	ConcealmentReasons ConcealmentReason
 	EffectiveOpacity   float64
 }
 
@@ -92,7 +92,7 @@ func nodeContentScope(n *html.Node, parent nodeScope) nodeScope {
 	// Otherwise a style element nested in (for example) a head template would
 	// incorrectly be collected as a document stylesheet.
 	switch n.Data {
-	case "template", "iframe", "noembed", "noframes", "object":
+	case "template", "iframe", "noembed", "noframes":
 		return scopeInert
 	}
 	if parent != scopeActive {
@@ -142,6 +142,7 @@ type documentWalker struct {
 	stack     []documentFrame
 	nodeCount int
 	mso       msoRevealedState
+	body      *html.Node
 }
 
 func (w *documentWalker) run(root *html.Node) error {
@@ -250,6 +251,9 @@ func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) e
 		return nil
 	}
 	styles := &w.document.styles
+	if node.Namespace == "" && node.Data == "body" && w.body == nil {
+		w.body = node
+	}
 	var prepared elementPreparation
 	if href, media, applies := styles.stylesheetLink(node); applies && (frame.scope == scopeActive || frame.scope == scopeHead) {
 		styles.loadStylesheetReference(href, media)
@@ -273,7 +277,7 @@ func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) e
 		prepared.inlineIncomplete = result.incomplete
 	}
 	if !styles.cascadeIncomplete && !styles.stopped {
-		prepared.legacy = prepareDeclarations(legacyDeclarationsWithBudget(node, w.processor.cpu), w.processor.cpu)
+		prepared.legacy = prepareDeclarations(legacyDeclarationsWithBody(node, w.body, w.processor.cpu), w.processor.cpu)
 	}
 	if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || prepared.inlineIncomplete {
 		if !w.document.storePreparation(node, prepared) {
@@ -283,7 +287,7 @@ func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) e
 	if frame.scope == scopeActive && (node.Data == "img" || node.Data == "input") {
 		w.document.extractableElementCount++
 	}
-	if node.Namespace == "" && node.Data == "noscript" {
+	if node.Namespace == "" && (node.Data == "noscript" || node.Data == "object" || node.Data == "canvas") {
 		frame.uncertainStylesheetOrigin = true
 	}
 	return nil

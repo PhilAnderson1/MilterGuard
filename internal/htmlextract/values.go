@@ -41,8 +41,10 @@ func makeInitialStyle() Style {
 	return s
 }
 
-func initial() Style      { return initialStyle }
-func inherits(p int) bool { return p == visibility || p == fontSize || p == lineHeight || p == color }
+func initial() Style { return initialStyle }
+func inherits(p int) bool {
+	return p == visibility || p == fontSize || p == lineHeight || p == color || p == textShadow || p == textFill || p == textStroke
+}
 
 // number parses the decimal syntax accepted by CSS <number>. strconv.ParseFloat
 // alone is too permissive here: it also accepts Go spellings such as hexadecimal
@@ -208,7 +210,12 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 		return Value{Text: numberStringWithBudget(v, "px", budget), Number: v, Known: known}, valueResolved
 	case lineHeight:
 		return resolveLineHeightWithBudget(s, budget)
-	case backgroundImage, filter, backdropFilter, maskImage, textShadow, transform:
+	case filter, backdropFilter:
+		if s == "none" {
+			return Value{Text: s, Known: true}, valueResolved
+		}
+		return Value{}, valueInvalid
+	case backgroundImage, maskImage, textShadow, transform:
 		if s == "none" {
 			return Value{Text: s, Known: true}, valueResolved
 		}
@@ -258,6 +265,17 @@ func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
 	return resolveLayoutPropertyWithBudget(property, value, nil)
 }
 func resolveLayoutPropertyWithBudget(property int, value string, budget *cpuGuard) (Value, valueStatus) {
+	switch property {
+	case inlineSize, blockSize:
+		property = width
+	case maxInlineSize, maxBlockSize:
+		property = maxWidth
+	case insetInlineStart, insetInlineEnd, insetBlockStart, insetBlockEnd:
+		property = left
+	case marginInlineStart, marginInlineEnd, marginBlockStart, marginBlockEnd:
+		property = marginLeft
+	}
+
 	if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
 		return Value{}, valueInvalid
 	}

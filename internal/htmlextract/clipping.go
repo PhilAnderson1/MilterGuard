@@ -19,6 +19,13 @@ func resolveClip(p int, s string, budget *cpuGuard) (Value, valueStatus) {
 	}
 	ts = significant(ts, budget)
 	if p == clipPath {
+		if len(ts) == 1 && ts[0].kind == css.IdentToken {
+			switch s {
+			case "margin-box", "border-box", "padding-box", "content-box", "fill-box", "stroke-box", "view-box":
+			default:
+				return Value{}, valueInvalid
+			}
+		}
 		if len(ts) == 3 && ts[0].kind == css.FunctionToken && ts[2].kind == css.RightParenthesisToken {
 			f := asciiLowerWithBudget(ts[0].raw, budget)
 			arg := ts[1].raw

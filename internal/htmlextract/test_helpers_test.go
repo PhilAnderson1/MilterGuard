@@ -36,3 +36,13 @@ func (s *sheet) candidates(n *html.Node) []selectorRef {
 	refs, _ := s.collectCandidates(n, nil)
 	return refs
 }
+
+func concealmentReasonStrings(mask concealmentReason) []string {
+	var out []string
+	for i, name := range [...]string{"display-none", "visibility-hidden", "visibility-collapse", "opacity", "font-size", "colour-distance", "empty-clip", "content-visibility-hidden"} {
+		if mask&(1<<i) != 0 {
+			out = append(out, name)
+		}
+	}
+	return out
+}

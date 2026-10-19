@@ -94,7 +94,7 @@ func TestConcealmentReasonsAreRetainedInPublicResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := findText(t, document, "T")
-	if text.Label != "concealed" || strings.Join(text.ConcealmentReasons, ",") != "display-none" {
+	if text.Label != "concealed" || strings.Join(concealmentReasonStrings(text.ConcealmentReasons), ",") != "display-none" {
 		t.Fatalf("concealed text result = %+v", text)
 	}
 }
@@ -108,7 +108,7 @@ func TestAggregatedLabelUnionsViewingCaseEvidence(t *testing.T) {
 	if text.Label != "unknown" {
 		t.Fatalf("aggregated label = %q", text.Label)
 	}
-	if len(text.ConcealmentReasons) != 0 || text.EffectiveOpacity != 0 {
+	if text.ConcealmentReasons != 0 || text.EffectiveOpacity != 0 {
 		t.Fatalf("aggregated viewing-case evidence = %+v", text)
 	}
 
@@ -117,7 +117,7 @@ func TestAggregatedLabelUnionsViewingCaseEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	text = findText(t, document, "T")
-	if text.Label != "concealed" || strings.Join(text.ConcealmentReasons, ",") != "font-size,colour-distance" || text.FontSize != "0px" {
+	if text.Label != "concealed" || strings.Join(concealmentReasonStrings(text.ConcealmentReasons), ",") != "font-size,colour-distance" || text.FontSize != "0px" {
 		t.Fatalf("aggregated font-size evidence = %+v", text)
 	}
 }
@@ -237,8 +237,13 @@ func TestInertImageLikeElementsAreNotRetained(t *testing.T) {
 		`<noframes><img id="noframes-image"><input id="noframes-input"></noframes>` +
 		`<object><img id="object-image"><input id="object-input"></object>`
 	document := inspectHTML(t, source)
-	if len(document.Elements) != 2 {
-		t.Fatalf("retained elements = %d, want only two active elements: %+v", len(document.Elements), document.Elements)
+	if len(document.Elements) != 4 {
+		t.Fatalf("retained elements = %d, want two active and two uncertain fallback elements: %+v", len(document.Elements), document.Elements)
+	}
+	for _, fallback := range document.Elements[2:] {
+		if fallback.Label != "unknown" {
+			t.Fatalf("fallback element = %+v", fallback)
+		}
 	}
 	if got := attr(document.Elements[0].Node, "id"); got != "visible-image" {
 		t.Fatalf("first retained element = %q, want visible-image", got)
@@ -1201,7 +1206,7 @@ func TestTreeEvidence(t *testing.T) {
 }
 
 func TestStylesInExcludedHeadContainersDoNotEnterCascade(t *testing.T) {
-	for _, container := range []string{"template", "iframe", "noembed", "noframes", "object"} {
+	for _, container := range []string{"template", "iframe", "noembed", "noframes"} {
 		t.Run(container, func(t *testing.T) {
 			source := `<head><` + container + `><style>#message{display:none}</style></` + container + `></head><body><p id="message">Visible text</p></body>`
 			document := inspectHTML(t, source)

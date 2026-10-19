@@ -375,6 +375,9 @@ func (p *parser) parseAttributeSelector() (attrSelector, error) {
 	}
 
 	if p.i+2 >= len(p.s) {
+		if p.s[p.i] == '=' {
+			return attrSelector{}, ErrInvalidAttributeValue
+		}
 		return attrSelector{}, ErrInvalidSelector
 	}
 
@@ -401,7 +404,7 @@ func (p *parser) parseAttributeSelector() (attrSelector, error) {
 		val, err = p.parseIdentifier()
 	}
 	if err != nil {
-		return attrSelector{}, err
+		return attrSelector{}, ErrInvalidAttributeValue
 	}
 
 	p.skipWhitespace()

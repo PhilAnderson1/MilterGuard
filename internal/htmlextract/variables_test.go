@@ -202,7 +202,7 @@ func TestAbsoluteLengthUnitsDetectTinyText(t *testing.T) {
 		t.Run(size, func(t *testing.T) {
 			document := inspectHTML(t, `<p style="font-size:`+size+`">T</p>`)
 			text := findText(t, document, "T")
-			if text.Label != "concealed" || strings.Join(text.ConcealmentReasons, ",") != "font-size" {
+			if text.Label != "concealed" || strings.Join(concealmentReasonStrings(text.ConcealmentReasons), ",") != "font-size" {
 				t.Fatalf("font-size %s = %+v, want concealed by font-size", size, text)
 			}
 		})

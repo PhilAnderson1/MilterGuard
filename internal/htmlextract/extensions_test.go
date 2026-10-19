@@ -397,11 +397,11 @@ func TestLayoutHidingPatternsAreVisibilityUncertain(t *testing.T) {
 		{"clipping with readable dimension", `overflow:hidden;width:2px`, "visible"},
 		{"contextual subunit dimension", `overflow:hidden;height:.001%`, "visible"},
 		{"ordinary responsive maximum", `overflow:hidden;max-width:100%;height:auto`, "visible"},
-		{"wrong-axis clipping", `overflow:hidden visible;height:0`, "visible"},
-		{"wrong horizontal longhand", `overflow-x:hidden;height:0`, "visible"},
-		{"wrong vertical longhand", `overflow-y:hidden;width:0`, "visible"},
+		{"wrong-axis clipping", `overflow:hidden visible;height:0`, "unknown"},
+		{"wrong horizontal longhand", `overflow-x:hidden;height:0`, "unknown"},
+		{"wrong vertical longhand", `overflow-y:hidden;width:0`, "unknown"},
 		{"shorthand overrides horizontal longhand", `overflow-x:hidden;overflow:visible;width:0`, "visible"},
-		{"horizontal longhand overrides shorthand", `overflow:hidden;overflow-x:visible;width:0`, "visible"},
+		{"horizontal longhand overrides shorthand", `overflow:hidden;overflow-x:visible;width:0`, "unknown"},
 		{"shorthand overrides vertical longhand", `overflow-y:hidden;overflow:visible;height:0`, "visible"},
 		{"invalid overflow ignored", `overflow:hidden;height:0;overflow:banana`, "unknown"},
 		{"static offset", `position:static;left:-9999px`, "visible"},
@@ -519,7 +519,7 @@ func TestElementPaintAndGeometryVisibility(t *testing.T) {
 			if element.Label != test.want {
 				t.Fatalf("label = %q, want %q", element.Label, test.want)
 			}
-			if test.reason != "" && (len(element.ConcealmentReasons) == 0 || element.ConcealmentReasons[0] != test.reason) {
+			if test.reason != "" && (element.ConcealmentReasons == 0 || concealmentReasonStrings(element.ConcealmentReasons)[0] != test.reason) {
 				t.Fatalf("reasons = %v, want %q", element.ConcealmentReasons, test.reason)
 			}
 		})
@@ -551,7 +551,7 @@ func TestNoscriptVisibilityIsClientDependent(t *testing.T) {
 		t.Fatalf("noscript fallback label = %q, want unknown", got)
 	}
 	hidden := findText(t, document, "Hidden fallback")
-	if hidden.Label != "concealed" || len(hidden.ConcealmentReasons) == 0 || hidden.ConcealmentReasons[0] != "display-none" {
+	if hidden.Label != "concealed" || hidden.ConcealmentReasons == 0 || concealmentReasonStrings(hidden.ConcealmentReasons)[0] != "display-none" {
 		t.Fatalf("concealed noscript fallback = %+v", hidden)
 	}
 }

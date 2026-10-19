@@ -17,6 +17,9 @@ const extremeNegativeSpacingPixels = 8
 
 type layoutVisibilityResult struct {
 	uncertain, elementConcealed bool
+	fontScaleUncertain          bool
+	textLayout                  [3]bool
+	textLayoutSet               [3]bool
 	clipsX, clipsY              bool
 	offsetX, offsetY            bool
 }
@@ -27,6 +30,7 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 	// likewise offsets are irrelevant on a statically positioned element.
 	overflowXResult := resolveLayoutCandidate(&wins[overflowX-properties], context)
 	overflowYResult := resolveLayoutCandidate(&wins[overflowY-properties], context)
+	overflowXResult, overflowYResult = computedOverflow(overflowXResult, overflowYResult)
 	clipX := overflowClips(overflowXResult)
 	clipY := overflowClips(overflowYResult)
 	clipsX := overflowDefinitelyClips(overflowXResult)
@@ -55,6 +59,14 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 	zeroX := clipX && zeroWidth
 	zeroY := clipY && zeroHeight
 	zeroBox := clipX && zeroX || clipY && zeroY
+	// Until writing-mode/direction and logical/physical conflicts are resolved,
+	// either logical dimension can be the clipped axis. Do not silently ignore it.
+	if clipX || clipY {
+		for _, p := range [...]int{inlineSize, blockSize, maxInlineSize, maxBlockSize} {
+			v := resolveLayoutCandidate(&wins[p-properties], context)
+			zeroBox = zeroBox || zeroLayoutCandidate(v) || wins[p-properties].uncertainOrigin
+		}
+	}
 	tinyWidth := tinyImageDimension(widthResult)
 	tinyHeight := tinyImageDimension(heightResult)
 	elementConcealed := isImage &&
@@ -86,6 +98,9 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 	}
 	extremeOffset := false
 	if positioned {
+		for _, p := range [...]int{insetInlineStart, insetInlineEnd, insetBlockStart, insetBlockEnd} {
+			extremeOffset = extremeOffset || extremeOffsetMagnitude(resolveLayoutCandidate(&wins[p-properties], context)) || wins[p-properties].uncertainOrigin
+		}
 		for _, result := range offsetResults {
 			extremeOffset = extremeOffset || extremeOffsetMagnitude(result)
 		}
@@ -96,28 +111,37 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 		}
 	}
 
-	extremeIndent := extremeOffsetMagnitude(resolveLayoutCandidate(&wins[textIndent-properties], context))
-	extremeSpacing := extremeNegativeSpacing(resolveLayoutCandidate(&wins[letterSpacing-properties], context)) ||
-		extremeNegativeSpacing(resolveLayoutCandidate(&wins[wordSpacing-properties], context))
+	var textLayout, textLayoutSet [3]bool
+	for i, p := range [...]int{textIndent, letterSpacing, wordSpacing} {
+		v := resolveLayoutCandidate(&wins[p-properties], context)
+		textLayoutSet[i] = v.set && v.value.Text != "inherit" && v.value.Text != "unset"
+		if i == 0 {
+			textLayout[i] = extremeOffsetMagnitude(v)
+		} else {
+			textLayout[i] = extremeNegativeSpacing(v)
+		}
+		textLayout[i] = textLayout[i] || wins[p-properties].uncertainOrigin
+	}
 	zeroLineHeight := clipY && style[lineHeight].Text != "normal" &&
 		(!style[lineHeight].Known || style[lineHeight].Number == 0)
 	extremeMargin := false
-	for _, property := range [...]int{marginTop, marginRight, marginBottom, marginLeft} {
+	for _, property := range [...]int{marginTop, marginRight, marginBottom, marginLeft, marginInlineStart, marginInlineEnd, marginBlockStart, marginBlockEnd} {
 		extremeMargin = extremeMargin || extremeOrUnresolvedMargin(resolveLayoutCandidate(&wins[property-properties], context))
 		uncertainOrigin = uncertainOrigin || wins[property-properties].uncertainOrigin
 	}
-	uncertainOrigin = uncertainOrigin || wins[textIndent-properties].uncertainOrigin ||
-		wins[letterSpacing-properties].uncertainOrigin || wins[wordSpacing-properties].uncertainOrigin ||
-		wins[zoom-properties].uncertainOrigin
-	tinyZoom := nearZeroZoom(resolveLayoutCandidate(&wins[zoom-properties], context))
+	uncertainOrigin = uncertainOrigin || wins[zoom-properties].uncertainOrigin
+	zoomResult := resolveLayoutCandidate(&wins[zoom-properties], context)
+	tinyZoom := nearZeroZoom(zoomResult)
+	scaleUncertain := zoomResult.set && (zoomResult.status != valueResolved || !zoomResult.value.Known || zoomResult.value.Number != 1)
 	offsetX := positionedWithinClip && (nonzeroOffset(offsetResults[0]) || nonzeroOffset(offsetResults[2]))
 	offsetY := positionedWithinClip && (nonzeroOffset(offsetResults[1]) || nonzeroOffset(offsetResults[3]))
 	if context.budget.stopped {
 		return layoutVisibilityResult{uncertain: true}
 	}
-	uncertain := uncertainOrigin || zeroBox || zeroLineHeight || positioned && extremeOffset || extremeIndent || extremeSpacing || extremeMargin || tinyZoom
+	uncertain := uncertainOrigin || zeroBox || zeroLineHeight || positioned && extremeOffset || extremeMargin || tinyZoom
 	return layoutVisibilityResult{
-		uncertain: uncertain, elementConcealed: elementConcealed,
+		textLayout: textLayout, textLayoutSet: textLayoutSet,
+		uncertain: uncertain, elementConcealed: elementConcealed, fontScaleUncertain: scaleUncertain,
 		clipsX: clipsX, clipsY: clipsY, offsetX: offsetX, offsetY: offsetY,
 	}
 }
@@ -161,12 +185,12 @@ func overflowClips(result layoutResult) bool {
 		// clipping mode. It matters only when paired with a zero dimension.
 		return true
 	}
-	return result.value.Text == "hidden" || result.value.Text == "clip"
+	return clippingOverflow(result.value.Text)
 }
 
 func overflowDefinitelyClips(result layoutResult) bool {
 	return result.set && result.status == valueResolved && result.value.Known &&
-		(result.value.Text == "hidden" || result.value.Text == "clip")
+		clippingOverflow(result.value.Text)
 }
 
 func nonzeroOffset(result layoutResult) bool {
@@ -275,4 +299,30 @@ func nearZeroZoom(result layoutResult) bool {
 		return true
 	}
 	return result.value.Number <= .01
+}
+
+func clippingOverflow(value string) bool {
+	return value == "hidden" || value == "clip" || value == "auto" || value == "scroll"
+}
+
+// visible/clip compute to auto/hidden when the opposite axis establishes a
+// scroll container. Include the implicit initial visible value.
+func computedOverflow(x, y layoutResult) (layoutResult, layoutResult) {
+	compute := func(own, other layoutResult) layoutResult {
+		if !other.set || other.status != valueResolved || !other.value.Known {
+			return own
+		}
+		v := other.value.Text
+		if v == "visible" || v == "clip" {
+			return own
+		}
+		if !own.set || own.status == valueResolved && own.value.Known && own.value.Text == "visible" {
+			return layoutResult{set: true, status: valueResolved, value: Value{Text: "auto", Known: true}}
+		}
+		if own.status == valueResolved && own.value.Known && own.value.Text == "clip" {
+			own.value.Text = "hidden"
+		}
+		return own
+	}
+	return compute(x, y), compute(y, x)
 }

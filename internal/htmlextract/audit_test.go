@@ -181,12 +181,7 @@ func TestAuditAllocationBoundaries(t *testing.T) {
 			t.Fatal("unbudgeted activation")
 		}
 	})
-	t.Run("result reasons", func(t *testing.T) {
-		memory := resourceguard.NewMemory(int64(unsafe.Sizeof(string(""))) - 1)
-		if got := concealmentReasonStringsWithBudget(reasonDisplayNone, &cpuGuard{memory: memory}); got != nil || !memory.Exhausted() {
-			t.Fatal("unbudgeted reasons")
-		}
-	})
+
 }
 
 func stopOnSecondSample() *cpuGuard {

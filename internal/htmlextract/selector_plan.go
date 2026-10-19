@@ -136,6 +136,8 @@ type selectorPlan struct {
 	uncertain       bool
 	generatedPseudo bool
 	foreignCaseType bool
+	parseRejected   bool
+	invalidSyntax   bool
 }
 
 func (p *selectorPlan) makeUncertain(memory *resourceguard.Memory) {
@@ -303,7 +305,11 @@ func planSelectorListWithStop(source string, nextSequence *int, memory *resource
 			break
 		}
 		branches++
-		if plan, keep := planSelectorBranch(branch, *nextSequence, memory); keep {
+		plan, keep := planSelectorBranch(branch, *nextSequence, memory)
+		if plan.invalidSyntax {
+			return nil, branches, false, false
+		}
+		if keep {
 			var admitted bool
 			plans, admitted = growSlice(plans, 1, memory, shouldStop)
 			if !admitted {
@@ -311,6 +317,18 @@ func planSelectorListWithStop(source string, nextSequence *int, memory *resource
 			}
 			plans = append(plans, plan)
 			(*nextSequence)++
+		}
+	}
+	// Ordinary comma lists are not forgiving. A parser rejection of unknown
+	// validity must make every surviving branch conservative, not just itself.
+	for _, p := range plans {
+		if p.parseRejected {
+			for i := range plans {
+				if !plans[i].uncertain {
+					plans[i].makeUncertain(memory)
+				}
+			}
+			break
 		}
 	}
 	return plans, branches, exceeded, iterator.Stopped()
@@ -336,6 +354,9 @@ func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memor
 		return plan, true
 	}
 
+	if err == cascadia.ErrInvalidAttributeValue {
+		return selectorPlan{invalidSyntax: true}, false
+	}
 	fallback, fallbackErr := cascadia.ConservativeFallbackWithMemory(branch, memory)
 	if fallbackErr != nil {
 		return selectorPlan{}, false
@@ -352,6 +373,7 @@ func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memor
 		scopePrefix:     fallback.PositiveSource,
 		sequence:        sequence,
 		generatedPseudo: fallback.GeneratedPseudo,
+		parseRejected:   true,
 	}
 	if _, ok := canonicalSVGTagNames[fallback.OriginalTypeName]; ok {
 		plan.foreignCaseType = true
