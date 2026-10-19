@@ -34,12 +34,15 @@ func (l Limits) validate() error {
 // document. Callers carry the remaining byte and allocation budgets across
 // all HTML parts of one message; limits are still enforced inside Analyze.
 // CSSLimitExceeded means the shared stylesheet cascade was abandoned after a
-// CSS resource limit or parser-recovery failure. A malformed inline style can
-// instead remain locally unresolved without setting that document-wide flag.
+// CSS resource limit or parser-recovery failure. MemoryLimitExceeded records
+// a failed allocation reservation, not merely using exactly the allowance.
+// A malformed inline style can instead remain locally unresolved without
+// setting that document-wide flag.
 type ResourceUsage struct {
 	InputBytes                 int
 	CSSBytes                   int
 	MemoryBytes                int64
 	CSSLimitExceeded           bool
+	MemoryLimitExceeded        bool
 	UnsupportedColourFunctions int
 }

@@ -404,17 +404,18 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 	if p.cpu == nil {
 		p.cpu, ok = resourceguard.New(p.memory, cpuGuard{shouldStop: p.shouldStop, memory: p.memory})
 		if !ok {
-			return Document{Usage: ResourceUsage{MemoryBytes: p.memory.Used()}}, resourceguard.ErrMemory
+			return Document{Usage: ResourceUsage{MemoryBytes: p.memory.Used(), MemoryLimitExceeded: true}}, resourceguard.ErrMemory
 		}
 	}
 	p.cpu.memory = p.memory
 	// Parsers and traversals share the same latched stop observation.
 	p.shouldStop, ok = resourceguard.BindStop(p.memory, p.cpu, stopCPU)
 	if !ok {
-		return Document{Usage: ResourceUsage{MemoryBytes: p.memory.Used()}}, resourceguard.ErrMemory
+		return Document{Usage: ResourceUsage{MemoryBytes: p.memory.Used(), MemoryLimitExceeded: true}}, resourceguard.ErrMemory
 	}
 	defer func() {
 		if p.memory.Exhausted() {
+			result.Usage.MemoryLimitExceeded = true
 			resultErr = fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
 		}
 	}()

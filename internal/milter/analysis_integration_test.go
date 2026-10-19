@@ -59,7 +59,7 @@ func TestHTMLCPUProtectionSkipsAIAndRespectsMode(t *testing.T) {
 			reading := 0
 			service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
 				Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
-				MaxHTMLParseCPUMilliseconds: 1000, HTMLParseCPULimitAction: "dos-reject", HTMLDoSRejectMessage: rejectMessage, VisionMode: "off",
+				MaxHTMLParseCPUMilliseconds: 1000, HTMLResourceLimitAction: "dos-reject", HTMLResourceRejectMessage: rejectMessage, VisionMode: "off",
 			}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 			service.threadCPUTime = func() (time.Duration, bool) {
 				value := readings[min(reading, len(readings)-1)]
@@ -72,7 +72,7 @@ func TestHTMLCPUProtectionSkipsAIAndRespectsMode(t *testing.T) {
 			result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, tc.mode, .9, "accept", false)
 			if result.proposed != actionReject || result.selected != tc.selected ||
 				result.classification != ai.ClassificationUnwanted || !result.htmlCPUExceeded ||
-				result.htmlCPUTime != time.Second+time.Millisecond || result.rejectMessage != rejectMessage ||
+				result.htmlPrimaryCPUTime != time.Second+time.Millisecond || result.rejectMessage != rejectMessage ||
 				analyzer.calls.Load() != 0 {
 				t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
 			}
@@ -86,7 +86,7 @@ func TestHTMLCPULimitFallbackContinuesAIWithBoundedExtraction(t *testing.T) {
 	reading := 0
 	service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
 		Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 4096,
-		MaxHTMLParseCPUMilliseconds: 250, HTMLParseCPULimitAction: "fallback", VisionMode: "off",
+		MaxHTMLParseCPUMilliseconds: 250, HTMLResourceLimitAction: "fallback", VisionMode: "off",
 	}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	service.threadCPUTime = func() (time.Duration, bool) {
 		value := readings[min(reading, len(readings)-1)]
@@ -111,7 +111,7 @@ func TestHTMLCPULimitRejectStopsLexicalFallback(t *testing.T) {
 	reading := 0
 	service := &analysisService{ai: config.AIConfig{
 		MaxBodyChars: 4096, MaxHTMLParseCPUMilliseconds: 250,
-		HTMLParseCPULimitAction: "dos-reject", VisionMode: "off",
+		HTMLResourceLimitAction: "dos-reject", VisionMode: "off",
 	}}
 	service.threadCPUTime = func() (time.Duration, bool) {
 		value := readings[min(reading, len(readings)-1)]
@@ -122,7 +122,8 @@ func TestHTMLCPULimitRejectStopsLexicalFallback(t *testing.T) {
 	msg.AddHeader("Content-Type", "text/html")
 	msg.AddBody([]byte(`<p style="display:none">hidden</p><p>ordinary message</p>`))
 
-	prepared, _, measured, exceeded := service.buildAnalysis(context.Background(), msg, message.AnalysisContext{})
+	prepared, usage := service.buildAnalysis(context.Background(), msg, message.AnalysisContext{})
+	measured, exceeded := usage.measured, usage.cpuExceeded()
 	if !measured || !exceeded || !prepared.BodyExtractionIncomplete || !prepared.HTMLCPULimitExceeded {
 		t.Fatalf("prepared=%+v measured=%t exceeded=%t", prepared, measured, exceeded)
 	}
@@ -135,7 +136,7 @@ func TestHTMLCPULimitFallbackRetainsCompletedMultipartAnalysis(t *testing.T) {
 	newService := func() *analysisService {
 		return &analysisService{ai: config.AIConfig{
 			MaxBodyChars: 4096, MaxHTMLParseCPUMilliseconds: 250,
-			HTMLParseCPULimitAction: "fallback", VisionMode: "off",
+			HTMLResourceLimitAction: "fallback", VisionMode: "off",
 		}}
 	}
 	msg := message.New(8192)
@@ -151,26 +152,28 @@ func TestHTMLCPULimitFallbackRetainsCompletedMultipartAnalysis(t *testing.T) {
 		baselineCalls++
 		return time.Second, true
 	}
-	_, _, measured, exceeded := baseline.buildAnalysis(context.Background(), msg, message.AnalysisContext{})
+	_, baselineUsage := baseline.buildAnalysis(context.Background(), msg, message.AnalysisContext{})
+	measured, exceeded := baselineUsage.measured, baselineUsage.cpuExceeded()
 	if !measured || exceeded || baselineCalls < 2 {
 		t.Fatalf("baseline clock: measured=%v exceeded=%v calls=%d", measured, exceeded, baselineCalls)
 	}
 
-	// Cross the limit only at the final, post-extraction clock sample. The
-	// already completed analysis must be retained rather than rebuilt.
+	// Any clock read after the last in-work checkpoint would cross the limit.
+	// Completion must not take that extra sample or veto completed output.
 	calls := 0
 	service := newService()
 	service.threadCPUTime = func() (time.Duration, bool) {
 		calls++
-		if calls == baselineCalls {
+		if calls > baselineCalls {
 			return time.Second + 251*time.Millisecond, true
 		}
 		return time.Second, true
 	}
-	prepared, duration, measured, exceeded := service.buildAnalysis(context.Background(), msg, message.AnalysisContext{})
-	if !measured || !exceeded || duration != 251*time.Millisecond || calls != baselineCalls {
+	prepared, usage := service.buildAnalysis(context.Background(), msg, message.AnalysisContext{})
+	measured, exceeded = usage.measured, usage.cpuExceeded()
+	if !measured || exceeded || calls != baselineCalls {
 		t.Fatalf("late limit: measured=%v exceeded=%v duration=%v calls=%d want calls=%d",
-			measured, exceeded, duration, calls, baselineCalls)
+			measured, exceeded, usage.primaryCPUTime, calls, baselineCalls)
 	}
 	if prepared.BodyExtractionIncomplete || !prepared.HasHTML ||
 		!strings.Contains(prepared.Prompt, "plain evidence") || !strings.Contains(prepared.Prompt, "HTML evidence") {
@@ -189,14 +192,14 @@ func TestHTMLCPULimitRejectIsNotDoSActivity(t *testing.T) {
 	}
 }
 
-func TestHTMLCPULimitRejectSkipsAIWithoutDoSMessage(t *testing.T) {
+func TestHTMLCPULimitRejectUsesResourceMessageWithoutDoSClassification(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: ai.ClassificationLegitimate, Score: 1}}
 	readings := []time.Duration{time.Second, 2 * time.Second, 2 * time.Second}
 	reading := 0
 	service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
 		Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
-		MaxHTMLParseCPUMilliseconds: 250, HTMLParseCPULimitAction: "reject",
-		HTMLDoSRejectMessage: "must not be used", VisionMode: "off",
+		MaxHTMLParseCPUMilliseconds: 250, HTMLResourceLimitAction: "reject",
+		HTMLResourceRejectMessage: "custom resource limit message", VisionMode: "off",
 	}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	service.threadCPUTime = func() (time.Duration, bool) {
 		value := readings[min(reading, len(readings)-1)]
@@ -208,7 +211,7 @@ func TestHTMLCPULimitRejectSkipsAIWithoutDoSMessage(t *testing.T) {
 	msg.AddBody([]byte("<p>ordinary message</p>"))
 	result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
 	if result.selected != actionReject || result.htmlCPUAction != "reject" || !result.htmlCPUExceeded ||
-		result.classification != "" || result.rejectMessage != "" || analyzer.calls.Load() != 0 {
+		result.classification != "" || result.rejectMessage != "custom resource limit message" || analyzer.calls.Load() != 0 {
 		t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
 	}
 }
@@ -234,7 +237,7 @@ func TestContentCPUProtectionRejectsOverBudgetPlainText(t *testing.T) {
 	reading := 0
 	service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
 		Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
-		MaxHTMLParseCPUMilliseconds: 1, VisionMode: "off",
+		MaxHTMLParseCPUMilliseconds: 1, HTMLResourceLimitAction: "dos-reject", VisionMode: "off",
 	}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	service.threadCPUTime = func() (time.Duration, bool) {
 		reading++
@@ -280,7 +283,8 @@ func TestContentPreparationObservesCancellationWithCPUProtectionDisabled(t *test
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	prepared, _, measured, exceeded := service.buildAnalysis(ctx, msg, message.AnalysisContext{})
+	prepared, usage := service.buildAnalysis(ctx, msg, message.AnalysisContext{})
+	measured, exceeded := usage.measured, usage.cpuExceeded()
 	if measured || exceeded {
 		t.Fatalf("CPU result measured=%t exceeded=%t, want context cancellation only", measured, exceeded)
 	}
@@ -307,15 +311,22 @@ func TestCancelledAnalysisDoesNotCallAnalyzer(t *testing.T) {
 	}
 }
 
-func TestHTMLCPUProtectionRecordsDistinctActivity(t *testing.T) {
-	repository := &recordingActivity{}
-	service := &activityService{repository: repository}
-	service.recordScan(context.Background(), evaluationResult{
-		selected: actionReject, htmlCPUExceeded: true, htmlCPUAction: "dos-reject",
-	}, nil)
-	if len(repository.events) != 1 || repository.events[0].EventType != stores.ActivityEventHTMLDoS ||
-		repository.events[0].Outcome != stores.ActivityOutcomeRejected {
-		t.Fatalf("activity events = %+v", repository.events)
+func TestHTMLResourceProtectionRecordsDistinctActivity(t *testing.T) {
+	for _, memory := range []bool{false, true} {
+		for _, action := range []string{"dos-reject", "reject"} {
+			repository := &recordingActivity{}
+			service := &activityService{repository: repository}
+			service.recordScan(context.Background(), evaluationResult{
+				selected: actionReject, htmlCPUExceeded: !memory, htmlMemoryExceeded: memory, htmlCPUAction: action,
+			}, nil)
+			want := stores.ActivityEventHTMLDoS
+			if action == "reject" {
+				want = stores.ActivityEventHTMLLimit
+			}
+			if len(repository.events) != 1 || repository.events[0].EventType != want || repository.events[0].Outcome != stores.ActivityOutcomeRejected {
+				t.Fatalf("memory=%v action=%s events=%+v", memory, action, repository.events)
+			}
+		}
 	}
 }
 

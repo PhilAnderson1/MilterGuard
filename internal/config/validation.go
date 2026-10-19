@@ -158,11 +158,11 @@ func validateAI(c AIConfig) error {
 	if c.MaxHTMLParseMemoryBytes < 8<<20 || c.MaxHTMLParseMemoryBytes > 512<<20 {
 		return fmt.Errorf("ai.max_html_parse_memory_bytes must be between %d and %d bytes", 8<<20, 512<<20)
 	}
-	if c.HTMLParseCPULimitAction != "fallback" && c.HTMLParseCPULimitAction != "reject" && c.HTMLParseCPULimitAction != "dos-reject" {
-		return fmt.Errorf("ai.html_parse_cpu_limit_action must be fallback, reject, or dos-reject")
+	if c.HTMLResourceLimitAction != "fallback" && c.HTMLResourceLimitAction != "reject" && c.HTMLResourceLimitAction != "dos-reject" {
+		return fmt.Errorf("ai.html_resource_limit_action must be fallback, reject, or dos-reject")
 	}
-	if c.HTMLParseCPULimitAction == "dos-reject" && strings.TrimSpace(c.HTMLDoSRejectMessage) == "" {
-		return fmt.Errorf("ai.html_dos_reject_message must not be empty")
+	if c.HTMLResourceLimitAction != "fallback" && strings.TrimSpace(c.HTMLResourceRejectMessage) == "" {
+		return fmt.Errorf("ai.html_resource_reject_message must not be empty")
 	}
 	if c.IncompleteBodyAction != "scan" && c.IncompleteBodyAction != "reject" {
 		return fmt.Errorf("ai incomplete_body_action must be scan or reject")

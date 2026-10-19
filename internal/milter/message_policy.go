@@ -121,7 +121,7 @@ func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, cur
 	defer cancel()
 	if result.selected == actionReject {
 		s.recordRejection(ctx, current.message, current.visibleSender, current.envelopeSender, current.envelopeRecipients, result.reasons, "ai")
-		if !current.authenticated && !(result.htmlCPUExceeded && result.htmlCPUAction == "reject") {
+		if !current.authenticated && !((result.htmlCPUExceeded || result.htmlMemoryExceeded) && result.htmlCPUAction == "reject") {
 			s.ipReputation.add(ctx, current.peerIP, current.connectionDNS)
 		}
 	}
@@ -131,7 +131,7 @@ func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, cur
 	if result.selected == actionAccept && current.authenticated {
 		s.learnAuthenticatedRecipients(ctx, current.envelopeSender, current.envelopeRecipients)
 	}
-	if !current.authenticated && result.err == nil && current.visibleSender != "" && !(result.htmlCPUExceeded && result.htmlCPUAction == "reject") {
+	if !current.authenticated && result.err == nil && current.visibleSender != "" && !((result.htmlCPUExceeded || result.htmlMemoryExceeded) && result.htmlCPUAction == "reject") {
 		s.recordInboundClassification(ctx, current, result, inbound.trustRequirementMet, unwantedMinScore)
 	}
 }

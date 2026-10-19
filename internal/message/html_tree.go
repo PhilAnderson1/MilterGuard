@@ -252,11 +252,11 @@ func htmlToText(source string) extractedContent {
 func htmlToTextWithBudget(source string, budget *extractionBudget) extractedContent {
 	budget.htmlParts++
 	if budget.useFallback() {
-		return extractCPUFallback(source, budget)
+		return budget.extractFallback(source)
 	}
 	limits, ok := budget.htmlLimits(len(source))
 	if !ok {
-		content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallbackShouldStop)
+		content := budget.extractFallback(source)
 		content.ExtractionIncomplete = true
 		return content
 	}
@@ -270,20 +270,24 @@ func extractTreeHTML(source string) extractedContent {
 func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget *extractionBudget) extractedContent {
 	inspection, err := htmlextract.AnalyzeWithStop([]byte(source), limits, budget.shouldFallback)
 	budget.consumeHTML(inspection.Usage)
-	if htmlextract.IsStopped(err) || budget.useFallback() {
-		return extractCPUFallback(source, budget)
+	if htmlextract.IsStopped(err) {
+		budget.cpuLimitExceeded = true
+	}
+	if budget.useFallback() {
+		return budget.extractFallback(source)
 	}
 	if err != nil {
 		// A bounded lexical fallback retains evidence when tree/style processing
 		// cannot complete. It is explicitly reported as incomplete extraction.
-		content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallbackShouldStop)
+		content := budget.extractFallback(source)
 		content.ExtractionIncomplete = true
 		return content
 	}
 	memory := resourceguard.NewMemory(budget.memoryBytesRemaining)
 	mapBytes := int64(len(inspection.Text)+len(inspection.Elements))*64 + 256
 	if !memory.Reserve(mapBytes) {
-		content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallbackShouldStop)
+		budget.consumeMemory(memory)
+		content := budget.extractFallback(source)
 		content.ExtractionIncomplete = true
 		return content
 	}
@@ -298,16 +302,16 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 	}
 	for i := range inspection.Text {
 		if i&255 == 0 && budget.useFallback() {
-			budget.memoryBytesRemaining = remainingInt64(budget.memoryBytesRemaining, memory.Used())
-			return extractCPUFallback(source, budget)
+			budget.consumeMemory(memory)
+			return budget.extractFallback(source)
 		}
 		state := &inspection.Text[i]
 		e.states[state.Node] = state
 	}
 	for i := range inspection.Elements {
 		if i&255 == 0 && budget.useFallback() {
-			budget.memoryBytesRemaining = remainingInt64(budget.memoryBytesRemaining, memory.Used())
-			return extractCPUFallback(source, budget)
+			budget.consumeMemory(memory)
+			return budget.extractFallback(source)
 		}
 		state := &inspection.Elements[i]
 		e.elements[state.Node] = state
@@ -324,7 +328,7 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		confidentChars = e.confidentVisibleCharacters(inspection.Text)
 	}
 	if e.memoryExhausted {
-		budget.memoryBytesRemaining = remainingInt64(budget.memoryBytesRemaining, memory.Used())
+		budget.consumeMemory(memory)
 		return extractedContent{
 			Text: tagged.text, VisibleText: tagged.visible, StrippedText: stripped,
 			Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
@@ -333,8 +337,8 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		}
 	}
 	if e.stopped || budget.useFallback() {
-		budget.memoryBytesRemaining = remainingInt64(budget.memoryBytesRemaining, memory.Used())
-		return extractCPUFallback(source, budget)
+		budget.consumeMemory(memory)
+		return budget.extractFallback(source)
 	}
 	cssIncomplete := inspection.UnresolvedStylesheet || inspection.Usage.CSSLimitExceeded
 	if cssIncomplete {
@@ -343,7 +347,7 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		// image analysis.
 		confidentChars = 0
 	}
-	budget.memoryBytesRemaining = remainingInt64(budget.memoryBytesRemaining, memory.Used())
+	budget.consumeMemory(memory)
 	return extractedContent{
 		Text: tagged.text, VisibleText: tagged.visible, ConfidentVisibleChars: confidentChars, StrippedText: stripped,
 		Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
@@ -353,9 +357,12 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 	}
 }
 
-func extractCPUFallback(source string, budget *extractionBudget) extractedContent {
-	content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallbackShouldStop)
-	content.HTMLCPULimitExceeded = true
+func (budget *extractionBudget) extractFallback(source string) extractedContent {
+	if budget.memoryStopped() {
+		return extractedContent{ExtractionIncomplete: true, HTMLMemoryLimitExceeded: true}
+	}
+	content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallbackStop)
+	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
 	return content
 }
 

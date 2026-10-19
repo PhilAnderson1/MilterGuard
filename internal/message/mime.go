@@ -35,6 +35,11 @@ type extractionBudget struct {
 	shouldFallback            func() bool
 	fallbackShouldStop        func() bool
 	cpuLimitExceeded          bool
+	fallbackActive            bool
+	fallbackStopped           bool
+	memoryLimitExceeded       bool
+	onMemoryLimit             func()
+	stopOnMemoryLimit         bool
 	compactURLs               bool
 }
 
@@ -56,6 +61,8 @@ func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBu
 		shouldFallback:            control.ShouldFallback,
 		fallbackShouldStop:        control.FallbackShouldStop,
 		compactURLs:               !control.DisableURLCompaction,
+		onMemoryLimit:             control.MemoryLimitExceeded,
+		stopOnMemoryLimit:         control.StopOnMemoryLimit,
 	}
 }
 
@@ -67,7 +74,7 @@ func (b *extractionBudget) setDecodedTextByteLimit(bytes int64) {
 }
 
 func (b *extractionBudget) useFallback() bool {
-	if b.cpuLimitExceeded {
+	if b.fallbackActive || b.cpuLimitExceeded || b.memoryStopped() {
 		return true
 	}
 	if b.shouldFallback != nil && b.shouldFallback() {
@@ -77,24 +84,66 @@ func (b *extractionBudget) useFallback() bool {
 	return false
 }
 
-// outputShouldStop selects the active CPU window for final string work. Once
-// primary processing has switched to lexical fallback, completed fallback
-// output is governed by the fallback callback rather than being rejected just
-// because the primary window remains exhausted.
+// Output and decoding use the active stage. Once fallback starts, the primary
+// allowance is never sampled again, including for later MIME parts.
 func (b *extractionBudget) outputShouldStop() bool {
-	if !b.cpuLimitExceeded {
-		return b.useFallback()
+	if b.memoryStopped() {
+		return true
 	}
-	return b.fallbackShouldStop != nil && b.fallbackShouldStop()
+	if b.fallbackActive || b.cpuLimitExceeded {
+		return b.fallbackStop()
+	}
+	return b.useFallback()
 }
 
-// Decoding is also needed by lexical HTML fallback. Switch to its allowance
-// without restarting the decoder when the primary CPU window expires.
+func (b *extractionBudget) fallbackStop() bool {
+	b.fallbackActive = true
+	if b.memoryStopped() || b.fallbackStopped {
+		return true
+	}
+	if b.fallbackShouldStop != nil && b.fallbackShouldStop() {
+		b.fallbackStopped = true
+		b.cpuLimitExceeded = true
+		return true
+	}
+	return false
+}
+
 func (b *extractionBudget) decodingShouldStop() bool {
+	if b.fallbackActive {
+		return b.fallbackStop()
+	}
+	if b.memoryStopped() {
+		return true
+	}
 	if !b.useFallback() {
 		return false
 	}
-	return b.fallbackShouldStop == nil || b.fallbackShouldStop()
+	if b.fallbackShouldStop == nil {
+		return true
+	}
+	return b.fallbackStop()
+}
+
+func (b *extractionBudget) memoryStopped() bool {
+	return b.memoryLimitExceeded && b.stopOnMemoryLimit
+}
+
+func (b *extractionBudget) noteMemoryLimit() {
+	if b.memoryLimitExceeded {
+		return
+	}
+	b.memoryLimitExceeded = true
+	if b.onMemoryLimit != nil {
+		b.onMemoryLimit()
+	}
+}
+
+func (b *extractionBudget) consumeMemory(memory *resourceguard.Memory) {
+	b.memoryBytesRemaining = remainingInt64(b.memoryBytesRemaining, memory.Used())
+	if memory.Exhausted() {
+		b.noteMemoryLimit()
+	}
 }
 
 func (b *extractionBudget) takePart() bool {
@@ -106,6 +155,9 @@ func (b *extractionBudget) takePart() bool {
 }
 
 func (b *extractionBudget) htmlLimits(bytes int) (htmlextract.Limits, bool) {
+	if b.memoryBytesRemaining <= 0 {
+		b.noteMemoryLimit()
+	}
 	if b.htmlParts > maxHTMLParts || bytes > b.htmlBytesRemaining || b.cssBytesRemaining <= 0 || b.memoryBytesRemaining <= 0 {
 		b.htmlBytesRemaining = 0
 		return htmlextract.Limits{}, false
@@ -118,6 +170,9 @@ func (b *extractionBudget) htmlLimits(bytes int) (htmlextract.Limits, bool) {
 }
 
 func (b *extractionBudget) consumeHTML(usage htmlextract.ResourceUsage) {
+	if usage.MemoryLimitExceeded {
+		b.noteMemoryLimit()
+	}
 	b.cssBytesRemaining = remainingInt(b.cssBytesRemaining, usage.CSSBytes)
 	b.memoryBytesRemaining = remainingInt64(b.memoryBytesRemaining, usage.MemoryBytes)
 }
@@ -128,6 +183,7 @@ func (b *extractionBudget) reserveOutputMemory(bytes int64) bool {
 	}
 	if bytes > b.memoryBytesRemaining {
 		b.memoryBytesRemaining = 0
+		b.noteMemoryLimit()
 		return false
 	}
 	b.memoryBytesRemaining -= bytes
@@ -149,22 +205,23 @@ func remainingInt(remaining, used int) int {
 }
 
 type extractedContent struct {
-	Text                  string
-	VisibleText           string
-	ConfidentVisibleChars int
-	StrippedText          string
-	Links                 []string
-	ImageRefs             []string
-	Images                []extractedImage
-	HTML                  bool
-	MIMEIncomplete        bool
-	TransferIncomplete    bool
-	ExtractionIncomplete  bool
-	HTMLFallbackUsed      bool
-	HTMLCPULimitExceeded  bool
-	CSSIncomplete         bool
-	HasConcealedContent   bool
-	HTMLComments          htmlCommentStats
+	Text                    string
+	VisibleText             string
+	ConfidentVisibleChars   int
+	StrippedText            string
+	Links                   []string
+	ImageRefs               []string
+	Images                  []extractedImage
+	HTML                    bool
+	MIMEIncomplete          bool
+	TransferIncomplete      bool
+	ExtractionIncomplete    bool
+	HTMLFallbackUsed        bool
+	HTMLCPULimitExceeded    bool
+	HTMLMemoryLimitExceeded bool
+	CSSIncomplete           bool
+	HasConcealedContent     bool
+	HTMLComments            htmlCommentStats
 }
 
 // incomplete reports missing or undecodable evidence, not visibility uncertainty.
@@ -193,7 +250,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 	// Opaque attachments contribute only a marker. Validate their encoding
 	// without allocating a decoded body that no consumer will use.
 	if mediaType != "text/plain" && mediaType != "text/html" && mediaType != "message/rfc822" && !strings.HasPrefix(mediaType, "multipart/") && !strings.HasPrefix(mediaType, "image/") {
-		incomplete, complete := validateOpaqueTransfer(encoding, data, budget.useFallback)
+		incomplete, complete := validateOpaqueTransfer(encoding, data, budget.outputShouldStop)
 		return extractedContent{Text: attachmentMarker(mediaType, params["name"]), TransferIncomplete: incomplete, ExtractionIncomplete: !complete, HTMLCPULimitExceeded: budget.cpuLimitExceeded}
 	}
 	decoded, transferIncomplete := decodeTransferRecoveringWithStop(encoding, data, budget.decodingShouldStop)
@@ -211,7 +268,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		var mimeIncomplete, nestedTransferIncomplete, processingStopped bool
 		var nestedExtractionIncomplete bool
 		for {
-			if budget.useFallback() {
+			if budget.outputShouldStop() {
 				mimeIncomplete = true
 				processingStopped = true
 				break
@@ -374,14 +431,14 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		return stoppedMIMEContent()
 	}
 	budget.decodedTextBytesRemaining -= int64(len(text))
-	if budget.useFallback() {
+	if budget.outputShouldStop() {
 		return extractedContent{
 			Text: text, VisibleText: text, ConfidentVisibleChars: confidentTextCharacters(text),
-			TransferIncomplete: transferIncomplete, ExtractionIncomplete: true, HTMLCPULimitExceeded: true,
+			TransferIncomplete: transferIncomplete, ExtractionIncomplete: true, HTMLCPULimitExceeded: budget.cpuLimitExceeded,
 		}
 	}
 	links := linkCollector{compactURLs: budget.compactURLs, shouldStop: budget.outputShouldStop}
-	promptText, urlsComplete := rewritePlainTextURLs(text, budget.compactURLs, &links, budget.useFallback)
+	promptText, urlsComplete := rewritePlainTextURLs(text, budget.compactURLs, &links, budget.outputShouldStop)
 	return extractedContent{
 		Text: promptText, VisibleText: text,
 		ConfidentVisibleChars: confidentTextCharacters(text),
@@ -414,6 +471,7 @@ func joinExtractedText(parts []string, separator string, budget *extractionBudge
 	for _, part := range parts {
 		if int64(len(part)) > maxInt64-total {
 			budget.memoryBytesRemaining = 0
+			budget.noteMemoryLimit()
 			return "", false
 		}
 		total += int64(len(part))

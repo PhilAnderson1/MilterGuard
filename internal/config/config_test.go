@@ -463,20 +463,20 @@ func TestValidateMaximumHTMLParseCPU(t *testing.T) {
 	if got := defaults().AI.MaxHTMLParseCPUMilliseconds; got != 250 {
 		t.Fatalf("maximum HTML parse CPU default = %d, want 250", got)
 	}
-	if got := defaults().AI.HTMLParseCPULimitAction; got != "dos-reject" {
-		t.Fatalf("HTML parse CPU action default = %q, want dos-reject", got)
+	if got := defaults().AI.HTMLResourceLimitAction; got != "reject" {
+		t.Fatalf("HTML resource action default = %q, want reject", got)
 	}
 	for _, action := range []string{"fallback", "reject", "dos-reject"} {
 		cfg := validConfig()
-		cfg.AI.HTMLParseCPULimitAction = action
+		cfg.AI.HTMLResourceLimitAction = action
 		if err := cfg.Validate(); err != nil {
-			t.Fatalf("valid html_parse_cpu_limit_action %q rejected: %v", action, err)
+			t.Fatalf("valid html_resource_limit_action %q rejected: %v", action, err)
 		}
 	}
 	cfg := validConfig()
-	cfg.AI.HTMLParseCPULimitAction = "accept"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "html_parse_cpu_limit_action") {
-		t.Fatalf("invalid html_parse_cpu_limit_action error = %v", err)
+	cfg.AI.HTMLResourceLimitAction = "accept"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "html_resource_limit_action") {
+		t.Fatalf("invalid html_resource_limit_action error = %v", err)
 	}
 	for _, milliseconds := range []int{1, 250, 1000} {
 		cfg := validConfig()
@@ -492,23 +492,24 @@ func TestValidateMaximumHTMLParseCPU(t *testing.T) {
 			t.Fatalf("invalid max_html_parse_cpu_ms %d error = %v", milliseconds, err)
 		}
 	}
-	const wantRejectMessage = "Message rejected due to suspected HTML/CSS denial-of-service attack"
-	if got := defaults().AI.HTMLDoSRejectMessage; got != wantRejectMessage {
+	const wantRejectMessage = "Message rejected because content processing exceeded server resource limits"
+	if got := defaults().AI.HTMLResourceRejectMessage; got != wantRejectMessage {
 		t.Fatalf("HTML DoS rejection message default = %q, want %q", got, wantRejectMessage)
 	}
-	cfg = validConfig()
-	cfg.AI.HTMLDoSRejectMessage = " "
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "html_dos_reject_message") {
-		t.Fatalf("blank html_dos_reject_message error = %v", err)
-	}
-	for _, action := range []string{"fallback", "reject"} {
+	for _, action := range []string{"dos-reject", "reject", "fallback"} {
 		cfg := validConfig()
-		cfg.AI.HTMLParseCPULimitAction = action
-		cfg.AI.HTMLDoSRejectMessage = " "
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("unused blank html_dos_reject_message rejected for %s: %v", action, err)
+		cfg.AI.HTMLResourceLimitAction = action
+		cfg.AI.HTMLResourceRejectMessage = " "
+		err := cfg.Validate()
+		if action == "fallback" {
+			if err != nil {
+				t.Fatalf("unused blank message rejected: %v", err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), "html_resource_reject_message") {
+			t.Fatalf("blank resource rejection message for %s: %v", action, err)
 		}
 	}
+
 }
 
 func TestValidateMaximumHTMLParseMemory(t *testing.T) {
@@ -1160,6 +1161,94 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 			}
 			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
 				t.Fatalf("Validate() error = %v, want error containing %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestLoadResourceRejectMessageAlias(t *testing.T) {
+	for _, tc := range []struct {
+		name, settings, want string
+		warning, invalid     bool
+	}{
+		{name: "default", want: defaults().AI.HTMLResourceRejectMessage},
+		{name: "new", settings: "  html_resource_reject_message: new message\n", want: "new message"},
+		{name: "legacy", settings: "  html_dos_reject_message: old message\n", want: "old message", warning: true},
+		{name: "both", settings: "  html_dos_reject_message: old message\n  html_resource_reject_message: new message\n", want: "new message", warning: true},
+		{name: "reverse order", settings: "  html_resource_reject_message: new message\n  html_dos_reject_message: old message\n", want: "new message", warning: true},
+		{name: "explicit default wins", settings: "  html_resource_reject_message: " + defaults().AI.HTMLResourceRejectMessage + "\n  html_dos_reject_message: old message\n", want: defaults().AI.HTMLResourceRejectMessage, warning: true},
+		{name: "empty new wins", settings: "  html_resource_reject_message: ''\n  html_dos_reject_message: old message\n", invalid: true},
+		{name: "empty legacy", settings: "  html_dos_reject_message: ''\n", invalid: true},
+		{name: "unknown field", settings: "  html_resource_reject_messsage: typo\n", invalid: true},
+		{name: "duplicate legacy", settings: "  html_dos_reject_message: one\n  html_dos_reject_message: two\n", invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			source := "ai:\n  html_resource_limit_action: reject\n  api_key: test-key\n  model: test-model\n" + tc.settings + "filtering:\n  sender_domain_allowlist: ''\n"
+			if err := os.WriteFile(path, []byte(source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if tc.invalid {
+				if err == nil {
+					t.Fatal("invalid config accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AI.HTMLResourceRejectMessage != tc.want || cfg.AI.LegacyHTMLDoSRejectMessage != nil {
+				t.Fatalf("message=%q legacy=%v", cfg.AI.HTMLResourceRejectMessage, cfg.AI.LegacyHTMLDoSRejectMessage)
+			}
+			warned := strings.Contains(strings.Join(cfg.Warnings, "\n"), "html_dos_reject_message is deprecated")
+			if warned != tc.warning {
+				t.Fatalf("warnings=%v", cfg.Warnings)
+			}
+		})
+	}
+}
+
+func TestLoadResourceLimitActionAlias(t *testing.T) {
+	for _, tc := range []struct {
+		name, settings, want string
+		warning, invalid     bool
+	}{
+		{name: "default", want: "reject"},
+		{name: "new", settings: "  html_resource_limit_action: fallback\n", want: "fallback"},
+		{name: "legacy", settings: "  html_parse_cpu_limit_action: dos-reject\n", want: "dos-reject", warning: true},
+		{name: "both", settings: "  html_parse_cpu_limit_action: fallback\n  html_resource_limit_action: reject\n", want: "reject", warning: true},
+		{name: "reverse order", settings: "  html_resource_limit_action: reject\n  html_parse_cpu_limit_action: fallback\n", want: "reject", warning: true},
+		{name: "explicit default wins", settings: "  html_resource_limit_action: reject\n  html_parse_cpu_limit_action: dos-reject\n", want: "reject", warning: true},
+		{name: "empty new wins", settings: "  html_resource_limit_action: ''\n  html_parse_cpu_limit_action: reject\n", invalid: true},
+		{name: "invalid legacy", settings: "  html_parse_cpu_limit_action: accept\n", invalid: true},
+		{name: "both legacy aliases", settings: "  html_parse_cpu_limit_action: reject\n  html_dos_reject_message: old message\n", want: "reject", warning: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			source := "ai:\n  api_key: test-key\n  model: test-model\n" + tc.settings + "filtering:\n  sender_domain_allowlist: ''\n"
+			if err := os.WriteFile(path, []byte(source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if tc.invalid {
+				if err == nil || !strings.Contains(err.Error(), "html_resource_limit_action") {
+					t.Fatalf("invalid action error=%v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AI.HTMLResourceLimitAction != tc.want || cfg.AI.LegacyHTMLParseCPULimitAction != nil {
+				t.Fatalf("action=%q legacy=%v", cfg.AI.HTMLResourceLimitAction, cfg.AI.LegacyHTMLParseCPULimitAction)
+			}
+			warned := strings.Contains(strings.Join(cfg.Warnings, "\n"), "html_parse_cpu_limit_action is deprecated")
+			if warned != tc.warning {
+				t.Fatalf("warnings=%v", cfg.Warnings)
+			}
+			if tc.name == "both legacy aliases" && (cfg.AI.HTMLResourceRejectMessage != "old message" || len(cfg.Warnings) != 2) {
+				t.Fatalf("combined aliases: %+v", cfg.AI)
 			}
 		})
 	}

@@ -112,18 +112,23 @@ type Analysis struct {
 	UsedVisibilityUncertainTag            bool
 	UsedHiddenContentStrippedTag          bool
 	HTMLCPULimitExceeded                  bool
+	HTMLMemoryLimitExceeded               bool
 }
 
 // HTMLProcessingControl carries the historical HTML CPU-limit controls through
 // all message-content preparation. ShouldFallback stops MIME and plain-text
 // work and switches HTML parts to bounded lexical fallback when the external
 // budget expires. FallbackShouldStop provides the fallback tokenizer's separate
-// budget. ObserveMemoryUsage is an optional diagnostic callback invoked once
+// message-wide budget. MemoryLimitExceeded reports a failed memory reservation;
+// StopOnMemoryLimit prevents further processing or fallback after that failure.
+// ObserveMemoryUsage is an optional diagnostic callback invoked once
 // extraction has completed. A positive MemoryBytes overrides the default
 // cumulative allocation budget. All callbacks must be inexpensive.
 type HTMLProcessingControl struct {
 	ShouldFallback       func() bool
 	FallbackShouldStop   func() bool
+	MemoryLimitExceeded  func()
+	StopOnMemoryLimit    bool
 	ObserveMemoryUsage   func(usedBytes, limitBytes int64)
 	MemoryBytes          int64
 	DisableURLCompaction bool

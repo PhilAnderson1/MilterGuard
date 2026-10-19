@@ -111,7 +111,7 @@ func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars
 	return Analysis{Prompt: b.String(), Images: images, HasHTML: content.HTML, BodyTruncated: bodyTruncated, BodyExtractionIncomplete: content.incomplete(), ConcealedContentRemoved: concealedRemoved, HasConcealedContent: content.HasConcealedContent,
 		UsedInvisibleTag: finalAnnotations.UsedInvisibleTag, UsedVisibilityVariesByViewportSizeTag: finalAnnotations.UsedVisibilityVariesByViewportSizeTag,
 		UsedVisibilityUncertainTag: finalAnnotations.UsedVisibilityUncertainTag, UsedHiddenContentStrippedTag: finalAnnotations.UsedHiddenContentStrippedTag,
-		HTMLCPULimitExceeded: content.HTMLCPULimitExceeded}
+		HTMLCPULimitExceeded: content.HTMLCPULimitExceeded, HTMLMemoryLimitExceeded: content.HTMLMemoryLimitExceeded}
 }
 
 func writeHTMLCommentSummary(b *strings.Builder, comments htmlCommentStats, body string) {
@@ -192,6 +192,7 @@ func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl)
 	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
 	normalizeExtractedUTF8(&content, budget)
 	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
+	content.HTMLMemoryLimitExceeded = budget.memoryLimitExceeded
 	return content
 }
 
@@ -209,10 +210,6 @@ func normalizeExtractedUTF8(content *extractedContent, budget *extractionBudget)
 			return
 		}
 		*field = strings.ToValidUTF8(*field, "�")
-	}
-	// Detect a limit crossed during the final indivisible scan.
-	if budget.outputShouldStop() {
-		content.ExtractionIncomplete = true
 	}
 }
 
