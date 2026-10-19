@@ -79,6 +79,7 @@ type Correspondent struct {
 type CorrespondentMatch struct {
 	Known                bool
 	AllRecipientsMatched bool
+	Kinds                []CorrespondentKind
 }
 
 type Rejection struct {

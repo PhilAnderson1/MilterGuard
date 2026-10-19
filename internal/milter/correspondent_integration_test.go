@@ -2,12 +2,14 @@ package milter
 
 import (
 	"context"
-	"github.com/PhilAnderson1/MilterGuard/internal/ai"
-	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"net/netip"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/ai"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 func TestAuthenticatedMessagesCanBypassAndAuthenticationPersists(t *testing.T) {
@@ -346,6 +348,45 @@ func TestKnownCorrespondentIsSuppliedAsAIEvidence(t *testing.T) {
 		if !strings.Contains(input.Text, want) {
 			t.Errorf("AI input missing %q:\n%s", want, input.Text)
 		}
+	}
+}
+
+func TestInboundLearnedCorrespondentBasisIsSuppliedAsAIEvidence(t *testing.T) {
+	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 1)}
+	server, conn, done := testServer(t, analyzer)
+	cfg := config.CorrespondentsConfig{
+		LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+		LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .9, MaxEntries: 100,
+	}
+	store := newTestCorrespondentStore(t, cfg, server.log)
+	setTestCorrespondents(server, cfg, store)
+	if err := store.recordInboundClassification(context.Background(), "alice@example.com", []string{"philip@invades.net"}, true,
+		stores.InboundVerdictLegitimate, 1, .9, false); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = conn.Close()
+		<-done
+	}()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "alice@example.com"),
+		envelopeFrame(commandRecipient, "philip@invades.net"),
+		headerFrame("From", "Alice <alice@example.com>"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	input := <-analyzer.inputs
+	if !strings.Contains(input.Text, "Basis: The visible From address qualified after repeated legitimate inbound emails to a relevant local address.") {
+		t.Fatalf("AI input missing inbound-learned basis:\n%s", input.Text)
+	}
+	if strings.Contains(input.Text, "previously emailed from a relevant local address") {
+		t.Fatalf("AI input falsely described inbound learning as outbound contact:\n%s", input.Text)
 	}
 }
 

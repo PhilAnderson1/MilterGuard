@@ -57,8 +57,17 @@ type CorrespondentInfo struct {
 	Enabled               bool
 	Known                 bool
 	Scope                 string
+	Bases                 []CorrespondentBasis
 	AuthenticationAligned bool
 }
+
+type CorrespondentBasis uint8
+
+const (
+	CorrespondentBasisAuthenticatedOutbound CorrespondentBasis = iota + 1
+	CorrespondentBasisRepeatedLegitimateInbound
+	CorrespondentBasisManual
+)
 
 type DomainRegistrationInfo struct {
 	Available    bool

@@ -786,6 +786,33 @@ func TestPromptIncludesDomainRegistrationEvidence(t *testing.T) {
 	}
 }
 
+func TestPromptDescribesCorrespondentBasis(t *testing.T) {
+	tests := []struct {
+		name  string
+		scope string
+		basis CorrespondentBasis
+		want  string
+	}{
+		{name: "outbound per sender", scope: "per_sender", basis: CorrespondentBasisAuthenticatedOutbound, want: "was previously emailed from a relevant local address"},
+		{name: "outbound global", scope: "global", basis: CorrespondentBasisAuthenticatedOutbound, want: "was previously emailed by an authenticated user of this server"},
+		{name: "inbound per sender", scope: "per_sender", basis: CorrespondentBasisRepeatedLegitimateInbound, want: "qualified after repeated legitimate inbound emails to a relevant local address"},
+		{name: "inbound global", scope: "global", basis: CorrespondentBasisRepeatedLegitimateInbound, want: "qualified after repeated legitimate inbound emails to this server"},
+		{name: "manual per sender", scope: "per_sender", basis: CorrespondentBasisManual, want: "was manually added to the correspondent allowlist for a relevant local address"},
+		{name: "manual global", scope: "global", basis: CorrespondentBasisManual, want: "was manually added to the server correspondent allowlist"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var b strings.Builder
+			writeCorrespondentInformation(&b, CorrespondentInfo{
+				Enabled: true, Known: true, Scope: test.scope, Bases: []CorrespondentBasis{test.basis},
+			})
+			if got := b.String(); !strings.Contains(got, "Basis: The visible From address "+test.want+".\n") {
+				t.Fatalf("correspondent information does not contain the stored basis:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestFormatDomainAgeUsesLargestWholeUnit(t *testing.T) {
 	tests := []struct {
 		name string

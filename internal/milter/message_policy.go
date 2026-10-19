@@ -62,11 +62,27 @@ func (s *messagePolicyService) prepareInboundEvidence(ctx context.Context, curre
 	evidence.knownCorrespondent = known
 	evidence.correspondent = message.CorrespondentInfo{
 		Enabled: true, Known: known, Scope: s.correspondentCfg.Scope,
+		Bases:                 correspondentBases(match.Kinds),
 		AuthenticationAligned: known && authentication.AnyAligned(),
 	}
 	bypassAuthentication := !s.correspondentCfg.RequireAuthenticationForBypass || evidence.trustRequirementMet
 	evidence.bypassAI = s.correspondentCfg.BypassAI && evidence.recipientsComplete && known && bypassAuthentication
 	return evidence
+}
+
+func correspondentBases(kinds []stores.CorrespondentKind) []message.CorrespondentBasis {
+	bases := make([]message.CorrespondentBasis, 0, len(kinds))
+	for _, kind := range kinds {
+		switch kind {
+		case stores.CorrespondentKindAuthenticatedOutbound:
+			bases = append(bases, message.CorrespondentBasisAuthenticatedOutbound)
+		case stores.CorrespondentKindRepeatedLegitimateInbound:
+			bases = append(bases, message.CorrespondentBasisRepeatedLegitimateInbound)
+		case stores.CorrespondentKindManual:
+			bases = append(bases, message.CorrespondentBasisManual)
+		}
+	}
+	return bases
 }
 
 func (s *messagePolicyService) trustedAuthservIDs(mtaHostname string) []string {

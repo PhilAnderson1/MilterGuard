@@ -326,32 +326,53 @@ func (r *correspondentRepository) Match(ctx context.Context, correspondent strin
 	now := r.now().UTC()
 	filter := r.qualifiedActiveFragment(now)
 	if r.options.Scope == stores.CorrespondentScopeGlobal {
-		var found int
-		query := `SELECT EXISTS(SELECT 1 FROM correspondents WHERE correspondent = ? AND ` + filter.text + `)`
-		args := append([]any{correspondent}, filter.args...)
-		if err := r.db.QueryRow(ctx, query, args...).Scan(&found); err != nil {
+		match, _, err := r.queryMatch(ctx, `correspondent = ? AND `+filter.text,
+			append([]any{correspondent}, filter.args...)...)
+		if err != nil {
 			return result, fmt.Errorf("match correspondent: %w", err)
 		}
-		result.Known, result.AllRecipientsMatched = found != 0, found != 0
-		return result, nil
+		match.AllRecipientsMatched = match.Known
+		return match, nil
 	}
 	addresses := sortedSet(normalizedAddressSet(recipients, maxCorrespondentRecipients))
 	if len(addresses) == 0 {
 		return result, nil
 	}
-	query := `SELECT count(*) FROM correspondents WHERE correspondent = ? AND ` + filter.text +
+	where := `correspondent = ? AND ` + filter.text +
 		" AND local_address IN (" + placeholders(len(addresses)) + ")"
 	args := append([]any{correspondent}, filter.args...)
 	for _, address := range addresses {
 		args = append(args, address)
 	}
-	var matchedRecipients int
-	if err := r.db.QueryRow(ctx, query, args...).Scan(&matchedRecipients); err != nil {
+	result, matchedRecipients, err := r.queryMatch(ctx, where, args...)
+	if err != nil {
 		return stores.CorrespondentMatch{}, fmt.Errorf("match correspondent recipients: %w", err)
 	}
-	result.Known = matchedRecipients > 0
 	result.AllRecipientsMatched = matchedRecipients == len(addresses)
 	return result, nil
+}
+
+func (r *correspondentRepository) queryMatch(ctx context.Context, where string, args ...any) (stores.CorrespondentMatch, int, error) {
+	query := `SELECT count(DISTINCT local_address),
+		COALESCE(max(CASE WHEN whitelist_type = 'authenticated_outbound' THEN 1 ELSE 0 END), 0),
+		COALESCE(max(CASE WHEN whitelist_type = 'repeated_legitimate_inbound' THEN 1 ELSE 0 END), 0),
+		COALESCE(max(CASE WHEN whitelist_type = 'manual' THEN 1 ELSE 0 END), 0)
+		FROM correspondents WHERE ` + where
+	var matchedRecipients, outbound, inbound, manual int
+	if err := r.db.QueryRow(ctx, query, args...).Scan(&matchedRecipients, &outbound, &inbound, &manual); err != nil {
+		return stores.CorrespondentMatch{}, 0, err
+	}
+	result := stores.CorrespondentMatch{Known: matchedRecipients > 0}
+	if outbound != 0 {
+		result.Kinds = append(result.Kinds, stores.CorrespondentKindAuthenticatedOutbound)
+	}
+	if inbound != 0 {
+		result.Kinds = append(result.Kinds, stores.CorrespondentKindRepeatedLegitimateInbound)
+	}
+	if manual != 0 {
+		result.Kinds = append(result.Kinds, stores.CorrespondentKindManual)
+	}
+	return result, matchedRecipients, nil
 }
 
 func (r *correspondentRepository) ListCorrespondents(ctx context.Context, list stores.CorrespondentListQuery) (stores.CorrespondentPage, error) {

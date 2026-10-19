@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -344,6 +345,35 @@ func TestCorrespondentStoreScopeChangesOnlyMatching(t *testing.T) {
 	}
 	if matchCorrespondent(t, perSender, context.Background(), "alice@example.net", []string{"anyone@example.com"}).Known {
 		t.Fatal("per-sender relationship leaked to another local address")
+	}
+}
+
+func TestCorrespondentMatchReportsQualifyingKinds(t *testing.T) {
+	store := newTestCorrespondentRepository(t, CorrespondentOptions{
+		UseAllowlist: true, Scope: "per_sender", LegitimateSenderMinMessages: 3, MaxEntries: 10,
+	}, nil)
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	for _, entry := range []stores.Correspondent{
+		{LocalAddress: "outbound@example.com", Correspondent: "sender@example.net", CorrespondentType: stores.CorrespondentKindAuthenticatedOutbound},
+		{LocalAddress: "inbound@example.com", Correspondent: "sender@example.net", CorrespondentType: stores.CorrespondentKindRepeatedLegitimateInbound, LegitimateEmailCount: 3},
+		{LocalAddress: "manual@example.com", Correspondent: "sender@example.net", CorrespondentType: stores.CorrespondentKindManual},
+		{LocalAddress: "candidate@example.com", Correspondent: "sender@example.net", CorrespondentType: stores.CorrespondentKindRepeatedLegitimateInbound, LegitimateEmailCount: 2},
+	} {
+		entry.LearnedAt, entry.LastActivityAt = now, now
+		putTestCorrespondent(t, store, entry)
+	}
+
+	match := matchCorrespondent(t, store, context.Background(), "sender@example.net", []string{
+		"outbound@example.com", "inbound@example.com", "manual@example.com", "candidate@example.com",
+	})
+	wantKinds := []stores.CorrespondentKind{
+		stores.CorrespondentKindAuthenticatedOutbound,
+		stores.CorrespondentKindRepeatedLegitimateInbound,
+		stores.CorrespondentKindManual,
+	}
+	if !match.Known || match.AllRecipientsMatched || !slices.Equal(match.Kinds, wantKinds) {
+		t.Fatalf("match = %#v, want known partial match with kinds %v", match, wantKinds)
 	}
 }
 

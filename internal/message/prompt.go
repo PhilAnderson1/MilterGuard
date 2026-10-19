@@ -309,10 +309,30 @@ func writeCorrespondentInformation(b *strings.Builder, info CorrespondentInfo) {
 		return
 	}
 	b.WriteString("Sender found in known correspondent database: yes\n")
-	if info.Scope == "global" {
-		b.WriteString("Basis: The visible From address was previously emailed by an authenticated user of this server.\n")
-	} else {
-		b.WriteString("Basis: The visible From address was previously emailed from a relevant local address.\n")
+	if len(info.Bases) == 0 {
+		b.WriteString("Basis: The visible From address has a qualifying correspondent allowlist entry.\n")
+	}
+	for _, basis := range info.Bases {
+		switch basis {
+		case CorrespondentBasisAuthenticatedOutbound:
+			if info.Scope == "global" {
+				b.WriteString("Basis: The visible From address was previously emailed by an authenticated user of this server.\n")
+			} else {
+				b.WriteString("Basis: The visible From address was previously emailed from a relevant local address.\n")
+			}
+		case CorrespondentBasisRepeatedLegitimateInbound:
+			if info.Scope == "global" {
+				b.WriteString("Basis: The visible From address qualified after repeated legitimate inbound emails to this server.\n")
+			} else {
+				b.WriteString("Basis: The visible From address qualified after repeated legitimate inbound emails to a relevant local address.\n")
+			}
+		case CorrespondentBasisManual:
+			if info.Scope == "global" {
+				b.WriteString("Basis: The visible From address was manually added to the server correspondent allowlist.\n")
+			} else {
+				b.WriteString("Basis: The visible From address was manually added to the correspondent allowlist for a relevant local address.\n")
+			}
+		}
 	}
 	if info.AuthenticationAligned {
 		b.WriteString("Sender authentication: a trusted SPF, DKIM, or DMARC result passed and aligned with the visible From domain.\n")
