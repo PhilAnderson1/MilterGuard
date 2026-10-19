@@ -1,6 +1,7 @@
 package html
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
@@ -75,7 +76,8 @@ func TestTokenizerReusesNameMapAllowance(t *testing.T) {
 	z.Next()
 	// Only the new map-key copies allocate. Span and map capacity are reused;
 	// attribute values still borrow input until Token() is requested.
-	if delta := memory.Used() - before; delta != 2 {
+	want := int64(cap(bytes.Clone([]byte("a"))) + len("a"))
+	if delta := memory.Used() - before; delta != want {
 		t.Fatalf("reused storage charged %d bytes", delta)
 	}
 }

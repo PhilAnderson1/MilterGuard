@@ -11,19 +11,16 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse/css"
 )
 
-// Conservative retained-size estimates for the maps, dependency graph, and
-// traversal state used while resolving a non-literal custom-property scope.
+// Fixed scope overhead. Map entries use the shared cumulative allocation
+// estimate in both the literal fast path and the general dependency graph.
 const (
-	variableDefinitionWorkBytes int64 = 320
-	variableAlternateEntryBytes int64 = 24
-	variableScopeBaseBytes      int64 = 256
+	variableScopeBaseBytes int64 = 256
 )
 
 // Maps have a substantial fixed cost even with just one entry. These are
 // conservative allowances, not a model of a particular Go map implementation.
 const (
 	literalVariableScopeBaseBytes int64 = 512
-	literalVariableEntryBytes     int64 = 96
 	variableColourMapBaseBytes    int64 = 256
 )
 
@@ -382,7 +379,7 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 	if !budget.check() {
 		return unresolvedVariableScope(parent), true
 	}
-	if !budget.reserve(int64(len(defs))*literalVariableEntryBytes + literalVariableScopeBaseBytes) {
+	if !budget.reserve(int64(len(defs))*mapEntryAllocationBytes[string, variableValue]() + literalVariableScopeBaseBytes) {
 		return unresolvedVariableScope(parent), true
 	}
 	s := &variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency, values: make(map[string]variableValue, len(defs))}
@@ -413,7 +410,7 @@ func buildLiteralVariables(parent *variableScope, defs map[string]candidate, alt
 	if !budget.check() {
 		return unresolvedVariableScope(parent), true
 	}
-	if !budget.reserve(int64(len(defs)+len(alternate))*variableAlternateEntryBytes + variableColourMapBaseBytes) {
+	if !budget.reserve(int64(len(defs)+len(alternate))*mapEntryAllocationBytes[string, bool]() + variableColourMapBaseBytes) {
 		return unresolvedVariableScope(parent), true
 	}
 	s.colourDependent = make(map[string]bool, len(defs)+len(alternate))
@@ -444,11 +441,17 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	if scope, ok := buildLiteralVariables(parent, defs, alternate, budget); ok {
 		return scope
 	}
-	if !budget.reserve(int64(len(defs))*variableDefinitionWorkBytes + int64(len(alternate))*variableAlternateEntryBytes + variableScopeBaseBytes) {
+	// Admit the four dependency maps and both string-index arrays before
+	// constructing them. The colour-dependency map has separate admission below.
+	definitionBytes := mapEntryAllocationBytes[string, variableValue]() +
+		mapEntryAllocationBytes[string, []valueToken]() +
+		mapEntryAllocationBytes[string, bool]() +
+		mapEntryAllocationBytes[string, uint8]() + int64(unsafe.Sizeof([2]string{}))
+	if !budget.reserve(int64(len(defs))*definitionBytes + int64(len(alternate))*mapEntryAllocationBytes[string, bool]() + variableScopeBaseBytes) {
 		return unresolvedVariableScope(parent)
 	}
-	s := &variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency, values: make(map[string]variableValue)}
-	var ordered []string
+	s := &variableScope{parent: parent, hasColourDependency: parent != nil && parent.hasColourDependency, values: make(map[string]variableValue, len(defs))}
+	ordered := make([]string, 0, len(defs))
 	for n := range defs {
 		ordered = append(ordered, n)
 	}
@@ -456,10 +459,10 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 		return unresolvedVariableScope(parent)
 	}
 	sort.Strings(ordered)
-	tokens := map[string][]valueToken{}
-	cyclic := map[string]bool{}
-	states := map[string]uint8{}
-	var path []string
+	tokens := make(map[string][]valueToken, len(defs))
+	cyclic := make(map[string]bool, len(defs))
+	states := make(map[string]uint8, len(defs))
+	path := make([]string, 0, min(len(defs), maxCSSValueDepth))
 	depthExceeded := false
 	for _, name := range ordered {
 		definition := defs[name]
@@ -561,7 +564,7 @@ func buildVariables(parent *variableScope, defs map[string]candidate, alternate 
 	if len(alternate) == 0 && (parent == nil || !parent.hasColourDependency) {
 		return s
 	}
-	if !budget.reserve(int64(len(defs)+len(alternate))*variableAlternateEntryBytes + variableColourMapBaseBytes) {
+	if !budget.reserve(int64(len(defs)+len(alternate))*mapEntryAllocationBytes[string, bool]() + variableColourMapBaseBytes) {
 		return unresolvedVariableScope(parent)
 	}
 	s.colourDependent = make(map[string]bool, len(defs)+len(alternate))

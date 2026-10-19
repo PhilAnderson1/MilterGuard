@@ -59,16 +59,16 @@ func TestNewlineConversionCannotSkipCheckpoints(t *testing.T) {
 func TestNULByteReplacementAdmissionAndSemantics(t *testing.T) {
 	src := []byte{'a', 0, 0xff, 'b', 0}
 	want := []byte{'a', 0xef, 0xbf, 0xbd, 0xff, 'b', 0xef, 0xbf, 0xbd}
-	mem := resourceguard.NewMemory(int64(len(want)))
-	if got := replaceNULBytes(src, &resourceGuard{limits: ResourceLimits{Memory: mem}}); !bytes.Equal(got, want) || mem.Used() != int64(len(want)) {
-		t.Fatalf("%x used %d", got, mem.Used())
+	mem := resourceguard.NewMemory(1 << 20)
+	got := replaceNULBytes(src, &resourceGuard{limits: ResourceLimits{Memory: mem}})
+	if !bytes.Equal(got, want) || mem.Used() != int64(cap(got)) {
+		t.Fatalf("%x used %d capacity %d", got, mem.Used(), cap(got))
 	}
-	defer func() {
-		if _, ok := recover().(resourceAbort); !ok {
-			t.Fatal("missing admission")
-		}
-	}()
-	replaceNULBytes(src, &resourceGuard{limits: ResourceLimits{Memory: resourceguard.NewMemory(1)}})
+	for _, limit := range []int64{1, int64(cap(got) - 1)} {
+		expectMemoryAbort(t, func() {
+			replaceNULBytes(src, &resourceGuard{limits: ResourceLimits{Memory: resourceguard.NewMemory(limit)}})
+		})
+	}
 }
 func TestChunkedStringSemantics(t *testing.T) {
 	for _, a := range []string{"", strings.Repeat(" ", 2048) + "x  ", strings.Repeat("a", 2048) + "x"} {

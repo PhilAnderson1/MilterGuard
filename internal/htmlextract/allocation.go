@@ -1,6 +1,7 @@
 package htmlextract
 
 import (
+	"bytes"
 	"strings"
 	"unsafe"
 
@@ -125,4 +126,18 @@ func mapEntryAllocationBytes[K comparable, V any]() int64 {
 	var key K
 	var value V
 	return 4*int64(unsafe.Sizeof(key)+unsafe.Sizeof(value)) + 64
+}
+
+// makeBudgetedBytes reconciles allocator rounding through Buffer.Cap, just as
+// growBuilder does. A failed reconciliation prevents use of the new buffer.
+func makeBudgetedBytes(size int, memory *resourceguard.Memory) ([]byte, bool) {
+	if memory.Exhausted() || !memory.Reserve(int64(size)) {
+		return nil, false
+	}
+	var buffer bytes.Buffer
+	buffer.Grow(size)
+	if !memory.Reserve(int64(buffer.Cap() - size)) {
+		return nil, false
+	}
+	return buffer.Bytes()[:size], true
 }

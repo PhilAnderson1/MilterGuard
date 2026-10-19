@@ -29,9 +29,8 @@ func mapStringWithGuard(s string, mapping func(rune) rune, guard *resourceGuard)
 	if !changed {
 		return s
 	}
-	guard.reserve(int64(size))
 	var b strings.Builder
-	b.Grow(size)
+	guard.initStringBuilder(&b, size)
 	next = 1024
 	for i, r := range s {
 		if i >= next {
@@ -68,9 +67,8 @@ func replaceNULString(s, replacement string, guard *resourceGuard) string {
 		return s
 	}
 	size := len(s) + count*(len(replacement)-1)
-	guard.reserve(int64(size))
 	var b strings.Builder
-	b.Grow(size)
+	guard.initStringBuilder(&b, size)
 	for start := 0; start < len(s); start += 1024 {
 		if start > 0 {
 			guard.check()

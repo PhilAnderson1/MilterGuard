@@ -102,8 +102,7 @@ func replaceNULBytes(s []byte, guard *resourceGuard) []byte {
 		return s
 	}
 	size := len(s) + count*(len(replacement)-1)
-	guard.reserve(int64(size))
-	out := make([]byte, 0, size)
+	out := guard.makeBytes(size)[:0]
 	for start := 0; start < len(s); start += workChunk {
 		if start > 0 {
 			guard.check()

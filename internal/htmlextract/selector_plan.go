@@ -306,6 +306,11 @@ func planSelectorListWithStop(source string, nextSequence *int, memory *resource
 		}
 		branches++
 		if plan, keep := planSelectorBranch(branch, *nextSequence, memory); keep {
+			var admitted bool
+			plans, admitted = growSlice(plans, 1, memory)
+			if !admitted {
+				return plans, branches, false, iterator.Stopped()
+			}
 			plans = append(plans, plan)
 			(*nextSequence)++
 		}

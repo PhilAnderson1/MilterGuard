@@ -1058,7 +1058,7 @@ func (s *sheet) attachMediaCondition(firstRule int, media string) {
 		parent := s.rules[i].conditions
 		frame := frames[parent]
 		if frame == nil {
-			if !s.memory.Reserve(mediaFrameSetEntryBytes) {
+			if !s.memory.Reserve(mapEntryAllocationBytes[*conditionFrame, *conditionFrame]()) {
 				s.abandonCascade()
 				return
 			}

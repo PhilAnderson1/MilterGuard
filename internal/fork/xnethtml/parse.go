@@ -307,8 +307,7 @@ func (p *parser) fosterParent(n *Node) {
 		prev = parent.LastChild
 	}
 	if prev != nil && prev.Type == TextNode && n.Type == TextNode {
-		p.guard.textMerge(len(prev.Data), len(n.Data))
-		prev.Data += n.Data
+		prev.Data = p.guard.mergeText(prev.Data, n.Data)
 		return
 	}
 
@@ -332,8 +331,7 @@ func (p *parser) addText(text string) {
 
 	t := p.top()
 	if n := t.LastChild; n != nil && n.Type == TextNode {
-		p.guard.textMerge(len(n.Data), len(text))
-		n.Data += text
+		n.Data = p.guard.mergeText(n.Data, text)
 		return
 	}
 	p.addChild(p.newNode(Node{

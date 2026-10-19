@@ -256,10 +256,6 @@ func (p *cssParseSession) beginRuleset(s *sheet, values []css.Token) bool {
 			plans[i].makeUncertain(s.memory)
 		}
 	}
-	if !s.memory.Reserve(int64(len(plans)) * int64(unsafe.Sizeof(selectorPlan{}))) {
-		s.abandonCascade()
-		return true
-	}
 	var ok bool
 	s.rules, ok = growSlice(s.rules, 1, s.memory)
 	if !ok {

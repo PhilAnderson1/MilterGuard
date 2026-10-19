@@ -10,9 +10,8 @@ import (
 // These conservative estimates cover Go map buckets and per-entry overhead
 // which unsafe.Sizeof cannot observe through a map value.
 const (
-	mediaCacheMapBytes      int64 = 128
-	mediaStateSliceOverhead int64 = 48
-	matchCacheMapBytes      int64 = 128
+	mediaCacheMapBytes int64 = 128
+	matchCacheMapBytes int64 = 128
 )
 
 type mediaCacheKey struct {
@@ -49,10 +48,13 @@ func (s *sheet) mediaStates(width float64, fallback bool, work *cpuGuard) ([]uin
 	if work != nil && !work.check() {
 		return nil, false
 	}
-	if !s.memory.Reserve(int64(len(s.runtime.mediaGroups)) + mediaStateSliceOverhead) {
+	if !s.memory.Reserve(mapEntryAllocationBytes[mediaCacheKey, []uint8]()) {
 		return nil, false
 	}
-	states := make([]uint8, len(s.runtime.mediaGroups))
+	states, ok := makeBudgetedBytes(len(s.runtime.mediaGroups), s.memory)
+	if !ok {
+		return nil, false
+	}
 	var frameStates map[*conditionFrame]conditionFrameState
 	if len(s.runtime.mediaGroups) > 1 {
 		if !s.memory.Reserve(mediaFrameStateMapBytes) {
@@ -65,7 +67,7 @@ func (s *sheet) mediaStates(width float64, fallback bool, work *cpuGuard) ([]uin
 				if _, seen := frameStates[f]; seen {
 					break
 				}
-				if !work.check() || !s.memory.Reserve(mediaFrameSetEntryBytes) {
+				if !work.check() || !s.memory.Reserve(mapEntryAllocationBytes[*conditionFrame, conditionFrameState]()) {
 					return nil, false
 				}
 				frameStates[f] = conditionFrameState{}
@@ -370,7 +372,7 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 						}
 						winners.alternateColourSchemeVars = make(map[string]bool)
 					}
-					if !winners.alternateColourSchemeVars[d.custom] && !s.memory.Reserve(variableAlternateEntryBytes) {
+					if !winners.alternateColourSchemeVars[d.custom] && !s.memory.Reserve(mapEntryAllocationBytes[string, bool]()) {
 						return false
 					}
 					winners.alternateColourSchemeVars[d.custom] = true

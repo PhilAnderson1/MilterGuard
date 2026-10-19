@@ -1,8 +1,10 @@
 package html
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"strings"
 	"unsafe"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
@@ -118,11 +120,22 @@ func growResourceSlice[T any](s []T, extra int, g *resourceGuard) []T {
 	return grown
 }
 
-func (g *resourceGuard) textMerge(oldBytes, addedBytes int) {
-	if g == nil || addedBytes == 0 {
-		return
+// mergeText charges the complete replacement string, including allocator
+// rounding exposed by Grow. Reconcile before copying so repeated merges cannot
+// accumulate uncharged spare capacity.
+func (g *resourceGuard) mergeText(left, right string) string {
+	if right == "" {
+		return left
 	}
-	g.reserve(int64(oldBytes + addedBytes))
+	if g == nil {
+		return left + right
+	}
+	size := len(left) + len(right)
+	var out strings.Builder
+	g.initStringBuilder(&out, size)
+	out.WriteString(left)
+	out.WriteString(right)
+	return out.String()
 }
 
 // ParseOptionResourceLimits installs direct tokenizer and tree-builder limits.
@@ -148,4 +161,48 @@ func (g *resourceGuard) check() {
 	if g.limits.ShouldStop != nil && g.limits.ShouldStop() {
 		panic(resourceAbort{ErrResourceStopped})
 	}
+}
+
+// initStringBuilder admits a fresh builder and reconciles allocator rounding
+// before callers write into it. It must only be used with an empty builder.
+func (g *resourceGuard) initStringBuilder(out *strings.Builder, size int) {
+	g.reserve(int64(size))
+	out.Grow(size)
+	g.reserve(int64(out.Cap() - size))
+}
+
+// ownedString keeps empty and single-byte conversions allocation-free while
+// accounting for the backing capacity of larger retained token strings.
+func (g *resourceGuard) ownedString(data []byte) string {
+	if g == nil {
+		return string(data)
+	}
+	if len(data) <= 1 {
+		g.reserve(int64(len(data)))
+		return string(data)
+	}
+	var out strings.Builder
+	g.initStringBuilder(&out, len(data))
+	out.Write(data)
+	return out.String()
+}
+
+// makeBytes exposes allocated capacity through Buffer, avoiding assumptions
+// about Go's size classes. Reconciliation can abort before the buffer is used.
+func (g *resourceGuard) makeBytes(size int) []byte {
+	if g == nil {
+		return make([]byte, size)
+	}
+	g.reserve(int64(size))
+	var out bytes.Buffer
+	out.Grow(size)
+	g.reserve(int64(out.Cap() - size))
+	return out.Bytes()[:size]
+}
+
+func (g *resourceGuard) copyBytes(data []byte) []byte {
+	g.reserve(int64(len(data)))
+	out := bytes.Clone(data)
+	g.reserve(int64(cap(out) - len(data)))
+	return out
 }

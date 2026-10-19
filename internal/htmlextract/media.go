@@ -13,11 +13,8 @@ import (
 // Conservative estimates for the temporary and retained maps built while
 // reducing media-query widths to distinct activation vectors.
 const (
-	mediaFrameSetEntryBytes      int64 = 32
-	mediaBoundSetEntryBytes      int64 = 24
-	mediaFrameStateMapBytes      int64 = 128
-	mediaViewingCaseMapsBytes    int64 = 256
-	mediaActivationOverheadBytes int64 = 48
+	mediaFrameStateMapBytes   int64 = 128
+	mediaViewingCaseMapsBytes int64 = 256
 )
 
 // A condition is a disjunction of alternatives; nested conditions are ANDed.
@@ -270,7 +267,7 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 			if seenFrames[frame] {
 				break
 			}
-			if !s.memory.Reserve(mediaFrameSetEntryBytes) {
+			if !s.memory.Reserve(mapEntryAllocationBytes[*conditionFrame, bool]()) {
 				return []float64{1024}, true
 			}
 			seenFrames[frame] = true
@@ -278,7 +275,7 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 			for _, a := range c {
 				for _, b := range a.bounds {
 					if !unique[b.value] {
-						if !s.memory.Reserve(mediaBoundSetEntryBytes) {
+						if !s.memory.Reserve(mapEntryAllocationBytes[float64, bool]()) {
 							return []float64{1024}, true
 						}
 						unique[b.value] = true
@@ -295,10 +292,14 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 	}
 	var candidates []float64
 	if len(bounds) == 0 {
-		if !s.memory.Reserve(int64(len(s.runtime.mediaGroups)) + int64(len(seenFrames))*mediaFrameSetEntryBytes + mediaFrameStateMapBytes) {
+		if !s.memory.Reserve(int64(len(seenFrames))*mapEntryAllocationBytes[*conditionFrame, conditionFrameState]() + mediaFrameStateMapBytes + mediaCacheMapBytes + mapEntryAllocationBytes[mediaCacheKey, []uint8]()) {
 			return []float64{1024}, true
 		}
-		states := make([]uint8, 0, len(s.runtime.mediaGroups))
+		states, ok := makeBudgetedBytes(len(s.runtime.mediaGroups), s.memory)
+		if !ok {
+			return []float64{1024}, true
+		}
+		states = states[:0]
 		var frameStates map[*conditionFrame]conditionFrameState
 		if len(seenFrames) > 0 {
 			frameStates = make(map[*conditionFrame]conditionFrameState, len(seenFrames))
@@ -331,7 +332,7 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 	}
 	// Each activation vector becomes one string key. The shared memory budget
 	// accounts for candidates, state vectors, and retained cache entries.
-	if !s.memory.Reserve(int64(len(seenFrames))*mediaFrameSetEntryBytes + mediaViewingCaseMapsBytes) {
+	if !s.memory.Reserve(int64(len(seenFrames))*mapEntryAllocationBytes[*conditionFrame, conditionFrameState]() + mediaViewingCaseMapsBytes) {
 		return []float64{1024}, true
 	}
 	seen := map[string]bool{}
@@ -341,12 +342,14 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 	if len(seenFrames) > 0 {
 		frameStates = make(map[*conditionFrame]conditionFrameState, len(seenFrames))
 	}
+	work := s.resourceBudget()
 	for _, w := range candidates {
 		clear(frameStates)
-		if !s.memory.Reserve(int64(len(s.runtime.mediaGroups))*2 + mediaActivationOverheadBytes) {
+		states, ok := makeBudgetedBytes(len(s.runtime.mediaGroups), s.memory)
+		if !ok {
 			return []float64{1024}, true
 		}
-		states := make([]uint8, 0, len(s.runtime.mediaGroups))
+		states = states[:0]
 		for _, group := range s.runtime.mediaGroups {
 			if !charge() {
 				return []float64{1024}, true
@@ -354,12 +357,17 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 			light, dark := evaluateConditionFrame(group, w, false, frameStates, s.cpu)
 			states = append(states, uint8(combinedMediaState(light, dark)))
 		}
-		k := string(states[1:])
+		k := ownedString(states[1:], work)
+		if work.stopNow(false) {
+			return []float64{1024}, true
+		}
 		if seen[k] {
 			continue
 		}
+		if !s.memory.Reserve(mapEntryAllocationBytes[string, bool]() + mapEntryAllocationBytes[mediaCacheKey, []uint8]()) {
+			return []float64{1024}, true
+		}
 		seen[k] = true
-		var ok bool
 		widths, ok = growSlice(widths, 1, s.memory)
 		if !ok {
 			return []float64{1024}, true
@@ -394,7 +402,7 @@ func (s *sheet) prepareMediaGroups() bool {
 		frame := s.rules[i].conditions
 		id, found := ids[frame]
 		if !found {
-			if !s.memory.Reserve(mediaFrameSetEntryBytes) {
+			if !s.memory.Reserve(mapEntryAllocationBytes[*conditionFrame, int]()) {
 				return false
 			}
 			id = len(groups)

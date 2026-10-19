@@ -932,8 +932,7 @@ func (z *Tokenizer) readTag(saveAttr bool) {
 		}
 		// Save pendingAttr if saveAttr and that attribute has a non-empty key, and the key hasn't been seen before.
 		keyBytes := z.buf[z.pendingAttr[0].start:z.pendingAttr[0].end]
-		z.guard.reserve(int64(len(keyBytes)) * 2) // mutable lowercase copy and retained map key
-		key := string(lowerWithGuard(bytes.Clone(keyBytes), z.guard))
+		key := z.guard.ownedString(lowerWithGuard(z.guard.copyBytes(keyBytes), z.guard))
 		if saveAttr && z.pendingAttr[0].start != z.pendingAttr[0].end && !z.attrNames[key] {
 			if z.attrNames == nil {
 				z.guard.reserve(attributeMapBaseBytes)
@@ -1347,8 +1346,7 @@ func (z *Tokenizer) Token() (t Token) {
 	switch z.tt {
 	case TextToken, CommentToken, DoctypeToken:
 		data := z.Text()
-		z.guard.reserve(int64(len(data)))
-		t.Data = string(data)
+		t.Data = z.guard.ownedString(data)
 	case StartTagToken, SelfClosingTagToken, EndTagToken:
 		name, moreAttr := z.TagName()
 		if moreAttr {
@@ -1360,21 +1358,18 @@ func (z *Tokenizer) Token() (t Token) {
 			var key, val []byte
 			key, val, moreAttr = z.TagAttr()
 			keyAtom := atom.Lookup(key)
-			z.guard.reserve(int64(len(val)))
 			var name string
 			if keyAtom != 0 {
 				name = keyAtom.String()
 			} else {
-				z.guard.reserve(int64(len(key)))
-				name = string(key)
+				name = z.guard.ownedString(key)
 			}
-			t.Attr = append(t.Attr, Attribute{"", name, string(val)})
+			t.Attr = append(t.Attr, Attribute{"", name, z.guard.ownedString(val)})
 		}
 		if a := atom.Lookup(name); a != 0 {
 			t.DataAtom, t.Data = a, a.String()
 		} else {
-			z.guard.reserve(int64(len(name)))
-			t.DataAtom, t.Data = 0, string(name)
+			t.DataAtom, t.Data = 0, z.guard.ownedString(name)
 		}
 	}
 	return t
