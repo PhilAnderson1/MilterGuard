@@ -67,14 +67,21 @@ func TestPreparedMathDeclarationUsesCPUControl(t *testing.T) {
 	}
 }
 
-func TestUncertainSelectorScopeDoesNotCrossFinalSiblingCombinator(t *testing.T) {
+func TestUncertainSelectorScopePreservesFinalSiblingCombinator(t *testing.T) {
 	sequence := 0
 	plans, _, _ := planSelectorList(`.product + img`, &sequence, nil, maxSelectorBranches)
 	plan := plans[0]
 	plan.makeUncertain(nil)
 
-	if !plan.scope.Match(&html.Node{Type: html.ElementNode, Data: "img"}) {
-		t.Fatal("sibling selector lost its safe rightmost scope")
+	img := &html.Node{Type: html.ElementNode, Data: "img"}
+	if plan.scope.Match(img) {
+		t.Fatal("unrelated image matched sibling scope")
+	}
+	parent := &html.Node{Type: html.ElementNode, Data: "div"}
+	parent.AppendChild(&html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "product"}}})
+	parent.AppendChild(img)
+	if !plan.scope.Match(img) {
+		t.Fatal("possible sibling match was lost")
 	}
 }
 

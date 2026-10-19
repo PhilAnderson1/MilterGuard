@@ -134,9 +134,13 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 	}
 	zeroLineHeight := clipY && style[lineHeight].Text != "normal" &&
 		(!style[lineHeight].Known || style[lineHeight].Number == 0)
+	marginRoot := context.root
+	if node != nil && node.Namespace == "" && node.Data == "html" {
+		marginRoot = style
+	}
 	extremeMargin := false
 	for _, property := range [...]int{marginTop, marginRight, marginBottom, marginLeft, marginInlineStart, marginInlineEnd, marginBlockStart, marginBlockEnd} {
-		extremeMargin = extremeMargin || extremeOrUnresolvedMargin(resolveLayoutCandidate(&wins[property-properties], context))
+		extremeMargin = extremeMargin || extremeOrUnresolvedMargin(resolveLayoutCandidate(&wins[property-properties], context), style, marginRoot)
 		uncertainOrigin = uncertainOrigin || wins[property-properties].uncertainOrigin
 	}
 	uncertainOrigin = uncertainOrigin || wins[zoom-properties].uncertainOrigin
@@ -264,7 +268,27 @@ func extremeMagnitude(result layoutResult, pixelThreshold float64) bool {
 	return math.Abs(result.value.Number) >= 100
 }
 
-func extremeOrUnresolvedMargin(result layoutResult) bool {
+func extremeOrUnresolvedMargin(result layoutResult, style, root *Style) bool {
+	// Margin em units refer to this element's computed font, not its parent's.
+	// Compare numerically: no formatted pixel string or new allocation is needed.
+	if result.set && result.status == valueUnsupported {
+		_, unit, found := splitLength(result.value.Text)
+		if found && (unit.suffix == "em" || unit.suffix == "rem" || unit.suffix == "ex") {
+			font := style[fontSize]
+			if unit.suffix == "rem" {
+				font = root[fontSize]
+			}
+			if font.Known {
+				pixels := result.value.Number * font.Number
+				if unit.suffix == "ex" {
+					// Email policy: allow ordinary font metrics up to 2em per ex.
+					// This is a generous heuristic, not a universal CSS bound.
+					pixels *= 2
+				}
+				return math.IsNaN(pixels) || math.IsInf(pixels, 0) || math.Abs(pixels) >= extremeMarginPixels
+			}
+		}
+	}
 	if extremeMagnitude(result, extremeMarginPixels) {
 		return true
 	}

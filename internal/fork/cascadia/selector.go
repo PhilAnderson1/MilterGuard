@@ -119,7 +119,7 @@ func ParseGroupWithPseudoElements(sel string) (SelectorGroup, error) {
 type Selector func(*html.Node) bool
 
 // CombinePositiveMatchers combines already compiled positive compounds for a
-// conservative descendant or child scope.
+// conservative descendant, child, or sibling scope.
 func CombinePositiveMatchers(left, right Matcher, combinator byte) Matcher {
 	return CombinePositiveMatchersWithMemory(left, right, combinator, nil)
 }
@@ -127,7 +127,7 @@ func CombinePositiveMatchers(left, right Matcher, combinator byte) Matcher {
 func CombinePositiveMatchersWithMemory(left, right Matcher, combinator byte, memory *resourceguard.Memory) Matcher {
 	leftSelector, leftOK := left.(Sel)
 	rightSelector, rightOK := right.(Sel)
-	if !leftOK || !rightOK || combinator != ' ' && combinator != '>' {
+	if !leftOK || !rightOK || combinator != ' ' && combinator != '>' && combinator != '+' && combinator != '~' {
 		return nil
 	}
 	value, ok := resourceguard.Box(memory, combinedSelector{first: leftSelector, combinator: combinator, second: rightSelector})

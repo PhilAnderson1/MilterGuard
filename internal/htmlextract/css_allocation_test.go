@@ -18,14 +18,18 @@ func TestCSSFixedAllocationBudget(t *testing.T) {
 		responsiveCSS += fmt.Sprintf("@media(min-width:%dpx){body{opacity:.9}}", i*50)
 	}
 	for _, tc := range []struct {
-		name, input string
-		limit       int64
+		name, input   string
+		limit         int64
+		allowComplete bool
 	}{
-		{"responsive variable scopes", "<style>" + responsiveCSS + "</style>" + strings.Repeat("<p>x</p>", 4000), 64 << 20},
-		{"literal scopes", "<style>p{--x:0}</style>" + strings.Repeat("<p>x</p>", 100000), 64 << 20},
-		{"colour dependent scopes", "<style>p{--x:0}@media(prefers-color-scheme:dark){p{--x:1}}</style>" + strings.Repeat("<p>x</p>", 100000), 64 << 20},
-		{"value lexers", "<style>:root{--x:rect(0,0,0,0)}p{clip:var(--x)}</style>" + strings.Repeat("<p>x</p>", 80000), 64 << 20},
-		{"inline parsers", strings.Repeat("<p style=' '>x</p>", 60000), 32 << 20},
+		{"responsive variable scopes", "<style>" + responsiveCSS + "</style>" + strings.Repeat("<p>x</p>", 4000), 64 << 20, false},
+		{"literal scopes", "<style>p{--x:0}</style>" + strings.Repeat("<p>x</p>", 100000), 64 << 20, false},
+		{"colour dependent scopes", "<style>p{--x:0}@media(prefers-color-scheme:dark){p{--x:1}}</style>" + strings.Repeat("<p>x</p>", 100000), 64 << 20, false},
+		{"value lexers", "<style>:root{--x:rect(0,0,0,0)}p{clip:var(--x)}</style>" + strings.Repeat("<p>x</p>", 80000), 64 << 20, false},
+		{"relative line heights", "<style>p{font-size:17px;line-height:163%}</style>" + strings.Repeat("<p>x</p>", 100000), 32 << 20, true},
+		{"conditional margin alternatives", "<style>p{margin:.8ex}</style><!--[if mso]><style>p{margin:0!important}</style><![endif]-->" + strings.Repeat("<p>x</p>", 100000), 32 << 20, true},
+		{"gradient clipping", strings.Repeat("<div style='background:linear-gradient(red,blue)'><p style='background:white'>x</p></div>", 30000), 32 << 20, false},
+		{"inline parsers", strings.Repeat("<p style=' '>x</p>", 60000), 32 << 20, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := []byte(tc.input)
@@ -36,7 +40,7 @@ func TestCSSFixedAllocationBudget(t *testing.T) {
 			runtime.ReadMemStats(&before)
 			doc, err := Analyze(input, limits)
 			runtime.ReadMemStats(&after)
-			if err == nil || doc.Usage.MemoryBytes != tc.limit {
+			if err == nil && !tc.allowComplete || err != nil && doc.Usage.MemoryBytes != tc.limit {
 				t.Fatalf("expected memory cutoff: charged=%d err=%v", doc.Usage.MemoryBytes, err)
 			}
 			allocated := after.TotalAlloc - before.TotalAlloc

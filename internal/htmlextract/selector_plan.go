@@ -184,7 +184,7 @@ func (p *selectorPlan) makeForeignCaseUncertain(memory *resourceguard.Memory) {
 }
 
 // conservativeScope retains only conditions that are necessary for the full
-// selector to match. In particular, an understood final descendant or child
+// selector to match. An understood final descendant, child, or sibling
 // relationship is safe to preserve even when an earlier, expensive part of
 // the selector has to be abandoned. This prevents a rule such as
 // "u + .body .product img" from degrading all the way to every img element.
@@ -200,11 +200,11 @@ func (p *selectorPlan) conservativeScope(memory *resourceguard.Memory) cascadia.
 	}
 	last := len(p.complexity.compounds) - 1
 	combinator := p.complexity.combinators[last-1]
-	if combinator != ' ' && combinator != '>' {
+	if combinator != ' ' && combinator != '>' && combinator != '+' && combinator != '~' {
 		return rightMatcher
 	}
 	left := p.complexity.compounds[last-1]
-	if !rightmost.FullyPositive || !left.FullyPositive || left.PositiveMatcher == nil {
+	if left.PositiveMatcher == nil || rightMatcher == nil {
 		return rightMatcher
 	}
 	scope := cascadia.CombinePositiveMatchersWithMemory(left.PositiveMatcher, rightMatcher, combinator, memory)

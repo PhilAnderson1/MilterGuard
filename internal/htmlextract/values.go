@@ -412,3 +412,23 @@ func layoutPropertyAllowsNegative(property int) bool {
 		return false
 	}
 }
+
+// Compute lengths at the declaring element so inheritance preserves the length,
+// while unitless multipliers remain relative to each descendant's font.
+func computedLineHeight(v Value, fontNumber float64, fontKnown bool, budget *cpuGuard) Value {
+	if v.Known {
+		return v
+	}
+	_, unit, found := splitLength(v.Text)
+	if !found || (unit.suffix != "%" && unit.suffix != "em") || !fontKnown {
+		return v
+	}
+	pixels := v.Number * fontNumber
+	if unit.suffix == "%" {
+		pixels /= 100
+	}
+	if math.IsInf(pixels, 0) || math.IsNaN(pixels) {
+		return v
+	}
+	return Value{Text: numberStringWithBudget(pixels, "px", budget), Number: pixels, Known: true}
+}

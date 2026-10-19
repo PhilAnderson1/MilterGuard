@@ -126,10 +126,12 @@ func (c candidate) beats(old candidate) bool {
 }
 
 type evaluationContext struct {
-	parent, root *Style
-	vars         *variableScope
-	budget       *cpuGuard
-	variableMemo *declarationScopeMemo
+	parent, root      *Style
+	currentFontNumber float64
+	currentFontKnown  bool
+	vars              *variableScope
+	budget            *cpuGuard
+	variableMemo      *declarationScopeMemo
 }
 
 type declarationScopeMemo struct {
@@ -182,6 +184,8 @@ type cascadeWinners struct {
 	properties                   [properties]candidate
 	alternateProperties          [properties]candidate
 	layout                       [layoutProperties]layoutCandidate
+	ordinaryMargins              [8]candidate
+	nonzeroConditionalMargins    uint8
 	variables                    map[string]candidate
 	alternateColourSchemeReasons concealmentReason
 	alternateColourSchemeVars    resourceguard.Table[string, bool]
@@ -207,7 +211,11 @@ func resolvedDeclaration(d *declaration, property int, context evaluationContext
 		return Value{Text: d.value}, valueUnsupported
 	}
 	if d.prepared != nil {
-		return d.prepared.value, d.prepared.status
+		v := d.prepared.value
+		if property == lineHeight && d.prepared.status == valueResolved {
+			v = computedLineHeight(v, context.currentFontNumber, context.currentFontKnown, context.budget)
+		}
+		return v, d.prepared.status
 	}
 	hadVar := d.hasVars
 	v := context.substitute(d)
@@ -273,6 +281,9 @@ func resolvedDeclaration(d *declaration, property int, context evaluationContext
 	if status == valueInvalid && hadVar {
 		return resolve(property, "unset", context.parent, context.root)
 	}
+	if property == lineHeight && status == valueResolved && value != "inherit" && value != "unset" {
+		out = computedLineHeight(out, context.currentFontNumber, context.currentFontKnown, context.budget)
+	}
 	return out, status
 }
 
@@ -326,6 +337,17 @@ func (s *sheet) collectCascade(n *html.Node, refs []selectorRef, legacy, inline 
 			}
 			if property >= properties {
 				index := property - properties
+				if m := marginIndex(property); m >= 0 {
+					if !c.uncertainOrigin {
+						if c.beats(winners.ordinaryMargins[m]) {
+							winners.ordinaryMargins[m] = c
+						}
+					} else if d.prepared == nil || d.prepared.status != valueResolved || !d.prepared.value.Known || d.prepared.value.Number != 0 || d.prepared.value.Text == "auto" {
+						// Only literal, context-independent zero conditional margins
+						// are eligible. Preserve uncertainty for every other branch.
+						winners.nonzeroConditionalMargins |= 1 << m
+					}
+				}
 				if c.beats(winners.layout[index]) {
 					winners.layout[index] = c
 				}
@@ -572,6 +594,10 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	context.vars = scope
 	for i := 0; i < properties; i++ {
 		c := winners.properties[i]
+		if i == lineHeight {
+			context.currentFontNumber = st[fontSize].Number
+			context.currentFontKnown = st[fontSize].Known
+		}
 		if c.set {
 			if declarationUsesColourSchemeVariable(c.d, scope, work, context.variableMemo) {
 				winners.alternateColourSchemeReasons |= alternateColourSchemeEffects(c.d)
@@ -590,6 +616,19 @@ func (s *sheet) elementStyle(n *html.Node, parent, root *Style, parentVars *vari
 	}
 	if st[background].Text == "currentcolor" {
 		st[background] = st[color]
+	}
+	marginRoot := root
+	if n.Namespace == "" && n.Data == "html" {
+		marginRoot = &st
+	}
+	for i := range winners.layout {
+		c := &winners.layout[i]
+		if m := marginIndex(i + properties); m >= 0 && c.uncertainOrigin && winners.nonzeroConditionalMargins&(1<<m) == 0 {
+			ordinary := resolveLayoutCandidate(&winners.ordinaryMargins[m], context)
+			if !extremeOrUnresolvedMargin(ordinary, &st, marginRoot) {
+				c.uncertainOrigin = false
+			}
+		}
 	}
 	layout := layoutVisibility(&winners.layout, &st, context, n)
 	animationActive := s.potentiallyActiveAnimation(winners.animation, context, work)
@@ -667,4 +706,15 @@ func declarationUsesColourSchemeVariable(d *declaration, scope *variableScope, b
 		memo.colourSchemeDependencyReady = true
 	}
 	return dependent
+}
+
+// marginIndex keeps the two contiguous margin property groups in a small fixed array.
+func marginIndex(property int) int {
+	if property >= marginTop && property <= marginLeft {
+		return property - marginTop
+	}
+	if property >= marginInlineStart && property <= marginBlockEnd {
+		return 4 + property - marginInlineStart
+	}
+	return -1
 }

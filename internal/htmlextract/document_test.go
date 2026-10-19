@@ -975,7 +975,7 @@ func TestUnsupportedSelectorUncertaintyIsLimitedToRelevantDeclarations(t *testin
 	}
 
 	in = inspectHTML(t, `<style>div:has(.x) .offer{visibility:hidden}.other:has(.x){opacity:0}</style><div class="offer">offer</div><div class="other">other</div><div>ordinary</div>`)
-	for text, want := range map[string]string{"offer": "unknown", "other": "unknown", "ordinary": "visible"} {
+	for text, want := range map[string]string{"offer": "visible", "other": "unknown", "ordinary": "visible"} {
 		if got := findText(t, in, text).Label; got != want {
 			t.Errorf("%s label = %q, want %q", text, got, want)
 		}

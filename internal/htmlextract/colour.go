@@ -105,7 +105,7 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 		colourUnsupported = imageColourStatus != valueResolved
 		imageUnsupported = true
 	}
-	return declarationList(budget, declaration{prop: background, value: colourValue, important: important, order: order, unsupported: colourUnsupported}, declaration{prop: backgroundImage, value: image, important: important, order: order, unsupported: imageUnsupported}, declaration{prop: backgroundClip, value: clipValue, important: important, order: order, unsupported: unsupported})
+	return declarationList(budget, declaration{prop: background, value: colourValue, important: important, order: order, unsupported: colourUnsupported}, declaration{prop: backgroundImage, value: image, important: important, order: order, unsupported: imageUnsupported}, declaration{prop: backgroundClip, value: clipValue, important: important, order: order, unsupported: unsupported && !simpleGradientBackground(value, budget)})
 }
 
 func backgroundFallbackColourTokens(tokens []valueToken, budget *cpuGuard) (string, valueStatus, bool) {
@@ -523,4 +523,67 @@ func evaluateColour(foreground Value, layers []paintLayer, work *cpuGuard) colou
 		return colourResult{uncertainty: "unsupported image or composition effect"}
 	}
 	return colourResult{foreground: ink, background: ground, distance: distance, known: true}
+}
+
+// Recognise a deliberately small, valid image-only shorthand. Its unknown pixels
+// do not make the default background-clip uncertain. Other grammar stays guarded.
+func simpleGradientBackground(value string, budget *cpuGuard) bool {
+	radial := strings.HasPrefix(value, "radial-gradient(")
+	if !radial && !strings.HasPrefix(value, "linear-gradient(") {
+		return false
+	}
+	_, body, _ := strings.Cut(value, "(")
+	if !strings.HasSuffix(body, ")") {
+		return false
+	}
+	body = body[:len(body)-1]
+	stops := 0
+	first := true
+	for {
+		if !budget.check() {
+			return false
+		}
+		part, rest, more := strings.Cut(body, ",")
+		part = trimCSSWhitespace(part)
+		direction := false
+		if first {
+			if radial {
+				direction = part == "circle" || part == "circle at center"
+			} else {
+				switch part {
+				case "to right", "to left", "to top", "to bottom":
+					direction = true
+				}
+				if strings.HasSuffix(part, "deg") {
+					_, direction = numberWithBudget(part[:len(part)-3], budget)
+				}
+			}
+		}
+		if !direction {
+			var scratch [3]string
+			fields := splitCSSWhitespace(part, scratch[:])
+			if len(fields) < 1 || len(fields) > 2 {
+				return false
+			}
+			if _, status := readColourWithBudget(fields[0], budget); status != valueResolved {
+				return false
+			}
+			if len(fields) == 2 {
+				num, unit, found := splitLength(fields[1])
+				if !found || (unit.suffix != "%" && unit.suffix != "px") {
+					return false
+				}
+				if _, ok := numberWithBudget(num, budget); !ok {
+					return false
+				}
+			}
+			stops++
+		}
+		first = false
+		if !more {
+			break
+		}
+		body = rest
+	}
+	return stops >= 2
 }
