@@ -83,6 +83,25 @@ func confidentTextCharactersWithResources(value string, memory *resourceguard.Me
 	return trimmed, true
 }
 
+// Every text node consults the same extraction state. Bind its callback once
+// instead of allocating an escaping method value for each node and pass.
+func (e *htmlExtraction) textStopCallback() (func() bool, bool) {
+	if e.textShouldStop == nil {
+		stop, ok := resourceguard.BindStop(e.memory, e, func(extraction *htmlExtraction) bool { return extraction.stopNow() })
+		if !ok {
+			e.stopForMemory()
+			return nil, false
+		}
+		e.textShouldStop = stop
+	}
+	return e.textShouldStop, true
+}
+
+type countingStopTarget struct {
+	budget *extractionBudget
+	stage  *fallbackResources
+}
+
 // Count optional evidence using the active stage's ledger. A stage transition
 // stops this optional work rather than continuing against the retired ledger.
 func (b *extractionBudget) confidentCharacters(value string) (int, bool) {
@@ -95,7 +114,17 @@ func (b *extractionBudget) confidentCharacters(value string) (int, bool) {
 		memory = resourceguard.NewMemory(b.memoryBytesRemaining)
 		defer b.consumeMemory(memory)
 	}
-	count, ok := confidentTextCharactersWithResources(value, memory, func() bool { return b.outputShouldStop() || b.fallback != stage })
+	if b.countingStop == nil || b.countingStage != stage {
+		stop, ok := resourceguard.BindStop(memory, countingStopTarget{budget: b, stage: stage}, func(target countingStopTarget) bool {
+			return target.budget.outputShouldStop() || target.budget.fallback != target.stage
+		})
+		if !ok {
+			b.observeFallback()
+			return 0, false
+		}
+		b.countingStop, b.countingStage = stop, stage
+	}
+	count, ok := confidentTextCharactersWithResources(value, memory, b.countingStop)
 	b.observeFallback()
 	return count, ok
 }

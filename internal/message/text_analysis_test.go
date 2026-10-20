@@ -131,3 +131,72 @@ func TestCountingUsesFallbackMemory(t *testing.T) {
 		t.Fatal("counting did not use and report the fallback ledger")
 	}
 }
+
+func TestHTMLTextStopCallbackIsSharedAndCurrent(t *testing.T) {
+	stopped := false
+	memory := resourceguard.NewMemory(4096)
+	e := htmlExtraction{memory: memory, shouldStop: func() bool { return stopped }}
+	stop, ok := e.textStopCallback()
+	if !ok || stop() || memory.Used() == 0 {
+		t.Fatal("callback was not admitted")
+	}
+	used := memory.Used()
+	for range 1000 {
+		shared, ok := e.textStopCallback()
+		if !ok || shared() || memory.Used() != used {
+			t.Fatal("callback allocation repeated")
+		}
+	}
+	stopped = true
+	if !stop() || !e.stopped {
+		t.Fatal("shared callback did not observe the new stop state")
+	}
+}
+
+func TestPlainCountingCallbackIsSharedPerStage(t *testing.T) {
+	stopped := false
+	b := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 4096, FallbackShouldStop: func() bool { return stopped }})
+	if count, ok := b.confidentCharacters("text"); !ok || count != 4 {
+		t.Fatal("initial count failed")
+	}
+	primaryRemaining := b.memoryBytesRemaining
+	primaryStop := b.countingStop
+	if primaryRemaining == 4096 || primaryStop == nil {
+		t.Fatal("callback was not charged")
+	}
+	for range 10 {
+		if _, ok := b.confidentCharacters("text"); !ok || b.memoryBytesRemaining != primaryRemaining {
+			t.Fatal("primary callback allocation repeated")
+		}
+	}
+	if !b.beginFallback() || !primaryStop() {
+		t.Fatal("primary callback did not stop at stage transition")
+	}
+	if count, ok := b.confidentCharacters("text"); !ok || count != 4 {
+		t.Fatal("fallback count failed")
+	}
+	used := b.fallback.memory.Used()
+	if used == 0 || b.countingStage != b.fallback || b.memoryBytesRemaining != primaryRemaining {
+		t.Fatal("fallback callback used the wrong ledger")
+	}
+	for range 10 {
+		if _, ok := b.confidentCharacters("text"); !ok || b.fallback.memory.Used() != used {
+			t.Fatal("fallback callback allocation repeated")
+		}
+	}
+	stopped = true
+	if !b.countingStop() {
+		t.Fatal("fallback callback missed stop")
+	}
+}
+
+func TestSharedCallbackAdmissionFailure(t *testing.T) {
+	e := htmlExtraction{memory: resourceguard.NewMemory(1)}
+	if stop, ok := e.textStopCallback(); ok || stop != nil || !e.memoryExhausted || !e.stopped {
+		t.Fatal("HTML callback admission failure was ignored")
+	}
+	b := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 1})
+	if count, ok := b.confidentCharacters("text"); ok || count != 0 || !b.memoryLimitExceeded {
+		t.Fatal("plain-text callback admission failure was ignored")
+	}
+}

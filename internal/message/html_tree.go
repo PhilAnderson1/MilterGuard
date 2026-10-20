@@ -46,6 +46,7 @@ type htmlExtraction struct {
 	anchorDepth          int
 	compactURLs          bool
 	shouldStop           func() bool
+	textShouldStop       func() bool
 	memory               *resourceguard.Memory
 	extractionIncomplete bool
 	workSteps            uint32
@@ -373,6 +374,10 @@ func (budget *extractionBudget) extractFallback(source string) extractedContent 
 // analysis. Generated link destinations and image descriptions are not DOM
 // text nodes and therefore cannot inflate this count.
 func (e *htmlExtraction) confidentVisibleCharacters(states []htmlextract.Text) int {
+	stop, ok := e.textStopCallback()
+	if !ok {
+		return 0
+	}
 	count := 0
 	for _, state := range states {
 		if e.stopRequested() {
@@ -381,7 +386,7 @@ func (e *htmlExtraction) confidentVisibleCharacters(states []htmlextract.Text) i
 		if state.Label != "visible" || state.Node == nil {
 			continue
 		}
-		value, ok := prepareVisibleText(state.Node.Data, e.memory, e.stopNow)
+		value, ok := prepareVisibleText(state.Node.Data, e.memory, stop)
 		if !ok {
 			if e.memory.Exhausted() {
 				e.stopForMemory()
@@ -391,7 +396,7 @@ func (e *htmlExtraction) confidentVisibleCharacters(states []htmlextract.Text) i
 		if value == "" || annotationWhitespaceOnly(value) {
 			continue
 		}
-		characters, ok := confidentTextCharactersWithResources(value, e.memory, e.stopNow)
+		characters, ok := confidentTextCharactersWithResources(value, e.memory, stop)
 		if !ok {
 			if e.memory.Exhausted() {
 				e.stopForMemory()
@@ -665,7 +670,11 @@ func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode
 	if content == "" {
 		return
 	}
-	promptContent, _ := rewritePlainTextURLs(content, e.compactURLs, &e.links, e.stopNow)
+	stop, ok := e.textStopCallback()
+	if !ok {
+		return
+	}
+	promptContent, _ := rewritePlainTextURLs(content, e.compactURLs, &e.links, stop)
 	state := e.elements[n]
 	if state == nil {
 		out.WriteString(promptContent)
@@ -866,7 +875,11 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *guardedBuilder,
 }
 
 func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *guardedBuilder) {
-	text, ok := prepareVisibleText(n.Data, e.memory, e.stopNow)
+	stop, ok := e.textStopCallback()
+	if !ok {
+		return
+	}
+	text, ok := prepareVisibleText(n.Data, e.memory, stop)
 	if !ok {
 		if e.memory.Exhausted() {
 			e.stopForMemory()
@@ -884,10 +897,10 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 	if e.anchorDepth > 0 {
 		// Text resembling a URL inside an anchor label is sender-visible text,
 		// not an independently validated destination.
-		outText, _ = rewritePlainTextURLs(text, e.compactURLs, nil, e.stopNow)
+		outText, _ = rewritePlainTextURLs(text, e.compactURLs, nil, stop)
 		outText = markdownLabelText(outText)
 	} else {
-		outText, _ = rewritePlainTextURLs(text, e.compactURLs, &e.links, e.stopNow)
+		outText, _ = rewritePlainTextURLs(text, e.compactURLs, &e.links, stop)
 	}
 	// Presentation annotations around whitespace add noise without carrying a
 	// visibility claim about message content. This includes decoded HTML space
@@ -1062,9 +1075,13 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 	if explicitTrackingPixel(n) {
 		return
 	}
+	stop, ok := e.textStopCallback()
+	if !ok {
+		return
+	}
 	raw := strings.TrimSpace(firstAttr(n, "src"))
 	alt := sanitizeSenderText(firstAttr(n, "alt"))
-	alt, _ = rewritePlainTextURLs(alt, e.compactURLs, nil, e.stopNow)
+	alt, _ = rewritePlainTextURLs(alt, e.compactURLs, nil, stop)
 	var destination string
 	if strings.HasPrefix(strings.ToLower(raw), "cid:") {
 		id := normalizeContentID(raw[4:])

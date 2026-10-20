@@ -43,6 +43,8 @@ type extractionBudget struct {
 	onMemoryLimit             func()
 	stopOnMemoryLimit         bool
 	compactURLs               bool
+	countingStop              func() bool
+	countingStage             *fallbackResources
 }
 
 func newExtractionBudget() *extractionBudget {

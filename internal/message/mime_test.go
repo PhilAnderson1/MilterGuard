@@ -669,8 +669,11 @@ func TestMultipartPlainTextReusesRepresentationsWithinBudget(t *testing.T) {
 	if got.incomplete() || len(got.Text) != 4<<20+2 || got.VisibleText != got.Text || got.StrippedText != got.Text {
 		t.Fatalf("text=%d visible=%d stripped=%d incomplete=%v", len(got.Text), len(got.VisibleText), len(got.StrippedText), got.incomplete())
 	}
-	if budget.memoryBytesRemaining != 8<<20-int64(len(got.Text)) {
-		t.Fatalf("remaining=%d", budget.memoryBytesRemaining)
+	// The normalized representations still share storage. Only the single
+	// reusable counting callback adds fixed overhead to the joined output.
+	callbackBytes := 8<<20 - int64(len(got.Text)) - budget.memoryBytesRemaining
+	if callbackBytes <= 0 || callbackBytes > 64 {
+		t.Fatalf("unexpected overhead=%d remaining=%d", callbackBytes, budget.memoryBytesRemaining)
 	}
 }
 
