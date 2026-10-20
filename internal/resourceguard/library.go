@@ -2,6 +2,7 @@ package resourceguard
 
 import (
 	"encoding/base64"
+	"io"
 	"mime"
 	"net/url"
 	"regexp"
@@ -72,6 +73,19 @@ func RegexpSubmatch(m *Memory, re *regexp.Regexp, text string) ([]string, bool) 
 		return nil, false
 	}
 	return re.FindStringSubmatch(text), true
+}
+
+// RegexpFindReaderIndex admits the match offsets and bounded library scratch.
+// Callers can provide a cancellation-aware RuneReader for long searches.
+func RegexpFindReaderIndex(m *Memory, re *regexp.Regexp, reader io.RuneReader) ([]int, bool) {
+	size, ok := storageBytes(re.NumSubexp()+1, 64)
+	if !ok || size > int64(^uint64(0)>>1)-1024 {
+		return nil, m.reject()
+	}
+	if m.Exhausted() || !m.Reserve(size+1024) {
+		return nil, false
+	}
+	return re.FindReaderIndex(reader), true
 }
 func DecodeBase64(m *Memory, text string) ([]byte, error) {
 	size := base64.StdEncoding.DecodedLen(len(text))

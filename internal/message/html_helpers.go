@@ -196,7 +196,7 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 	}
 	if complete || !memory.Exhausted() && !resources.cpuStopped {
 		var ok bool
-		value, ok = sanitizeSenderTextWithBudget(value, memory)
+		value, ok = sanitizeSenderTextWithResources(value, memory, shouldStop)
 		if ok {
 			value, ok = normalizeHTMLTextWithResources(value, memory, shouldStop)
 		}
@@ -212,18 +212,6 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 	}
 	return extractedContent{Text: value, HTMLFallbackUsed: true, Links: links.links, ImageRefs: images.refs,
 		ExtractionIncomplete: !complete, HTMLCPULimitExceeded: resources.cpuStopped || errors.Is(z.Err(), xhtml.ErrResourceStopped) && !memory.Exhausted(), HTMLMemoryLimitExceeded: memory.Exhausted()}
-}
-
-func sanitizeSenderTextWithBudget(value string, memory *resourceguard.Memory) (string, bool) {
-	if !strings.Contains(value, "<") {
-		return value, true
-	}
-	// regexp replacement owns a temporary buffer and its final string. Matching
-	// uses fixed scratch; the output cannot be longer than the source.
-	if !memory.Reserve(int64(len(value))*3 + 1024) {
-		return "", false
-	}
-	return reservedAnnotation.ReplaceAllString(value, ""), true
 }
 
 func fallbackDestination(raw string, base *url.URL) (string, bool) {

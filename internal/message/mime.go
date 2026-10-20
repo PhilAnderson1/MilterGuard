@@ -497,17 +497,19 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 	budget.decodedTextBytesRemaining -= int64(len(text))
 	if budget.outputShouldStop() {
 		return extractedContent{
-			Text: text, VisibleText: text, ConfidentVisibleChars: confidentTextCharacters(text),
+			Text: text, VisibleText: text,
 			TransferIncomplete: transferIncomplete, ExtractionIncomplete: true, HTMLCPULimitExceeded: budget.cpuLimitExceeded,
 		}
 	}
 	links := linkCollector{compactURLs: budget.compactURLs, memory: budget.fallbackMemory(), shouldStop: budget.outputShouldStop}
 	promptText, urlsComplete := rewritePlainTextURLs(text, budget.compactURLs, &links, budget.outputShouldStop)
+	confidentChars, counted := budget.confidentCharacters(text)
 	return extractedContent{
 		Text: promptText, VisibleText: text,
-		ConfidentVisibleChars: confidentTextCharacters(text),
-		Links:                 links.links, TransferIncomplete: transferIncomplete, ExtractionIncomplete: !complete || !urlsComplete,
-		HTMLCPULimitExceeded: budget.cpuLimitExceeded,
+		ConfidentVisibleChars: confidentChars,
+		Links:                 links.links, TransferIncomplete: transferIncomplete, ExtractionIncomplete: !complete || !urlsComplete || !counted,
+		HTMLMemoryLimitExceeded: budget.memoryLimitExceeded || budget.fallbackMemoryExceeded,
+		HTMLCPULimitExceeded:    budget.cpuLimitExceeded,
 	}
 }
 

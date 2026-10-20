@@ -381,21 +381,26 @@ func (e *htmlExtraction) confidentVisibleCharacters(states []htmlextract.Text) i
 		if state.Label != "visible" || state.Node == nil {
 			continue
 		}
-		value := compactFormattingPadding(sanitizeSenderText(state.Node.Data))
+		value, ok := prepareVisibleText(state.Node.Data, e.memory, e.stopNow)
+		if !ok {
+			if e.memory.Exhausted() {
+				e.stopForMemory()
+			}
+			return 0
+		}
 		if value == "" || annotationWhitespaceOnly(value) {
 			continue
 		}
-		count += confidentTextCharacters(value)
+		characters, ok := confidentTextCharactersWithResources(value, e.memory, e.stopNow)
+		if !ok {
+			if e.memory.Exhausted() {
+				e.stopForMemory()
+			}
+			return 0
+		}
+		count += characters
 	}
 	return count
-}
-
-func confidentTextCharacters(value string) int {
-	value = normalizeHTMLText(compactFormattingPadding(sanitizeSenderText(value)))
-	if value == "" || annotationWhitespaceOnly(value) {
-		return 0
-	}
-	return utf8.RuneCountInString(value)
 }
 
 type htmlCommentStats struct {
@@ -861,7 +866,13 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *guardedBuilder,
 }
 
 func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *guardedBuilder) {
-	text := compactFormattingPadding(sanitizeSenderText(n.Data))
+	text, ok := prepareVisibleText(n.Data, e.memory, e.stopNow)
+	if !ok {
+		if e.memory.Exhausted() {
+			e.stopForMemory()
+		}
+		return
+	}
 	if text == "" {
 		return
 	}
@@ -980,50 +991,8 @@ func collapseHTMLFormattingWhitespace(value string) string {
 // a small sample as evidence, but do not let formatting-only padding dominate
 // the LLM input. Ordinary whitespace and short obfuscation runs are unchanged.
 func compactFormattingPadding(value string) string {
-	const threshold, retained = 32, 8
-	runLength := 0
-	hasFormat := false
-	needsCompaction := false
-	for _, r := range value {
-		if !preheaderPaddingRune(r) {
-			runLength = 0
-			hasFormat = false
-			continue
-		}
-		runLength++
-		hasFormat = hasFormat || !unicode.IsSpace(r)
-		if runLength >= threshold && hasFormat {
-			needsCompaction = true
-			break
-		}
-	}
-	if !needsCompaction {
-		return value
-	}
-	runes := []rune(value)
-	var out strings.Builder
-	for start := 0; start < len(runes); {
-		end := start
-		hasFormat := false
-		for end < len(runes) && preheaderPaddingRune(runes[end]) {
-			hasFormat = hasFormat || !unicode.IsSpace(runes[end])
-			end++
-		}
-		if end == start {
-			out.WriteRune(runes[start])
-			start++
-			continue
-		}
-		keep := end - start
-		if hasFormat && keep >= threshold {
-			keep = retained
-		}
-		for _, r := range runes[start : start+keep] {
-			out.WriteRune(r)
-		}
-		start = end
-	}
-	return out.String()
+	result, _ := compactFormattingPaddingWithResources(value, nil, nil)
+	return result
 }
 
 func preheaderPaddingRune(r rune) bool {
