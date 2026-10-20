@@ -11,7 +11,9 @@
 // buffers and builders reconcile exposed capacity before publication. Native
 // maps, callback environments and library workspaces use conservative policies
 // in this package, not exact runtime layouts. Compiler/runtime setup, diagnostic
-// failure objects, process initialization and auxiliary APIs have explicit
-// exceptions in local-testing/allocation-audit/README.md. These policies are cumulative
-// pressure accounting, not a promise about live heap or process memory.
+// failure objects, process initialization and intentionally unguarded auxiliary
+// APIs are outside the extraction ledger. These policies account for cumulative
+// pressure, not live heap or process memory. Revalidate library allowances when
+// upgrading Go. See internal/allocationaudit/README.md for the required review
+// and fingerprint-approval procedure for changes to htmlextract and the forks.
 package resourceguard

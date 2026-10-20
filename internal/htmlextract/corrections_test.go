@@ -208,3 +208,12 @@ func TestInertContentStillHasStructuralLimitsAndCancellation(t *testing.T) {
 		t.Fatalf("inert traversal cancellation: nodes=%d", walker.nodeCount)
 	}
 }
+
+// Test convenience wrappers; production supplies the sheet's complete CPU guard.
+func parseMedia(src string) mediaCondition { return parseMediaBudgeted(src, nil) }
+
+// Both retained conditions and temporary applicability parsing consume the
+// monotonic allocation budget. Per-query bounds also limit regexp scratch.
+func parseMediaBudgeted(src string, memory *resourceguard.Memory) mediaCondition {
+	return parseMediaWithBudget(src, &cpuGuard{memory: memory})
+}

@@ -16,7 +16,6 @@ import (
 )
 
 var (
-	errParse           = errors.New("html: parsing failed")
 	errFragmentContext = errors.New("html: invalid fragment context")
 )
 
@@ -2279,7 +2278,7 @@ func (p *parser) parse() (err error) {
 			if abort, ok := panicErr.(resourceAbort); ok {
 				err = abort.err
 			} else {
-				err = errParse
+				panic(panicErr)
 			}
 		}
 	}()

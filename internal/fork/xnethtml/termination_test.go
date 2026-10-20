@@ -53,3 +53,34 @@ func expectTermination(t *testing.T, code termination.Code, work func()) {
 		t.Fatalf("failure=%+v want %v", failure, code)
 	}
 }
+
+type panickingReader struct{ value any }
+
+func (r panickingReader) Read([]byte) (int, error) { panic(r.value) }
+
+func TestUnexpectedParserPanicsRemainVisible(t *testing.T) {
+	marker := &struct{ message string }{"unexpected failure"}
+	for name, work := range map[string]func(){
+		"reader":          func() { Parse(panickingReader{marker}) },
+		"fragment reader": func() { ParseFragment(panickingReader{marker}, nil) },
+		"checkpoint": func() {
+			calls := 0
+			ParseWithOptions(strings.NewReader(strings.Repeat("<p>text</p>", 300)), ParseOptionResourceLimits(ResourceLimits{ShouldStop: func() {
+				calls++
+				if calls == 2 {
+					panic(marker)
+				}
+			}}))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if got := recover(); got != marker {
+					t.Fatalf("panic=%v, want original marker", got)
+				}
+			}()
+			work()
+			t.Fatal("unexpected panic was converted to a parse error")
+		})
+	}
+}

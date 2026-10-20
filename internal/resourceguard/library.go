@@ -75,6 +75,9 @@ func RegexpSubmatch(m *Memory, re *regexp.Regexp, text string) []string {
 }
 
 func DecodeBase64(m *Memory, text string) ([]byte, error) {
+	// Admit the source conversion even when the compiler currently elides its
+	// copy. Accounting must not depend on escape-analysis optimizations.
+	m.Reserve(int64(len(text)))
 	size := base64.StdEncoding.DecodedLen(len(text))
 	out := MakeSlice[byte](m, size, size)
 

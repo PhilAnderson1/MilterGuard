@@ -202,13 +202,17 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 
 func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte, depth int, budget *extractionBudget) extractedContent {
 	var retained extractedContent
+	// Replay restores traversal/output allowances, never allocation ledgers or
+	// terminal outcomes. Keep this list in sync with extractionBudget progress fields.
 	decodedRemaining := budget.decodedTextBytesRemaining
-	htmlParts := budget.htmlParts
+	parts, htmlParts := budget.parts, budget.htmlParts
+	htmlBytes, cssBytes := budget.htmlBytesRemaining, budget.cssBytesRemaining
 	retry := false
 	result, complete := runExtraction(budget, func() extractedContent {
 		if retry {
 			budget.decodedTextBytesRemaining = decodedRemaining
-			budget.htmlParts = htmlParts
+			budget.parts, budget.htmlParts = parts, htmlParts
+			budget.htmlBytesRemaining, budget.cssBytesRemaining = htmlBytes, cssBytes
 		}
 		retry = true
 		return extractMIMEOnce(contentType, encoding, contentID, data, depth, budget, &retained)
@@ -237,8 +241,8 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 	// Opaque attachments contribute only a marker. Validate their encoding
 	// without allocating a decoded body that no consumer will use.
 	if mediaType != "text/plain" && mediaType != "text/html" && mediaType != "message/rfc822" && !strings.HasPrefix(mediaType, "multipart/") && !strings.HasPrefix(mediaType, "image/") {
-		incomplete, complete := validateOpaqueTransfer(encoding, data, budget.outputShouldStop)
-		return extractedContent{Text: attachmentMarker(mediaType, params["name"]), TransferIncomplete: incomplete, ExtractionIncomplete: !complete, HTMLCPULimitExceeded: budget.cpuLimitExceeded}
+		incomplete := validateOpaqueTransfer(encoding, data, budget.outputShouldStop)
+		return extractedContent{Text: attachmentMarker(mediaType, params["name"]), TransferIncomplete: incomplete, HTMLCPULimitExceeded: budget.cpuLimitExceeded}
 	}
 	decoded, transferIncomplete := decodeTransferRecoveringWithResources(encoding, data, budget.decodingShouldStop, budget.allocationMemory)
 	if strings.HasPrefix(mediaType, "multipart/") {
@@ -697,19 +701,19 @@ func decodeTransferRecoveringWithResources(encoding string, data []byte, shouldS
 
 // validateOpaqueTransfer preserves recovery decoder diagnostics, including
 // unpadded Base64, while bounding temporary decoded storage and sampling CPU
-// controls between reads. It returns transfer incompleteness and work completion.
-func validateOpaqueTransfer(encoding string, data []byte, shouldStop func()) (bool, bool) {
+// controls between reads. It returns transfer incompleteness; resource termination unwinds.
+func validateOpaqueTransfer(encoding string, data []byte, shouldStop func()) bool {
 	encoding = strings.ToLower(strings.TrimSpace(encoding))
 	if encoding != "base64" && encoding != "quoted-printable" {
 		switch encoding {
 		case "", "7bit", "8bit", "binary":
-			return false, true
+			return false
 		default:
-			return len(data) > 0, true
+			return len(data) > 0
 		}
 	}
 	var buf [32 << 10]byte
-	consume := func(reader io.Reader) (error, bool) {
+	consume := func(reader io.Reader) error {
 		for {
 			if shouldStop != nil {
 				shouldStop()
@@ -717,23 +721,23 @@ func validateOpaqueTransfer(encoding string, data []byte, shouldStop func()) (bo
 
 			_, err := reader.Read(buf[:])
 			if err == io.EOF {
-				return nil, true
+				return nil
 			}
 			if err != nil {
-				return err, true
+				return err
 			}
 		}
 	}
 	if encoding == "quoted-printable" {
-		err, complete := consume(quotedprintable.NewReader(bytes.NewReader(data)))
-		return err != nil, complete
+		err := consume(quotedprintable.NewReader(bytes.NewReader(data)))
+		return err != nil
 	}
-	err, complete := consume(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(data)))
-	if !complete || err == nil {
-		return false, complete
+	err := consume(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(data)))
+	if err == nil {
+		return false
 	}
-	err, complete = consume(base64.NewDecoder(base64.RawStdEncoding, bytes.NewReader(data)))
-	return err != nil, complete
+	err = consume(base64.NewDecoder(base64.RawStdEncoding, bytes.NewReader(data)))
+	return err != nil
 }
 
 func attachmentMarker(mediaType, name string) string {

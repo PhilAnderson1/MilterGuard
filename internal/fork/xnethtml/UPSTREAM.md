@@ -69,9 +69,9 @@ are allocation allowances, not an exact Go heap/RSS ceiling.
 
 Structural-limit errors preserve their typed identity through setup and parsing.
 Parser recovery converts only fork-local structural aborts at the outer boundary
-and rethrows shared termination signals. The local `parse` recovery converts
-other parsing panics into a generic parse error. Standalone tokenizers have no
-resource recovery boundary.
+and rethrows shared termination signals. Unknown panics, including invariant
+and injected-checkpoint failures, are re-raised unchanged; they are not ordinary malformed-input errors. Standalone
+tokenizers have no resource recovery boundary.
 
 Fragment parsing samples cancellation while walking context ancestors and
 collecting result nodes. Result-slice growth is admitted to the shared memory
@@ -89,8 +89,8 @@ so larger loop steps cannot skip checkpoints. Shared operation counters retain
 exact-multiple sampling because they increment by one per operation.
 
 Unused parser/context and rendering diagnostics use shared errors, without
-formatting source, node, or recovered-panic details. Internal panic messages are
-constant. Resource errors retain their type and fields but return constant text.
+formatting source or node details. Unexpected parser panics remain visible.
+Internal panic messages are constant. Resource errors retain their type and fields but return constant text.
 Underlying I/O errors and resource-abort handling are preserved. Charset-label
 diagnostics remain: attachment filename decoding wraps and reports that text.
 

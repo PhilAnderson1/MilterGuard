@@ -49,3 +49,14 @@ func captureAnalysis(input []byte, limits Limits) (document Document, usage Reso
 	document, err = AnalyzeControlled(input, limits, nil, &usage)
 	return
 }
+
+func TestAnalysisEntryPointsRequireCallerBoundary(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MemoryBytes = 1
+	for name, work := range map[string]func(){
+		"Analyze":         func() { Analyze([]byte("<p>text</p>"), limits) },
+		"AnalyzeWithStop": func() { AnalyzeWithStop([]byte("<p>text</p>"), limits, nil) },
+	} {
+		t.Run(name, func(t *testing.T) { expectTermination(t, termination.MemoryExceeded, work) })
+	}
+}

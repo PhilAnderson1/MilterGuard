@@ -709,9 +709,9 @@ func TestOpaqueTransferValidationMatchesRecovery(t *testing.T) {
 	for _, encoding := range []string{"base64", "quoted-printable", "binary", "7bit", "8bit", "", "unknown"} {
 		for _, data := range []string{"", "aGVsbG8=", "aGVsbG8", "aGVsbG8=!!", "!!", "hello=20world", "hello=XY", strings.Repeat("YWFh", 20000)} {
 			_, want := decodeTransferRecovering(encoding, []byte(data))
-			got, complete := validateOpaqueTransfer(encoding, []byte(data), nil)
-			if !complete || got != want {
-				t.Errorf("encoding=%q length=%d got=%v complete=%v want=%v", encoding, len(data), got, complete, want)
+			got := validateOpaqueTransfer(encoding, []byte(data), nil)
+			if got != want {
+				t.Errorf("encoding=%q length=%d got=%v want=%v", encoding, len(data), got, want)
 			}
 		}
 	}

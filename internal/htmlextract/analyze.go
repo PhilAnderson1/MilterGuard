@@ -18,6 +18,9 @@ type processor struct {
 
 // Analyze parses and resolves a document once and retains the tree alongside
 // the per-text-node presentation decisions used by message extraction.
+// The caller must establish an extraction-stage termination.Recover boundary:
+// required memory failures unwind even without a supplied checkpoint. Returned
+// errors describe ordinary parse/structural failures, not resource exhaustion.
 func Analyze(input []byte, limits Limits) (Document, error) {
 	p := processor{Limits: limits}
 	return p.process(input)
@@ -25,7 +28,8 @@ func Analyze(input []byte, limits Limits) (Document, error) {
 
 // AnalyzeWithStop is Analyze with a cooperative stop check. The callback is
 // sampled inside the forked parsers as well as between bounded analysis phases
-// and during long traversals.
+// and during long traversals. Like Analyze, this requires a caller-managed
+// termination.Recover boundary for memory, CPU and cancellation signals.
 func AnalyzeWithStop(input []byte, limits Limits, shouldStop func()) (Document, error) {
 	p := processor{Limits: limits, shouldStop: shouldStop}
 	return p.process(input)

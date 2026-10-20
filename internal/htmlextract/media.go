@@ -51,13 +51,6 @@ const (
 
 var widthFeature = regexp.MustCompile(`^\(\s*(min|max)-(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(px)?\s*\)$`)
 
-func parseMedia(src string) mediaCondition { return parseMediaBudgeted(src, nil) }
-
-// Both retained conditions and temporary applicability parsing consume the
-// monotonic allocation budget. Per-query bounds also limit regexp scratch.
-func parseMediaBudgeted(src string, memory *resourceguard.Memory) mediaCondition {
-	return parseMediaWithBudget(src, &cpuGuard{memory: memory})
-}
 func parseMediaWithBudget(src string, budget *cpuGuard) mediaCondition {
 	memory := budget.allocationMemory()
 	unknown := func() mediaCondition {
