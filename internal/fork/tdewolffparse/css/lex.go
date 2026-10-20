@@ -153,21 +153,13 @@ func NewLexer(r *parse.Input) *Lexer {
 // NewLexerWithLimits returns a lexer that checks cancellation while advancing
 // input. Tokens borrow input storage; callers account for copies they retain.
 func NewLexerWithLimits(r *parse.Input, limits ResourceLimits) *Lexer {
-	check, ok := resourceguard.ErrorCheck(limits.Memory, limits.ShouldStop, ErrResourceStopped)
-	if !ok {
-		return &Lexer{resourceErr: &ResourceLimitError{"memory bytes", int(limits.Memory.Limit())}}
-	}
-	if check != nil {
-		r.SetProgressCheck(check)
-	}
+	r.SetProgressCheck(limits.ShouldStop)
 	return newLexer(r, newResourceGuard(limits))
 }
 
 func newLexer(r *parse.Input, g *resourceGuard) *Lexer {
-	l, ok := resourceguard.New(g.memory(), Lexer{r: r, guard: g})
-	if !ok {
-		return &Lexer{resourceErr: g.allocationError()}
-	}
+	l := resourceguard.New(g.memory(), Lexer{r: r, guard: g})
+
 	return l
 }
 
@@ -175,9 +167,6 @@ func newLexer(r *parse.Input, g *resourceGuard) *Lexer {
 func (l *Lexer) Err() error {
 	if l.resourceErr != nil {
 		return l.resourceErr
-	}
-	if l.r.Err() == resourceguard.ErrStopped {
-		return ErrResourceStopped
 	}
 	return l.r.Err()
 }
@@ -201,10 +190,8 @@ func (l *Lexer) Next() (tt TokenType, data []byte) {
 			tt, data = ErrorToken, nil
 			return
 		}
-		if err := l.guard.step(); err != nil {
-			l.resourceErr = err
-			tt, data = ErrorToken, nil
-		}
+
+		l.guard.step()
 	}()
 	switch l.r.Peek(0) {
 	case ' ', '\t', '\n', '\r', '\f':
@@ -222,38 +209,59 @@ func (l *Lexer) Next() (tt TokenType, data []byte) {
 		l.r.Move(1)
 		return CommaToken, l.r.Shift()
 	case '(', ')', '[', ']', '{', '}':
-		if t := l.consumeBracket(); t != ErrorToken {
-			return t, l.r.Shift()
+		{
+			t := l.consumeBracket()
+			if t != ErrorToken {
+				return t, l.r.Shift()
+			}
 		}
 	case '#':
 		if l.consumeHashToken() {
 			return HashToken, l.r.Shift()
 		}
 	case '"', '\'':
-		if t := l.consumeString(); t != ErrorToken {
-			return t, l.r.Shift()
+		{
+			t := l.consumeString()
+			if t != ErrorToken {
+				return t, l.r.Shift()
+			}
 		}
 	case '.', '+':
-		if t := l.consumeNumeric(); t != ErrorToken {
-			return t, l.r.Shift()
+		{
+			t := l.consumeNumeric()
+			if t != ErrorToken {
+				return t, l.r.Shift()
+			}
 		}
 	case '-':
 		if l.consumeCDCToken() {
 			return CDCToken, l.r.Shift()
 		} else if l.consumeCustomVariableToken() {
 			return CustomPropertyNameToken, l.r.Shift()
-		} else if t := l.consumeIdentlike(); t != ErrorToken {
-			return t, l.r.Shift()
-		} else if t := l.consumeNumeric(); t != ErrorToken {
-			return t, l.r.Shift()
+		} else {
+
+			if t := l.consumeIdentlike(); t != ErrorToken {
+				return t, l.r.Shift()
+			} else {
+
+				if t := l.consumeNumeric(); t != ErrorToken {
+					return t, l.r.Shift()
+				}
+
+			}
+
 		}
+
 	case '@':
 		if l.consumeAtKeywordToken() {
 			return AtKeywordToken, l.r.Shift()
 		}
 	case '$', '*', '^', '~':
-		if t := l.consumeMatch(); t != ErrorToken {
-			return t, l.r.Shift()
+		{
+			t := l.consumeMatch()
+			if t != ErrorToken {
+				return t, l.r.Shift()
+			}
 		}
 	case '/':
 		if l.consumeComment() {
@@ -264,30 +272,47 @@ func (l *Lexer) Next() (tt TokenType, data []byte) {
 			return CDOToken, l.r.Shift()
 		}
 	case '\\':
-		if t := l.consumeIdentlike(); t != ErrorToken {
-			return t, l.r.Shift()
+		{
+			t := l.consumeIdentlike()
+			if t != ErrorToken {
+				return t, l.r.Shift()
+			}
 		}
 	case 'u', 'U':
 		if l.consumeUnicodeRangeToken() {
 			return UnicodeRangeToken, l.r.Shift()
-		} else if t := l.consumeIdentlike(); t != ErrorToken {
-			return t, l.r.Shift()
+		} else {
+
+			if t := l.consumeIdentlike(); t != ErrorToken {
+				return t, l.r.Shift()
+			}
+
 		}
 	case '|':
-		if t := l.consumeMatch(); t != ErrorToken {
-			return t, l.r.Shift()
-		} else if l.consumeColumnToken() {
-			return ColumnToken, l.r.Shift()
+		{
+			t := l.consumeMatch()
+			if t != ErrorToken {
+				return t, l.r.Shift()
+			} else if l.consumeColumnToken() {
+				return ColumnToken, l.r.Shift()
+			}
 		}
 	case 0:
 		if l.r.Err() != nil {
 			return ErrorToken, nil
 		}
 	default:
-		if t := l.consumeNumeric(); t != ErrorToken {
-			return t, l.r.Shift()
-		} else if t := l.consumeIdentlike(); t != ErrorToken {
-			return t, l.r.Shift()
+		{
+			t := l.consumeNumeric()
+			if t != ErrorToken {
+				return t, l.r.Shift()
+			} else {
+
+				if t := l.consumeIdentlike(); t != ErrorToken {
+					return t, l.r.Shift()
+				}
+
+			}
 		}
 	}
 	// can't be rune because consumeIdentlike consumes that as an identifier
@@ -363,7 +388,7 @@ func (l *Lexer) consumeDigit() bool {
 
 func (l *Lexer) consumeHexDigit() bool {
 	c := l.r.Peek(0)
-	if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+	if c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' {
 		l.r.Move(1)
 		return true
 	}
@@ -388,8 +413,8 @@ func (l *Lexer) consumeEscape() bool {
 		l.consumeWhitespace()
 		return true
 	} else {
-		c := l.r.Peek(0)
-		if c >= 0xC0 {
+
+		if c := l.r.Peek(0); c >= 0xC0 {
 			_, n := l.r.PeekRune(0)
 			l.r.Move(n)
 			return true
@@ -397,7 +422,9 @@ func (l *Lexer) consumeEscape() bool {
 			l.r.Rewind(mark)
 			return false
 		}
+
 	}
+
 	l.r.Move(1)
 	return true
 }
@@ -414,7 +441,7 @@ func (l *Lexer) consumeIdentToken() bool {
 	}
 	if !custom {
 		c := l.r.Peek(0)
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c >= 0x80) {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' || c >= 0x80) {
 			if c != '\\' || !l.consumeEscape() {
 				l.r.Rewind(mark)
 				return false
@@ -425,7 +452,7 @@ func (l *Lexer) consumeIdentToken() bool {
 	}
 	for {
 		c := l.r.Peek(0)
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c >= 0x80) {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-' || c >= 0x80) {
 			if c != '\\' || !l.consumeEscape() {
 				break
 			}
@@ -462,7 +489,7 @@ func (l *Lexer) consumeHashToken() bool {
 	mark := l.r.Pos()
 	l.r.Move(1)
 	c := l.r.Peek(0)
-	if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c >= 0x80) {
+	if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-' || c >= 0x80) {
 		if c != '\\' || !l.consumeEscape() {
 			l.r.Rewind(mark)
 			return false
@@ -472,7 +499,7 @@ func (l *Lexer) consumeHashToken() bool {
 	}
 	for {
 		c := l.r.Peek(0)
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c >= 0x80) {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-' || c >= 0x80) {
 			if c != '\\' || !l.consumeEscape() {
 				break
 			}
@@ -532,7 +559,7 @@ func (l *Lexer) consumeNumberToken() bool {
 
 func (l *Lexer) consumeUnicodeRangeToken() bool {
 	c := l.r.Peek(0)
-	if (c != 'u' && c != 'U') || l.r.Peek(1) != '+' {
+	if c != 'u' && c != 'U' || l.r.Peek(1) != '+' {
 		return false
 	}
 	mark := l.r.Pos()
@@ -569,6 +596,7 @@ func (l *Lexer) consumeUnicodeRangeToken() bool {
 			k++
 		}
 	}
+
 	if k == 0 || 6 < k {
 		l.r.Rewind(mark)
 		return false
@@ -761,10 +789,8 @@ func (l *Lexer) isURLName(name []byte) bool {
 	for i, c := range name {
 		if i >= nextCheck {
 			nextCheck = i + 1024
-			if err := l.r.CheckProgress(); err != nil {
-				l.resourceErr = err
-				return false
-			}
+
+			l.r.CheckProgress()
 		}
 		if c == '\\' {
 			continue

@@ -12,6 +12,7 @@ import (
 
 	a "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/atom"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 )
 
 var (
@@ -888,16 +889,20 @@ func (p *parser) copyAttributes(dst *Node, src Token) {
 		panic("html: copyAttributes called for non-html/body node")
 	}
 	if names.View() == nil {
-		p.guard.must(names.Init(p.guard.memory(), len(dst.Attr)))
+		names.Init(p.guard.memory(), len(dst.Attr))
+
 		for _, attribute := range dst.Attr {
-			p.guard.must(names.Set(p.guard.memory(), attribute.Key, struct{}{}))
+			names.Set(p.guard.memory(), attribute.Key, struct{}{})
 		}
 	}
 	for _, t := range src.Attr {
+
 		if _, ok := names.Get(t.Key); !ok {
-			p.guard.must(names.Set(p.guard.memory(), t.Key, struct{}{}))
+			names.Set(p.guard.memory(), t.Key, struct{}{})
+
 			dst.Attr = append(growResourceSlice(dst.Attr, 1, p.guard), t)
 		}
+
 	}
 }
 
@@ -1035,12 +1040,14 @@ func inBodyIM(p *parser) bool {
 			p.framesetOK = false
 		case a.A:
 			for i := len(p.afe) - 1; i >= 0 && p.afe[i].Type != scopeMarkerNode; i-- {
+
 				if n := p.afe[i]; n.Type == ElementNode && n.DataAtom == a.A {
 					p.inBodyEndTagFormatting(a.A, "a")
 					p.oe.remove(n)
 					p.afe.remove(n)
 					break
 				}
+
 			}
 			p.reconstructActiveFormattingElements()
 			p.addFormattingElement()
@@ -1145,6 +1152,7 @@ func inBodyIM(p *parser) bool {
 			} else if p.popUntil(defaultScope, a.Select) {
 				return true
 			}
+
 			p.reconstructActiveFormattingElements()
 			p.addElement()
 			p.framesetOK = false
@@ -1156,6 +1164,7 @@ func inBodyIM(p *parser) bool {
 			} else if p.top().DataAtom == a.Option {
 				p.oe.pop()
 			}
+
 			p.reconstructActiveFormattingElements()
 			p.addElement()
 		case a.Optgroup:
@@ -1165,6 +1174,7 @@ func inBodyIM(p *parser) bool {
 			} else if p.top().DataAtom == a.Option {
 				p.oe.pop()
 			}
+
 			p.reconstructActiveFormattingElements()
 			p.addElement()
 		case a.Rb, a.Rtc:
@@ -1231,15 +1241,17 @@ func inBodyIM(p *parser) bool {
 				}
 				p.popUntil(defaultScope, a.Form)
 			} else {
-				node := p.form
-				p.form = nil
-				i := p.indexOfElementInScope(defaultScope, a.Form)
-				if node == nil || i == -1 || p.oe[i] != node {
-					// Ignore the token.
-					return true
+				{
+					node := p.form
+					p.form = nil
+					i := p.indexOfElementInScope(defaultScope, a.Form)
+					if node == nil || i == -1 || p.oe[i] != node {
+						// Ignore the token.
+						return true
+					}
+					p.generateImpliedEndTags()
+					p.oe.remove(node)
 				}
-				p.generateImpliedEndTags()
-				p.oe.remove(node)
 			}
 		case a.P:
 			if !p.elementInScope(buttonScope, a.P) {
@@ -1455,8 +1467,8 @@ func (p *parser) inBodyEndTagOther(tagAtom a.Atom, tagName string) {
 		// Uncommon (custom) tags get a zero DataAtom.
 		//
 		// The if condition here is equivalent to (p.oe[i].Data == tagName).
-		if p.oe[i].Namespace == "" && (p.oe[i].DataAtom == tagAtom) &&
-			((tagAtom != 0) || (p.oe[i].Data == tagName)) {
+		if p.oe[i].Namespace == "" && p.oe[i].DataAtom == tagAtom &&
+			(tagAtom != 0 || p.oe[i].Data == tagName) {
 			p.oe = p.oe[:i]
 			break
 		}
@@ -1473,13 +1485,16 @@ func textIM(p *parser) bool {
 		p.oe.pop()
 	case TextToken:
 		d := p.tok.Data
-		if n := p.oe.top(); n.DataAtom == a.Textarea && n.FirstChild == nil {
-			// Ignore a newline at the start of a <textarea> block.
-			if d != "" && d[0] == '\r' {
-				d = d[1:]
-			}
-			if d != "" && d[0] == '\n' {
-				d = d[1:]
+		{
+			n := p.oe.top()
+			if n.DataAtom == a.Textarea && n.FirstChild == nil {
+				// Ignore a newline at the start of a <textarea> block.
+				if d != "" && d[0] == '\r' {
+					d = d[1:]
+				}
+				if d != "" && d[0] == '\n' {
+					d = d[1:]
+				}
 			}
 		}
 		if d == "" {
@@ -2130,11 +2145,14 @@ func parseForeignContent(p *parser) bool {
 		case "math":
 			adjustAttributeNames(p.tok.Attr, mathMLAttributeAdjustments)
 		case "svg":
-			// Adjust SVG tag names. The tokenizer lower-cases tag names, but
-			// SVG wants e.g. "foreignObject" with a capital second "O".
-			if x := svgTagNameAdjustments[p.tok.Data]; x != "" {
-				p.tok.DataAtom = a.Lookup([]byte(x))
-				p.tok.Data = x
+			{
+				// Adjust SVG tag names. The tokenizer lower-cases tag names, but
+				// SVG wants e.g. "foreignObject" with a capital second "O".
+				x := svgTagNameAdjustments[p.tok.Data]
+				if x != "" {
+					p.tok.DataAtom = a.Lookup([]byte(x))
+					p.tok.Data = x
+				}
 			}
 			adjustAttributeNames(p.tok.Attr, svgAttributeAdjustments)
 		default:
@@ -2254,6 +2272,7 @@ func (p *parser) parseCurrentToken() {
 func (p *parser) parse() (err error) {
 	defer func() {
 		if panicErr := recover(); panicErr != nil {
+			termination.Rethrow(panicErr)
 			if abort, ok := panicErr.(resourceAbort); ok {
 				err = abort.err
 			} else {
@@ -2318,14 +2337,12 @@ func newParserWithOptions(opts []ParseOption, value parser) *parser {
 	for _, option := range opts {
 		option(&c)
 	}
-	g, ok := resourceguard.New(c.limits.Memory, resourceGuard{limits: c.limits})
-	if !ok {
-		panic(resourceAbort{&ResourceLimitError{"memory bytes", c.limits.Memory.Limit()}})
-	}
+	g := resourceguard.New(c.limits.Memory, resourceGuard{limits: c.limits, sampler: resourceguard.NewStopSampler(256, c.limits.ShouldStop)})
+
 	value.guard = g
 	value.scripting = c.scripting
-	p, ok := resourceguard.New(c.limits.Memory, value)
-	g.must(ok)
+	p := resourceguard.New(c.limits.Memory, value)
+
 	return p
 }
 
@@ -2342,38 +2359,44 @@ func ParseOptionEnableScripting(enable bool) ParseOption {
 // ParseWithOptions is like Parse, with options.
 func ParseWithOptions(r io.Reader, opts ...ParseOption) (node *Node, err error) {
 	defer func() {
+
 		if panicErr := recover(); panicErr != nil {
+
 			if abort, ok := panicErr.(resourceAbort); ok {
 				node, err = nil, abort.err
 				return
 			}
+
 			panic(panicErr)
 		}
+
 	}()
 	p := newParserWithOptions(opts, parser{framesetOK: true, im: initialIM})
 	p.tokenizer = newTokenizer(r, "", p.guard)
-	if p.tokenizer.err != nil {
-		return nil, p.tokenizer.err
-	}
 
 	p.doc = p.newNode(Node{Type: DocumentNode})
 
 	if err := p.parse(); err != nil {
 		return nil, err
 	}
+
 	return p.doc, nil
 }
 
 // ParseFragmentWithOptions is like ParseFragment, with options.
 func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) (nodes []*Node, err error) {
 	defer func() {
+
 		if panicErr := recover(); panicErr != nil {
+
 			if abort, ok := panicErr.(resourceAbort); ok {
 				nodes, err = nil, abort.err
 				return
 			}
+
 			panic(panicErr)
 		}
+
 	}()
 	contextTag := ""
 	if context != nil {
@@ -2393,9 +2416,6 @@ func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) (
 		contextTag = ""
 	}
 	p.tokenizer = newTokenizer(r, contextTag, p.guard)
-	if p.tokenizer.err != nil {
-		return nil, p.tokenizer.err
-	}
 
 	p.doc = p.newNode(Node{Type: DocumentNode})
 
@@ -2448,8 +2468,9 @@ func (p *parser) appendText(n *Node, text string) {
 	if p.textNode != n {
 		p.textBuilder.Reset()
 		p.textNode = n
-		p.guard.must(resourceguard.WriteString(p.guard.memory(), &p.textBuilder, n.Data, p.guard.checkpoint))
+		resourceguard.WriteString(p.guard.memory(), &p.textBuilder, n.Data, p.guard.checkpoint)
 	}
-	p.guard.must(resourceguard.WriteString(p.guard.memory(), &p.textBuilder, text, p.guard.checkpoint))
+	resourceguard.WriteString(p.guard.memory(), &p.textBuilder, text, p.guard.checkpoint)
+
 	n.Data = p.textBuilder.String()
 }

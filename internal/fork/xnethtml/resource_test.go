@@ -1,5 +1,7 @@
 package html
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"errors"
 	"fmt"
@@ -12,10 +14,11 @@ import (
 
 func TestSharedMemoryBudgetStopsTokenizerAndTreeBuilder(t *testing.T) {
 	memory := resourceguard.NewMemory(512)
-	_, err := ParseWithOptions(strings.NewReader(`<div `+strings.Repeat(`a=x `, 100)+`>text</div>`), ParseOptionResourceLimits(ResourceLimits{Memory: memory}))
-	var limitErr *ResourceLimitError
-	if !errors.As(err, &limitErr) || !memory.Exhausted() {
-		t.Fatalf("err=%v exhausted=%v", err, memory.Exhausted())
+	expectTermination(t, termination.MemoryExceeded, func() {
+		ParseWithOptions(strings.NewReader(`<div `+strings.Repeat(`a=x `, 100)+`>text</div>`), ParseOptionResourceLimits(ResourceLimits{Memory: memory}))
+	})
+	if !memory.Exhausted() {
+		t.Fatal("missing exhaustion")
 	}
 }
 
@@ -82,56 +85,54 @@ func TestDocumentNodeLimitIsResourceError(t *testing.T) {
 
 func TestResourceStopDuringLargeToken(t *testing.T) {
 	checks := 0
-	_, err := ParseWithOptions(strings.NewReader(`<!--`+strings.Repeat("x", 5000)+`-->`), ParseOptionResourceLimits(ResourceLimits{ShouldStop: func() bool { checks++; return checks > 1 }}))
-	if !errors.Is(err, ErrResourceStopped) {
-		t.Fatalf("err=%v", err)
+	expectTermination(t, termination.CPUExceeded, func() {
+		ParseWithOptions(strings.NewReader(`<!--`+strings.Repeat("x", 5000)+`-->`), ParseOptionResourceLimits(ResourceLimits{ShouldStop: func() {
+			checks++
+			if checks > 1 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+		}}))
+	})
+	if checks != 2 {
+		t.Fatalf("checks=%d", checks)
 	}
 }
 
 func TestTreeBuilderStopCheckIsSampled(t *testing.T) {
 	checks := 0
-	guard := resourceGuard{limits: ResourceLimits{ShouldStop: func() bool {
-		checks++
-		return false
-	}}}
+	guard := resourceGuard{limits: ResourceLimits{ShouldStop: func() { checks++ }}}
+	guard.sampler = resourceguard.NewStopSampler(256, guard.limits.ShouldStop)
 	for range 512 {
 		guard.stop()
 	}
-	if checks != 3 {
-		t.Fatalf("external stop checks = %d, want 3", checks)
+	if checks != 2 {
+		t.Fatalf("external checks=%d want 2", checks)
 	}
 }
 
-func TestTreeBuilderStopChecksExhaustedMemoryImmediately(t *testing.T) {
+func TestTreeBuilderAllocationTerminatesBeforeCPUCheckpoint(t *testing.T) {
 	memory := resourceguard.NewMemory(1)
-	if memory.Reserve(2) {
-		t.Fatal("memory budget did not become exhausted")
+	checks := 0
+	expectTermination(t, termination.MemoryExceeded, func() { memory.Reserve(2); checks++; t.Fatal("allocation returned") })
+	if checks != 0 {
+		t.Fatal("continued after memory refusal")
 	}
-	guard := resourceGuard{limits: ResourceLimits{Memory: memory}}
-	defer func() {
-		recovered := recover()
-		abort, ok := recovered.(resourceAbort)
-		if !ok {
-			t.Fatalf("panic = %v, want resourceAbort", recovered)
-		}
-		var limitErr *ResourceLimitError
-		if !errors.As(abort.err, &limitErr) || limitErr.Resource != "memory bytes" {
-			t.Fatalf("limit error = %v", abort.err)
-		}
-	}()
-	guard.stop()
 }
 
 func TestStandaloneTokenizerResourceStop(t *testing.T) {
 	checks := 0
-	z := NewTokenizerWithStop(strings.NewReader(`<!--`+strings.Repeat("x", 5000)+`-->`), func() bool {
+	z := NewTokenizerWithStop(strings.NewReader(`<!--`+strings.Repeat("x", 5000)+`-->`), func() {
 		checks++
-		return checks > 1
+		if checks > 1 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
 	})
-	for z.Next() != ErrorToken {
-	}
-	if !errors.Is(z.Err(), ErrResourceStopped) {
-		t.Fatalf("err=%v", z.Err())
+	expectTermination(t, termination.CPUExceeded, func() {
+		for z.Next() != ErrorToken {
+		}
+	})
+	if checks != 2 {
+		t.Fatalf("checks=%d", checks)
 	}
 }
 

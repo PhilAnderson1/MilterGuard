@@ -50,7 +50,6 @@ func Metadata(selector Sel) SelectorMetadata {
 
 // MetadataWithMemory accounts for arrays owned by metadata before allocating.
 func MetadataWithMemory(selector Sel, memory *resourceguard.Memory) (result SelectorMetadata, err error) {
-	defer recoverAllocation(&err)
 	compoundCount := selectorCompoundCount(selector)
 	metadata := SelectorMetadata{
 		Compounds: selectorSlice[CompoundMetadata](memory, 0, compoundCount),

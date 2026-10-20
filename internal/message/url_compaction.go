@@ -9,7 +9,7 @@ import (
 
 // promptURL preserves the existing component limits and filename suffix rule.
 func promptURL(value string, compact bool) string {
-	result, _ := promptURLWithBudget(value, compact, nil, nil)
+	result := promptURLWithBudget(value, compact, nil, nil)
 	return result
 }
 
@@ -54,7 +54,7 @@ func (o *urlOutput) part(s string, limit int, path bool) bool {
 	o.write(prefix, changed)
 	return changed
 }
-func (o *urlOutput) result(memory *resourceguard.Memory, stop resourceguard.Stop) (string, bool) {
+func (o *urlOutput) result(memory *resourceguard.Memory, stop resourceguard.Stop) string {
 	if o.full() {
 		// The old final []rune conversion also normalized invalid UTF-8 when
 		// truncating. Keep that behaviour without materializing the entire URL.
@@ -87,7 +87,7 @@ func hasLikelyFileExtension(s string) bool {
 		if c == '.' {
 			return end > 0 && letters > 0
 		}
-		if letters == 16 || !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+		if letters == 16 || !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
 			return false
 		}
 		letters++
@@ -107,35 +107,42 @@ func urlHex(c byte) int {
 }
 
 // cutURL samples cancellation even when a single component spans megabytes.
-func cutURL(s string, delimiter byte, stop resourceguard.Stop) (string, string, bool, bool) {
+func cutURL(s string, delimiter byte, stop resourceguard.Stop) (string, string, bool) {
 	for start := 0; start < len(s); start += resourceguard.WorkChunk {
-		if stop != nil && stop() {
-			return "", "", false, false
+		if stop != nil {
+			stop()
 		}
+
 		end := min(start+resourceguard.WorkChunk, len(s))
+
 		if i := strings.IndexByte(s[start:end], delimiter); i >= 0 {
 			i += start
-			return s[:i], s[i+1:], true, true
+			return s[:i], s[i+1:], true
 		}
+
 	}
-	return s, "", false, true
+	return s, "", false
 }
-func promptURLWithBudget(value string, compact bool, memory *resourceguard.Memory, stop resourceguard.Stop) (string, bool) {
+func promptURLWithBudget(value string, compact bool, memory *resourceguard.Memory, stop resourceguard.Stop) string {
 	if !compact {
-		return value, true
+		return value
 	}
-	if stop != nil && stop() {
-		return "", false
+
+	if stop != nil {
+		stop()
 	}
+
 	parsed, err := resourceguard.ParseURL(memory, value)
-	if memory.Exhausted() || (stop != nil && stop()) {
-		return "", false
+
+	if stop != nil {
+		stop()
 	}
+
 	var out urlOutput
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
 		prefix, truncated := runePrefix(value, maxPromptURLChars)
 		if !truncated {
-			return value, true
+			return value
 		}
 		out.write(prefix, true)
 		return out.result(memory, stop)
@@ -150,10 +157,8 @@ func promptURLWithBudget(value string, compact bool, memory *resourceguard.Memor
 	if !out.full() {
 		path := parsed.EscapedPath()
 		for {
-			part, rest, found, ok := cutURL(path, '/', stop)
-			if !ok {
-				return "", false
-			}
+			part, rest, found := cutURL(path, '/', stop)
+
 			changed = out.part(part, maxPromptURLPathChars, true) || changed
 			if out.full() || !found {
 				break
@@ -166,14 +171,10 @@ func promptURLWithBudget(value string, compact bool, memory *resourceguard.Memor
 		out.write("?", false)
 		query := parsed.RawQuery
 		for {
-			parameter, rest, found, ok := cutURL(query, '&', stop)
-			if !ok {
-				return "", false
-			}
-			key, val, equals, ok := cutURL(parameter, '=', stop)
-			if !ok {
-				return "", false
-			}
+			parameter, rest, found := cutURL(query, '&', stop)
+
+			key, val, equals := cutURL(parameter, '=', stop)
+
 			changed = out.part(key, maxPromptURLParameterChars, false) || changed
 			if equals {
 				out.write("=", false)
@@ -192,7 +193,7 @@ func promptURLWithBudget(value string, compact bool, memory *resourceguard.Memor
 	}
 	_, long := runePrefix(value, maxPromptURLChars)
 	if !changed && !long {
-		return value, true
+		return value
 	}
 	return out.result(memory, stop)
 }

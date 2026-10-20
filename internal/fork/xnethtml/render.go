@@ -75,30 +75,47 @@ func render1(w writer, n *Node) error {
 		return escape(w, n.Data)
 	case DocumentNode:
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
+
 			if err := render1(w, c); err != nil {
 				return err
 			}
+
 		}
 		return nil
 	case ElementNode:
 		// No-op.
 	case CommentNode:
-		if _, err := w.WriteString("<!--"); err != nil {
-			return err
+		{
+			_, err := w.WriteString("<!--")
+			if err != nil {
+				return err
+			}
 		}
-		if err := escapeComment(w, n.Data); err != nil {
-			return err
+		{
+			err := escapeComment(w, n.Data)
+			if err != nil {
+				return err
+			}
 		}
-		if _, err := w.WriteString("-->"); err != nil {
-			return err
+		{
+			_, err := w.WriteString("-->")
+			if err != nil {
+				return err
+			}
 		}
 		return nil
 	case DoctypeNode:
-		if _, err := w.WriteString("<!DOCTYPE "); err != nil {
-			return err
+		{
+			_, err := w.WriteString("<!DOCTYPE ")
+			if err != nil {
+				return err
+			}
 		}
-		if err := escape(w, n.Data); err != nil {
-			return err
+		{
+			err := escape(w, n.Data)
+			if err != nil {
+				return err
+			}
 		}
 		if n.Attr != nil {
 			var p, s string
@@ -111,27 +128,36 @@ func render1(w writer, n *Node) error {
 				}
 			}
 			if p != "" {
+
 				if _, err := w.WriteString(" PUBLIC "); err != nil {
 					return err
 				}
+
 				if err := writeDoctypeQuoted(w, p); err != nil {
 					return err
 				}
+
 				if s != "" {
+
 					if err := w.WriteByte(' '); err != nil {
 						return err
 					}
+
 					if err := writeDoctypeQuoted(w, s); err != nil {
 						return err
 					}
+
 				}
 			} else if s != "" {
+
 				if _, err := w.WriteString(" SYSTEM "); err != nil {
 					return err
 				}
+
 				if err := writeDoctypeQuoted(w, s); err != nil {
 					return err
 				}
+
 			}
 		}
 		return w.WriteByte('>')
@@ -143,36 +169,49 @@ func render1(w writer, n *Node) error {
 	}
 
 	// Render the <xxx> opening tag.
+
 	if err := w.WriteByte('<'); err != nil {
 		return err
 	}
+
 	if _, err := w.WriteString(n.Data); err != nil {
 		return err
 	}
+
 	for _, a := range n.Attr {
+
 		if err := w.WriteByte(' '); err != nil {
 			return err
 		}
+
 		if a.Namespace != "" {
+
 			if _, err := w.WriteString(a.Namespace); err != nil {
 				return err
 			}
+
 			if err := w.WriteByte(':'); err != nil {
 				return err
 			}
+
 		}
+
 		if _, err := w.WriteString(a.Key); err != nil {
 			return err
 		}
+
 		if _, err := w.WriteString(`="`); err != nil {
 			return err
 		}
+
 		if err := escape(w, a.Val); err != nil {
 			return err
 		}
+
 		if err := w.WriteByte('"'); err != nil {
 			return err
 		}
+
 	}
 	if voidElements[n.Data] {
 		if n.FirstChild != nil {
@@ -181,16 +220,21 @@ func render1(w writer, n *Node) error {
 		_, err := w.WriteString("/>")
 		return err
 	}
+
 	if err := w.WriteByte('>'); err != nil {
 		return err
 	}
 
 	// Add initial newline where there is danger of a newline being ignored.
+
 	if c := n.FirstChild; c != nil && c.Type == TextNode && strings.HasPrefix(c.Data, "\n") {
 		switch n.Data {
 		case "pre", "listing", "textarea":
-			if err := w.WriteByte('\n'); err != nil {
-				return err
+			{
+				err := w.WriteByte('\n')
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -199,13 +243,17 @@ func render1(w writer, n *Node) error {
 	if childTextNodesAreLiteral(n) {
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			if c.Type == TextNode {
+
 				if _, err := w.WriteString(c.Data); err != nil {
 					return err
 				}
+
 			} else {
+
 				if err := render1(w, c); err != nil {
 					return err
 				}
+
 			}
 		}
 		if n.Data == "plaintext" {
@@ -215,19 +263,24 @@ func render1(w writer, n *Node) error {
 		}
 	} else {
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
+
 			if err := render1(w, c); err != nil {
 				return err
 			}
+
 		}
 	}
 
 	// Render the </xxx> closing tag.
+
 	if _, err := w.WriteString("</"); err != nil {
 		return err
 	}
+
 	if _, err := w.WriteString(n.Data); err != nil {
 		return err
 	}
+
 	return w.WriteByte('>')
 }
 

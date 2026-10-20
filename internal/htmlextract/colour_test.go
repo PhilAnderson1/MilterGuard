@@ -530,7 +530,7 @@ func TestStandardParsingDecisions(t *testing.T) {
 		{`<table style="display:none"><tr><td>T</td></tr></table>`, true},
 	} {
 		v := colourText(t, `<style>html{background:white}</style>`+c.src)
-		if (v.Label == "concealed") != c.concealed {
+		if v.Label == "concealed" != c.concealed {
 			t.Fatal(v)
 		}
 	}

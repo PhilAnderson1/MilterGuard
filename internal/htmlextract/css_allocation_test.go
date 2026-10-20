@@ -1,5 +1,7 @@
 package htmlextract
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"fmt"
 	"runtime"
@@ -38,18 +40,18 @@ func TestCSSFixedAllocationBudget(t *testing.T) {
 			runtime.GC()
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
-			doc, err := Analyze(input, limits)
+			_, usage, err, failure := captureAnalysis(input, limits)
 			runtime.ReadMemStats(&after)
-			if err == nil && !tc.allowComplete || err != nil && doc.Usage.MemoryBytes != tc.limit {
-				t.Fatalf("expected memory cutoff: charged=%d err=%v", doc.Usage.MemoryBytes, err)
+			if err != nil || failure.Code == termination.None && !tc.allowComplete || failure.Code != termination.None && (failure.Code != termination.MemoryExceeded || usage.MemoryBytes != tc.limit) {
+				t.Fatalf("expected memory cutoff: charged=%d err=%v", usage.MemoryBytes, err)
 			}
 			allocated := after.TotalAlloc - before.TotalAlloc
 			// Allow unrelated runtime bookkeeping; this is a regression bound, not an
 			// assertion that the estimated budget is an exact process heap limit.
-			if allocated > uint64(tc.limit)+(2<<20) {
+			if allocated > uint64(tc.limit)+2<<20 {
 				t.Fatalf("allocated=%d, budget=%d", allocated, tc.limit)
 			}
-			t.Logf("allocated=%d, charged=%d", allocated, doc.Usage.MemoryBytes)
+			t.Logf("allocated=%d, charged=%d", allocated, usage.MemoryBytes)
 		})
 	}
 }
@@ -77,34 +79,44 @@ func TestStaticCSSValueRejectsFailedCopy(t *testing.T) {
 	}
 	for _, reason := range []string{"memory", "cancellation"} {
 		t.Run(reason, func(t *testing.T) {
-			budget := &cpuGuard{}
+			budget := testCPUGuard(cpuGuard{})
 			if reason == "memory" {
 				budget.memory = resourceguard.NewMemory(1)
 			} else {
-				budget.shouldStop = func() bool { return true }
+				{
+					{
+						budget.shouldStop = func() {
+							{
+								termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+							}
+
+							return
+						}
+					}
+				}
 			}
-			text := rawTokenStringWithBudget(tokens, budget)
-			if text != "" || !budget.stopNow(false) {
-				t.Fatal("expected interrupted copy")
+			code := termination.CPUExceeded
+			if reason == "memory" {
+				code = termination.MemoryExceeded
 			}
-			got := parseUnretainedCSSTokensWithBudget(tokens, text, budget)
-			if got.status != valueUnsupported {
-				t.Fatalf("interrupted copy produced status %v", got.status)
-			}
+			expectTermination(t, code, func() {
+				text := rawTokenStringWithBudget(tokens, budget)
+				parseUnretainedCSSTokensWithBudget(tokens, text, budget)
+			})
 		})
 	}
 }
 
-func TestInlineCSSMemoryBoundaryReturnsError(t *testing.T) {
+func TestInlineCSSMemoryBoundaryUnwinds(t *testing.T) {
 	input := []byte("<p style='color:red'>x</p>")
 	// Sweep the small-document allocation boundaries rather than depending on
 	// one Go version's object sizes to exhaust memory during the value copy.
 	for limit := int64(4096); limit < 40000; limit++ {
 		limits := DefaultLimits()
 		limits.MemoryBytes = limit
-		doc, err := Analyze(input, limits)
-		if err != nil && (!strings.Contains(err.Error(), "memory bytes") || doc.Usage.MemoryBytes != limit) {
-			t.Fatalf("limit=%d charged=%d err=%v", limit, doc.Usage.MemoryBytes, err)
+		_, usage, err, failure := captureAnalysis(input, limits)
+		if err != nil || failure.Code != termination.None && (failure.Code != termination.MemoryExceeded || usage.MemoryBytes != limit) {
+			t.Fatalf("limit=%d charged=%d err=%v", limit, usage.MemoryBytes, err)
 		}
 	}
 }

@@ -33,9 +33,8 @@ func (s *sheet) recordKeyframeName(tokens []css.Token) {
 	var name string
 	found := false
 	for _, token := range tokens {
-		if !s.checkCPU() {
-			return
-		}
+		s.checkCPU()
+
 		if token.TokenType == css.WhitespaceToken || token.TokenType == css.CommentToken {
 			continue
 		}
@@ -76,9 +75,8 @@ func parseAnimationValue(value string, shorthand bool, budget *cpuGuard) animati
 		end := start
 		depth := 0
 		for end < len(tokens) {
-			if !budget.check() {
-				return animationValue{unresolved: true}
-			}
+			budget.check()
+
 			token := tokens[end]
 			if token.kind == css.CommaToken && depth == 0 {
 				break
@@ -91,6 +89,7 @@ func parseAnimationValue(value string, shorthand bool, budget *cpuGuard) animati
 					return animationValue{unresolved: true}
 				}
 			}
+
 			end++
 		}
 		if depth != 0 || start == end {
@@ -101,11 +100,8 @@ func parseAnimationValue(value string, shorthand bool, budget *cpuGuard) animati
 			return animationValue{unresolved: true}
 		}
 		if named {
-			var admitted bool
-			result.names, admitted = growSlice(result.names, 1, budget.allocationMemory(), budget.allocationStop)
-			if !admitted {
-				return animationValue{unresolved: true}
-			}
+			result.names = growSlice(result.names, 1, budget.allocationMemory(), budget.allocationStop)
+
 			result.names = append(result.names, name)
 		}
 		if end == len(tokens) {
@@ -135,9 +131,8 @@ func singleAnimationName(tokens []valueToken, shorthand bool, budget *cpuGuard) 
 	var timing, iteration, direction, fill, play, nameSet bool
 	times := 0
 	for i := 0; i < len(tokens); i++ {
-		if !budget.check() {
-			return "", false, false
-		}
+		budget.check()
+
 		token := tokens[i]
 		keyword := asciiLowerWithBudget(cssUnescapeWithBudget(token.raw, budget), budget)
 		switch token.kind {
@@ -150,7 +145,7 @@ func singleAnimationName(tokens []valueToken, shorthand bool, budget *cpuGuard) 
 				return "", false, false
 			}
 			n, valid := numberWithBudget(strings.TrimSuffix(keyword, unit), budget)
-			if !valid || (times == 0 && n < 0) {
+			if !valid || times == 0 && n < 0 {
 				return "", false, false
 			}
 			times++
@@ -211,9 +206,8 @@ func singleAnimationName(tokens []valueToken, shorthand bool, budget *cpuGuard) 
 func animationTimingFunction(tokens []valueToken, start int, budget *cpuGuard) (int, bool) {
 	end := start + 1
 	for end < len(tokens) && tokens[end].kind != css.RightParenthesisToken {
-		if !budget.check() {
-			return 0, false
-		}
+		budget.check()
+
 		if tokens[end].kind == css.FunctionToken || tokens[end].kind == css.LeftParenthesisToken {
 			return 0, false
 		}
@@ -236,7 +230,7 @@ func animationTimingFunction(tokens []valueToken, start int, budget *cpuGuard) (
 				continue
 			}
 			n, ok := numberWithBudget(token.raw, budget)
-			if token.kind != css.NumberToken || !ok || (i%4 == 0 && (n < 0 || n > 1)) {
+			if token.kind != css.NumberToken || !ok || i%4 == 0 && (n < 0 || n > 1) {
 				return 0, false
 			}
 		}
@@ -269,7 +263,7 @@ func animationTimingFunction(tokens []valueToken, start int, budget *cpuGuard) (
 }
 
 func (s *sheet) potentiallyActiveAnimation(c candidate, context evaluationContext, work *cpuGuard) bool {
-	if !c.set || (s.keyframeNames.Len() == 0 && !s.unresolvedStylesheet) {
+	if !c.set || s.keyframeNames.Len() == 0 && !s.unresolvedStylesheet {
 		return false
 	}
 	if c.uncertainOrigin || c.d.unsupported {
@@ -281,9 +275,12 @@ func (s *sheet) potentiallyActiveAnimation(c candidate, context evaluationContex
 		if resolved.status == valueInvalid {
 			return false
 		}
-		if resolved.status != valueResolved || !context.budget.check() {
+
+		if resolved.status != valueResolved {
 			return true
 		}
+		context.budget.check()
+
 		parsed := parseAnimationValue(resolved.text, c.d.animationShorthand, context.budget)
 		value = &parsed
 	}
@@ -291,12 +288,12 @@ func (s *sheet) potentiallyActiveAnimation(c candidate, context evaluationContex
 		return true
 	}
 	for _, name := range value.names {
-		if !work.check() {
-			return true
-		}
+		work.check()
+
 		if _, found := s.keyframeNames.View()[name]; found || s.unresolvedStylesheet {
 			return true
 		}
+
 	}
 	return false
 }

@@ -124,7 +124,7 @@ func unescapeEntity(s []byte, attribute bool, guard *resourceGuard) (rune, rune,
 		if 0x80 <= x && x <= 0x9F {
 			// Replace characters from Windows-1252 with UTF-8 equivalents.
 			x = replacementTable[x-0x80]
-		} else if x == 0 || (0xD800 <= x && x <= 0xDFFF) || x > 0x10FFFF {
+		} else if x == 0 || 0xD800 <= x && x <= 0xDFFF || x > 0x10FFFF {
 			// Replace invalid characters with the replacement character.
 			x = '\uFFFD'
 		}
@@ -155,17 +155,27 @@ func unescapeEntity(s []byte, attribute bool, guard *resourceGuard) (rune, rune,
 		// No-op.
 	} else if attribute && entityName[len(entityName)-1] != ';' && len(s) > i && s[i] == '=' {
 		// No-op.
-	} else if x := entity[string(entityName)]; x != 0 {
-		return x, 0, i
-	} else if x := entity2[string(entityName)]; x[0] != 0 {
-		return x[0], x[1], i
-	} else if !attribute {
-		maxLen := min(len(entityName)-1, longestEntityWithoutSemicolon)
-		for j := maxLen; j > 1; j-- {
-			if x := entity[string(entityName[:j])]; x != 0 {
-				return x, 0, j + 1
+	} else {
+
+		if x := entity[string(entityName)]; x != 0 {
+			return x, 0, i
+		} else {
+
+			if x := entity2[string(entityName)]; x[0] != 0 {
+				return x[0], x[1], i
+			} else if !attribute {
+				maxLen := min(len(entityName)-1, longestEntityWithoutSemicolon)
+				for j := maxLen; j > 1; j-- {
+
+					if x := entity[string(entityName[:j])]; x != 0 {
+						return x, 0, j + 1
+					}
+
+				}
 			}
+
 		}
+
 	}
 
 	return '&', 0, 1
@@ -297,9 +307,11 @@ func escapeComment(w writer, s string) error {
 
 		case '>':
 			if j > 0 {
-				if prev := s[j-1]; (prev != '!') && (prev != '-') {
+
+				if prev := s[j-1]; prev != '!' && prev != '-' {
 					continue
 				}
+
 			}
 			escaped = "&gt;"
 
@@ -308,20 +320,26 @@ func escapeComment(w writer, s string) error {
 		}
 
 		if i < j {
+
 			if _, err := w.WriteString(s[i:j]); err != nil {
 				return err
 			}
+
 		}
+
 		if _, err := w.WriteString(escaped); err != nil {
 			return err
 		}
+
 		i = j + 1
 	}
 
 	if i < len(s) {
+
 		if _, err := w.WriteString(s[i:]); err != nil {
 			return err
 		}
+
 	}
 	return nil
 }

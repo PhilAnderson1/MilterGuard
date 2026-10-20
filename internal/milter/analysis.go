@@ -10,7 +10,8 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/threadcpu"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 )
 
 const analysisResponseMargin = 5 * time.Second
@@ -27,8 +28,6 @@ type evaluationResult struct {
 	reasons                    []string
 	visionImages               int
 	tokenCost                  float64
-	htmlPrimaryCPUTime         time.Duration
-	htmlFallbackCPUTime        time.Duration
 	htmlPrimaryCPUExceeded     bool
 	htmlFallbackCPUExceeded    bool
 	htmlMemoryExceeded         bool
@@ -74,8 +73,6 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 	prepared, usage := s.buildAnalysis(ctx, msg, analysisContext)
 	htmlCPUExceeded := usage.cpuExceeded()
 	defer func() {
-		result.htmlPrimaryCPUTime = usage.primaryCPUTime
-		result.htmlFallbackCPUTime = usage.fallbackCPUTime
 		result.htmlPrimaryCPUExceeded = usage.primaryCPUExceeded
 		result.htmlFallbackCPUExceeded = usage.fallbackCPUExceeded
 		result.htmlMemoryExceeded = usage.memoryExceeded
@@ -173,59 +170,36 @@ func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Messag
 		ObserveMemoryUsage:          func(used, limit int64) { usage.primaryMemoryBytes = used },
 		ObserveFallbackMemoryUsage:  func(used, limit int64) { usage.fallbackMemoryBytes = used },
 	}
-	contextStopped := func() bool { return ctx.Err() != nil }
-	if s.ai.MaxHTMLParseCPUMilliseconds == 0 {
-		control.ShouldFallback = contextStopped
-		control.FallbackShouldStop = contextStopped
-		prepared := msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control)
-		return prepared, usage
-	}
-	clock := threadcpu.Now
-	if s.threadCPUTime != nil {
-		clock = s.threadCPUTime
-	}
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	started, ok := clock()
-	primary := cpuAllowance{started: started, available: ok}
-	var fallback cpuAllowance
-	fallbackActive := false
 	maximum := time.Duration(s.ai.MaxHTMLParseCPUMilliseconds) * time.Millisecond
-	control.ShouldFallback = func() bool {
-		if contextStopped() || usage.memoryExceeded && !continueAfterLimit {
-			return true
+	if maximum != 0 {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+	}
+	var budget resourceguard.CPUBudget
+	budget.Reset(maximum)
+	check := func() {
+		if ctx.Err() != nil {
+			termination.Fail(termination.Failure{Code: termination.Cancelled})
 		}
-		if fallbackActive {
-			return false
+		budget.Check()
+	}
+	control.CheckPrimary = check
+	control.CheckFallback = check
+	control.CPULimitExceeded = func(fallback bool) {
+		if fallback {
+			usage.fallbackCPUExceeded = true
+		} else {
+			usage.primaryCPUExceeded = true
 		}
-		if primary.exceeded {
-			return true
-		}
-		current, ok := clock()
-		return primary.check(current, ok, maximum)
 	}
 	control.BeginFallback = func() bool {
-		if contextStopped() || (primary.exceeded || usage.primaryMemoryExceeded) && !continueAfterLimit {
+		if ctx.Err() != nil || (usage.primaryCPUExceeded || usage.primaryMemoryExceeded) && !continueAfterLimit {
 			return false
 		}
-		current, ok := clock()
-		fallbackActive = true
-		fallback = cpuAllowance{started: current, available: ok}
+		budget.Reset(maximum)
 		return true
 	}
-	control.FallbackShouldStop = func() bool {
-		if contextStopped() || fallback.exceeded {
-			return true
-		}
-		current, ok := clock()
-		return fallback.check(current, ok, maximum)
-	}
-
 	prepared := msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control)
-	// Use completed output. No clock sample or elapsed-time veto at completion.
-	usage.primaryCPUTime, usage.fallbackCPUTime = primary.elapsed, fallback.elapsed
-	usage.primaryCPUExceeded, usage.fallbackCPUExceeded = primary.exceeded, fallback.exceeded
-	usage.measured = primary.available || fallback.available
 	return prepared, usage
 }
 
@@ -276,8 +250,6 @@ func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, 
 			"actual_action", result.selected.String(), "error", result.err,
 			"latency_ms", result.latency.Milliseconds(), "response_sent", sent,
 			"vision_images", result.visionImages,
-			"html_primary_cpu_ms", result.htmlPrimaryCPUTime.Milliseconds(),
-			"html_fallback_cpu_ms", result.htmlFallbackCPUTime.Milliseconds(),
 			"html_primary_cpu_limit_exceeded", result.htmlPrimaryCPUExceeded,
 			"html_fallback_cpu_limit_exceeded", result.htmlFallbackCPUExceeded,
 			"html_memory_limit_exceeded", result.htmlMemoryExceeded,
@@ -313,8 +285,6 @@ func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, 
 		"actual_action", result.selected.String(), "model", s.ai.Model,
 		"latency_ms", result.latency.Milliseconds(), "truncated", msg.Truncated,
 		"response_sent", sent, "vision_images", result.visionImages,
-		"html_primary_cpu_ms", result.htmlPrimaryCPUTime.Milliseconds(),
-		"html_fallback_cpu_ms", result.htmlFallbackCPUTime.Milliseconds(),
 		"html_primary_cpu_limit_exceeded", result.htmlPrimaryCPUExceeded,
 		"html_fallback_cpu_limit_exceeded", result.htmlFallbackCPUExceeded,
 		"html_memory_limit_exceeded", result.htmlMemoryExceeded,

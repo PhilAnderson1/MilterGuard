@@ -1,5 +1,7 @@
 package cascadia
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"strings"
 	"testing"
@@ -33,13 +35,16 @@ func TestMatchWithStopInterruptsDescendantSearch(t *testing.T) {
 		parent = child
 	}
 	checks := 0
-	matched, stopped := MatchWithStop(selector, root, func() bool {
-		checks++
-		return checks == 2
+	expectTermination(t, termination.CPUExceeded, func() {
+		MatchWithStop(selector, root, func() {
+			checks++
+			if checks == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
+		})
 	})
-	if matched || !stopped {
-		t.Fatalf("matched=%v stopped=%v, want false/true", matched, stopped)
-	}
 }
 
 func TestMatchWithStopInterruptsLangAncestorSearch(t *testing.T) {
@@ -55,13 +60,16 @@ func TestMatchWithStopInterruptsLangAncestorSearch(t *testing.T) {
 		n = child
 	}
 	checks := 0
-	matched, stopped := MatchWithStop(selector, n, func() bool {
-		checks++
-		return checks == 2
+	expectTermination(t, termination.CPUExceeded, func() {
+		MatchWithStop(selector, n, func() {
+			checks++
+			if checks == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
+		})
 	})
-	if matched || !stopped {
-		t.Fatalf("matched=%v stopped=%v, want false/true", matched, stopped)
-	}
 }
 
 func TestMatchWithStopPreservesMatchResult(t *testing.T) {
@@ -72,9 +80,9 @@ func TestMatchWithStopPreservesMatchResult(t *testing.T) {
 	parent := &html.Node{Type: html.ElementNode, Data: "div"}
 	child := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: "notice"}}}
 	parent.AppendChild(child)
-	matched, stopped := MatchWithStop(selector, child, func() bool { return false })
-	if !matched || stopped {
-		t.Fatalf("matched=%v stopped=%v, want true/false", matched, stopped)
+	matched := MatchWithStop(selector, child, func() {})
+	if !matched {
+		t.Fatal("expected selector match")
 	}
 }
 
@@ -85,14 +93,14 @@ func TestMatchControlSamplesAcrossMatches(t *testing.T) {
 	}
 	n := &html.Node{Type: html.ElementNode, Data: "p"}
 	checks := 0
-	control := NewMatchControl(func() bool {
+	control := NewMatchControl(func() {
 		checks++
-		return false
+		return
 	})
 	for range 100 {
-		matched, stopped := control.Match(selector, n)
-		if !matched || stopped {
-			t.Fatalf("matched=%v stopped=%v, want true/false", matched, stopped)
+		matched := control.Match(selector, n)
+		if !matched {
+			t.Fatal("expected selector match")
 		}
 	}
 	if checks != 1 {
@@ -107,13 +115,16 @@ func TestAttributeValueMatchStopsDuringLongScan(t *testing.T) {
 	}
 	n := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "data-value", Val: strings.Repeat("x", 4096) + "needle"}}}
 	checks := 0
-	matched, stopped := MatchWithStop(selector, n, func() bool {
-		checks++
-		return checks == 2
+	expectTermination(t, termination.CPUExceeded, func() {
+		MatchWithStop(selector, n, func() {
+			checks++
+			if checks == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
+		})
 	})
-	if matched || !stopped {
-		t.Fatalf("matched=%v stopped=%v, want false/true", matched, stopped)
-	}
 	if checks != 2 {
 		t.Fatalf("CPU callback called %d times; want second check inside attribute value", checks)
 	}
@@ -126,12 +137,12 @@ func TestAttributePresenceDoesNotCheckValue(t *testing.T) {
 	}
 	n := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "data-value", Val: "present"}}}
 	checks := 0
-	matched, stopped := MatchWithStop(selector, n, func() bool {
+	matched := MatchWithStop(selector, n, func() {
 		checks++
-		return false
+		return
 	})
-	if !matched || stopped {
-		t.Fatalf("matched=%v stopped=%v, want true/false", matched, stopped)
+	if !matched {
+		t.Fatal("expected selector match")
 	}
 	if checks != 1 {
 		t.Fatalf("CPU callback called %d times; presence selector should not inspect the value", checks)

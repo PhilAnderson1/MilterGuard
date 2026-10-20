@@ -1,5 +1,7 @@
 package htmlextract
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"strings"
 	"testing"
@@ -823,15 +825,18 @@ func TestMSOConditionalStyleTokenizerSamplesCooperativeStop(t *testing.T) {
 	calls := 0
 	s := sheet{
 		limits: DefaultLimits(),
-		shouldStop: func() bool {
+		shouldStop: func() {
 			calls++
-			return true
+			{
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
 		},
 	}
-	s.parseMSOConditionalStyles(`[if mso]><style>` + strings.Repeat("x", 8<<10) + `</style><![endif]`)
-	if !s.stopped {
-		t.Fatal("conditional-style tokenization did not report the cooperative stop")
-	}
+	expectTermination(t, termination.CPUExceeded, func() {
+		s.parseMSOConditionalStyles(`[if mso]><style>` + strings.Repeat("x", 8<<10) + `</style><![endif]`)
+	})
 	if calls == 0 {
 		t.Fatal("stop callback was not sampled")
 	}

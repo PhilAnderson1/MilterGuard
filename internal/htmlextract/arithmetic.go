@@ -30,14 +30,11 @@ type mathLiteral struct {
 }
 
 func prepareMathLiterals(ts []valueToken, budget *cpuGuard) []mathLiteral {
-	literals, ok := resourceguard.MakeSlice[mathLiteral](budget.allocationMemory(), len(ts), len(ts))
-	if !ok {
-		return nil
-	}
+	literals := resourceguard.MakeSlice[mathLiteral](budget.allocationMemory(), len(ts), len(ts))
+
 	for i, t := range ts {
-		if !budget.check() {
-			return nil
-		}
+		budget.check()
+
 		text := t.raw
 		switch t.kind {
 		case css.NumberToken:
@@ -64,9 +61,7 @@ func prepareMathLiterals(ts []valueToken, budget *cpuGuard) []mathLiteral {
 		}
 		literals[i].value, literals[i].valid = numberWithBudget(text, budget)
 	}
-	if budget.stopNow(false) {
-		return nil
-	}
+
 	return literals
 }
 
@@ -82,9 +77,8 @@ func isMath(s string) bool {
 func evalMath(prop int, src string, parent, root *Style, budget *cpuGuard) (Value, valueStatus) {
 	// Substituted values do not have a reusable token stream. Check before
 	// allocating lexer storage; lexer and evaluator loops continue sampling.
-	if !budget.check() {
-		return Value{Text: src}, valueUnsupported
-	}
+	budget.check()
+
 	ts, status := lexValue(src, budget)
 	if status != valueResolved {
 		return Value{Text: src}, status
@@ -99,17 +93,16 @@ func evalPreparedMathTokens(prop int, src string, ts []valueToken, literals []ma
 	if len(literals) != len(ts) {
 		literals = prepareMathLiterals(ts, budget)
 	}
-	if len(literals) != len(ts) || budget.stopNow(false) {
+	if len(literals) != len(ts) {
 		return Value{Text: src}, valueUnsupported
 	}
-	if !budget.check() {
-		return Value{Text: src}, valueUnsupported
-	}
+
+	budget.check()
+
 	// Binary + and - require whitespace on both sides (comments alone do not suffice).
 	for i, t := range ts {
-		if !budget.check() {
-			return Value{Text: src}, valueUnsupported
-		}
+		budget.check()
+
 		if t.kind == css.DelimToken && (t.raw == "+" || t.raw == "-") {
 			if i == 0 || i+1 == len(ts) || ts[i-1].kind != css.WhitespaceToken || ts[i+1].kind != css.WhitespaceToken {
 				return Value{}, valueInvalid
@@ -209,10 +202,9 @@ func (p *mathParser) atom() quantity {
 		p.status = valueInvalid
 		return quantity{}
 	}
-	if !p.budget.check() {
-		p.status = valueUnsupported
-		return quantity{}
-	}
+
+	p.budget.check()
+
 	t := p.ts[p.at]
 	literal := p.literals[p.at]
 	p.at++

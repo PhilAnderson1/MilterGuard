@@ -12,25 +12,22 @@ import (
 func scanCSSNumber(s string, budget *cpuGuard) (order int64, zero, negative, valid bool) {
 	i, digits, integerDigits, first := 0, 0, 0, -1
 	nextCheck := stringWorkChunk
-	step := func() bool {
+	step := func() {
 		if i < nextCheck {
-			return true
+			return
 		}
 		nextCheck = i + stringWorkChunk
-		return !budget.stopNow(true)
-	}
-	if budget.stopNow(false) {
+		budget.checkpoint()
 		return
 	}
+
 	if i < len(s) && (s[i] == '+' || s[i] == '-') {
 		negative = s[i] == '-'
 		i++
 	}
 	start := i
 	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		if !step() {
-			return
-		}
+		step()
 		if first < 0 && s[i] != '0' {
 			first = digits
 		}
@@ -43,9 +40,7 @@ func scanCSSNumber(s string, budget *cpuGuard) (order int64, zero, negative, val
 		i++
 		start = i
 		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-			if !step() {
-				return
-			}
+			step()
 			if first < 0 && s[i] != '0' {
 				first = digits
 			}
@@ -58,6 +53,7 @@ func scanCSSNumber(s string, budget *cpuGuard) (order int64, zero, negative, val
 	} else if !hasInteger {
 		return
 	}
+
 	var exponent int64
 	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
 		i++
@@ -70,9 +66,7 @@ func scanCSSNumber(s string, budget *cpuGuard) (order int64, zero, negative, val
 		// More than len(s)+1024 cannot be cancelled by this mantissa.
 		capExponent := int64(len(s)) + 1024
 		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-			if !step() {
-				return
-			}
+			step()
 			digit := int64(s[i] - '0')
 			if exponent > (capExponent-digit)/10 {
 				exponent = capExponent
@@ -114,10 +108,7 @@ func parseCSSNumber(s string, budget *cpuGuard) (float64, bool) {
 	// ParseFloat's range error clones its input and owns a NumError. Admit that
 	// possibility before conversion, including conservative size-class/page
 	// rounding. The monotonic charge remains even when no error is allocated.
-	value, err := resourceguard.ParseFloat(budget.allocationMemory(), s, 64)
-	if err == resourceguard.ErrMemory {
-		return 0, false
-	}
+	value, _ := resourceguard.ParseFloat(budget.allocationMemory(), s, 64)
 	return value, !math.IsNaN(value)
 }
 

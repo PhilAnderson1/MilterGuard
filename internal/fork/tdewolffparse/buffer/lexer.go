@@ -23,20 +23,24 @@ type Lexer struct {
 func NewLexer(r io.Reader) *Lexer {
 	var b []byte
 	if r != nil {
+
 		if buffer, ok := r.(interface {
 			Bytes() []byte
 		}); ok {
 			b = buffer.Bytes()
 		} else {
-			var err error
-			b, err = io.ReadAll(r)
-			if err != nil {
-				return &Lexer{
-					buf: nullBuffer,
-					err: err,
+			{
+				var err error
+				b, err = io.ReadAll(r)
+				if err != nil {
+					return &Lexer{
+						buf: nullBuffer,
+						err: err,
+					}
 				}
 			}
 		}
+
 	}
 	return NewLexerBytes(b)
 }

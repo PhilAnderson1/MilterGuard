@@ -1,5 +1,7 @@
 package message
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"fmt"
 	"strings"
@@ -17,7 +19,7 @@ func TestMemoryPolicyStopsBeforeLexicalFallback(t *testing.T) {
 		got := msg.BuildAnalysisWithHTMLControl(AnalysisContext{}, 4096, VisionOptions{Mode: "off"}, HTMLProcessingControl{
 			MemoryBytes: 8192, StopOnMemoryLimit: stop,
 			MemoryLimitExceeded: func() { memoryCalls++ },
-			FallbackShouldStop:  func() bool { fallbackCalls++; return false },
+			CheckFallback:       func() { fallbackCalls++; return },
 		})
 		if !got.HTMLMemoryLimitExceeded || got.HTMLCPULimitExceeded || memoryCalls != 1 {
 			t.Fatalf("stop=%v memory callbacks=%d analysis=%+v", stop, memoryCalls, got)
@@ -26,25 +28,29 @@ func TestMemoryPolicyStopsBeforeLexicalFallback(t *testing.T) {
 			if fallbackCalls != 0 || strings.Contains(got.Prompt, "retained evidence") {
 				t.Fatalf("memory rejection ran fallback: calls=%d", fallbackCalls)
 			}
-		} else if fallbackCalls == 0 || !strings.Contains(got.Prompt, "retained evidence") {
-			t.Fatal("memory fallback lost evidence")
+		} else {
+			if fallbackCalls == 0 || !strings.Contains(got.Prompt, "retained evidence") {
+				t.Fatal("memory fallback lost evidence")
+			}
 		}
 	}
 }
 
 func TestMemoryLimitFlagRequiresFailedAllocation(t *testing.T) {
 	calls := 0
-	b := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 64, MemoryLimitExceeded: func() { calls++ }})
-	b.consumeHTML(htmlextract.ResourceUsage{MemoryBytes: 64})
+	b := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 256, StopOnMemoryLimit: true, MemoryLimitExceeded: func() { calls++ }})
+	runExtraction(b, func() struct{} { return struct{}{} })
+	b.consumeHTML(htmlextract.ResourceUsage{MemoryBytes: b.remainingMemory()})
 	if b.memoryLimitExceeded || calls != 0 {
-		t.Fatal("exactly using the budget is not a violation")
+		t.Fatal("exact use is not a violation")
 	}
-	if b.reserveOutputMemory(1) || !b.memoryLimitExceeded || calls != 1 {
-		t.Fatal("failed reservation did not report memory exhaustion")
+	_, complete := runExtraction(b, func() struct{} { b.reserveOutputMemory(1); return struct{}{} })
+	if complete || !b.memoryLimitExceeded || calls != 1 {
+		t.Fatal("failed reservation did not report exhaustion")
 	}
-	b.reserveOutputMemory(1)
-	if calls != 1 {
-		t.Fatal("memory failure callback must be latched")
+	_, complete = runExtraction(b, func() struct{} { t.Fatal("terminal operation resumed"); return struct{}{} })
+	if complete || calls != 1 {
+		t.Fatal("memory notification repeated")
 	}
 }
 
@@ -73,11 +79,19 @@ func TestUncontrolledFallbackPreservesLaterMIMEParts(t *testing.T) {
 	}
 }
 
-func TestFallbackStopIsLatched(t *testing.T) {
+func TestTerminalFallbackIsNotRestarted(t *testing.T) {
 	calls := 0
-	b := newExtractionBudgetWithControl(HTMLProcessingControl{FallbackShouldStop: func() bool { calls++; return calls == 1 }})
-	if !b.fallbackStop() || !b.fallbackStop() || !b.outputShouldStop() || !b.decodingShouldStop() || calls != 1 {
-		t.Fatal("fallback restarted after its stop callback fired")
+	b := newExtractionBudgetWithControl(HTMLProcessingControl{CheckFallback: func() { calls++; termination.Fail(termination.Failure{Code: termination.CPUExceeded}) }})
+	if !b.beginFallback() {
+		t.Fatal("fallback admission")
+	}
+	_, complete := runExtraction(b, func() struct{} { b.checkStage(); return struct{}{} })
+	if complete || calls != 1 {
+		t.Fatal("fallback stop not reported")
+	}
+	_, complete = runExtraction(b, func() struct{} { t.Fatal("terminal fallback resumed"); return struct{}{} })
+	if complete || calls != 1 {
+		t.Fatal("fallback restarted")
 	}
 }
 
@@ -92,7 +106,7 @@ func TestCSSExpansionMemoryExhaustionStopsRecovery(t *testing.T) {
 	m.AddHeader("Content-Type", "text/html")
 	m.AddBody([]byte(source.String()))
 	fallbackCalls := 0
-	a := m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 4096, VisionOptions{Mode: "off"}, HTMLProcessingControl{MemoryBytes: 8 << 20, StopOnMemoryLimit: true, FallbackShouldStop: func() bool { fallbackCalls++; return false }})
+	a := m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 4096, VisionOptions{Mode: "off"}, HTMLProcessingControl{MemoryBytes: 8 << 20, StopOnMemoryLimit: true, CheckFallback: func() { fallbackCalls++; return }})
 	if !a.HTMLMemoryLimitExceeded || a.HTMLCPULimitExceeded || fallbackCalls != 0 {
 		t.Fatalf("analysis=%+v fallback calls=%d", a, fallbackCalls)
 	}

@@ -1,7 +1,6 @@
 package htmlextract
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
@@ -9,18 +8,13 @@ import (
 )
 
 type processor struct {
+	usage            *ResourceUsage
 	Limits           Limits
 	retainInspection bool // tests only; production results retain compact decisions
-	shouldStop       func() bool
+	shouldStop       func()
 	cpu              *cpuGuard
 	memory           *resourceguard.Memory
 }
-
-var errStopped = errors.New("HTML processing stopped")
-
-// IsStopped reports whether analysis ended because the caller's external
-// resource guard requested the bounded fallback.
-func IsStopped(err error) bool { return errors.Is(err, errStopped) }
 
 // Analyze parses and resolves a document once and retains the tree alongside
 // the per-text-node presentation decisions used by message extraction.
@@ -32,12 +26,24 @@ func Analyze(input []byte, limits Limits) (Document, error) {
 // AnalyzeWithStop is Analyze with a cooperative stop check. The callback is
 // sampled inside the forked parsers as well as between bounded analysis phases
 // and during long traversals.
-func AnalyzeWithStop(input []byte, limits Limits, shouldStop func() bool) (Document, error) {
+func AnalyzeWithStop(input []byte, limits Limits, shouldStop func()) (Document, error) {
 	p := processor{Limits: limits, shouldStop: shouldStop}
 	return p.process(input)
 }
 
-func (p processor) stopped() bool { return p.shouldStop != nil && p.shouldStop() }
+// AnalyzeControlled participates in the caller's extraction-stage boundary.
+// Required allocation failures and the supplied checkpoint unwind to that
+// boundary. Usage is published even when analysis does not return.
+func AnalyzeControlled(input []byte, limits Limits, check func(), usage *ResourceUsage) (Document, error) {
+	p := processor{Limits: limits, shouldStop: check, memory: resourceguard.NewMemory(limits.MemoryBytes), usage: usage}
+	return p.process(input)
+}
+
+func (p processor) checkpoint() {
+	if p.shouldStop != nil {
+		p.shouldStop()
+	}
+}
 
 type viewingCaseResults struct {
 	text           []Text
@@ -87,26 +93,29 @@ type viewingCaseRunner struct {
 	layerGeneration  uint64
 	colourMemo       colourMemo
 	rootStyle        Style
-	shouldStop       func() bool
+	shouldStop       func()
 	visited          int
 }
 
 func (r *viewingCaseRunner) evaluateColour(foreground Value) colourResult {
-	if !r.work.check() {
-		return colourResult{uncertainty: "style-analysis CPU limit"}
-	}
+	r.work.check()
+
 	if r.colourMemo.valid && r.colourMemo.generation == r.layerGeneration && r.colourMemo.foreground == foreground {
 		return r.colourMemo.result
 	}
+
 	result := evaluateColour(foreground, r.layers, r.work)
+
 	if foreground.Text == "link-default" && result.known {
 		visited := foreground
 		visited.RGBA = RGBA{R: 85.0 / 255, G: 26.0 / 255, B: 139.0 / 255, A: 1}
 		alternate := evaluateColour(visited, r.layers, r.work)
+
 		if !alternate.known || colourConcealed(result.distance) != colourConcealed(alternate.distance) {
 			result = colourResult{uncertainty: "visited link colour"}
 		}
 	}
+
 	r.colourMemo = colourMemo{foreground: foreground, result: result, generation: r.layerGeneration, valid: true}
 	return result
 }
@@ -184,19 +193,20 @@ func (r *viewingCaseRunner) recordElement(n *html.Node, f *viewingCaseFrame, sty
 
 func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, rootStyle *Style, media *mediaEvaluation, msoRevealedDepth int, elementIndex *int, initialize bool) error {
 	var prepared elementPreparation
+
 	if len(r.document.elements.View()) != 0 {
 		prepared = r.document.elements.View()[n]
 	}
+
 	parentStyle := &r.styleStack[f.styleIndex]
 	var resolved elementStyleResult
+
 	if prepared.inlineIncomplete {
 		resolved = elementStyleResult{style: unresolvedStyle(), variables: f.vars}
 	} else {
 		resolved = r.styles.elementStyle(n, parentStyle, rootStyle, f.vars, prepared.legacy, prepared.inline, media, selectorMatchContext{elements: r.document.elements.View()}, r.work)
 	}
-	if r.styles.stopped || r.work.stopNow(false) {
-		return errStopped
-	}
+
 	r.styleStack = append(r.styleStack, resolved.style)
 	f.styleIndex = len(r.styleStack) - 1
 	style := &r.styleStack[f.styleIndex]
@@ -204,6 +214,7 @@ func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, root
 	clip := emptyClip(style, n, resolved.displayDeclared)
 	wasClipped := f.clipped
 	f.clipped = f.clipped || clip.empty
+
 	if clip.empty {
 		if clip.clientDependent && !wasClipped {
 			f.clientDependentReasons |= reasonEmptyClip
@@ -211,29 +222,40 @@ func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, root
 			f.clientDependentReasons &^= reasonEmptyClip
 		}
 	}
+
 	f.clipKnown = f.clipKnown && clip.known
 	f.colourContextChanged = r.enterPaintLayer(n, layerWithClipOverride(style, clip.inlineUncertain))
+
 	if n.Data == "html" {
 		*rootStyle = *style
 	}
+
 	f.displayKnown = f.displayKnown && style[display].Known
+
 	if style[display].Known && style[display].Text == "none" {
 		f.none = true
 	}
+
 	contentVisibilityValue := style[contentVisibility]
+
 	if contentVisibilityValue.Known && contentVisibilityValue.Text == "hidden" {
 		f.contentHidden = true
 		f.clientDependentReasons |= reasonContentVisibility
 	}
+
 	f.contentKnown = f.contentKnown && contentVisibilityValue.Known
 	msoHideValue := style[msoHide]
+
 	if msoHideValue.Known && msoHideValue.Text == "all" {
 		f.msoHidden = true
 	}
+
 	f.msoKnown = f.msoKnown && msoHideValue.Known
+
 	if f.clipsDescendantsX && resolved.offsetWithinClippedAncestorX || f.clipsDescendantsY && resolved.offsetWithinClippedAncestorY {
 		f.layoutUncertain = true
 	}
+
 	f.layoutUncertain = f.layoutUncertain || resolved.layoutUncertain || !style[translate].Known || !style[rotate].Known || !style[scale].Known || style[display].Text == "table-column" || style[display].Text == "table-column-group"
 	f.clipsDescendantsX = f.clipsDescendantsX || resolved.clipsDescendantsX
 	f.clipsDescendantsY = f.clipsDescendantsY || resolved.clipsDescendantsY
@@ -247,6 +269,7 @@ func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, root
 	f.animationUncertain = f.animationUncertain || resolved.animationActive
 	f.alternateColourSchemeReasons |= resolved.alternateColourSchemeReasons
 	opacityValue := style[opacity]
+
 	if opacityValue.Known && opacityValue.Number == 0 {
 		f.alpha = 0
 		f.alphaKnown = true
@@ -254,59 +277,70 @@ func (r *viewingCaseRunner) enterElement(n *html.Node, f *viewingCaseFrame, root
 		f.alpha *= opacityValue.Number
 		f.alphaKnown = f.alphaKnown && opacityValue.Known
 	}
+
 	if f.alphaKnown && f.alpha <= .01+1e-14 {
 		f.clientDependentReasons |= reasonOpacity | reasonColour
 	}
+
 	if err := r.recordElement(n, f, style, resolved, msoRevealedDepth, elementIndex, initialize); err != nil {
 		return err
 	}
+
 	if n.Namespace == "" && (n.Data == "noscript" || n.Data == "canvas" || n.Data == "object") {
 		f.layoutUncertain = true
 	}
-	if !r.work.stopped && prepared.hasElementChild {
-		activation, complete := r.styles.activateAncestorBuckets(n, r.work)
-		if complete {
-			f.ancestorKeys = activation
-		}
+
+	if prepared.hasElementChild {
+		activation := r.styles.activateAncestorBuckets(n, r.work)
+
+		f.ancestorKeys = activation
 	}
+
 	return nil
 }
 
 func (r *viewingCaseRunner) recordText(n *html.Node, f *viewingCaseFrame, msoRevealedDepth int, textIndex *int, initialize bool) error {
 	style := &r.styleStack[f.styleIndex]
 	var colour colourResult
+
 	// Stable display:none already determines the annotation. Only diagnostic
 	// inspection needs additional contrast evidence for this text.
 	if !f.stableDisplayNone || r.retainInspection {
 		colour = r.evaluateColour(style[color])
 	}
-	if r.work.stopNow(false) {
-		return errStopped
-	}
+
 	textState := f.presentationState
+
 	if msoRevealedDepth > 0 {
 		textState.layoutUncertain = true
 	}
+
 	decision := decideVisibility(style, textState, &colour)
+
 	if initialize {
 		r.results.textLabels = append(r.results.textLabels, decision.label)
 		r.results.textReasons = append(r.results.textReasons, decision.reasons)
 		text := Text{FontSize: style[fontSize].Text, EffectiveOpacity: f.alpha, Node: n}
+
 		if r.retainInspection {
 			text.inspection = &textInspection{style: *style, colour: colour.inspection()}
 		}
+
 		r.results.text = append(r.results.text, text)
 	} else if !mergeViewingCaseLabel(r.results.textLabels, *textIndex, decision.label) {
 		return fmt.Errorf("internal: viewing-case text count exceeded first case")
 	} else {
 		r.results.textReasons[*textIndex] |= decision.reasons
+
 		if decision.reasons&reasonOpacity != 0 && f.alpha < r.results.text[*textIndex].EffectiveOpacity {
 			r.results.text[*textIndex].EffectiveOpacity = f.alpha
 		}
+
 		if decision.reasons&reasonFontSize != 0 {
 			r.results.text[*textIndex].FontSize = style[fontSize].Text
 		}
 	}
+
 	*textIndex++
 	return nil
 }
@@ -328,56 +362,70 @@ func (r *viewingCaseRunner) run(c viewingCase) error {
 	r.layerGeneration = 0
 	r.colourMemo.valid = false
 	r.styles.runtime.activeAncestors.enabled = r.styles.hasAncestorSelectorIndex()
+
 	if r.styles.runtime.activeAncestors.enabled {
-		if !r.styles.runtime.activeAncestors.reset(r.styles.index.count, r.styles.memory) {
-			return errStopped
-		}
+		r.styles.runtime.activeAncestors.reset(r.styles.index.count, r.styles.memory)
 	}
+
 	defer func() { r.styles.runtime.activeAncestors.enabled = false }()
 	mso := msoRevealedState{}
 	for len(r.frames) > 0 {
 		r.visited++
-		if r.visited&255 == 0 && r.shouldStop != nil && r.shouldStop() {
-			return errStopped
+
+		if r.visited&255 == 0 && r.shouldStop != nil {
+			r.shouldStop()
 		}
+
 		frame := &r.frames[len(r.frames)-1]
 		node := frame.n
+
 		// Preserve the parsed DOM for selectors, but presentation inside inert
 		// containers cannot contribute extraction results. No stack was entered.
 		if !frame.entered && nodeContentScope(node, frame.scope) == scopeInert {
 			r.frames = r.frames[:len(r.frames)-1]
 			continue
 		}
+
 		if !frame.entered {
 			frame.entered = true
 			frame.next = node.FirstChild
+
 			if node.Type == html.CommentNode && (frame.scope == scopeActive || frame.scope == scopeHead) {
-				if !mso.update(msoDownlevelRevealedMarker(node.Data), r.work) {
-					return errStopped
-				}
+				mso.update(msoDownlevelRevealedMarker(node.Data), r.work)
 			}
+
 			if node.Type == html.ElementNode {
+
 				if err := r.enterElement(node, frame, &r.rootStyle, &media, mso.uncertain, &elementIndex, c.initialize); err != nil {
 					return err
 				}
+
 			}
+
 			frame.scope = nodeContentScope(node, frame.scope)
+
 			if node.Type == html.TextNode && frame.scope == scopeActive {
+
 				if err := r.recordText(node, frame, mso.uncertain, &textIndex, c.initialize); err != nil {
 					return err
 				}
+
 			}
 		}
+
 		if frame.next == nil {
 			if frame.n.Type == html.ElementNode {
 				r.leaveElement(frame)
 			}
+
 			r.frames = r.frames[:len(r.frames)-1]
 			continue
 		}
+
 		child := frame.next
 		frame.next = child.NextSibling
 		childState := frame.presentationState
+
 		if node.Namespace == "" && node.Data == "details" && !hasAttr(node, "open") {
 			// Only the first summary escapes closed disclosure content. Track it
 			// during the existing walk instead of rescanning siblings per child.
@@ -385,56 +433,58 @@ func (r *viewingCaseRunner) run(c viewingCase) error {
 			frame.summarySeen = frame.summarySeen || firstSummary
 			childState.layoutUncertain = childState.layoutUncertain || !firstSummary
 		}
+
 		r.frames = append(r.frames, viewingCaseFrame{
 			n: child, styleIndex: frame.styleIndex, scope: frame.scope, presentationState: childState,
 			vars: frame.vars,
 		})
 	}
+
 	if !c.initialize && (textIndex != len(r.results.textLabels) || elementIndex != len(r.results.elementLabels)) {
 		return fmt.Errorf("internal: viewing-case traversal shape changed: text %d/%d, elements %d/%d", textIndex, len(r.results.textLabels), elementIndex, len(r.results.elementLabels))
 	}
+
 	return nil
 }
 
 func (p processor) process(input []byte) (result Document, resultErr error) {
+
+	if err := p.Limits.validate(); err != nil {
+		return Document{}, err
+	}
+
 	if p.memory == nil {
 		p.memory = resourceguard.NewMemory(p.Limits.MemoryBytes)
 	}
-	var ok bool
+
+	if p.usage != nil {
+		defer func() {
+			*p.usage = result.Usage
+			p.usage.InputBytes = len(input)
+			p.usage.MemoryBytes = p.memory.Used()
+			p.usage.MemoryLimitExceeded = p.memory.Exhausted()
+		}()
+	}
+
 	if p.cpu == nil {
-		p.cpu, ok = resourceguard.New(p.memory, cpuGuard{shouldStop: p.shouldStop, memory: p.memory})
-		if !ok {
-			return Document{Usage: ResourceUsage{MemoryBytes: p.memory.Used(), MemoryLimitExceeded: true}}, resourceguard.ErrMemory
-		}
+		p.cpu = resourceguard.New(p.memory, cpuGuard{shouldStop: p.shouldStop, memory: p.memory, sampler: resourceguard.NewStopSampler(256, p.shouldStop)})
 	}
+
 	p.cpu.memory = p.memory
-	// Parsers and traversals share the same latched stop observation.
-	p.shouldStop, ok = resourceguard.BindStop(p.memory, p.cpu, stopCPU)
-	if !ok {
-		return Document{Usage: ResourceUsage{MemoryBytes: p.memory.Used(), MemoryLimitExceeded: true}}, resourceguard.ErrMemory
-	}
-	defer func() {
-		if p.memory.Exhausted() {
-			result.Usage.MemoryLimitExceeded = true
-			resultErr = fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
-		}
-	}()
-	if p.stopped() {
-		return Document{Usage: ResourceUsage{InputBytes: len(input), MemoryBytes: p.memory.Used()}}, errStopped
-	}
+	// Parsers and traversals share one checkpoint callback.
+	p.shouldStop = resourceguard.BindCheckpoint(p.memory, p.cpu, stopCPU)
+
+	p.checkpoint()
+
 	document, err := p.parseDocument(input)
-	if document == nil {
-		return Document{Usage: ResourceUsage{MemoryBytes: p.memory.Used()}}, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
-	}
+
 	if err != nil {
-		if p.memory.Exhausted() {
-			err = fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
-		}
 		return Document{
 			Usage:                parsedResourceUsage(len(input), document),
 			UnresolvedStylesheet: document.styles.unresolvedStylesheet,
 		}, err
 	}
+
 	root := document.root
 	s := &document.styles
 	in := Document{
@@ -449,20 +499,17 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 	defer func() {
 		result.Usage = parsedResourceUsage(len(input), document)
 	}()
-	if p.stopped() {
-		return in, errStopped
-	}
+
+	p.checkpoint()
+
 	s.buildSelectorIndex()
-	if p.memory.Exhausted() {
-		return in, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
-	}
-	if p.stopped() {
-		return in, errStopped
-	}
+
+	p.checkpoint()
+
 	widths, fallback := s.viewingCases()
 	s.runtime.cacheMatches = len(widths) > 1
 	guard := p.cpu
-	results, ok := resourceguard.New(p.memory, viewingCaseResults{
+	results := resourceguard.New(p.memory, viewingCaseResults{
 		text:           allocatedSlice[Text](p.memory, 0, document.extractableTextCount),
 		elements:       allocatedSlice[Element](p.memory, 0, document.extractableElementCount),
 		textLabels:     allocatedSlice[visibilityLabel](p.memory, 0, document.extractableTextCount),
@@ -470,10 +517,8 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 		textReasons:    allocatedSlice[concealmentReason](p.memory, 0, document.extractableTextCount),
 		elementReasons: allocatedSlice[concealmentReason](p.memory, 0, document.extractableElementCount),
 	})
-	if !ok {
-		return in, resourceguard.ErrMemory
-	}
-	runner, ok := resourceguard.New(p.memory, viewingCaseRunner{
+
+	runner := resourceguard.New(p.memory, viewingCaseRunner{
 		document: document, styles: s, retainInspection: p.retainInspection,
 		work: guard, results: results,
 		frames:     allocatedSlice[viewingCaseFrame](p.memory, 0, document.treeDepth+1),
@@ -481,20 +526,16 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 		layers:     allocatedSlice[paintLayer](p.memory, 0, document.treeDepth),
 		shouldStop: p.shouldStop,
 	})
-	if !ok || p.memory.Exhausted() {
-		return in, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
-	}
+
 	for caseIndex, width := range widths {
-		if p.stopped() {
-			return in, errStopped
-		}
+		p.checkpoint()
+
 		if err := runner.run(viewingCase{width: width, fallback: fallback, initialize: caseIndex == 0}); err != nil {
-			if p.memory.Exhausted() {
-				err = fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
-			}
 			return in, err
 		}
+
 	}
+
 	if s.unsupportedNesting || document.msoOrderUncertain {
 		// Nested selectors can target descendants, siblings, or ancestors of
 		// their parent match. Foster parenting can likewise move source text
@@ -507,30 +548,29 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 			results.elementLabels[i] |= labelUnknown
 		}
 	}
+
 	for i, bits := range results.textLabels {
-		if !guard.check() {
-			return in, errStopped
-		}
+		guard.check()
+
 		label := aggregateLabel(bits)
 		results.text[i].Label = label
+
 		if label == "concealed" {
 			results.text[i].ConcealmentReasons = results.textReasons[i]
 		}
 	}
 	in.Text = results.text
 	for i, bits := range results.elementLabels {
-		if !guard.check() {
-			return in, errStopped
-		}
+		guard.check()
+
 		results.elements[i].Label = aggregateLabel(bits)
+
 		if results.elements[i].Label == "concealed" {
 			results.elements[i].ConcealmentReasons = results.elementReasons[i]
 		}
 	}
 	in.Elements = results.elements
-	if p.memory.Exhausted() {
-		return in, fmt.Errorf("limit: memory bytes > %d", p.memory.Limit())
-	}
+
 	return in, nil
 }
 

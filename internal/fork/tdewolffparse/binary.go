@@ -221,41 +221,67 @@ func NewBinaryReader(f IBinaryReader) *BinaryReader {
 // Will use Bytes when interface { Bytes() []byte } is implemented (n not used), Seeker when io.Seeker is implemented (negative n tolerated), ReaderAt when io.ReaderAt is implemented, otherwise it will read all bytes if n is negative or returns a non-Seeking/non-ReaderAt reader that does not allow Seek.
 func NewBinaryReaderReader(r io.Reader, n int64) (*BinaryReader, error) {
 	var f IBinaryReader
+
 	if z, ok := r.(*BinaryReader); ok {
 		return z, nil
-	} else if b, ok := r.(interface{ Bytes() []byte }); ok {
-		fb := newBinaryReaderBytes(b.Bytes())
-		if closer, ok := r.(io.Closer); ok {
-			fb.closer = closer
-		}
-		f = fb
-	} else if seeker, ok := r.(io.ReadSeeker); ok {
-		// seeker seems faster than readerAt by 10%
-		if n < 0 {
-			if offset, err := seeker.Seek(0, os.SEEK_CUR); err != nil {
-				return nil, err
-			} else if n, err = seeker.Seek(0, os.SEEK_END); err != nil {
-				return nil, err
-			} else if _, err = seeker.Seek(offset, os.SEEK_SET); err != nil {
-				return nil, err
-			}
-		}
-		f = newBinaryReaderSeeker(seeker, n)
-	} else if readerAt, ok := r.(io.ReaderAt); ok && 0 < n {
-		f = newBinaryReaderReaderAt(readerAt, n)
-	} else if n < 0 {
-		b, err := io.ReadAll(r)
-		if err != nil {
-			return nil, err
-		}
-		fb := newBinaryReaderBytes(b)
-		if closer, ok := r.(io.Closer); ok {
-			fb.closer = closer
-		}
-		f = fb
 	} else {
-		f = newBinaryReaderReader(r, n)
+
+		if b, ok := r.(interface{ Bytes() []byte }); ok {
+			fb := newBinaryReaderBytes(b.Bytes())
+
+			if closer, ok := r.(io.Closer); ok {
+				fb.closer = closer
+			}
+
+			f = fb
+		} else {
+
+			if seeker, ok := r.(io.ReadSeeker); ok {
+				// seeker seems faster than readerAt by 10%
+				if n < 0 {
+
+					if offset, err := seeker.Seek(0, os.SEEK_CUR); err != nil {
+						return nil, err
+					} else {
+						n, err = seeker.Seek(0, os.SEEK_END)
+						if err != nil {
+							return nil, err
+						} else {
+							_, err = seeker.Seek(offset, os.SEEK_SET)
+							if err != nil {
+								return nil, err
+							}
+						}
+					}
+
+				}
+				f = newBinaryReaderSeeker(seeker, n)
+			} else {
+
+				if readerAt, ok := r.(io.ReaderAt); ok && 0 < n {
+					f = newBinaryReaderReaderAt(readerAt, n)
+				} else if n < 0 {
+					b, err := io.ReadAll(r)
+					if err != nil {
+						return nil, err
+					}
+					fb := newBinaryReaderBytes(b)
+
+					if closer, ok := r.(io.Closer); ok {
+						fb.closer = closer
+					}
+
+					f = fb
+				} else {
+					f = newBinaryReaderReader(r, n)
+				}
+
+			}
+
+		}
+
 	}
+
 	return NewBinaryReader(f), nil
 }
 
@@ -629,7 +655,7 @@ func (w *BitmapWriter) Write(bit bool) {
 		w.buf = append(w.buf, 0)
 	}
 	if bit {
-		w.buf[w.pos>>3] = w.buf[w.pos>>3] | (0x80 >> (w.pos & 7))
+		w.buf[w.pos>>3] = w.buf[w.pos>>3] | 0x80>>(w.pos&7)
 	}
 	w.pos += 1
 }

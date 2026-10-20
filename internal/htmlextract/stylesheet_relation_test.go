@@ -1,5 +1,7 @@
 package htmlextract
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"strings"
 	"testing"
@@ -39,10 +41,18 @@ func TestStylesheetRelationScanDoesNotAllocate(t *testing.T) {
 func TestStylesheetRelationScanCancellation(t *testing.T) {
 	for _, suffix := range []string{strings.Repeat("x", 1<<20), strings.Repeat("\u2003", 1<<18), strings.Repeat("x ", 1<<19)} {
 		calls := 0
-		budget := &cpuGuard{shouldStop: func() bool { calls++; return calls == 2 }}
+		budget := testCPUGuard(cpuGuard{shouldStop: func() {
+			calls++
+			if calls == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
+		}})
 		s := sheet{cpu: budget}
-		if s.hasStylesheetRelation("stylesheet "+suffix) || !s.stopped || !budget.stopped || calls != 2 {
-			t.Fatalf("stopped=%v budget stopped=%v calls=%d", s.stopped, budget.stopped, calls)
+		expectTermination(t, termination.CPUExceeded, func() { s.hasStylesheetRelation("stylesheet " + suffix) })
+		if calls != 2 {
+			t.Fatalf("calls=%d", calls)
 		}
 	}
 }

@@ -1,5 +1,7 @@
 package message
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"fmt"
 	"net/url"
@@ -1142,16 +1144,15 @@ func TestPlainURLWalkCanBeStoppedBetweenCandidates(t *testing.T) {
 	text := strings.Repeat("http://example.test/a ", 300)
 	checks := 0
 	visited := 0
-	complete := walkPlainHTTPURLs(text, -1, func() bool {
-		checks++
-		return checks == 2
-	}, func(string, int, int) bool {
-		visited++
-		return true
+	expectTermination(t, termination.CPUExceeded, func() {
+		walkPlainHTTPURLs(text, -1, func() {
+			checks++
+			if checks == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+		}, func(string, int, int) bool { visited++; return true })
 	})
-	if complete {
-		t.Fatal("URL walk reported completion after stop callback fired")
-	}
+
 	if visited != 256 {
 		t.Fatalf("visited %d URLs before stop; want 256", visited)
 	}

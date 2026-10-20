@@ -2,6 +2,7 @@ package htmlextract
 
 import (
 	"fmt"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 	"math"
 	"runtime"
 	"strings"
@@ -14,24 +15,26 @@ func TestBudgetedFormatting(t *testing.T) {
 	for _, v := range []float64{0, math.Copysign(0, -1), 1, .1, math.MaxFloat64, math.SmallestNonzeroFloat64, math.Inf(1)} {
 		for _, unit := range []string{"", "px"} {
 			got := numberStringWithBudget(v, unit, nil)
+
 			if want := fmt.Sprintf("%g%s", v, unit); got != want {
 				t.Fatalf("got %q, want %q", got, want)
 			}
+
 		}
 	}
 	for _, c := range []RGBA{{0, 0, 0, 1}, {1, .5, .1, 0}, {math.SmallestNonzeroFloat64, .123456789, .987654321, .2}} {
+
 		if got, want := colourStringWithBudget(c, nil), fmt.Sprintf("rgba(%g,%g,%g,%g)", c.R*255, c.G*255, c.B*255, c.A); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
+
 	}
 	for _, format := range []func(*cpuGuard) string{
 		func(b *cpuGuard) string { return numberStringWithBudget(10, "px", b) },
 		func(b *cpuGuard) string { return colourStringWithBudget(RGBA{0, 0, 0, 1}, b) },
 	} {
-		budget := &cpuGuard{memory: resourceguard.NewMemory(1)}
-		if format(budget) != "" || !budget.memory.Exhausted() {
-			t.Fatal("formatting bypassed admission")
-		}
+		budget := testCPUGuard(cpuGuard{memory: resourceguard.NewMemory(1)})
+		expectTermination(t, termination.MemoryExceeded, func() { format(budget) })
 	}
 }
 

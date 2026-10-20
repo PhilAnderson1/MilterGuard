@@ -1,6 +1,7 @@
 package cascadia
 
 import (
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 	"strings"
 	"testing"
 
@@ -25,13 +26,8 @@ func TestRejectedSelectorDoesNotAllocateDiagnostics(t *testing.T) {
 	}
 }
 
-func TestSelectorMemoryErrorRemainsDistinct(t *testing.T) {
-	_, err := ParseGroupWithMemory("a", resourceguard.NewMemory(1))
-	if err != errSelectorMemory {
-		t.Fatalf("got %v, want memory error", err)
-	}
-	_, err = ParseGroupWithMemory("a", resourceguard.NewMemory(0))
-	if err != errSelectorMemory {
-		t.Fatalf("source admission returned %v, want memory error", err)
+func TestSelectorMemoryTerminationRemainsDistinct(t *testing.T) {
+	for _, limit := range []int64{0, 1} {
+		expectTermination(t, termination.MemoryExceeded, func() { ParseGroupWithMemory("a", resourceguard.NewMemory(limit)) })
 	}
 }

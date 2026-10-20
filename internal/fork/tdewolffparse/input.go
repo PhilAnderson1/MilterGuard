@@ -18,7 +18,7 @@ type Input struct {
 
 	restore func()
 
-	progressCheck func() error
+	progressCheck func()
 	progressLeft  int
 }
 
@@ -27,20 +27,24 @@ type Input struct {
 func NewInput(r io.Reader) *Input {
 	var b []byte
 	if r != nil {
+
 		if buffer, ok := r.(interface {
 			Bytes() []byte
 		}); ok {
 			b = buffer.Bytes()
 		} else {
-			var err error
-			b, err = io.ReadAll(r)
-			if err != nil {
-				return &Input{
-					buf: nullBuffer,
-					err: err,
+			{
+				var err error
+				b, err = io.ReadAll(r)
+				if err != nil {
+					return &Input{
+						buf: nullBuffer,
+						err: err,
+					}
 				}
 			}
 		}
+
 	}
 	return NewInputBytes(b)
 }
@@ -58,20 +62,12 @@ func NewInputString(s string) *Input {
 }
 
 // NewInputStringWithMemory owns and admits the mutable NUL-terminated input.
-// A failed input remains safe to pass to a lexer: peeking observes EOF/error.
+// Required storage refusal unwinds before the input is returned.
 func NewInputStringWithMemory(s string, m *resourceguard.Memory, stop resourceguard.Stop) *Input {
-	b, ok := resourceguard.StringBytes(m, s, true, stop)
-	if !ok {
-		err := resourceguard.ErrMemory
-		if !m.Exhausted() {
-			err = resourceguard.ErrStopped
-		}
-		return &Input{buf: nullBuffer, err: err}
-	}
-	z, ok := resourceguard.New(m, Input{buf: b})
-	if !ok {
-		return &Input{buf: nullBuffer, err: resourceguard.ErrMemory}
-	}
+	b := resourceguard.StringBytes(m, s, true, stop)
+
+	z := resourceguard.New(m, Input{buf: b})
+
 	return z
 }
 
@@ -165,18 +161,17 @@ func (z *Input) Move(n int) {
 
 // SetProgressCheck installs an allocation-free callback sampled while input is
 // consumed, including rereads after rewinding. Backward movement does not
-// refund work. Returning an error stops subsequent peeks and makes Err report it.
-func (z *Input) SetProgressCheck(check func() error) {
+// refund work. A resource failure unwinds directly; Err is reserved for input errors.
+func (z *Input) SetProgressCheck(check func()) {
 	z.progressCheck = check
 	z.progressLeft = 1024
 }
 
 // CheckProgress checks cancellation during scans that do not advance input.
-func (z *Input) CheckProgress() error {
-	if z.err == nil && z.progressCheck != nil {
-		z.err = z.progressCheck()
+func (z *Input) CheckProgress() {
+	if z.progressCheck != nil {
+		z.progressCheck()
 	}
-	return z.err
 }
 
 // MoveRune advances the position by the length of the current rune.

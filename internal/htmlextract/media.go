@@ -31,7 +31,7 @@ type conditionFrame struct {
 }
 
 func newConditionFrame(condition mediaCondition, parent *conditionFrame, memory *resourceguard.Memory) *conditionFrame {
-	frame, _ := resourceguard.New(memory, conditionFrame{condition: condition, parent: parent})
+	frame := resourceguard.New(memory, conditionFrame{condition: condition, parent: parent})
 	return frame
 }
 
@@ -61,10 +61,8 @@ func parseMediaBudgeted(src string, memory *resourceguard.Memory) mediaCondition
 func parseMediaWithBudget(src string, budget *cpuGuard) mediaCondition {
 	memory := budget.allocationMemory()
 	unknown := func() mediaCondition {
-		out, ok := resourceguard.MakeSlice[mediaAlternative](memory, 1, 1)
-		if !ok {
-			return nil
-		}
+		out := resourceguard.MakeSlice[mediaAlternative](memory, 1, 1)
+
 		out[0] = mediaAlternative{schemes: colourSchemeBoth, unknown: true}
 		return out
 	}
@@ -73,9 +71,8 @@ func parseMediaWithBudget(src string, budget *cpuGuard) mediaCondition {
 	}
 	var result mediaCondition
 	for raw := range strings.SplitSeq(asciiLowerWithBudget(src, budget), ",") {
-		if !budget.check() {
-			return nil
-		}
+		budget.check()
+
 		a := mediaAlternative{schemes: colourSchemeBoth}
 		raw = trimCSSWhitespace(strings.TrimPrefix(trimCSSWhitespace(raw), "only "))
 		// The supported subset has no functions or nested query parentheses.
@@ -83,19 +80,14 @@ func parseMediaWithBudget(src string, budget *cpuGuard) mediaCondition {
 		if strings.Contains(raw, "and") {
 			// At most 17 results and bounded regexp match-index scratch. The extra
 			// result detects excessive clauses without splitting the entire query.
-			var ok bool
-			parts, ok = resourceguard.RegexpSplit(memory, regexpAnd, raw, 17)
-			if !ok {
-				return nil
-			}
+			parts = resourceguard.RegexpSplit(memory, regexpAnd, raw, 17)
 		}
 		if len(parts) > 16 {
 			return unknown()
 		}
 		for _, part := range parts {
-			if !budget.check() {
-				return nil
-			}
+			budget.check()
+
 			part = trimCSSWhitespace(part)
 			switch part {
 			case "screen", "all":
@@ -106,35 +98,28 @@ func parseMediaWithBudget(src string, budget *cpuGuard) mediaCondition {
 			case "(prefers-color-scheme:dark)", "(prefers-color-scheme: dark)":
 				a.schemes &= colourSchemeDark
 			default:
-				m, ok := resourceguard.RegexpSubmatch(memory, widthFeature, part)
-				if !ok {
-					return nil
-				}
+				m := resourceguard.RegexpSubmatch(memory, widthFeature, part)
+
 				if m == nil {
 					a.unknown = true
 					continue
 				}
 				// Preserve the media grammar's acceptance of a trailing decimal point.
 				v, valid := numberWithBudget(strings.TrimSuffix(m[2], "."), budget)
-				if !valid || (m[3] == "" && v != 0) {
+				if !valid || m[3] == "" && v != 0 {
 					a.unknown = true
 					continue
 				}
-				a.bounds, ok = growSlice(a.bounds, 1, memory, budget.allocationStop)
-				if !ok {
-					return nil
-				}
+				a.bounds = growSlice(a.bounds, 1, memory, budget.allocationStop)
+
 				a.bounds = append(a.bounds, widthBound{m[1] == "min", v})
 			}
 		}
 		if a.schemes == 0 {
 			a.never = true
 		}
-		var ok bool
-		result, ok = growSlice(result, 1, memory, budget.allocationStop)
-		if !ok {
-			return nil
-		}
+		result = growSlice(result, 1, memory, budget.allocationStop)
+
 		result = append(result, a)
 	}
 	return result
@@ -187,15 +172,16 @@ type conditionFrameState struct {
 // evaluateConditionFrame derives a frame from its parent. A cache shared by
 // all rules at one width evaluates every immutable frame at most once.
 func evaluateConditionFrame(frame *conditionFrame, width float64, fallback bool, cache map[*conditionFrame]conditionFrameState, budget *cpuGuard) (light, dark int) {
-	if !budget.check() {
-		return mediaUnknown, mediaUnknown
-	}
+	budget.check()
+
 	if frame == nil {
 		return mediaYes, mediaYes
 	}
+
 	if state, ok := cache[frame]; ok {
 		return state.light, state.dark
 	}
+
 	light, dark = evaluateConditionFrame(frame.parent, width, fallback, cache, budget)
 	frameLight, frameDark := frame.condition.states(width, fallback)
 	light = intersectMediaState(light, frameLight)
@@ -239,74 +225,65 @@ var defaultViewingWidths = [...]float64{1024}
 
 func (s *sheet) viewingCases() ([]float64, bool) {
 	fallback := func() ([]float64, bool) { return defaultViewingWidths[:], true }
-	if s.cascadeIncomplete || s.stopped || !s.prepareMediaGroups() {
+
+	if s.cascadeIncomplete {
 		return fallback()
 	}
+	s.prepareMediaGroups()
+
 	var bounds []float64
 	var unique resourceguard.Table[float64, bool]
 	var seenFrames resourceguard.Table[*conditionFrame, bool]
 	for _, group := range s.runtime.mediaGroups {
-		if !s.checkCPU() {
-			return fallback()
-		}
+		s.checkCPU()
+
 		for frame := group; frame != nil; frame = frame.parent {
-			if !s.checkCPU() {
-				return fallback()
-			}
+			s.checkCPU()
+
 			if _, seen := seenFrames.Get(frame); seen {
 				break
 			}
-			if !seenFrames.Set(s.memory, frame, true) {
-				return fallback()
-			}
+
+			seenFrames.Set(s.memory, frame, true)
+
 			for _, a := range frame.condition {
 				for _, b := range a.bounds {
+
 					if _, seen := unique.Get(b.value); !seen {
-						if !unique.Set(s.memory, b.value, true) {
-							return fallback()
-						}
-						var ok bool
-						bounds, ok = resourceguard.Append(s.memory, bounds, s.shouldStop, b.value)
-						if !ok {
-							return fallback()
-						}
+						unique.Set(s.memory, b.value, true)
+
+						bounds = resourceguard.Append(s.memory, bounds, s.shouldStop, b.value)
 					}
+
 				}
 			}
 		}
 	}
-	frameStates, ok := resourceguard.MakeMap[*conditionFrame, conditionFrameState](s.memory, seenFrames.Len())
-	if !ok {
-		return fallback()
-	}
-	scratch, ok := makeBudgetedBytes(len(s.runtime.mediaGroups), s.memory)
-	if !ok {
-		return fallback()
-	}
-	evaluate := func(width float64) ([]byte, bool) {
+	frameStates := resourceguard.MakeMap[*conditionFrame, conditionFrameState](s.memory, seenFrames.Len())
+
+	scratch := makeBudgetedBytes(len(s.runtime.mediaGroups), s.memory)
+
+	evaluate := func(width float64) []byte {
 		// All possible keys were counted in seenFrames; this map is bounded scratch.
 		clear(frameStates)
 		states := scratch
 		for i, group := range s.runtime.mediaGroups {
-			if !s.checkCPU() {
-				return nil, false
-			}
+			s.checkCPU()
+
 			light, dark := evaluateConditionFrame(group, width, false, frameStates, s.cpu)
 			states[i] = uint8(combinedMediaState(light, dark))
 		}
-		return states, true
+		return states
 	}
 	if len(bounds) == 0 {
-		states, ok := evaluate(1024)
-		if !ok || !s.runtime.mediaCache.Set(s.memory, mediaCacheKey{width: 1024}, states) {
-			return fallback()
-		}
+		states := evaluate(1024)
+
+		s.runtime.mediaCache.Set(s.memory, mediaCacheKey{width: 1024}, states)
+
 		return defaultViewingWidths[:], false
 	}
-	candidates, ok := resourceguard.MakeSlice[float64](s.memory, 1, len(bounds)*2+2)
-	if !ok {
-		return fallback()
-	}
+	candidates := resourceguard.MakeSlice[float64](s.memory, 1, len(bounds)*2+2)
+
 	sort.Float64s(bounds)
 	prev := 0.0
 	for _, b := range bounds {
@@ -315,80 +292,67 @@ func (s *sheet) viewingCases() ([]float64, bool) {
 			prev = b
 		}
 	}
+
 	if after := math.Nextafter(prev, math.Inf(1)); !math.IsInf(after, 0) {
 		candidates = append(candidates, after)
 	}
+
 	var seen resourceguard.Table[string, bool]
 	var widths []float64
 	s.runtime.mediaCache.Release()
 	work := s.resourceBudget()
 	for _, width := range candidates {
-		states, ok := evaluate(width)
-		if !ok {
-			return fallback()
-		}
+		states := evaluate(width)
+
 		// Lookup borrows scratch only for this expression. Retained signatures
 		// and cached vectors get independent ownership before the next evaluation.
 		if seen.View()[string(states[1:])] {
 			continue
 		}
 		key := ownedString(states[1:], work)
-		if work.stopNow(false) {
-			return fallback()
-		}
-		states, ok = resourceguard.CloneBytes(s.memory, states, s.shouldStop)
-		if !ok {
-			return fallback()
-		}
-		if !seen.Set(s.memory, key, true) || !s.runtime.mediaCache.Set(s.memory, mediaCacheKey{width: width}, states) {
-			return fallback()
-		}
-		widths, ok = resourceguard.Append(s.memory, widths, s.shouldStop, width)
-		if !ok {
-			return fallback()
-		}
+
+		states = resourceguard.CloneBytes(s.memory, states, s.shouldStop)
+
+		seen.Set(s.memory, key, true)
+		s.runtime.mediaCache.Set(s.memory, mediaCacheKey{width: width}, states)
+
+		widths = resourceguard.Append(s.memory, widths, s.shouldStop, width)
 	}
 	return widths, false
 }
 
 // Rules sharing a persistent condition chain always have identical media
 // states. Group zero is the unconditional state and is omitted from signatures.
-func (s *sheet) prepareMediaGroups() bool {
+func (s *sheet) prepareMediaGroups() {
 	if s.runtime.mediaGroups != nil {
-		return true
+		return
 	}
 	var ids resourceguard.Table[*conditionFrame, int]
-	if !ids.Set(s.memory, nil, 0) {
-		return false
-	}
+
+	ids.Set(s.memory, nil, 0)
+
 	groups := []*conditionFrame(nil)
-	var ok bool
-	groups, ok = growSlice(groups, 1, s.memory, s.shouldStop)
-	if !ok {
-		return false
-	}
+	groups = growSlice(groups, 1, s.memory, s.shouldStop)
+
 	groups = append(groups, nil)
 	for i := range s.rules {
-		if !s.checkCPU() {
-			return false
-		}
+		s.checkCPU()
+
 		frame := s.rules[i].conditions
 		id, found := ids.Get(frame)
 		if !found {
 			id = len(groups)
-			if !ids.Set(s.memory, frame, id) {
-				return false
-			}
-			groups, ok = growSlice(groups, 1, s.memory, s.shouldStop)
-			if !ok {
-				return false
-			}
+
+			ids.Set(s.memory, frame, id)
+
+			groups = growSlice(groups, 1, s.memory, s.shouldStop)
+
 			groups = append(groups, frame)
 		}
 		s.rules[i].mediaGroup = id
 	}
 	s.runtime.mediaGroups = groups
-	return true
+	return
 }
 
 var neverMedia = [...]mediaAlternative{{schemes: colourSchemeBoth, never: true}}

@@ -146,13 +146,10 @@ type documentWalker struct {
 	body      *html.Node
 }
 
-func (w *documentWalker) run(root *html.Node) error {
+func (w *documentWalker) run(root *html.Node) {
 	const initialStackCapacity = 64
-	var ok bool
-	w.stack, ok = resourceguard.MakeSlice[documentFrame](w.processor.memory, 1, initialStackCapacity)
-	if !ok {
-		return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
-	}
+	w.stack = resourceguard.MakeSlice[documentFrame](w.processor.memory, 1, initialStackCapacity)
+
 	w.stack[0] = documentFrame{n: root}
 	for len(w.stack) > 0 {
 		frame := &w.stack[len(w.stack)-1]
@@ -167,15 +164,12 @@ func (w *documentWalker) run(root *html.Node) error {
 				prepared := w.document.elements.View()[frame.n]
 				if !prepared.hasElementChild {
 					prepared.hasElementChild = true
-					if !w.document.storePreparation(frame.n, prepared) {
-						return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
-					}
+
+					w.document.storePreparation(frame.n, prepared)
 				}
 			}
-			w.stack, ok = resourceguard.GrowSlice(w.processor.memory, w.stack, 1, w.processor.shouldStop)
-			if !ok {
-				return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
-			}
+			w.stack = resourceguard.GrowSlice(w.processor.memory, w.stack, 1, w.processor.shouldStop)
+
 			w.stack = append(w.stack, documentFrame{
 				n: child, depth: frame.depth + 1, scope: frame.scope,
 				uncertainStylesheetOrigin: frame.uncertainStylesheetOrigin,
@@ -184,42 +178,37 @@ func (w *documentWalker) run(root *html.Node) error {
 		}
 		frame.entered = true
 		frame.next = frame.n.FirstChild
-		if err := w.visit(frame); err != nil {
-			return err
-		}
+		w.visit(frame)
 	}
-	return nil
+	return
 }
 
-func (w *documentWalker) visit(frame *documentFrame) error {
+func (w *documentWalker) visit(frame *documentFrame) {
 	node := frame.n
 	if frame.depth > w.document.treeDepth {
 		w.document.treeDepth = frame.depth
 	}
 	w.nodeCount++
-	// Inner loops may already have observed the CPU limit. Honour that stop
-	// on every node without increasing the frequency of clock sampling.
-	if w.processor.cpu.stopNow(false) || (w.nodeCount&255 == 0 && w.processor.stopped()) {
-		return errStopped
+
+	// Sample once per 256 visited nodes; inner loops have their own checkpoints.
+	if w.nodeCount&255 == 0 {
+		w.processor.checkpoint()
 	}
+
 	if node.Type == html.CommentNode && (frame.scope == scopeActive || frame.scope == scopeHead) {
-		if !w.visitComment(node) {
-			return errStopped
-		}
+		w.visitComment(node)
 	}
 	if node.Type == html.ElementNode {
-		if err := w.prepareElement(node, frame); err != nil {
-			return err
-		}
+		w.prepareElement(node, frame)
 	}
 	frame.scope = nodeContentScope(node, frame.scope)
 	if node.Type == html.TextNode && frame.scope == scopeActive {
 		w.document.extractableTextCount++
 	}
-	return nil
+	return
 }
 
-func (w *documentWalker) visitComment(node *html.Node) bool {
+func (w *documentWalker) visitComment(node *html.Node) {
 	marker := msoDownlevelRevealedMarker(node.Data)
 	if marker != msoRevealedNone {
 		// Foster parenting can move text out of table insertion modes while
@@ -240,52 +229,56 @@ func (w *documentWalker) visitComment(node *html.Node) bool {
 			}
 		}
 	}
-	if !w.mso.update(marker, w.processor.cpu) {
-		return false
-	}
+
+	w.mso.update(marker, w.processor.cpu)
+
 	w.document.styles.parseMSOConditionalStyles(node.Data)
-	return !w.processor.cpu.stopNow(false)
+	return
 }
 
-func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) error {
+func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) {
 	// The container itself is prepared in its parent scope; its contents cannot
 	// contribute presentation or stylesheet state. Structural traversal remains.
 	if frame.scope == scopeInert {
-		return nil
+		return
 	}
 	styles := &w.document.styles
 	if node.Namespace == "" && node.Data == "body" && w.body == nil {
 		w.body = node
 	}
 	var prepared elementPreparation
+
 	if href, media, applies := styles.stylesheetLink(node); applies && (frame.scope == scopeActive || frame.scope == scopeHead) {
 		styles.loadStylesheetReference(href, media)
 	}
-	if node.Data == "style" && cssTypeAttributeAppliesWithBudget(node, w.processor.cpu) && (frame.scope == scopeActive || frame.scope == scopeHead) && !styles.cascadeIncomplete && !styles.stopped {
+
+	if node.Data == "style" && cssTypeAttributeAppliesWithBudget(node, w.processor.cpu) && (frame.scope == scopeActive || frame.scope == scopeHead) && !styles.cascadeIncomplete {
 		remaining := styles.limits.CSSBytes - styles.cssBytes
 		cssText, complete := boundedStyleTextWithBudget(node, remaining, w.processor.cpu)
 		if !complete {
 			styles.abandonCascade()
 		} else {
-			origin := trustedStylesheetOrigin
-			if node.Namespace != "" || frame.uncertainStylesheetOrigin || w.mso.uncertain > 0 {
-				origin = uncertainStylesheetOrigin
+			{
+				origin := trustedStylesheetOrigin
+				if node.Namespace != "" || frame.uncertainStylesheetOrigin || w.mso.uncertain > 0 {
+					origin = uncertainStylesheetOrigin
+				}
+				styles.parseStylesheet(cssText, attr(node, "media"), origin)
 			}
-			styles.parseStylesheet(cssText, attr(node, "media"), origin)
 		}
 	}
+
 	if value := attr(node, "style"); value != "" {
 		result := styles.parseInlineCSS(value)
 		prepared.inline = result.declarations
 		prepared.inlineIncomplete = result.incomplete
 	}
-	if !styles.cascadeIncomplete && !styles.stopped {
+
+	if !styles.cascadeIncomplete {
 		prepared.legacy = prepareDeclarations(legacyDeclarationsWithBody(node, w.body, w.processor.cpu), w.processor.cpu)
 	}
 	if len(prepared.inline) != 0 || len(prepared.legacy) != 0 || prepared.inlineIncomplete {
-		if !w.document.storePreparation(node, prepared) {
-			return fmt.Errorf("limit: memory bytes > %d", w.processor.memory.Limit())
-		}
+		w.document.storePreparation(node, prepared)
 	}
 	if frame.scope == scopeActive && (node.Data == "img" || node.Data == "input") {
 		w.document.extractableElementCount++
@@ -293,17 +286,16 @@ func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) e
 	if node.Namespace == "" && (node.Data == "noscript" || node.Data == "object" || node.Data == "canvas") {
 		frame.uncertainStylesheetOrigin = true
 	}
-	return nil
+	return
 }
 
 func (p processor) parseDocument(input []byte) (*parsedDocument, error) {
-	document, ok := resourceguard.New(p.memory, parsedDocument{memory: p.memory})
-	if !ok {
-		return nil, resourceguard.ErrMemory
-	}
+	document := resourceguard.New(p.memory, parsedDocument{memory: p.memory})
+
 	if err := p.Limits.validate(); err != nil {
 		return document, err
 	}
+
 	if len(input) > p.Limits.InputBytes {
 		return document, fmt.Errorf("limit: input bytes > %d", p.Limits.InputBytes)
 	}
@@ -317,9 +309,6 @@ func (p processor) parseDocument(input []byte) (*parsedDocument, error) {
 		}),
 	)
 	if err != nil {
-		if errors.Is(err, html.ErrResourceStopped) {
-			return document, errStopped
-		}
 		var limitErr *html.ResourceLimitError
 		if errors.As(err, &limitErr) {
 			return document, fmt.Errorf("limit: HTML parser %s > %d", limitErr.Resource, limitErr.Limit)
@@ -327,26 +316,20 @@ func (p processor) parseDocument(input []byte) (*parsedDocument, error) {
 		return document, err
 	}
 	document.root = root
-	if p.stopped() {
-		return document, errStopped
-	}
+
+	p.checkpoint()
+
 	document.styles = sheet{
 		limits: p.Limits, shouldStop: p.shouldStop,
 
 		cpu:    p.cpu,
 		memory: p.memory,
 	}
-	document.styles.selectorControl, ok = cascadia.NewMatchControlWithMemory(p.shouldStop, p.memory)
-	if !ok {
-		return document, resourceguard.ErrMemory
-	}
+	document.styles.selectorControl = cascadia.NewMatchControlWithMemory(p.shouldStop, p.memory)
+
 	walker := documentWalker{processor: p, document: document}
-	if err := walker.run(root); err != nil {
-		return document, err
-	}
-	if document.styles.stopped {
-		return document, errStopped
-	}
+	walker.run(root)
+
 	if document.styles.cascadeIncomplete {
 		// No prepared per-element CSS can be used once global style analysis is
 		// incomplete. Release declarations and selector profiles collected before
@@ -356,8 +339,9 @@ func (p processor) parseDocument(input []byte) (*parsedDocument, error) {
 	return document, nil
 }
 
-func (d *parsedDocument) storePreparation(n *html.Node, prepared elementPreparation) bool {
-	return d.elements.Set(d.memory, n, prepared)
+func (d *parsedDocument) storePreparation(n *html.Node, prepared elementPreparation) {
+	d.elements.Set(d.memory, n, prepared)
+	return
 }
 
 func boundedStyleText(style *html.Node, maximum int) (string, bool) {
@@ -375,9 +359,10 @@ func boundedStyleTextWithBudget(style *html.Node, maximum int, budget *cpuGuard)
 		if len(child.Data) > maximum-css.Len() {
 			return "", false
 		}
-		if !budget.check() || !writeBudgetedString(&css, child.Data, budget) {
-			return "", false
-		}
+
+		budget.check()
+
+		writeBudgetedString(&css, child.Data, budget)
 	}
 	return css.String(), true
 }

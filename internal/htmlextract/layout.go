@@ -89,11 +89,11 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 	// for paired clipping/positioning patterns and for properties which can move
 	// or collapse content by themselves.
 	uncertainOrigin :=
-		(wins[overflowX-properties].uncertainOrigin && zeroWidth) ||
-			(wins[overflowY-properties].uncertainOrigin && zeroHeight) ||
-			((wins[width-properties].uncertainOrigin || wins[maxWidth-properties].uncertainOrigin) && clipX) ||
-			((wins[height-properties].uncertainOrigin || wins[maxHeight-properties].uncertainOrigin) && clipY) ||
-			(isImage && (tinyWidth && wins[width-properties].uncertainOrigin || tinyHeight && wins[height-properties].uncertainOrigin))
+		wins[overflowX-properties].uncertainOrigin && zeroWidth ||
+			wins[overflowY-properties].uncertainOrigin && zeroHeight ||
+			(wins[width-properties].uncertainOrigin || wins[maxWidth-properties].uncertainOrigin) && clipX ||
+			(wins[height-properties].uncertainOrigin || wins[maxHeight-properties].uncertainOrigin) && clipY ||
+			isImage && (tinyWidth && wins[width-properties].uncertainOrigin || tinyHeight && wins[height-properties].uncertainOrigin)
 
 	positioned := style[position].Known && (style[position].Text == "absolute" || style[position].Text == "fixed" || style[position].Text == "relative")
 	positionedWithinClip := style[position].Known &&
@@ -149,9 +149,7 @@ func layoutVisibility(wins *[layoutProperties]layoutCandidate, style *Style, con
 	scaleUncertain := zoomResult.set && (zoomResult.status != valueResolved || !zoomResult.value.Known || zoomResult.value.Number != 1)
 	offsetX := positionedWithinClip && (nonzeroOffset(offsetResults[0]) || nonzeroOffset(offsetResults[2]))
 	offsetY := positionedWithinClip && (nonzeroOffset(offsetResults[1]) || nonzeroOffset(offsetResults[3]))
-	if context.budget.stopped {
-		return layoutVisibilityResult{uncertain: true}
-	}
+
 	uncertain := uncertainOrigin || zeroBox || zeroLineHeight || positioned && extremeOffset || extremeMargin || tinyZoom
 	return layoutVisibilityResult{
 		textLayout: textLayout, textLayoutSet: textLayoutSet,

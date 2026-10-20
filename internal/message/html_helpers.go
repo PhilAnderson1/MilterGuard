@@ -2,7 +2,6 @@ package message
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"net/url"
 	"strings"
@@ -26,7 +25,7 @@ type linkCollector struct {
 	full        bool
 	compactURLs bool
 	memory      *resourceguard.Memory
-	shouldStop  func() bool
+	shouldStop  func()
 }
 
 func (collector *linkCollector) Full() bool {
@@ -42,27 +41,26 @@ type imageRefCollector struct {
 
 func (collector *imageRefCollector) Add(candidate string) {
 	// Normalization can allocate an unescaped copy and a lower-case copy.
-	if !collector.memory.Reserve(int64(len(candidate)) * 4) {
-		return
-	}
+	collector.memory.Reserve(int64(len(candidate)) * 4)
+
 	candidate = normalizeContentID(candidate)
 	if candidate == "" {
 		return
 	}
+
 	if _, found := collector.seen.Get(candidate); found {
 		return
 	}
+
 	characters := utf8.RuneCountInString(candidate)
 	if len(collector.refs) >= maxExtractedLinks || characters > maxExtractedReferenceLength || collector.chars+characters > maxExtractedLinkChars {
 		return
 	}
-	if !collector.seen.Set(collector.memory, candidate, struct{}{}) {
-		return
-	}
-	grown, ok := growGuardedSlice(collector.refs, len(collector.refs)+1, collector.memory)
-	if !ok {
-		return
-	}
+
+	collector.seen.Set(collector.memory, candidate, struct{}{})
+
+	grown := growGuardedSlice(collector.refs, len(collector.refs)+1, collector.memory)
+
 	collector.refs = append(grown, candidate)
 	collector.chars += characters
 }
@@ -84,11 +82,10 @@ func markdownURL(value string) string { return markdownURLReplacer.Replace(value
 // extractBoundedHTMLFallback owns no primary-stage state. Admission and
 // resource-limit policy are handled by the caller before entering this stage.
 func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fallbackResources) extractedContent {
-	memory, shouldStop := resources.memory, resources.stopped
-	if shouldStop() {
-		return extractedContent{Text: "[HTML tokenization stopped]", HTMLFallbackUsed: true, ExtractionIncomplete: true,
-			HTMLCPULimitExceeded: resources.cpuStopped, HTMLMemoryLimitExceeded: memory.Exhausted()}
-	}
+	memory, shouldStop := resources.memory, resources.checkpoint
+
+	shouldStop()
+
 	z := xhtml.NewTokenizerWithLimits(strings.NewReader(source), xhtml.ResourceLimits{Memory: memory, ShouldStop: shouldStop})
 	text := newGuardedBuilder(memory)
 	links := linkCollector{compactURLs: compactURLs, memory: memory, shouldStop: shouldStop}
@@ -96,7 +93,14 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 	var base *url.URL
 	baseSeen, suppressed := false, 0
 	complete := true
-	for text.Len() < fallbackTextBytes && !text.Failed() && !shouldStop() {
+	for {
+		if !(text.Len() < fallbackTextBytes) {
+			break
+		}
+		shouldStop()
+
+		resources.prefix = text.String()
+
 		token := z.Next()
 		if token == xhtml.ErrorToken {
 			if z.Err() != nil && z.Err() != io.EOF {
@@ -108,11 +112,8 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 		switch token {
 		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
 			rawName, moreAttributes := z.TagName()
-			name, ok := resourceguard.CopyString(memory, rawName, shouldStop)
-			if !ok {
-				complete = false
-				break
-			}
+			name := resourceguard.CopyString(memory, rawName, shouldStop)
+
 			if omittedHTMLElement(name) {
 				suppressed++
 				continue
@@ -129,42 +130,49 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 			}
 			var raw string
 			present := false
-			for moreAttributes && !shouldStop() {
+			for {
+				if !(moreAttributes) {
+					break
+				}
+				shouldStop()
 				key, value, more := z.TagAttr()
 				moreAttributes = more
 				if !present && attributeName != nil && bytes.EqualFold(key, attributeName) {
-					raw, ok = resourceguard.CopyString(memory, value, shouldStop)
-					if !ok {
-						break
-					}
+					raw = resourceguard.CopyString(memory, value, shouldStop)
+
 					present = true
 				}
 			}
 			if name == "base" && !baseSeen && present {
 				baseSeen = true
+
 				if u, err := resourceguard.ParseURL(memory, strings.TrimSpace(raw)); err == nil && u.IsAbs() && (u.Scheme == "http" || u.Scheme == "https") {
 					base = u
 				}
+
 			}
 			if name == "a" && present {
+
 				if destination, valid := fallbackDestinationWithBudget(raw, base, memory); valid {
 					links.AddDestination(destination)
 				}
+
 			}
 			if name == "img" && present {
 				if len(raw) >= 4 && strings.EqualFold(raw[:4], "cid:") {
 					images.Add(raw[4:])
-				} else if destination, valid := fallbackDestinationWithBudget(raw, base, memory); valid {
-					links.AddDestination(destination)
+				} else {
+
+					if destination, valid := fallbackDestinationWithBudget(raw, base, memory); valid {
+						links.AddDestination(destination)
+					}
+
 				}
 			}
 		case xhtml.EndTagToken:
 			rawName, _ := z.TagName()
-			name, ok := resourceguard.CopyString(memory, rawName, shouldStop)
-			if !ok {
-				complete = false
-				break
-			}
+			name := resourceguard.CopyString(memory, rawName, shouldStop)
+
 			if omittedHTMLElement(name) && suppressed > 0 {
 				suppressed--
 			}
@@ -183,35 +191,16 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 			text.appendByte(' ')
 		}
 	}
-	if text.Len() >= fallbackTextBytes || text.Failed() || resources.cpuStopped || memory.Exhausted() {
+	if text.Len() >= fallbackTextBytes {
 		complete = false
 	}
 	value := text.String()
-	// Keep a safe prefix when storage is exhausted; do not allocate from a new
-	// budget merely to finish output. Annotation-like or invalid UTF-8 prefixes
-	// must not escape the normal sanitization path.
-	safePrefix := value
-	if strings.Contains(value, "<") || !utf8.ValidString(value) {
-		safePrefix = ""
-	}
-	if complete || !memory.Exhausted() && !resources.cpuStopped {
-		var ok bool
-		value, ok = sanitizeSenderTextWithResources(value, memory, shouldStop)
-		if ok {
-			value, ok = normalizeHTMLTextWithResources(value, memory, shouldStop)
-		}
-		if ok {
-			value, ok = rewritePlainTextURLs(value, compactURLs, &links, shouldStop)
-		}
-		if !ok {
-			value = safePrefix
-			complete = false
-		}
-	} else {
-		value = safePrefix
-	}
-	return extractedContent{Text: value, HTMLFallbackUsed: true, Links: links.links, ImageRefs: images.refs,
-		ExtractionIncomplete: !complete, HTMLCPULimitExceeded: resources.cpuStopped || errors.Is(z.Err(), xhtml.ErrResourceStopped) && !memory.Exhausted(), HTMLMemoryLimitExceeded: memory.Exhausted()}
+	textStop := resources.textStopCallback()
+	value = sanitizeSenderTextWithResources(value, memory, textStop)
+	value = normalizeHTMLTextWithResources(value, memory, textStop)
+	var urlsComplete bool
+	value, urlsComplete = rewritePlainTextURLs(value, compactURLs, &links, shouldStop)
+	return extractedContent{Text: value, HTMLFallbackUsed: true, Links: links.links, ImageRefs: images.refs, ExtractionIncomplete: !complete || !urlsComplete}
 }
 
 func fallbackDestination(raw string, base *url.URL) (string, bool) {
@@ -233,9 +222,9 @@ func fallbackDestinationWithBudget(raw string, base *url.URL, memory *resourcegu
 		}
 		size += len(base.Scheme) + len(base.Host) + len(base.Path) + len(base.RawPath) + len(base.RawQuery) + len(base.Fragment) + len(base.RawFragment)
 	}
-	if !memory.Reserve(int64(size)*16 + 1024) {
-		return "", false
-	}
+
+	memory.Reserve(int64(size)*16 + 1024)
+
 	if !u.IsAbs() && base != nil {
 		u = base.ResolveReference(u)
 	}

@@ -2,6 +2,7 @@ package htmlextract
 
 import (
 	"fmt"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 	"runtime"
 	"strings"
 	"testing"
@@ -89,15 +90,18 @@ func TestGrowingStorageStaysWithinAllocationBudget(t *testing.T) {
 			runtime.GC()
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
-			doc, err := Analyze(input, limits)
+			_, usage, err, failure := captureAnalysis(input, limits)
 			runtime.ReadMemStats(&after)
-			if err == nil || doc.Usage.MemoryBytes != tc.limit {
-				t.Fatalf("expected memory cutoff: charged=%d err=%v", doc.Usage.MemoryBytes, err)
+			if err != nil || failure.Code != termination.MemoryExceeded || usage.MemoryBytes != tc.limit {
+				t.Fatalf("expected memory cutoff: charged=%d err=%v", usage.MemoryBytes, err)
 			}
+
 			// Allow unrelated runtime bookkeeping; the budget remains an estimate.
+
 			if allocated := after.TotalAlloc - before.TotalAlloc; allocated > uint64(tc.limit)+uint64(min(tc.limit/8, 2<<20)) {
 				t.Fatalf("allocated=%d budget=%d", allocated, tc.limit)
 			}
+
 		})
 	}
 }

@@ -1,5 +1,7 @@
 package html
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"bytes"
 	"fmt"
@@ -25,14 +27,15 @@ func TestWorkHelpersCancellation(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			g := &resourceGuard{limits: ResourceLimits{ShouldStop: func() bool { return true }}}
-			defer func() {
-				v, ok := recover().(resourceAbort)
-				if !ok || v.err != ErrResourceStopped {
-					t.Fatalf("%v", v)
+			g := &resourceGuard{limits: ResourceLimits{ShouldStop: func() {
+				if true {
+					termination.Fail(termination.Failure{Code: termination.CPUExceeded})
 				}
-			}()
-			run(g)
+
+				return
+			}}}
+			g.sampler = resourceguard.NewStopSampler(1, g.limits.ShouldStop)
+			expectTermination(t, termination.CPUExceeded, func() { run(g) })
 		})
 	}
 }
@@ -45,14 +48,14 @@ func TestNewlineConversionCannotSkipCheckpoints(t *testing.T) {
 			if got := string(convertNewlines([]byte(source))); got != want {
 				t.Fatal("incorrect newline conversion")
 			}
-			g := &resourceGuard{limits: ResourceLimits{ShouldStop: func() bool { return true }}}
-			defer func() {
-				v, ok := recover().(resourceAbort)
-				if !ok || v.err != ErrResourceStopped {
-					t.Fatalf("expected cancellation, got %v", v)
+			g := &resourceGuard{limits: ResourceLimits{ShouldStop: func() {
+				if true {
+					termination.Fail(termination.Failure{Code: termination.CPUExceeded})
 				}
-			}()
-			convertNewlinesWithGuard([]byte(source), g)
+
+				return
+			}}}
+			expectTermination(t, termination.CPUExceeded, func() { convertNewlinesWithGuard([]byte(source), g) })
 		})
 	}
 }
@@ -89,15 +92,17 @@ func TestReparentStopsDuringMove(t *testing.T) {
 		src.AppendChild(&Node{})
 	}
 	calls := 0
-	g := &resourceGuard{limits: ResourceLimits{ShouldStop: func() bool { calls++; return calls == 2 }}}
-	func() {
-		defer func() {
-			if _, ok := recover().(resourceAbort); !ok {
-				t.Fatal("no stop")
-			}
-		}()
-		reparentChildrenWithGuard(dst, src, g)
-	}()
+	g := &resourceGuard{limits: ResourceLimits{ShouldStop: func() {
+		calls++
+		if calls == 2 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
+	}}}
+	g.sampler = resourceguard.NewStopSampler(256, g.limits.ShouldStop)
+	expectTermination(t, termination.CPUExceeded, func() { reparentChildrenWithGuard(dst, src, g) })
+
 	moved := 0
 	for n := dst.FirstChild; n != nil; n = n.NextSibling {
 		moved++
@@ -105,17 +110,22 @@ func TestReparentStopsDuringMove(t *testing.T) {
 			t.Fatal("bad parent")
 		}
 	}
-	if moved != 255 || src.FirstChild == nil {
+	if moved != 256 || src.FirstChild == nil {
 		t.Fatalf("moved %d", moved)
 	}
 }
 func TestNULStopsDuringOutput(t *testing.T) {
 	calls := 0
-	g := &resourceGuard{limits: ResourceLimits{Memory: resourceguard.NewMemory(1 << 20), ShouldStop: func() bool { calls++; return calls == 4 }}}
-	defer func() {
-		if _, ok := recover().(resourceAbort); !ok || calls != 4 {
-			t.Fatalf("calls %d", calls)
+	g := &resourceGuard{limits: ResourceLimits{Memory: resourceguard.NewMemory(1 << 20), ShouldStop: func() {
+		calls++
+		if calls == 4 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
 		}
-	}()
-	replaceNULBytes(bytes.Repeat([]byte{0}, 4096), g)
+
+		return
+	}}}
+	expectTermination(t, termination.CPUExceeded, func() { replaceNULBytes(bytes.Repeat([]byte{0}, 4096), g) })
+	if calls != 4 {
+		t.Fatalf("calls %d", calls)
+	}
 }

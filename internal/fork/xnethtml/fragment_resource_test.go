@@ -1,7 +1,8 @@
 package html
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
-	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -28,9 +29,10 @@ func TestFragmentResultMemoryAdmission(t *testing.T) {
 	const count = 1000
 	source := strings.Repeat("<i></i>", count)
 	context := &Node{Type: ElementNode, Data: "div", DataAtom: a.Div}
+	var lastEOF int64
 	parse := func(memory *resourceguard.Memory) ([]*Node, int64, error) {
 		var beforeCollection int64
-		r := fragmentEOFReader{strings.NewReader(source), func() { beforeCollection = memory.Used() }}
+		r := fragmentEOFReader{strings.NewReader(source), func() { beforeCollection = memory.Used(); lastEOF = beforeCollection }}
 		nodes, err := ParseFragmentWithOptions(r, context, ParseOptionResourceLimits(ResourceLimits{Memory: memory}))
 		return nodes, beforeCollection, err
 	}
@@ -48,10 +50,10 @@ func TestFragmentResultMemoryAdmission(t *testing.T) {
 		}
 	}
 	memory = resourceguard.NewMemory(beforeCollection + 1)
-	nodes, reachedEOF, err := parse(memory)
-	var limited *ResourceLimitError
-	if reachedEOF != beforeCollection || nodes != nil || !errors.As(err, &limited) || !memory.Exhausted() {
-		t.Fatalf("collection limit: eof=%d nodes=%d err=%v", reachedEOF, len(nodes), err)
+	nodes = nil
+	expectTermination(t, termination.MemoryExceeded, func() { nodes, _, _ = parse(memory) })
+	if lastEOF != beforeCollection || nodes != nil || !memory.Exhausted() {
+		t.Fatalf("collection limit: eof=%d nodes=%d", lastEOF, len(nodes))
 	}
 }
 
@@ -59,11 +61,19 @@ func TestFragmentResultCancellation(t *testing.T) {
 	atEOF := false
 	r := fragmentEOFReader{strings.NewReader(strings.Repeat("<i></i>", 1000)), func() { atEOF = true }}
 	context := &Node{Type: ElementNode, Data: "div", DataAtom: a.Div}
-	nodes, err := ParseFragmentWithOptions(r, context, ParseOptionResourceLimits(ResourceLimits{
-		ShouldStop: func() bool { return atEOF },
-	}))
-	if nodes != nil || !errors.Is(err, ErrResourceStopped) {
-		t.Fatalf("nodes=%d err=%v", len(nodes), err)
+	expectTermination(t, termination.CPUExceeded, func() {
+		ParseFragmentWithOptions(r, context, ParseOptionResourceLimits(ResourceLimits{
+			ShouldStop: func() {
+				if atEOF {
+					termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+				}
+
+				return
+			},
+		}))
+	})
+	if !atEOF {
+		t.Fatal("cancellation occurred before collection")
 	}
 }
 
@@ -80,10 +90,19 @@ func TestFragmentAncestorCancellation(t *testing.T) {
 	calls := 0
 	atEOF := false
 	r := fragmentEOFReader{strings.NewReader(""), func() { atEOF = true }}
-	nodes, err := ParseFragmentWithOptions(r, context, ParseOptionResourceLimits(ResourceLimits{
-		ShouldStop: func() bool { calls++; return calls > 1 },
-	}))
-	if atEOF || nodes != nil || !errors.Is(err, ErrResourceStopped) {
-		t.Fatalf("eof=%v nodes=%d err=%v", atEOF, len(nodes), err)
+	expectTermination(t, termination.CPUExceeded, func() {
+		ParseFragmentWithOptions(r, context, ParseOptionResourceLimits(ResourceLimits{
+			ShouldStop: func() {
+				calls++
+				if calls > 1 {
+					termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+				}
+
+				return
+			},
+		}))
+	})
+	if atEOF {
+		t.Fatal("ancestor scan continued to reader")
 	}
 }

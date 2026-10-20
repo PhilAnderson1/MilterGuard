@@ -1,5 +1,7 @@
 package htmlextract
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"math"
 	"runtime"
@@ -32,18 +34,26 @@ func TestCSSNumberRangeAndSyntax(t *testing.T) {
 
 func TestCSSNumberAdmissionAndCancellation(t *testing.T) {
 	// Definite overflow never reaches ParseFloat or its error allocation.
-	budget := &cpuGuard{memory: resourceguard.NewMemory(1)}
+	budget := testCPUGuard(cpuGuard{memory: resourceguard.NewMemory(1)})
+
 	if v, ok := parseCSSNumber(strings.Repeat("9", 64000), budget); !ok || !math.IsInf(v, 1) || budget.memory.Exhausted() {
 		t.Fatal("definite overflow was not detected before conversion")
 	}
+
 	// Borderline overflow requires conversion and must be admitted first.
-	if _, ok := parseCSSNumber("1.7976931348623159e308", budget); ok || !budget.memory.Exhausted() {
-		t.Fatal("conversion bypassed admission")
-	}
+	expectTermination(t, termination.MemoryExceeded, func() { parseCSSNumber("1.7976931348623159e308", budget) })
 	calls := 0
-	budget = &cpuGuard{shouldStop: func() bool { calls++; return true }}
-	if _, ok := numberWithBudget(strings.Repeat("9", 64000), budget); ok || calls != 1 || !budget.stopped {
-		t.Fatal("numeric scan ignored cancellation")
+	budget = testCPUGuard(cpuGuard{shouldStop: func() {
+		calls++
+		{
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
+	}})
+	expectTermination(t, termination.CPUExceeded, func() { numberWithBudget(strings.Repeat("9", 64000), budget) })
+	if calls != 1 {
+		t.Fatalf("calls=%d", calls)
 	}
 }
 
@@ -55,7 +65,7 @@ func TestPreparedMathLiteralsKeepContext(t *testing.T) {
 	}
 	literals := prepareMathLiterals(ts, nil)
 	// Enough for the output strings, but not another conversion: reuse literals.
-	budget := &cpuGuard{memory: resourceguard.NewMemory(64)}
+	budget := testCPUGuard(cpuGuard{memory: resourceguard.NewMemory(64)})
 	for _, size := range []float64{10, 20} {
 		parent := initialStyle
 		parent[fontSize] = Value{Number: size, Known: true}

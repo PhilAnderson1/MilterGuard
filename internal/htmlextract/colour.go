@@ -47,9 +47,8 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 		haveNone := false
 		var b strings.Builder
 		for _, valueToken := range tokens {
-			if !budget.check() {
-				return nil
-			}
+			budget.check()
+
 			tt, s := valueToken.kind, asciiLowerWithBudget(valueToken.raw, budget)
 			if isClosingToken(tt) && len(stack) == 0 {
 				return nil
@@ -62,9 +61,8 @@ func backgroundDeclarationsTokens(value string, tokens []valueToken, tokenStatus
 				haveNone = true
 				continue
 			}
-			if !writeBudgetedString(&b, s, budget) {
-				return nil
-			}
+
+			writeBudgetedString(&b, s, budget)
 		}
 		token := trimCSSWhitespace(b.String())
 		if token != "" {
@@ -112,9 +110,8 @@ func backgroundFallbackColourTokens(tokens []valueToken, budget *cpuGuard) (stri
 	finalStart := 0
 	var stack []css.TokenType
 	for i, token := range tokens {
-		if !budget.check() {
-			return "", valueUnsupported, false
-		}
+		budget.check()
+
 		if token.kind == css.CommaToken && len(stack) == 0 {
 			finalStart = i + 1
 		}
@@ -122,9 +119,11 @@ func backgroundFallbackColourTokens(tokens []valueToken, budget *cpuGuard) (stri
 	}
 	// A colour in any non-final layer makes the shorthand invalid.
 	if finalStart > 0 {
+
 		if _, _, count := backgroundLayerColour(tokens[:finalStart-1], budget); count != 0 {
 			return "", valueInvalid, false
 		}
+
 	}
 	colour, colourStatus, count := backgroundLayerColour(tokens[finalStart:], budget)
 	if count > 1 {
@@ -140,9 +139,8 @@ func backgroundLayerColour(tokens []valueToken, budget *cpuGuard) (string, value
 	var colour string
 	colourStatus, count := valueInvalid, 0
 	for i := 0; i < len(tokens); i++ {
-		if !budget.check() {
-			return "", valueUnsupported, 0
-		}
+		budget.check()
+
 		token := tokens[i]
 		candidate := ""
 		switch token.kind {
@@ -190,9 +188,8 @@ func countUnsupportedColourFunctions(tokens []valueToken) int {
 func countUnsupportedColourFunctionsWithBudget(tokens []valueToken, budget *cpuGuard) int {
 	count := 0
 	for _, token := range tokens {
-		if !budget.check() {
-			return count
-		}
+		budget.check()
+
 		if token.kind == css.FunctionToken && isUnsupportedColourFunctionWithBudget(token.raw, budget) {
 			count++
 		}
@@ -228,17 +225,18 @@ func legacyDimensionWithBudget(value string, budget *cpuGuard) (string, bool) {
 		return "", false
 	}
 	for i := range value {
-		if i%stringWorkChunk == 0 && len(value) > stringWorkChunk && budget.stopNow(true) {
-			return "", false
+		if i%stringWorkChunk == 0 && len(value) > stringWorkChunk {
+			budget.checkpoint()
 		}
+
 		if value[i] < '0' || value[i] > '9' {
 			return "", false
 		}
 	}
 	if percentage {
-		return concatString(value, "%", budget), !budget.stopNow(false)
+		return concatString(value, "%", budget), true
 	}
-	return concatString(value, "px", budget), !budget.stopNow(false)
+	return concatString(value, "px", budget), true
 }
 
 // Presentational hints precede all author rules, with specificity zero. Full
@@ -267,6 +265,7 @@ func legacyDeclarationsWithBody(n, body *html.Node, budget *cpuGuard) []declarat
 		// explicit author display declaration can restore the element.
 		addDeclaration(declaration{prop: display, value: "none", order: -2, unsupported: true})
 	}
+
 	add := func(prop int, value string) {
 		value = asciiLowerWithBudget(strings.TrimSpace(value), budget)
 		if value == "" || value == "transparent" {
@@ -274,9 +273,11 @@ func legacyDeclarationsWithBody(n, body *html.Node, budget *cpuGuard) []declarat
 		}
 		if len(value) == 6 && !strings.HasPrefix(value, "#") {
 			hex := concatString("#", value, budget)
+
 			if _, status := readColourWithBudget(hex, budget); status == valueResolved {
 				value = hex
 			}
+
 		}
 		_, status := readColourWithBudget(value, budget)
 		addDeclaration(declaration{prop: prop, value: value, order: -1, unsupported: status != valueResolved})
@@ -302,9 +303,11 @@ func legacyDeclarationsWithBody(n, body *html.Node, budget *cpuGuard) []declarat
 		add(color, attr(n, "color"))
 	}
 	addDimension := func(prop int, name string) {
+
 		if value, ok := legacyDimensionWithBudget(attr(n, name), budget); ok {
 			addDeclaration(declaration{prop: prop, value: value, order: -1})
 		}
+
 	}
 	// These obsolete attributes remain common in table-based email and are
 	// interpreted as low-priority presentational hints. Retaining them lets the
@@ -318,17 +321,18 @@ func legacyDeclarationsWithBody(n, body *html.Node, budget *cpuGuard) []declarat
 	// Legacy tiled background images remain unknown; author CSS can override.
 	switch n.Data {
 	case "body", "table", "td", "th":
-		if v := attr(n, "background"); v != "" {
-			addDeclaration(declaration{prop: backgroundImage, value: concatString("legacy-image:", v, budget), order: -1, unsupported: true})
+		{
+			v := attr(n, "background")
+			if v != "" {
+				addDeclaration(declaration{prop: backgroundImage, value: concatString("legacy-image:", v, budget), order: -1, unsupported: true})
+			}
 		}
 	}
 	if count == 0 {
 		return nil
 	}
-	result, ok := resourceguard.MakeSlice[declaration](budget.allocationMemory(), count, count)
-	if !ok {
-		return nil
-	}
+	result := resourceguard.MakeSlice[declaration](budget.allocationMemory(), count, count)
+
 	copy(result, hints[:count])
 	return result
 }
@@ -463,9 +467,8 @@ func (c colourResult) inspection() colourInspection {
 // canvas is supplied after known layers; unresolved layers remain unknown. No sibling/layout/image
 // sampling, antialiasing, blending or filter model is implied.
 func evaluateColour(foreground Value, layers []paintLayer, work *cpuGuard) colourResult {
-	if !work.check() {
-		return colourResult{uncertainty: "style-analysis CPU limit"}
-	}
+	work.check()
+
 	if !foreground.Known {
 		return colourResult{uncertainty: "unresolved foreground"}
 	}
@@ -480,9 +483,8 @@ func evaluateColour(foreground Value, layers []paintLayer, work *cpuGuard) colou
 	}
 	unresolvedGroundImage := false
 	for i := len(layers) - 1; i >= 0; i-- {
-		if !work.check() {
-			return colourResult{uncertainty: "style-analysis CPU limit"}
-		}
+		work.check()
+
 		p := layers[i]
 		if !p.compositionKnown {
 			return colourResult{uncertainty: "unsupported composition effect"}
@@ -540,9 +542,8 @@ func simpleGradientBackground(value string, budget *cpuGuard) bool {
 	stops := 0
 	first := true
 	for {
-		if !budget.check() {
-			return false
-		}
+		budget.check()
+
 		part, rest, more := strings.Cut(body, ",")
 		part = trimCSSWhitespace(part)
 		direction := false
@@ -565,17 +566,21 @@ func simpleGradientBackground(value string, budget *cpuGuard) bool {
 			if len(fields) < 1 || len(fields) > 2 {
 				return false
 			}
+
 			if _, status := readColourWithBudget(fields[0], budget); status != valueResolved {
 				return false
 			}
+
 			if len(fields) == 2 {
 				num, unit, found := splitLength(fields[1])
-				if !found || (unit.suffix != "%" && unit.suffix != "px") {
+				if !found || unit.suffix != "%" && unit.suffix != "px" {
 					return false
 				}
+
 				if _, ok := numberWithBudget(num, budget); !ok {
 					return false
 				}
+
 			}
 			stops++
 		}

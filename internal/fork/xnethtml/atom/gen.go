@@ -200,7 +200,7 @@ func main() {
 		fmt.Fprintf(&buf, "\t%#x: %#x, // %s\n", i, atom[s], s)
 	}
 	fmt.Fprintf(&buf, "}\n")
-	datasize := (1 << best.k) * 4
+	datasize := 1 << best.k * 4
 
 	fmt.Fprintln(&buf, "const atomText =")
 	textsize := len(text)
@@ -244,7 +244,7 @@ type table struct {
 func (t *table) hash(s string) (h1, h2 uint32) {
 	h := fnv(t.h0, s)
 	h1 = h & t.mask
-	h2 = (h >> 16) & t.mask
+	h2 = h >> 16 & t.mask
 	return
 }
 

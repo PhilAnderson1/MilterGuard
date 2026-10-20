@@ -1,5 +1,7 @@
 package message
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"strings"
 	"testing"
@@ -34,22 +36,28 @@ func TestURLCompactionGuards(t *testing.T) {
 	input := "https://e.com/?" + strings.Repeat("&a", 10000)
 	t.Run("memory", func(t *testing.T) {
 		memory := resourceguard.NewMemory(1)
-		if got, ok := promptURLWithBudget(input, true, memory, nil); ok || got != "" || !memory.Exhausted() {
-			t.Fatal("allocation limit was ignored")
-		}
+		expectTermination(t, termination.MemoryExceeded, func() { promptURLWithBudget(input, true, memory, nil) })
 	})
 	t.Run("cancel", func(t *testing.T) {
 		calls := 0
-		stop := func() bool { calls++; return calls >= 3 }
-		if got, ok := promptURLWithBudget("https://e.com/"+strings.Repeat("a", 10000), true, nil, stop); ok || got != "" {
-			t.Fatal("cancellation during component scan was ignored")
+		stop := func() {
+			calls++
+			if calls >= 3 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
+		}
+		expectTermination(t, termination.CPUExceeded, func() { promptURLWithBudget("https://e.com/"+strings.Repeat("a", 10000), true, nil, stop) })
+		if calls != 3 {
+			t.Fatalf("checks=%d", calls)
 		}
 	})
 	t.Run("accounting", func(t *testing.T) {
 		memory := resourceguard.NewMemory(1 << 20)
-		got, ok := promptURLWithBudget(input, true, memory, nil)
-		if !ok || len(got) != 512 || memory.Used() < int64(len(got)) {
-			t.Fatalf("result length=%d, ok=%v, charged=%d", len(got), ok, memory.Used())
+		got := promptURLWithBudget(input, true, memory, nil)
+		if len(got) != 512 || memory.Used() < int64(len(got)) {
+			t.Fatalf("result length=%d, ok=%v, charged=%d", len(got), true, memory.Used())
 		}
 	})
 }
@@ -71,14 +79,21 @@ func TestPlainURLCompactionCancellationIsIncomplete(t *testing.T) {
 	input := "https://e.com/" + strings.Repeat("a", 10000)
 	for _, collect := range []bool{false, true} {
 		calls := 0
-		stop := func() bool { calls++; return calls >= 3 }
+		stop := func() {
+			calls++
+			if calls >= 3 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
+		}
 		var links *linkCollector
 		if collect {
 			links = &linkCollector{compactURLs: true, shouldStop: stop}
 		}
-		got, complete := rewritePlainTextURLs(input, true, links, stop)
-		if complete || got != input {
-			t.Fatalf("collect=%v: cancelled rewrite returned complete=%v, text=%q", collect, complete, got)
+		expectTermination(t, termination.CPUExceeded, func() { rewritePlainTextURLs(input, true, links, stop) })
+		if calls != 3 {
+			t.Fatalf("checks=%d", calls)
 		}
 	}
 }

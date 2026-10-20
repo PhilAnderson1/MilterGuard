@@ -15,20 +15,14 @@ func NewSelectorListIterator(source string) SelectorListIterator {
 }
 
 // NewSelectorListIteratorWithStop samples source scanning, including empty branches.
-func NewSelectorListIteratorWithStop(source string, shouldStop func() bool) SelectorListIterator {
+func NewSelectorListIteratorWithStop(source string, shouldStop func()) SelectorListIterator {
 	return SelectorListIterator{source: source, control: MatchControl{shouldStop: shouldStop}}
-}
-func (iterator *SelectorListIterator) Stopped() bool {
-	return iterator.control.stopped
 }
 
 // EmptyBranch reports invalid empty branches without changing splitting semantics.
 func (iterator *SelectorListIterator) EmptyBranch() bool { return iterator.emptyBranch }
 
 func (iterator *SelectorListIterator) Next() (string, bool) {
-	if iterator.Stopped() {
-		return "", false
-	}
 	for iterator.offset <= len(iterator.source) {
 		start := iterator.offset
 		brackets, parens := 0, 0
@@ -38,9 +32,8 @@ func (iterator *SelectorListIterator) Next() (string, bool) {
 		for i := start; i < len(iterator.source); i++ {
 			if iterator.control.shouldStop != nil && i >= iterator.nextCheck {
 				iterator.nextCheck = i + 1024
-				if iterator.control.checkNow() {
-					return "", false
-				}
+
+				iterator.control.checkNow()
 			}
 			c := iterator.source[i]
 			if !isCSSWhitespace(c) && !(c == ',' && quote == 0 && brackets == 0 && parens == 0) {

@@ -1,10 +1,8 @@
 package resourceguard
 
-import "errors"
-
-// ErrMemory is allocation-free failure reporting for storage constructors.
-var ErrMemory = errors.New("allocation budget exhausted")
-var ErrStopped = errors.New("allocation operation stopped")
+import (
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
+)
 
 // Memory is a monotonic per-operation allocation budget. It deliberately does
 // not release charges: unreachable Go objects remain allocated until a later
@@ -20,19 +18,34 @@ func NewMemory(limit int64) *Memory {
 	return &Memory{limit: limit}
 }
 
-func (m *Memory) Reserve(bytes int64) bool {
-	if m == nil || bytes <= 0 {
-		return true
+// unavailable protects storage entry points against reuse of an exhausted
+// ledger. Exhausted remains a side-effect-free query for boundary reporting.
+func (m *Memory) unavailable() {
+	if !m.Exhausted() {
+		return
 	}
-	if m.exhausted {
-		return false
+
+	termination.Fail(termination.Failure{Code: termination.MemoryExceeded, Limit: m.limit})
+
+	return
+}
+
+func (m *Memory) Reserve(bytes int64) {
+	if m == nil {
+		return
+	}
+
+	m.unavailable()
+
+	if bytes <= 0 {
+		return
 	}
 	if m.limit <= 0 || m.used > m.limit || bytes > m.limit-m.used {
-		m.exhausted = true
-		return false
+		m.reject()
+		return
 	}
 	m.used += bytes
-	return true
+	return
 }
 
 func (m *Memory) Exhausted() bool { return m != nil && m.exhausted }
@@ -60,14 +73,15 @@ func (m *Memory) TryReserve(bytes int64) bool {
 	if m == nil {
 		return true
 	}
-	if m.exhausted {
-		return false
-	}
+
+	m.unavailable()
+
 	if bytes <= 0 {
 		return true
 	}
 	if m.limit <= 0 || m.used > m.limit || bytes > m.limit-m.used {
 		return false
 	}
-	return m.Reserve(bytes)
+	m.Reserve(bytes)
+	return true
 }

@@ -1,5 +1,7 @@
 package htmlextract
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"fmt"
 	"math"
@@ -101,8 +103,8 @@ func BenchmarkAuditAttributes(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				s.runtime.attributeCandidates.Release()
-				if _, ok := s.attributeCandidateBuckets(n, nil); !ok {
-					b.Fatal("stopped")
+				{
+					s.attributeCandidateBuckets(n, nil)
 				}
 			}
 		})
@@ -126,19 +128,15 @@ func BenchmarkAuditMath(b *testing.B) {
 func TestAuditAllocationBoundaries(t *testing.T) {
 	t.Run("cumulative slice growth", func(t *testing.T) {
 		memory := resourceguard.NewMemory(1 << 20)
-		s, ok := growSlice([]uint64(nil), 1, memory)
-		if !ok {
-			t.Fatal("initial growth")
-		}
+		s := growSlice([]uint64(nil), 1, memory)
 		first := cap(s)
 		s = s[:cap(s)]
-		s, ok = growSlice(s, 1, memory)
-		if !ok {
-			t.Fatal("second growth")
-		}
+		s = growSlice(s, 1, memory)
+
 		if want := int64(first+cap(s)) * 8; memory.Used() != want {
 			t.Fatalf("used=%d want=%d", memory.Used(), want)
 		}
+
 	})
 	t.Run("plain container preparation", func(t *testing.T) {
 		probe := resourceguard.NewMemory(1 << 20)
@@ -148,45 +146,44 @@ func TestAuditAllocationBoundaries(t *testing.T) {
 		root := &html.Node{Type: html.ElementNode, Data: "div"}
 		root.AppendChild(&html.Node{Type: html.ElementNode, Data: "span"})
 		document := parsedDocument{memory: memory, elements: resourceguard.Table[*html.Node, elementPreparation]{}}
-		walker := documentWalker{document: &document, processor: processor{memory: memory, cpu: &cpuGuard{memory: memory}}}
-		if err := walker.run(root); err == nil || !memory.Exhausted() {
-			t.Fatalf("err=%v exhausted=%v", err, memory.Exhausted())
-		}
+		walker := documentWalker{document: &document, processor: processor{memory: memory, cpu: testCPUGuard(cpuGuard{memory: memory})}}
+		expectTermination(t, termination.MemoryExceeded, func() { walker.run(root) })
 	})
 	t.Run("legacy hints", func(t *testing.T) {
 		memory := resourceguard.NewMemory(int64(unsafe.Sizeof(declaration{})) - 1)
 		n := &html.Node{Type: html.ElementNode, Data: "img", Attr: []html.Attribute{{Key: "width", Val: "1"}}}
-		if ds := legacyDeclarationsWithBudget(n, &cpuGuard{memory: memory}); len(ds) != 0 || !memory.Exhausted() {
-			t.Fatal("unbudgeted hints")
-		}
+		expectTermination(t, termination.MemoryExceeded, func() { legacyDeclarationsWithBudget(n, testCPUGuard(cpuGuard{memory: memory})) })
 	})
 	t.Run("prepared value", func(t *testing.T) {
 		memory := resourceguard.NewMemory(int64(unsafe.Sizeof(preparedDeclaration{})) - 1)
-		d := prepareDeclaration(declaration{prop: display, value: "none"}, &cpuGuard{memory: memory})
-		if d.prepared != nil || !memory.Exhausted() {
-			t.Fatal("unbudgeted prepared value")
-		}
+		expectTermination(t, termination.MemoryExceeded, func() {
+			prepareDeclaration(declaration{prop: display, value: "none"}, testCPUGuard(cpuGuard{memory: memory}))
+		})
 	})
 	t.Run("selector scratch", func(t *testing.T) {
 		memory := resourceguard.NewMemory(4 + 1)
 		s := sheet{memory: memory, index: selectorIndex{count: 1, universal: []selectorRef{{sequence: 0}}}}
-		if _, ok := s.collectCandidates(&html.Node{Type: html.ElementNode, Data: "p"}, &cpuGuard{memory: memory}); ok || !memory.Exhausted() {
-			t.Fatal("unbudgeted candidates")
-		}
+		expectTermination(t, termination.MemoryExceeded, func() {
+			s.collectCandidates(&html.Node{Type: html.ElementNode, Data: "p"}, testCPUGuard(cpuGuard{memory: memory}))
+		})
 	})
 	t.Run("ancestor activation", func(t *testing.T) {
 		var active activeAncestorBuckets
 		memory := resourceguard.NewMemory(1)
-		if active.reset(100, memory) || !memory.Exhausted() {
-			t.Fatal("unbudgeted activation")
-		}
+		expectTermination(t, termination.MemoryExceeded, func() { active.reset(100, memory) })
 	})
-
 }
 
 func stopOnSecondSample() *cpuGuard {
 	calls := 0
-	return &cpuGuard{shouldStop: func() bool { calls++; return calls >= 2 }}
+	return testCPUGuard(cpuGuard{shouldStop: func() {
+		calls++
+		if calls >= 2 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
+	}})
 }
 func TestAuditLongLoopsSampleCancellation(t *testing.T) {
 	t.Run("prepared cascade", func(t *testing.T) {
@@ -197,9 +194,9 @@ func TestAuditLongLoopsSampleCancellation(t *testing.T) {
 		}
 		work := stopOnSecondSample()
 		s := sheet{}
-		if _, ok := s.collectCascade(nil, nil, ds, nil, &mediaEvaluation{}, selectorMatchContext{}, work, evaluationContext{}); ok || !work.stopped {
-			t.Fatal("cascade did not stop within list")
-		}
+		expectTermination(t, termination.CPUExceeded, func() {
+			s.collectCascade(nil, nil, ds, nil, &mediaEvaluation{}, selectorMatchContext{}, work, evaluationContext{})
+		})
 	})
 	t.Run("colour layers", func(t *testing.T) {
 		layers := make([]paintLayer, 1024)
@@ -207,9 +204,7 @@ func TestAuditLongLoopsSampleCancellation(t *testing.T) {
 			layers[i] = layer(&initialStyle)
 		}
 		work := stopOnSecondSample()
-		if result := evaluateColour(initialStyle[color], layers, work); result.known || !work.stopped {
-			t.Fatal("colour loop did not stop")
-		}
+		expectTermination(t, termination.CPUExceeded, func() { evaluateColour(initialStyle[color], layers, work) })
 	})
 	t.Run("variable boundaries", func(t *testing.T) {
 		ts, status := lexValue(strings.Repeat("var(--missing,", 192)+"none"+strings.Repeat(")", 192), nil)
@@ -217,15 +212,22 @@ func TestAuditLongLoopsSampleCancellation(t *testing.T) {
 			t.Fatal(status)
 		}
 		work := stopOnSecondSample()
-		if v := substituteTokens(ts, func(string) variableValue { return variableValue{status: valueInvalid} }, work, 0); v.status != valueUnsupported || !work.stopped {
-			t.Fatal("variable scan did not stop")
-		}
+		expectTermination(t, termination.CPUExceeded, func() {
+			substituteTokens(ts, func(string) variableValue { return variableValue{status: valueInvalid} }, work, 0)
+		})
 	})
-	t.Run("latched public stop", func(t *testing.T) {
+	t.Run("public stop unwinds", func(t *testing.T) {
 		calls := 0
-		_, err := AnalyzeWithStop([]byte(strings.Repeat("<p>T</p>", 2000)), DefaultLimits(), func() bool { calls++; return calls == 3 })
-		if !IsStopped(err) {
-			t.Fatalf("err=%v calls=%d", err, calls)
+		expectTermination(t, termination.CPUExceeded, func() {
+			AnalyzeWithStop([]byte(strings.Repeat("<p>T</p>", 2000)), DefaultLimits(), func() {
+				calls++
+				if calls == 3 {
+					termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+				}
+			})
+		})
+		if calls != 3 {
+			t.Fatalf("calls=%d", calls)
 		}
 	})
 }
@@ -256,14 +258,14 @@ func TestMediaGroupsMatchIndependentRuleEvaluation(t *testing.T) {
 	}
 	for _, width := range append(widths, 1024) {
 		for _, fallback := range []bool{false, true} {
-			states, ok := s.mediaStates(width, fallback, nil)
-			if !ok {
-				t.Fatal("incomplete media")
-			}
+			states := s.mediaStates(width, fallback, nil)
+
 			for _, rule := range s.rules {
+
 				if got, want := int(states[rule.mediaGroup]), independentMediaState(rule.conditions, width, fallback); got != want {
 					t.Fatalf("width=%v fallback=%v state=%d want=%d", width, fallback, got, want)
 				}
+
 			}
 		}
 	}
@@ -274,9 +276,9 @@ func TestAttributeBucketsDeduplicateAndPreserveFirstAttributes(t *testing.T) {
 	s.parseStylesheetCSS(`.x{display:none}.x *{opacity:0}#first{visibility:hidden}#second{font-size:0}`)
 	s.buildSelectorIndex()
 	n := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "id", Val: "first"}, {Key: "id", Val: "second"}, {Key: "class", Val: strings.Repeat("x\t\n\f", 1000)}}}
-	result, ok := s.attributeCandidateBuckets(n, nil)
-	if !ok || len(result.direct) != 2 || len(result.ancestor) != 1 {
-		t.Fatalf("buckets=%+v complete=%v", result, ok)
+	result := s.attributeCandidateBuckets(n, nil)
+	if len(result.direct) != 2 || len(result.ancestor) != 1 {
+		t.Fatalf("buckets=%+v complete=%v", result, true)
 	}
 	for _, bucket := range result.direct {
 		for _, ref := range bucket {
@@ -287,14 +289,10 @@ func TestAttributeBucketsDeduplicateAndPreserveFirstAttributes(t *testing.T) {
 	}
 	s.runtime.activeAncestors.reset(s.index.count, nil)
 	s.runtime.activeAncestors.enabled = true
-	first, ok := s.activateAncestorBuckets(n, nil)
-	if !ok {
-		t.Fatal("activation")
-	}
-	second, ok := s.activateAncestorBuckets(n, nil)
-	if !ok {
-		t.Fatal("activation")
-	}
+	first := s.activateAncestorBuckets(n, nil)
+
+	second := s.activateAncestorBuckets(n, nil)
+
 	s.deactivateAncestorBuckets(second)
 	if len(s.runtime.activeAncestors.buckets) != 1 {
 		t.Fatal("inner exit removed outer bucket")

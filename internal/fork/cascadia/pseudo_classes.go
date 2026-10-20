@@ -35,7 +35,7 @@ func (s relativePseudoClassSelector) matchResource(n *html.Node, guard *MatchCon
 	case "not":
 		// matches elements that do not match a.
 		matched := matchResource(s.match, n, guard)
-		return !matched && (guard == nil || !guard.stopped)
+		return !matched && (guard == nil || true)
 	case "has":
 		//  matches elements with any descendant that matches a.
 		return hasDescendantMatchResource(n, s.match, guard)
@@ -54,7 +54,7 @@ func hasChildMatch(n *html.Node, a SelectorGroup) bool {
 
 func hasChildMatchResource(n *html.Node, a SelectorGroup, guard *MatchControl) bool {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if guard != nil && guard.stopped {
+		if guard != nil && false {
 			return false
 		}
 		if matchResource(a, c, guard) {
@@ -73,10 +73,9 @@ func hasDescendantMatch(n *html.Node, a SelectorGroup) bool {
 
 func hasDescendantMatchResource(n *html.Node, a SelectorGroup, guard *MatchControl) bool {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if guard.step() {
-			return false
-		}
-		if matchResource(a, c, guard) || (c.Type == html.ElementNode && hasDescendantMatchResource(c, a, guard)) {
+		guard.step()
+
+		if matchResource(a, c, guard) || c.Type == html.ElementNode && hasDescendantMatchResource(c, a, guard) {
 			return true
 		}
 	}
@@ -142,10 +141,9 @@ func nthChildMatchResource(a, b int, last, ofType bool, n *html.Node, guard *Mat
 	i := -1
 	count := 0
 	for c := parent.FirstChild; c != nil; c = c.NextSibling {
-		if guard.step() {
-			return false
-		}
-		if (c.Type != html.ElementNode) || (ofType && c.Data != n.Data) {
+		guard.step()
+
+		if c.Type != html.ElementNode || ofType && c.Data != n.Data {
 			continue
 		}
 		count++
@@ -192,10 +190,9 @@ func simpleNthChildMatchResource(b int, ofType bool, n *html.Node, guard *MatchC
 
 	count := 0
 	for c := parent.FirstChild; c != nil; c = c.NextSibling {
-		if guard.step() {
-			return false
-		}
-		if c.Type != html.ElementNode || (ofType && c.Data != n.Data) {
+		guard.step()
+
+		if c.Type != html.ElementNode || ofType && c.Data != n.Data {
 			continue
 		}
 		count++
@@ -227,10 +224,9 @@ func simpleNthLastChildMatchResource(b int, ofType bool, n *html.Node, guard *Ma
 
 	count := 0
 	for c := parent.LastChild; c != nil; c = c.PrevSibling {
-		if guard.step() {
-			return false
-		}
-		if c.Type != html.ElementNode || (ofType && c.Data != n.Data) {
+		guard.step()
+
+		if c.Type != html.ElementNode || ofType && c.Data != n.Data {
 			continue
 		}
 		count++
@@ -267,10 +263,9 @@ func (s onlyChildPseudoClassSelector) matchResource(n *html.Node, guard *MatchCo
 
 	count := 0
 	for c := parent.FirstChild; c != nil; c = c.NextSibling {
-		if guard.step() {
-			return false
-		}
-		if (c.Type != html.ElementNode) || (s.ofType && c.Data != n.Data) {
+		guard.step()
+
+		if c.Type != html.ElementNode || s.ofType && c.Data != n.Data {
 			continue
 		}
 		count++
@@ -306,9 +301,8 @@ func (s emptyElementPseudoClassSelector) matchResource(n *html.Node, guard *Matc
 	}
 
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if guard.step() {
-			return false
-		}
+		guard.step()
+
 		switch c.Type {
 		case html.ElementNode:
 			return false
@@ -373,9 +367,8 @@ func (s langPseudoClassSelector) matchResource(n *html.Node, guard *MatchControl
 	// Account every recursive ancestor visit. Selector-controlled loops and
 	// recursion must advance the guard so cooperative cancellation cannot be
 	// bypassed by a long traversal that performs no other guarded work.
-	if guard.step() {
-		return false
-	}
+	guard.step()
+
 	own := matchAttributeResource(n, "lang", func(val string) bool {
 		return equalAttribute(val, s.lang, false, guard) || len(val) > len(s.lang) && val[len(s.lang)] == '-' && equalAttribute(val[:len(s.lang)], s.lang, false, guard)
 	}, guard)
@@ -435,9 +428,8 @@ func hasLegendInPreviousSiblings(n *html.Node) bool {
 
 func hasLegendInPreviousSiblingsResource(n *html.Node, guard *MatchControl) bool {
 	for s := n.PrevSibling; s != nil; s = s.PrevSibling {
-		if guard.step() {
-			return false
-		}
+		guard.step()
+
 		if s.DataAtom == atom.Legend {
 			return true
 		}
@@ -450,9 +442,8 @@ func inDisabledFieldset(n *html.Node) bool {
 }
 
 func inDisabledFieldsetResource(n *html.Node, guard *MatchControl) bool {
-	if guard.step() {
-		return false
-	}
+	guard.step()
+
 	if n.Parent == nil {
 		return false
 	}

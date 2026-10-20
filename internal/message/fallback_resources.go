@@ -1,33 +1,51 @@
 package message
 
-import "github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
+import (
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
+)
 
 // Fallback receives only this stage's resources. It cannot inspect, charge, or
 // reset the primary allowance. The caller owns admission and policy decisions.
 type fallbackResources struct {
-	memory     *resourceguard.Memory
-	shouldStop func() bool
-	cpuStopped bool
+	prefix string
+
+	check       func()
+	memory      *resourceguard.Memory
+	cpuStopped  bool
+	textStop    func()
+	textSampler resourceguard.StopSampler
 }
 
-func (r *fallbackResources) stopped() bool {
-	if r.memory.Exhausted() || r.cpuStopped {
-		return true
+// Tokenizer callbacks retain their existing sampling. Only helpers owned by
+// this package share this sampler, avoiding nested sampling intervals.
+func (r *fallbackResources) textStopCallback() func() {
+	if r.textStop == nil {
+		r.textSampler = resourceguard.NewStopSampler(10, r.check)
+		r.textStop = resourceguard.BindCheckpoint(r.memory, r, func(r *fallbackResources) {
+			r.textSampler.Check()
+		})
 	}
-	if r.shouldStop != nil && r.shouldStop() {
-		r.cpuStopped = true
+	return r.textStop
+}
+
+func (r *fallbackResources) checkpoint() {
+	if r.check != nil {
+		r.check()
 	}
-	return r.cpuStopped
 }
 
 func (b *extractionBudget) beginFallback() bool {
+	if b.terminal.Code != termination.None {
+		return false
+	}
 	if b.fallback != nil {
 		return true
 	}
 	if b.memoryStopped() || b.allowFallback != nil && !b.allowFallback() {
 		return false
 	}
-	b.fallback = &fallbackResources{memory: resourceguard.NewMemory(b.memoryBytesLimit), shouldStop: b.fallbackShouldStop}
+	b.fallback = &fallbackResources{memory: b.newMemory(b.memoryBytesLimit), check: b.checkFallback}
 	return true
 }
 
@@ -48,9 +66,9 @@ func (b *extractionBudget) observeFallback() {
 
 // Shared MIME/output work asks the coordinator for its current allocation
 // owner. It never receives the primary ledger while fallback is active.
-func (b *extractionBudget) fallbackMemory() *resourceguard.Memory {
-	if b.fallback == nil {
-		return nil
+func (b *extractionBudget) allocationMemory() *resourceguard.Memory {
+	if b.fallback != nil {
+		return b.fallback.memory
 	}
-	return b.fallback.memory
+	return b.primaryMemory
 }

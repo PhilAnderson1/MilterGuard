@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-func testFallbackResources(stop func() bool) *fallbackResources {
-	return &fallbackResources{memory: resourceguard.NewMemory(64 << 20), shouldStop: stop}
+func testFallbackResources(stop func()) *fallbackResources {
+	return &fallbackResources{memory: resourceguard.NewMemory(64 << 20), check: stop}
 }
 
 // The primary ledger is deliberately exhausted before admitting recovery.
@@ -20,18 +20,26 @@ func TestFallbackMemoryIsFreshAndIndependent(t *testing.T) {
 		MemoryLimitExceeded:         func() { primaryCalls++ },
 		FallbackMemoryLimitExceeded: func() { fallbackCalls++ },
 	})
-	b.reserveOutputMemory(limit + 1)
-	first := b.extractFallback("<p>first evidence</p>")
+	first, complete := runExtraction(b, func() extractedContent {
+		if b.fallback == nil {
+			b.reserveOutputMemory(limit + 1)
+		}
+		return b.extractFallback("<p>first evidence</p>")
+	})
+	if !complete {
+		t.Fatal("fallback did not complete")
+	}
 	if first.Text != "first evidence" || first.HTMLMemoryLimitExceeded || b.fallback.memory.Limit() != limit {
 		t.Fatalf("first=%+v", first)
 	}
 	used := b.fallback.memory.Used()
 	second := b.extractFallback("<p>second evidence</p>")
-	if second.Text != "second evidence" || b.fallback.memory.Used() <= used || admissions != 1 || primaryCalls != 1 || fallbackCalls != 0 || b.memoryBytesRemaining != 0 {
+	if second.Text != "second evidence" || b.fallback.memory.Used() <= used || admissions != 1 || primaryCalls != 1 || fallbackCalls != 0 || b.remainingMemory() != 0 {
 		t.Fatalf("second=%+v budget=%+v", second, b)
 	}
-	if b.reserveOutputMemory(limit) {
-		t.Fatal("fallback allowance unexpectedly reset")
+	_, complete = runExtraction(b, func() struct{} { b.reserveOutputMemory(limit); return struct{}{} })
+	if complete {
+		t.Fatal("fallback allowance reset")
 	}
 	b.observeFallback()
 	b.observeFallback()
@@ -46,8 +54,9 @@ func TestFallbackMemoryFailuresAreNotCPUFailures(t *testing.T) {
 		`<p>prefix</p><a href="` + strings.Repeat("x", 128<<10) + `">link</a>`,
 		strings.Repeat(`<a href="https://example.test/path">link</a><img src="cid:logo">`, 100),
 	} {
-		r := &fallbackResources{memory: resourceguard.NewMemory(8192)}
-		got := extractBoundedHTMLFallback(source, true, r)
+		b := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 8192})
+		got := b.extractFallback(source)
+		r := b.fallback
 		if !got.HTMLMemoryLimitExceeded || !got.ExtractionIncomplete || got.HTMLCPULimitExceeded || r.memory.Used() > r.memory.Limit() {
 			t.Fatalf("content=%+v used=%d", got, r.memory.Used())
 		}
@@ -68,9 +77,9 @@ func TestFallbackDecodingUsesOwnLedger(t *testing.T) {
 	if !b.beginFallback() {
 		t.Fatal("admission failed")
 	}
-	primary := b.memoryBytesRemaining
-	text, complete := decodeCharsetWithResources("", []byte("decoded text"), 100, b.decodingShouldStop, b.fallbackMemory)
-	if !complete || text != "decoded text" || b.fallback.memory.Used() == 0 || b.memoryBytesRemaining != primary {
+	primary := b.remainingMemory()
+	text, complete := decodeCharsetWithResources("", []byte("decoded text"), 100, b.decodingShouldStop, b.allocationMemory)
+	if !complete || text != "decoded text" || b.fallback.memory.Used() == 0 || b.remainingMemory() != primary {
 		t.Fatalf("text=%q complete=%v budget=%+v", text, complete, b)
 	}
 }

@@ -24,7 +24,7 @@ func trimCSSWhitespace(s string) string {
 func asciiLower(s string) string { return asciiLowerWithBudget(s, nil) }
 
 func asciiLowerWithBudget(s string, budget *cpuGuard) string {
-	value, _ := lowerASCIIWithBudget(s, budget)
+	value := lowerASCIIWithBudget(s, budget)
 	return value
 }
 
@@ -34,12 +34,13 @@ func normalizeCSSKeyword(s string) string {
 
 // Expanded variables can be much larger than the stylesheet that defines them.
 // Trim in bounded chunks and admit one owned lowercase string only if needed.
-func trimCSSWhitespaceWithBudget(s string, budget *cpuGuard) (string, bool) {
+func trimCSSWhitespaceWithBudget(s string, budget *cpuGuard) string {
 	const whitespace = " \t\r\n\f"
 	for len(s) > 0 {
-		if len(s) > stringWorkChunk && budget.stopNow(true) {
-			return "", false
+		if len(s) > stringWorkChunk {
+			budget.checkpoint()
 		}
+
 		n := min(len(s), stringWorkChunk)
 		tail := strings.TrimLeft(s[:n], whitespace)
 		s = s[n-len(tail):]
@@ -48,9 +49,10 @@ func trimCSSWhitespaceWithBudget(s string, budget *cpuGuard) (string, bool) {
 		}
 	}
 	for len(s) > 0 {
-		if len(s) > stringWorkChunk && budget.stopNow(true) {
-			return "", false
+		if len(s) > stringWorkChunk {
+			budget.checkpoint()
 		}
+
 		start := max(0, len(s)-stringWorkChunk)
 		head := strings.TrimRight(s[start:], whitespace)
 		s = s[:start+len(head)]
@@ -58,23 +60,22 @@ func trimCSSWhitespaceWithBudget(s string, budget *cpuGuard) (string, bool) {
 			break
 		}
 	}
-	return s, true
+	return s
 }
 
-func normalizeCSSKeywordWithBudget(s string, budget *cpuGuard) (string, bool) {
-	s, ok := trimCSSWhitespaceWithBudget(s, budget)
-	if !ok {
-		return "", false
-	}
+func normalizeCSSKeywordWithBudget(s string, budget *cpuGuard) string {
+	s = trimCSSWhitespaceWithBudget(s, budget)
+
 	return lowerASCIIWithBudget(s, budget)
 }
 
-func lowerASCIIWithBudget(s string, budget *cpuGuard) (string, bool) {
+func lowerASCIIWithBudget(s string, budget *cpuGuard) string {
 	changed := false
 	for start := 0; start < len(s) && !changed; start += stringWorkChunk {
-		if len(s) > stringWorkChunk && budget.stopNow(true) {
-			return "", false
+		if len(s) > stringWorkChunk {
+			budget.checkpoint()
 		}
+
 		for _, c := range []byte(s[start:min(start+stringWorkChunk, len(s))]) {
 			if c >= 'A' && c <= 'Z' {
 				changed = true
@@ -83,16 +84,17 @@ func lowerASCIIWithBudget(s string, budget *cpuGuard) (string, bool) {
 		}
 	}
 	if !changed {
-		return s, true
+		return s
 	}
 	var out strings.Builder
-	if !growBuilder(&out, len(s), budget) {
-		return "", false
-	}
+
+	growBuilder(&out, len(s), budget)
+
 	for start := 0; start < len(s); start += stringWorkChunk {
-		if len(s) > stringWorkChunk && budget.stopNow(true) {
-			return "", false
+		if len(s) > stringWorkChunk {
+			budget.checkpoint()
 		}
+
 		for _, c := range []byte(s[start:min(start+stringWorkChunk, len(s))]) {
 			if c >= 'A' && c <= 'Z' {
 				c += 'a' - 'A'
@@ -100,7 +102,7 @@ func lowerASCIIWithBudget(s string, budget *cpuGuard) (string, bool) {
 			out.WriteByte(c)
 		}
 	}
-	return out.String(), true
+	return out.String()
 }
 
 func equalASCIIFold(left, right string) bool {

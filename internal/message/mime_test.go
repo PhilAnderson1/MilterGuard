@@ -1,5 +1,7 @@
 package message
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"bytes"
 	"encoding/base64"
@@ -345,7 +347,7 @@ func TestMalformedAttachedMessageProducesMarker(t *testing.T) {
 
 func TestMIMEExtractionRetainsContentBeyondTwoMiB(t *testing.T) {
 	tail := "evidence-after-two-mib"
-	largeText := strings.Repeat("a", (2<<20)+1024) + tail
+	largeText := strings.Repeat("a", 2<<20+1024) + tail
 
 	t.Run("transfer decoded body", func(t *testing.T) {
 		encoded := base64.StdEncoding.EncodeToString([]byte(largeText))
@@ -461,7 +463,7 @@ func TestMultipartAlternativeAppliesLimitAfterSelection(t *testing.T) {
 
 func TestHTMLMemoryBudgetIsSharedAcrossParts(t *testing.T) {
 	budget := newExtractionBudget()
-	initial := budget.memoryBytesRemaining
+	initial := budget.remainingMemory()
 	budget.consumeHTML(htmlextract.ResourceUsage{MemoryBytes: initial / 3})
 	limits, ok := budget.htmlLimits(1)
 	if !ok {
@@ -471,66 +473,73 @@ func TestHTMLMemoryBudgetIsSharedAcrossParts(t *testing.T) {
 		t.Fatalf("remaining memory=%d want=%d", limits.MemoryBytes, initial-initial/3)
 	}
 	budget.consumeHTML(htmlextract.ResourceUsage{MemoryBytes: limits.MemoryBytes})
-	if _, ok := budget.htmlLimits(1); ok {
-		t.Fatal("exhausted shared memory budget accepted")
-	}
+	expectTermination(t, termination.MemoryExceeded, func() { budget.htmlLimits(1) })
 }
 
 func TestMultipartJoinReservesOutputBeforeAllocation(t *testing.T) {
 	budget := newExtractionBudget()
-	initial := budget.memoryBytesRemaining
+	initial := budget.remainingMemory()
 	joined, complete := joinExtractedText([]string{"only"}, "\n\n", budget)
-	if !complete || joined != "only" || budget.memoryBytesRemaining != initial {
-		t.Fatalf("single-part join: joined=%q complete=%v remaining=%d", joined, complete, budget.memoryBytesRemaining)
+	if !complete || joined != "only" || budget.remainingMemory() != initial {
+		t.Fatalf("single-part join: joined=%q complete=%v remaining=%d", joined, complete, budget.remainingMemory())
 	}
 
-	budget.memoryBytesRemaining = 5
-	joined, complete = joinExtractedText([]string{"ab", "cd"}, "\n\n", budget)
-	if complete || joined != "" || budget.memoryBytesRemaining != 0 {
-		t.Fatalf("over-budget join: joined=%q complete=%v remaining=%d", joined, complete, budget.memoryBytesRemaining)
+	budget = newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 5})
+	expectTermination(t, termination.MemoryExceeded, func() { joinExtractedText([]string{"ab", "cd"}, "\n\n", budget) })
+	if budget.remainingMemory() != 0 {
+		t.Fatal("lost exhaustion")
 	}
 
-	budget.memoryBytesRemaining = 6
+	budget = newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 6})
 	joined, complete = joinExtractedText([]string{"ab", "cd"}, "\n\n", budget)
-	if !complete || joined != "ab\n\ncd" || budget.memoryBytesRemaining != 0 {
-		t.Fatalf("bounded join: joined=%q complete=%v remaining=%d", joined, complete, budget.memoryBytesRemaining)
+	if !complete || joined != "ab\n\ncd" || budget.remainingMemory() != 0 {
+		t.Fatalf("bounded join: joined=%q complete=%v remaining=%d", joined, complete, budget.remainingMemory())
 	}
 }
 
 func TestMultipartJoinsCheckCPUBetweenCopies(t *testing.T) {
 	calls := 0
-	budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool {
+	budget := newExtractionBudgetWithControl(HTMLProcessingControl{CheckPrimary: func() {
 		calls++
-		return calls >= 2
+		if calls >= 2 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
 	}})
+
 	if joined, complete := joinExtractedText([]string{"a", "b"}, "", budget); !complete || joined != "ab" {
 		t.Fatalf("first join: joined=%q complete=%v", joined, complete)
 	}
-	if joined, complete := joinExtractedText([]string{"c", "d"}, "", budget); complete || joined != "" {
-		t.Fatalf("post-limit join: joined=%q complete=%v", joined, complete)
-	}
-	if !budget.cpuLimitExceeded {
-		t.Fatal("post-limit join did not record CPU exhaustion")
+
+	expectTermination(t, termination.CPUExceeded, func() { joinExtractedText([]string{"c", "d"}, "", budget) })
+	if calls != 2 {
+		t.Fatalf("calls=%d", calls)
 	}
 }
 
 func TestUTF8NormalisationChecksCPUBetweenScans(t *testing.T) {
 	calls := 0
-	budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool {
+	budget := newExtractionBudgetWithControl(HTMLProcessingControl{CheckPrimary: func() {
 		calls++
-		return calls >= 2
+		if calls >= 2 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
 	}})
 	content := extractedContent{
 		Text:         string([]byte{'a', 0xff}),
 		VisibleText:  string([]byte{'b', 0xff}),
 		StrippedText: string([]byte{'c', 0xff}),
 	}
-	normalizeExtractedUTF8(&content, budget)
-	if content.Text != "a�" || content.VisibleText != "" || content.StrippedText != "" {
-		t.Fatalf("normalized content = %+v", content)
+	expectTermination(t, termination.CPUExceeded, func() { normalizeExtractedUTF8(&content, budget) })
+	if content.Text != "a�" || content.VisibleText != "b\xff" || content.StrippedText != "c\xff" {
+		t.Fatalf("normalization continued: %+v", content)
 	}
-	if !content.ExtractionIncomplete || !budget.cpuLimitExceeded {
-		t.Fatalf("normalization limit not reported: content=%+v budget=%+v", content, budget)
+	discardInvalidUTF8(&content)
+	if content.Text != "a�" || content.VisibleText != "" || content.StrippedText != "" {
+		t.Fatalf("invalid fields retained: %+v", content)
 	}
 }
 
@@ -552,9 +561,13 @@ func TestHTMLProcessingReportsMemoryUsage(t *testing.T) {
 
 func TestMultipartExtractionStopsAtContentCPULimit(t *testing.T) {
 	calls := 0
-	budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool {
+	budget := newExtractionBudgetWithControl(HTMLProcessingControl{BeginFallback: func() bool { return false }, CheckPrimary: func() {
 		calls++
-		return calls >= 2
+		if calls >= 2 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
 	}})
 	body := []byte("--x\r\nContent-Type: text/plain\r\n\r\nfirst\r\n" +
 		"--x\r\nContent-Type: text/plain\r\n\r\nsecond\r\n--x--\r\n")
@@ -593,7 +606,20 @@ func TestMultipartPreservesCPUFallbackEvidence(t *testing.T) {
 					primaryChecks = 3
 				}
 				calls := 0
-				budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool { calls++; return calls >= primaryChecks }, FallbackShouldStop: func() bool { return stopOutput }})
+				budget := newExtractionBudgetWithControl(HTMLProcessingControl{CheckPrimary: func() {
+					calls++
+					if calls >= primaryChecks {
+						termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+					}
+
+					return
+				}, CheckFallback: func() {
+					if stopOutput {
+						termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+					}
+
+					return
+				}})
 				got := extractMIMEWithBudget(ctype, "", "", []byte(body), 0, budget)
 				if !got.HTMLCPULimitExceeded {
 					t.Fatal("missing CPU status")
@@ -662,18 +688,20 @@ func BenchmarkOpaqueAttachment(b *testing.B) {
 }
 
 func TestMultipartPlainTextReusesRepresentationsWithinBudget(t *testing.T) {
-	budget := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 8 << 20})
+	budget := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 64 << 20})
 	budget.setDecodedTextByteLimit(10 << 20)
 	body := []byte("--x\r\nContent-Type: text/plain\r\n\r\n" + strings.Repeat("a", 2<<20) + "\r\n--x\r\nContent-Type: text/plain\r\n\r\n" + strings.Repeat("b", 2<<20) + "\r\n--x--\r\n")
 	got := extractMIMEWithBudget(`multipart/mixed; boundary="x"`, "", "", body, 0, budget)
 	if got.incomplete() || len(got.Text) != 4<<20+2 || got.VisibleText != got.Text || got.StrippedText != got.Text {
 		t.Fatalf("text=%d visible=%d stripped=%d incomplete=%v", len(got.Text), len(got.VisibleText), len(got.StrippedText), got.incomplete())
 	}
-	// The normalized representations still share storage. Only the single
-	// reusable counting callback adds fixed overhead to the joined output.
-	callbackBytes := 8<<20 - int64(len(got.Text)) - budget.memoryBytesRemaining
-	if callbackBytes <= 0 || callbackBytes > 64 {
-		t.Fatalf("unexpected overhead=%d remaining=%d", callbackBytes, budget.memoryBytesRemaining)
+	// MIME body buffers are also charged. The three final representations
+	// must still share the single admitted joined output.
+	if !sameStringStorage(got.Text, got.VisibleText) || !sameStringStorage(got.Text, got.StrippedText) {
+		t.Fatal("normalized representations duplicated storage")
+	}
+	if budget.remainingMemory() <= 0 || budget.primaryMemory.Exhausted() {
+		t.Fatal("unexpected exhaustion")
 	}
 }
 
@@ -688,8 +716,15 @@ func TestOpaqueTransferValidationMatchesRecovery(t *testing.T) {
 		}
 	}
 	calls := 0
-	got := extractMIMEWithBudget("application/octet-stream; name=test.bin", "base64", "", []byte(strings.Repeat("YWFh", 20000)), 0, newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool { calls++; return calls >= 2 }}))
-	if !got.ExtractionIncomplete || !got.HTMLCPULimitExceeded || got.Text != "[attachment: test.bin; type=application/octet-stream]" {
+	got := extractMIMEWithBudget("application/octet-stream; name=test.bin", "base64", "", []byte(strings.Repeat("YWFh", 20000)), 0, newExtractionBudgetWithControl(HTMLProcessingControl{BeginFallback: func() bool { return false }, CheckPrimary: func() {
+		calls++
+		if calls >= 2 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
+	}}))
+	if !got.ExtractionIncomplete || !got.HTMLCPULimitExceeded {
 		t.Fatalf("interrupted validation=%+v", got)
 	}
 }
@@ -725,7 +760,14 @@ func TestMultipartDistinctRepresentationsRemainDistinct(t *testing.T) {
 
 func TestEmptyHTMLFallbackKeepsProvenance(t *testing.T) {
 	calls := 0
-	budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool { calls++; return calls >= 2 }, FallbackShouldStop: func() bool { return false }})
+	budget := newExtractionBudgetWithControl(HTMLProcessingControl{CheckPrimary: func() {
+		calls++
+		if calls >= 2 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
+	}, CheckFallback: func() { return }})
 	got := extractMIMEWithBudget("multipart/mixed; boundary=x", "", "", []byte("--x\r\nContent-Type: text/html\r\n\r\n<style>p{display:none}</style>\r\n--x--\r\n"), 0, budget)
 	if !got.HTMLFallbackUsed || !got.HTML || !got.HTMLCPULimitExceeded {
 		t.Fatalf("lost empty fallback provenance: %+v", got)

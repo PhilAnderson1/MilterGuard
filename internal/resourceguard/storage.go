@@ -2,6 +2,7 @@ package resourceguard
 
 import (
 	"bytes"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 	"strings"
 	"unsafe"
 )
@@ -9,317 +10,353 @@ import (
 // WorkChunk bounds scans and copies between cooperative cancellation checks.
 const WorkChunk = 4096
 
-// Stop returns true when work must stop. A nil callback permits the operation.
-type Stop func() bool
+// Stop is a checkpoint: return normally to continue or unwind to terminate.
+// A nil callback disables CPU/cancellation checking.
+type Stop func()
 
-func stopped(stop Stop) bool { return stop != nil && stop() }
-
-func (m *Memory) reject() bool {
+func (m *Memory) reject() {
 	if m != nil {
 		m.exhausted = true
 	}
-	return false
+	termination.Fail(termination.Failure{Code: termination.MemoryExceeded, Limit: m.Limit()})
+	return
 }
 
 // storageBytes validates arithmetic even for unguarded callers. It accounts for
 // requested typed storage, not hidden allocator size classes or GC metadata.
 func storageBytes(count int, size uintptr) (int64, bool) {
-	if count < 0 || (size != 0 && uint64(count) > uint64(^uint(0)>>1)/uint64(size)) {
+	if count < 0 || size != 0 && uint64(count) > uint64(^uint(0)>>1)/uint64(size) {
 		return 0, false
 	}
 	return int64(count) * int64(size), true
 }
 
 // New admits and owns a fixed object. Referenced storage has its own owner.
-func New[T any](m *Memory, value T) (*T, bool) {
-	if m.Exhausted() || !m.Reserve((int64(unsafe.Sizeof(value))+15)&^15) {
-		return nil, false
-	}
+func New[T any](m *Memory, value T) *T {
+	m.Reserve((int64(unsafe.Sizeof(value)) + 15) &^ 15)
+
 	owned := new(T)
 	*owned = value
-	return owned, true
+	return owned
 }
 
 // MakeSlice owns the initial backing array. The returned slice transfers that
 // ownership to its caller; reslicing within capacity does not spend budget.
-func MakeSlice[T any](m *Memory, length, capacity int) ([]T, bool) {
+func MakeSlice[T any](m *Memory, length, capacity int) []T {
 	var value T
 	size, ok := storageBytes(capacity, unsafe.Sizeof(value))
 	if !ok || length < 0 || length > capacity {
-		return nil, m.reject()
+		m.reject()
+		return nil
 	}
-	if m.Exhausted() || !m.Reserve(size) {
-		return nil, false
-	}
-	return make([]T, length, capacity), true
+
+	m.Reserve(size)
+
+	return make([]T, length, capacity)
 }
 
 // GrowSlice owns replacement storage and leaves s unchanged on failure. Copies
 // are cancellable; every full replacement remains charged, including discarded
 // replacements. The caller must retire borrowed views before mutating storage.
-func GrowSlice[T any](m *Memory, s []T, additional int, stop Stop) ([]T, bool) {
+func GrowSlice[T any](m *Memory, s []T, additional int, stop Stop) []T {
 	return GrowSliceFrom(m, s, additional, 1, stop)
 }
 
 // GrowSliceFrom sets the modest initial capacity for a collection's workload.
-func GrowSliceFrom[T any](m *Memory, s []T, additional, initial int, stop Stop) ([]T, bool) {
+func GrowSliceFrom[T any](m *Memory, s []T, additional, initial int, stop Stop) []T {
 	if additional < 0 || additional > int(^uint(0)>>1)-len(s) {
-		return s, m.reject()
+		m.reject()
+		return s
 	}
-	if m.Exhausted() {
-		return s, false
-	}
+
+	m.unavailable()
+
 	needed := len(s) + additional
 	if needed <= cap(s) {
-		return s, true
+		return s
 	}
 	capacity := needed
 	if cap(s) <= int(^uint(0)>>1)/2 {
 		capacity = max(capacity, max(initial, 2*cap(s)))
 	}
 	var value T
-	if len(s) > WorkChunk/max(1, int(unsafe.Sizeof(value))) && stopped(stop) {
-		return s, false
+
+	if len(s) > WorkChunk/max(1, int(unsafe.Sizeof(value))) {
+		if stop != nil {
+			stop()
+		}
 	}
-	grown, ok := MakeSlice[T](m, len(s), capacity)
-	if !ok {
-		return s, false
-	}
+
+	grown := MakeSlice[T](m, len(s), capacity)
+
 	chunk := max(1, WorkChunk/max(1, int(unsafe.Sizeof(value))))
 	for start := 0; start < len(s); start += chunk {
-		if start > 0 && stopped(stop) {
-			return s, false
+		if start > 0 {
+			if stop != nil {
+				stop()
+			}
 		}
+
 		copy(grown[start:min(start+chunk, len(s))], s[start:])
 	}
-	return grown, true
+	return grown
 }
 
 // Append combines admission and insertion; no caller-side reservation is needed.
-func Append[T any](m *Memory, s []T, stop Stop, values ...T) ([]T, bool) {
-	grown, ok := GrowSlice(m, s, len(values), stop)
-	if !ok {
-		return s, false
-	}
+func Append[T any](m *Memory, s []T, stop Stop, values ...T) []T {
+	grown := GrowSlice(m, s, len(values), stop)
+
 	old := len(grown)
 	grown = grown[:old+len(values)]
 	var value T
 	chunk := max(1, WorkChunk/max(1, int(unsafe.Sizeof(value))))
 	for start := 0; start < len(values); start += chunk {
-		if start > 0 && stopped(stop) {
-			clear(grown[old:])
-			return grown[:old], false
+		if start > 0 {
+			if stop != nil {
+				stop()
+			}
 		}
+
 		copy(grown[old+start:old+min(start+chunk, len(values))], values[start:])
 	}
-	return grown, true
+	return grown
 }
 
 // MakeBytes reconciles capacity exposed by bytes.Buffer before publishing it.
 // Failed reconciliation may already have allocated the rounding excess; it
-// latches failure and discards the storage. It is not a hard process-memory cap.
-func MakeBytes(m *Memory, size int) ([]byte, bool) {
+// terminates the operation and discards the storage. It is not a hard process-memory cap.
+func MakeBytes(m *Memory, size int) []byte {
 	if size < 0 {
-		return nil, m.reject()
+		m.reject()
+		return nil
 	}
-	if m.Exhausted() || !m.Reserve(int64(size)) {
-		return nil, false
-	}
+
+	m.Reserve(int64(size))
+
 	var b bytes.Buffer
 	b.Grow(size)
-	if !m.Reserve(int64(b.Cap() - size)) {
-		return nil, false
-	}
-	return b.Bytes()[:size], true
+
+	m.Reserve(int64(b.Cap() - size))
+
+	return b.Bytes()[:size]
 }
 
 // GrowText owns complete builder replacements. String views remain immutable:
 // never reuse their backing storage as mutable scratch. Reset drops ownership.
-func GrowText(m *Memory, b *strings.Builder, additional int, stop Stop) bool {
+func GrowText(m *Memory, b *strings.Builder, additional int, stop Stop) {
 	if additional < 0 || additional > int(^uint(0)>>1)-b.Len() {
-		return m.reject()
+		m.reject()
+		return
 	}
-	if m.Exhausted() || (additional > WorkChunk || b.Len() > WorkChunk) && stopped(stop) {
-		return false
+
+	m.unavailable()
+
+	if additional > WorkChunk || b.Len() > WorkChunk {
+		if stop != nil {
+			stop()
+		}
 	}
+
 	if additional <= b.Cap()-b.Len() {
-		return true
+		return
 	}
 	capacity := b.Len() + additional
 	if b.Cap() <= (int(^uint(0)>>1)-additional)/2 {
 		capacity = 2*b.Cap() + additional
 	}
-	if !m.Reserve(int64(capacity)) {
-		return false
-	}
+
+	m.Reserve(int64(capacity))
+
 	previous := b.String()
 	b.Reset()
 	b.Grow(capacity)
-	if !m.Reserve(int64(b.Cap() - capacity)) {
-		b.Reset()
-		return false
-	}
+
+	m.Reserve(int64(b.Cap() - capacity))
+
 	for start := 0; start < len(previous); start += WorkChunk {
-		if start > 0 && stopped(stop) {
-			b.Reset()
-			return false
+		if start > 0 {
+			if stop != nil {
+				stop()
+			}
 		}
+
 		b.WriteString(previous[start:min(start+WorkChunk, len(previous))])
 	}
-	return true
+	return
 }
 
-func WriteString(m *Memory, b *strings.Builder, text string, stop Stop) bool {
-	if !GrowText(m, b, len(text), stop) {
-		return false
-	}
+func WriteString(m *Memory, b *strings.Builder, text string, stop Stop) {
+	GrowText(m, b, len(text), stop)
+
 	for start := 0; start < len(text); start += WorkChunk {
-		if start > 0 && stopped(stop) {
-			b.Reset()
-			return false
+		if start > 0 {
+			if stop != nil {
+				stop()
+			}
 		}
+
 		b.WriteString(text[start:min(start+WorkChunk, len(text))])
 	}
-	return true
+	return
 }
 
-func WriteBytes(m *Memory, b *strings.Builder, data []byte, stop Stop) bool {
-	if !GrowText(m, b, len(data), stop) {
-		return false
-	}
+func WriteBytes(m *Memory, b *strings.Builder, data []byte, stop Stop) {
+	GrowText(m, b, len(data), stop)
+
 	for start := 0; start < len(data); start += WorkChunk {
-		if start > 0 && stopped(stop) {
-			b.Reset()
-			return false
+		if start > 0 {
+			if stop != nil {
+				stop()
+			}
 		}
+
 		b.Write(data[start:min(start+WorkChunk, len(data))])
 	}
-	return true
+	return
 }
 
-func CopyString(m *Memory, data []byte, stop Stop) (string, bool) {
+func CopyString(m *Memory, data []byte, stop Stop) string {
 	if len(data) <= 1 {
-		if m.Exhausted() || !m.Reserve(int64(len(data))) {
-			return "", false
-		}
-		return string(data), true
+		m.unavailable()
+		m.Reserve(int64(len(data)))
+
+		return string(data)
 	}
 	var b strings.Builder
-	if !WriteBytes(m, &b, data, stop) {
-		return "", false
-	}
-	return b.String(), true
+
+	WriteBytes(m, &b, data, stop)
+
+	return b.String()
 }
 
-func Concat(m *Memory, left, right string, stop Stop) (string, bool) {
+func Concat(m *Memory, left, right string, stop Stop) string {
 	if len(right) == 0 {
-		return left, !m.Exhausted()
+		m.unavailable()
+		return left
 	}
 	if len(left) == 0 {
-		return right, !m.Exhausted()
+		m.unavailable()
+		return right
 	}
 	var b strings.Builder
 	if len(right) > int(^uint(0)>>1)-len(left) {
-		return "", m.reject()
+		m.reject()
+		return ""
 	}
-	if !GrowText(m, &b, len(left)+len(right), stop) || !WriteString(m, &b, left, stop) || !WriteString(m, &b, right, stop) {
-		return "", false
-	}
-	return b.String(), true
+
+	GrowText(m, &b, len(left)+len(right), stop)
+	WriteString(m, &b, left, stop)
+	WriteString(m, &b, right, stop)
+
+	return b.String()
 }
 
 // CloneBytes owns a byte copy and reconciles the capacity exposed by Clone.
-func CloneBytes(m *Memory, data []byte, stop Stop) ([]byte, bool) {
+func CloneBytes(m *Memory, data []byte, stop Stop) []byte {
 	if len(data) > WorkChunk {
-		if stopped(stop) {
-			return nil, false
+		if stop != nil {
+			stop()
 		}
-		out, ok := MakeBytes(m, len(data))
-		if !ok {
-			return nil, false
-		}
+
+		out := MakeBytes(m, len(data))
+
 		for start := 0; start < len(data); start += WorkChunk {
-			if start > 0 && stopped(stop) {
-				return nil, false
+			if start > 0 {
+				if stop != nil {
+					stop()
+				}
 			}
+
 			copy(out[start:min(start+WorkChunk, len(data))], data[start:])
 		}
-		return out, true
+		return out
 	}
-	if m.Exhausted() || !m.Reserve(int64(len(data))) {
-		return nil, false
-	}
+
+	m.Reserve(int64(len(data)))
+
 	out := bytes.Clone(data)
-	if !m.Reserve(int64(cap(out) - len(data))) {
-		return nil, false
-	}
-	return out, true
+
+	m.Reserve(int64(cap(out) - len(data)))
+
+	return out
 }
 
 // StringBytes creates mutable owned bytes, optionally with a trailing NUL.
-func StringBytes(m *Memory, s string, nul bool, stop Stop) ([]byte, bool) {
+func StringBytes(m *Memory, s string, nul bool, stop Stop) []byte {
 	size := len(s)
 	if nul {
 		if size == int(^uint(0)>>1) {
-			return nil, m.reject()
+			m.reject()
+			return nil
 		}
 		size++
 	}
-	if len(s) > WorkChunk && stopped(stop) {
-		return nil, false
-	}
-	out, ok := MakeSlice[byte](m, size, size)
-	if !ok {
-		return nil, false
-	}
-	for start := 0; start < len(s); start += WorkChunk {
-		if start > 0 && stopped(stop) {
-			return nil, false
+
+	if len(s) > WorkChunk {
+		if stop != nil {
+			stop()
 		}
+	}
+
+	out := MakeSlice[byte](m, size, size)
+
+	for start := 0; start < len(s); start += WorkChunk {
+		if start > 0 {
+			if stop != nil {
+				stop()
+			}
+		}
+
 		copy(out[start:min(start+WorkChunk, len(s))], s[start:])
 	}
-	return out, true
+	return out
 }
 
 // Box owns a value stored in an interface. It preserves the concrete value type
 // (unlike New), which matters to selector type switches. Pointer-bearing fields
 // still refer to separately owned storage. Small/static values may be overcharged.
-func Box[T any](m *Memory, value T) (any, bool) {
-	if m.Exhausted() || !m.Reserve((int64(unsafe.Sizeof(value))+15)&^15) {
-		return nil, false
-	}
-	return value, true
+func Box[T any](m *Memory, value T) any {
+	m.Reserve((int64(unsafe.Sizeof(value)) + 15) &^ 15)
+
+	return value
 }
 
-func LowerASCII(m *Memory, s string, stop Stop) (string, bool) {
+func LowerASCII(m *Memory, s string, stop Stop) string {
 	changed := false
 	for i := 0; i < len(s); i++ {
-		if i > 0 && i%WorkChunk == 0 && stopped(stop) {
-			return "", false
+		if i > 0 && i%WorkChunk == 0 {
+			if stop != nil {
+				stop()
+			}
 		}
+
 		if s[i] >= 'A' && s[i] <= 'Z' {
 			changed = true
 			break
 		}
 	}
 	if !changed {
-		return s, !m.Exhausted()
+		m.unavailable()
+		return s
 	}
 	var b strings.Builder
-	if !GrowText(m, &b, len(s), stop) {
-		return "", false
-	}
+
+	GrowText(m, &b, len(s), stop)
+
 	for i := 0; i < len(s); i++ {
-		if i > 0 && i%WorkChunk == 0 && stopped(stop) {
-			return "", false
+		if i > 0 && i%WorkChunk == 0 {
+			if stop != nil {
+				stop()
+			}
 		}
+
 		c := s[i]
 		if c >= 'A' && c <= 'Z' {
 			c += 'a' - 'A'
 		}
 		b.WriteByte(c)
 	}
-	return b.String(), true
+	return b.String()
 }
 
 // TryMakeSlice is optional-cache admission: rejection does not poison required

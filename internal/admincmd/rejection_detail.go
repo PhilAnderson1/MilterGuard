@@ -10,6 +10,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 	"github.com/PhilAnderson1/MilterGuard/internal/threadcpu"
 )
 
@@ -65,40 +66,31 @@ func (p *Processor) archivedVisibleBody(archived *message.Message) string {
 		})
 	}
 	maximum := time.Duration(p.maxHTMLParseCPUMilliseconds) * time.Millisecond
-	primaryExceeded := false
-	shouldFallback := func() bool {
-		if primaryExceeded {
-			return true
-		}
+	checkPrimary := func() {
 		current, available := clock()
 		if available && current >= started && current-started > maximum {
-			primaryExceeded = true
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
 		}
-		return primaryExceeded
 	}
 	fallbackStarted := time.Duration(0)
 	fallbackStartedOK := false
-	fallbackExceeded := false
-	fallbackShouldStop := func() bool {
-		if fallbackExceeded {
-			return true
-		}
+	checkFallback := func() {
 		current, available := clock()
 		if !available {
-			return false
+			return
 		}
 		if !fallbackStartedOK {
-			fallbackStarted = current
-			fallbackStartedOK = true
-			return false
+			fallbackStarted, fallbackStartedOK = current, true
+			return
 		}
 		if current >= fallbackStarted && current-fallbackStarted > maximum {
-			fallbackExceeded = true
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
 		}
-		return fallbackExceeded
 	}
+
 	return archived.VisibleBodyWithHTMLControl(MaxRejectionBodyRunes, message.HTMLProcessingControl{
-		ShouldFallback: shouldFallback, FallbackShouldStop: fallbackShouldStop,
-		MemoryBytes: p.maxHTMLParseMemoryBytes,
+		CheckPrimary:  checkPrimary,
+		CheckFallback: checkFallback,
+		MemoryBytes:   p.maxHTMLParseMemoryBytes,
 	})
 }

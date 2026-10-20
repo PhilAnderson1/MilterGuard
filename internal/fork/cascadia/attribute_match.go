@@ -17,9 +17,11 @@ func equalAttribute(left, right string, insensitive bool, guard *MatchControl) b
 	}
 	for offset := 0; offset < len(left); {
 		end := min(offset+attributeScanChunk, len(left))
-		if offset > 0 && guard.checkNow() {
-			return false
+
+		if offset > 0 {
+			guard.checkNow()
 		}
+
 		if !insensitive {
 			if left[offset:end] != right[offset:end] {
 				return false
@@ -42,9 +44,8 @@ func matchIncludeResource(needle, value string, insensitive bool, guard *MatchCo
 	for i := 0; i < len(value); i++ {
 		if i >= nextCheck {
 			nextCheck = i + attributeScanChunk
-			if guard.checkNow() {
-				return false
-			}
+
+			guard.checkNow()
 		}
 		switch value[i] {
 		case ' ', '\t', '\r', '\n', '\f':
@@ -63,9 +64,8 @@ func nonBlankAttribute(value string, guard *MatchControl) bool {
 	next := attributeScanChunk
 	for i := 0; i < len(value); {
 		if i >= next {
-			if guard.checkNow() {
-				return false
-			}
+			guard.checkNow()
+
 			next = i + attributeScanChunk
 		}
 		r, size := utf8.DecodeRuneInString(value[i:])
@@ -137,9 +137,8 @@ func (t attrSelector) contains(value string, guard *MatchControl) bool {
 		for i, matched := 0, 0; i < len(value); i++ {
 			if i >= nextCheck {
 				nextCheck = i + attributeScanChunk
-				if guard.checkNow() {
-					return false
-				}
+
+				guard.checkNow()
 			}
 			c := foldASCII(value[i])
 			for matched > 0 && c != foldASCII(t.val[matched]) {
@@ -157,9 +156,8 @@ func (t attrSelector) contains(value string, guard *MatchControl) bool {
 	for i, matched := 0, 0; i < len(value); i++ {
 		if i >= nextCheck {
 			nextCheck = i + attributeScanChunk
-			if guard.checkNow() {
-				return false
-			}
+
+			guard.checkNow()
 		}
 		for matched > 0 && value[i] != t.val[matched] {
 			matched = t.failure[matched-1]

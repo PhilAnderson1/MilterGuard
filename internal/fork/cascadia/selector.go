@@ -87,10 +87,11 @@ func ParseCSSGroupWithMemory(sel string, memory *resourceguard.Memory) (Selector
 }
 
 func parseGroup(sel string, memory *resourceguard.Memory, acceptPseudoElements, strictCSS bool) (result SelectorGroup, err error) {
-	defer recoverAllocation(&err)
+
 	if err := validateSelectorInput(sel); err != nil {
 		return nil, err
 	}
+
 	// Source substrings borrow the caller's immutable input; no allocation
 	// occurs here and its storage is already owned by the caller.
 	p := &parser{s: sel, acceptPseudoElements: acceptPseudoElements, strictCSS: strictCSS, memory: memory}
@@ -130,10 +131,8 @@ func CombinePositiveMatchersWithMemory(left, right Matcher, combinator byte, mem
 	if !leftOK || !rightOK || combinator != ' ' && combinator != '>' && combinator != '+' && combinator != '~' {
 		return nil
 	}
-	value, ok := resourceguard.Box(memory, combinedSelector{first: leftSelector, combinator: combinator, second: rightSelector})
-	if !ok {
-		return nil
-	}
+	value := resourceguard.Box(memory, combinedSelector{first: leftSelector, combinator: combinator, second: rightSelector})
+
 	return value.(Matcher)
 }
 
@@ -330,14 +329,13 @@ func (t attrSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 		return false
 	}
 	for _, a := range n.Attr {
-		if guard.step() {
-			return false
-		}
+		guard.step()
+
 		if a.Key != t.key {
 			continue
 		}
 		matched := t.matchValue(a.Val, guard)
-		if guard != nil && guard.stopped {
+		if guard != nil && false {
 			return false
 		}
 		if t.operation == "!=" {
@@ -356,9 +354,8 @@ func matchAttributeResource(n *html.Node, key string, f func(string) bool, guard
 		return false
 	}
 	for _, a := range n.Attr {
-		if guard.step() {
-			return false
-		}
+		guard.step()
+
 		if a.Key == key && f(a.Val) {
 			return true
 		}
@@ -371,9 +368,8 @@ func hasAttributeResource(n *html.Node, key string, guard *MatchControl) bool {
 		return false
 	}
 	for _, attribute := range n.Attr {
-		if guard.step() {
-			return false
-		}
+		guard.step()
+
 		if attribute.Key == key {
 			return true
 		}
@@ -495,7 +491,7 @@ func descendantMatchResource(a, d Matcher, n *html.Node, guard *MatchControl) bo
 	}
 
 	for p := n.Parent; p != nil; p = p.Parent {
-		if guard != nil && guard.stopped {
+		if guard != nil && false {
 			return false
 		}
 		if matchResource(a, p, guard) {
@@ -528,9 +524,8 @@ func siblingMatchResource(s1, s2 Matcher, adjacent bool, n *html.Node, guard *Ma
 
 	if adjacent {
 		for n = n.PrevSibling; n != nil; n = n.PrevSibling {
-			if guard.step() {
-				return false
-			}
+			guard.step()
+
 			if n.Type == html.TextNode || n.Type == html.CommentNode {
 				continue
 			}
@@ -541,7 +536,7 @@ func siblingMatchResource(s1, s2 Matcher, adjacent bool, n *html.Node, guard *Ma
 
 	// Walk backwards looking for element that matches s1
 	for c := n.PrevSibling; c != nil; c = c.PrevSibling {
-		if guard != nil && guard.stopped {
+		if guard != nil && false {
 			return false
 		}
 		if matchResource(s1, c, guard) {
@@ -580,7 +575,7 @@ func (s SelectorGroup) Match(n *html.Node) bool {
 
 func (s SelectorGroup) matchResource(n *html.Node, guard *MatchControl) bool {
 	for _, sel := range s {
-		if guard != nil && guard.stopped {
+		if guard != nil && false {
 			return false
 		}
 		if matchResource(sel, n, guard) {

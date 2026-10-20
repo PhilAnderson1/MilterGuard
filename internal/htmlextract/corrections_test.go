@@ -1,5 +1,7 @@
 package htmlextract
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"fmt"
 	"reflect"
@@ -62,9 +64,10 @@ func TestOptionalMatchCacheDeclinesAtomically(t *testing.T) {
 		}
 		before := m.Used()
 		s.cacheMatch(&selectorPlan{}, &html.Node{}, true)
-		if m.Exhausted() || m.Used() != before || !m.Reserve(1) {
+		if m.Exhausted() || m.Used() != before {
 			t.Fatalf("existing=%v: declined insertion consumed budget", existing)
 		}
+		m.Reserve(1)
 		if existing {
 			s.cacheMatch(&selectorPlan{}, first, true)
 			if s.runtime.matchCaches[0].View()[first] != 2 {
@@ -99,7 +102,7 @@ func TestAncestorMatchingWithoutCacheCapacity(t *testing.T) {
 		s := sheet{memory: m, selectorControl: cascadia.NewMatchControl(nil)}
 		// Required traversal scratch is already owned; only optional caching is tight.
 		s.runtime.ancestorNodes = make([]*html.Node, 0, 8)
-		matched, complete := s.matchAncestorChain(plan, leaf, selectorMatchContext{}, &cpuGuard{memory: m})
+		matched, complete := s.matchAncestorChain(plan, leaf, selectorMatchContext{}, testCPUGuard(cpuGuard{memory: m}))
 		if !matched || !complete || m.Exhausted() || m.Used() != 0 {
 			t.Fatalf("%s: matched=%v complete=%v budget=%d", selector, matched, complete, m.Used())
 		}
@@ -107,19 +110,20 @@ func TestAncestorMatchingWithoutCacheCapacity(t *testing.T) {
 }
 
 func TestMediaRetentionAccounting(t *testing.T) {
-
 	m := resourceguard.NewMemory(1)
-	s := sheet{memory: m, cpu: &cpuGuard{memory: m}}
-	s.mediaCanApply("screen and (min-width:1px)")
+	s := sheet{memory: m, cpu: testCPUGuard(cpuGuard{memory: m})}
+	expectTermination(t, termination.MemoryExceeded, func() { s.mediaCanApply("screen and (min-width:1px)") })
 	if !m.Exhausted() {
 		t.Fatal("temporary applicability parsing bypassed budget")
 	}
 
 	for _, query := range []string{"print", "screen and (min-width:1px), (max-width:10px)", "unsupported", strings.Repeat("x", 4097), strings.Repeat("screen and ", 17) + "screen"} {
 		m := resourceguard.NewMemory(10000)
+
 		if got := parseMediaBudgeted(query, m); !reflect.DeepEqual(got, parseMedia(query)) || m.Used() == 0 || m.Exhausted() {
 			t.Fatalf("query %q accounting or semantics changed", query)
 		}
+
 	}
 }
 
@@ -164,7 +168,7 @@ func BenchmarkAuditMediaApplicability(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		m := resourceguard.NewMemory(1)
-		s := sheet{memory: m, cpu: &cpuGuard{memory: m}}
+		s := sheet{memory: m, cpu: testCPUGuard(cpuGuard{memory: m})}
 		for _, v := range values {
 			s.mediaCanApply(v)
 		}
@@ -178,22 +182,29 @@ func TestInertContentStillHasStructuralLimitsAndCancellation(t *testing.T) {
 	source := []byte(`<template>` + strings.Repeat(`<div style="color:red">T</div>`, 2000) + `</template>`)
 	limits := DefaultLimits()
 	limits.InputBytes = len(source) - 1
+
 	if _, err := Analyze(source, limits); err == nil {
 		t.Fatal("inert source bypassed input limit")
 	}
+
 	limits = DefaultLimits()
 	limits.MemoryBytes = 4096
-	if _, err := Analyze(source, limits); err == nil {
-		t.Fatal("inert DOM bypassed memory limit")
-	}
+	expectTermination(t, termination.MemoryExceeded, func() { Analyze(source, limits) })
 	root, err := html.Parse(strings.NewReader(string(source)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	doc := parsedDocument{elements: resourceguard.Table[*html.Node, elementPreparation]{}}
-	p := processor{Limits: DefaultLimits(), shouldStop: func() bool { return true }}
+	p := processor{Limits: DefaultLimits(), shouldStop: func() {
+		{
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
+	}}
 	walker := documentWalker{processor: p, document: &doc}
-	if err := walker.run(root); err != errStopped || walker.nodeCount != 256 {
-		t.Fatalf("inert traversal did not sample cancellation: nodes=%d err=%v", walker.nodeCount, err)
+	expectTermination(t, termination.CPUExceeded, func() { walker.run(root) })
+	if walker.nodeCount != 256 {
+		t.Fatalf("inert traversal cancellation: nodes=%d", walker.nodeCount)
 	}
 }

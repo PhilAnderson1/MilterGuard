@@ -1,5 +1,7 @@
 package htmlextract
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"math"
 	"os"
@@ -64,27 +66,15 @@ func TestProductionTextResultIsCompact(t *testing.T) {
 	}
 }
 
-func TestDocumentWalkerHonoursRecordedCPUStop(t *testing.T) {
+func TestDocumentWalkerDoesNotRunAfterCPUStop(t *testing.T) {
 	for _, visited := range []int{0, 1, 254, 255} {
 		t.Run(strconv.Itoa(visited), func(t *testing.T) {
-			budget := &cpuGuard{shouldStop: func() bool { return true }}
-			if !budget.stopNow(true) {
-				t.Fatal("failed to record CPU stop")
-			}
-			walker := documentWalker{
-				processor: processor{cpu: budget, shouldStop: func() bool {
-					t.Fatal("recorded stop should not require another clock sample")
-					return false
-				}},
-				document:  &parsedDocument{},
-				nodeCount: visited,
-			}
+			budget := testCPUGuard(cpuGuard{shouldStop: func() { termination.Fail(termination.Failure{Code: termination.CPUExceeded}) }})
+			walker := documentWalker{processor: processor{cpu: budget}, document: &parsedDocument{}, nodeCount: visited}
 			frame := documentFrame{n: &html.Node{Type: html.TextNode, Data: "text"}, scope: scopeActive}
-			if err := walker.visit(&frame); !IsStopped(err) {
-				t.Fatalf("visit after CPU stop = %v, want stopped", err)
-			}
-			if walker.document.extractableTextCount != 0 {
-				t.Fatal("processed text after CPU stop")
+			expectTermination(t, termination.CPUExceeded, func() { budget.checkpoint(); walker.visit(&frame) })
+			if walker.nodeCount != visited || walker.document.extractableTextCount != 0 {
+				t.Fatal("processed text after termination")
 			}
 		})
 	}
@@ -159,15 +149,16 @@ func TestCSSParserSamplesCooperativeStop(t *testing.T) {
 	calls := 0
 	s := sheet{
 		limits: DefaultLimits(),
-		shouldStop: func() bool {
+		shouldStop: func() {
 			calls++
-			return true
+			{
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
 		},
 	}
-	s.parseStylesheetCSS(`/*` + strings.Repeat(`x`, 8<<10) + `*/p{color:red}`)
-	if !s.stopped {
-		t.Fatal("CSS parsing did not report the cooperative stop")
-	}
+	expectTermination(t, termination.CPUExceeded, func() { s.parseStylesheetCSS(`/*` + strings.Repeat(`x`, 8<<10) + `*/p{color:red}`) })
 	if calls == 0 {
 		t.Fatal("stop callback was not sampled")
 	}
@@ -1359,12 +1350,10 @@ func TestAdditionalBoundsAndUnsupportedWinners(t *testing.T) {
 func TestAnalyzeEnforcesSharedMemoryBudget(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MemoryBytes = 512
-	document, err := Analyze([]byte(`<div `+strings.Repeat(`data-x="value" `, 100)+`>text</div>`), limits)
-	if err == nil || !strings.Contains(err.Error(), "memory bytes") {
-		t.Fatalf("err=%v", err)
-	}
-	if document.Usage.MemoryBytes != limits.MemoryBytes {
-		t.Fatalf("memory usage=%d want=%d", document.Usage.MemoryBytes, limits.MemoryBytes)
+	input := []byte(`<div ` + strings.Repeat(`data-x="value" `, 100) + `>text</div>`)
+	_, usage, err, failure := captureAnalysis(input, limits)
+	if err != nil || failure.Code != termination.MemoryExceeded || usage.MemoryBytes != limits.MemoryBytes {
+		t.Fatalf("failure=%+v usage=%+v err=%v", failure, usage, err)
 	}
 }
 

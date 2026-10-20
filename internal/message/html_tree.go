@@ -45,13 +45,13 @@ type htmlExtraction struct {
 	images               imageRefCollector
 	anchorDepth          int
 	compactURLs          bool
-	shouldStop           func() bool
-	textShouldStop       func() bool
+	shouldStop           func()
+	textShouldStop       func()
+	textClockCheck       func() // for loops which already sample their work
+	textStopSampler      resourceguard.StopSampler
 	memory               *resourceguard.Memory
 	extractionIncomplete bool
-	workSteps            uint32
-	stopped              bool
-	memoryExhausted      bool
+	workSampler          resourceguard.StopSampler
 }
 
 type outputAnnotation struct {
@@ -70,7 +70,6 @@ type annotatedOutput struct {
 	data   guardedBuilder
 	chunks []outputChunk
 	memory *resourceguard.Memory
-	failed bool
 }
 
 func newAnnotatedOutput(memory *resourceguard.Memory) annotatedOutput {
@@ -80,14 +79,11 @@ func newAnnotatedOutput(memory *resourceguard.Memory) annotatedOutput {
 func (o *annotatedOutput) WriteString(value string) { o.write(outputAnnotation{}, value) }
 func (o *annotatedOutput) WriteByte(value byte) error {
 	start := o.data.Len()
-	if !o.data.appendByte(value) {
-		o.failed = true
-		return errOutputMemoryLimit
-	}
+
+	o.data.appendByte(value)
+
 	o.extendChunk(outputAnnotation{}, start)
-	if o.failed {
-		return errOutputMemoryLimit
-	}
+
 	return nil
 }
 
@@ -96,10 +92,9 @@ func (o *annotatedOutput) write(annotation outputAnnotation, value string) {
 		return
 	}
 	start := o.data.Len()
-	if !o.data.WriteString(value) {
-		o.failed = true
-		return
-	}
+
+	o.data.WriteString(value)
+
 	o.extendChunk(annotation, start)
 }
 
@@ -108,10 +103,11 @@ func (o *annotatedOutput) writeBytes(annotation outputAnnotation, value []byte) 
 		return
 	}
 	start := o.data.Len()
+
 	if _, err := o.data.Write(value); err != nil {
-		o.failed = true
 		return
 	}
+
 	o.extendChunk(annotation, start)
 }
 
@@ -121,11 +117,8 @@ func (o *annotatedOutput) extendChunk(annotation outputAnnotation, start int) {
 		return
 	}
 	if len(o.chunks) == cap(o.chunks) {
-		grown, ok := growGuardedSlice(o.chunks, len(o.chunks)+1, o.memory)
-		if !ok {
-			o.failed = true
-			return
-		}
+		grown := growGuardedSlice(o.chunks, len(o.chunks)+1, o.memory)
+
 		o.chunks = grown
 	}
 	o.chunks = append(o.chunks, outputChunk{start: start, end: o.data.Len(), annotation: annotation})
@@ -158,7 +151,7 @@ func (o *annotatedOutput) uniformAnnotation() (outputAnnotation, bool) {
 	return found, haveContent
 }
 
-func (o *annotatedOutput) String() (string, bool) {
+func (o *annotatedOutput) renderAnnotations() string {
 	out := newGuardedBuilder(o.memory)
 	pending := newGuardedBuilder(o.memory)
 	var active outputAnnotation
@@ -199,9 +192,6 @@ func (o *annotatedOutput) String() (string, bool) {
 	}
 	lastWasStripped := false
 	for _, chunk := range o.chunks {
-		if out.Failed() || pending.Failed() {
-			return "", false
-		}
 		value := o.chunkBytes(chunk)
 		if annotationWhitespaceOnlyBytes(value) {
 			_, _ = pending.Write(value)
@@ -240,10 +230,8 @@ func (o *annotatedOutput) String() (string, bool) {
 	}
 	closeActive()
 	_, _ = out.Write(pending.Bytes())
-	if o.failed || out.Failed() || pending.Failed() {
-		return "", false
-	}
-	return out.String(), true
+
+	return out.String()
 }
 
 func htmlToText(source string) extractedContent {
@@ -252,7 +240,8 @@ func htmlToText(source string) extractedContent {
 
 func htmlToTextWithBudget(source string, budget *extractionBudget) extractedContent {
 	budget.htmlParts++
-	if budget.useFallback() {
+	budget.checkStage()
+	if budget.fallback != nil {
 		return budget.extractFallback(source)
 	}
 	limits, ok := budget.htmlLimits(len(source))
@@ -269,14 +258,14 @@ func extractTreeHTML(source string) extractedContent {
 }
 
 func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget *extractionBudget) extractedContent {
-	inspection, err := htmlextract.AnalyzeWithStop([]byte(source), limits, budget.shouldFallback)
-	budget.consumeHTML(inspection.Usage)
-	if htmlextract.IsStopped(err) {
-		budget.cpuLimitExceeded = true
+	if budget.stageStop == nil {
+		budget.stageStop = resourceguard.BindCheckpoint(budget.allocationMemory(), budget, (*extractionBudget).checkStage)
 	}
-	if budget.useFallback() {
-		return budget.extractFallback(source)
-	}
+	var inspection htmlextract.Document
+	var err error
+
+	inspection, err = analyzeControlledHTML(source, limits, budget)
+	budget.checkStage()
 	if err != nil {
 		// A bounded lexical fallback retains evidence when tree/style processing
 		// cannot complete. It is explicitly reported as incomplete extraction.
@@ -284,35 +273,34 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		content.ExtractionIncomplete = true
 		return content
 	}
-	memory := resourceguard.NewMemory(budget.memoryBytesRemaining)
+	memory := budget.newMemory(budget.remainingMemory())
+
+	defer budget.consumeMemory(memory)
+
 	mapBytes := int64(len(inspection.Text)+len(inspection.Elements))*64 + 256
-	if !memory.Reserve(mapBytes) {
-		budget.consumeMemory(memory)
-		content := budget.extractFallback(source)
-		content.ExtractionIncomplete = true
-		return content
-	}
+
+	memory.Reserve(mapBytes)
+
 	e := htmlExtraction{
+		workSampler: resourceguard.NewStopSampler(256, budget.stageStop),
 		inspection:  inspection,
 		states:      make(map[*xhtml.Node]*htmlextract.Text, len(inspection.Text)),
 		elements:    make(map[*xhtml.Node]*htmlextract.Element, len(inspection.Elements)),
 		compactURLs: budget.compactURLs,
-		links:       linkCollector{compactURLs: budget.compactURLs, memory: memory, shouldStop: budget.useFallback},
-		shouldStop:  budget.useFallback,
+		links:       linkCollector{compactURLs: budget.compactURLs, memory: memory, shouldStop: budget.checkStage},
+		shouldStop:  budget.checkStage,
 		memory:      memory,
 	}
 	for i := range inspection.Text {
-		if i&255 == 0 && budget.useFallback() {
-			budget.consumeMemory(memory)
-			return budget.extractFallback(source)
+		if i&255 == 0 {
+			budget.checkStage()
 		}
 		state := &inspection.Text[i]
 		e.states[state.Node] = state
 	}
 	for i := range inspection.Elements {
-		if i&255 == 0 && budget.useFallback() {
-			budget.consumeMemory(memory)
-			return budget.extractFallback(source)
+		if i&255 == 0 {
+			budget.checkStage()
 		}
 		state := &inspection.Elements[i]
 		e.elements[state.Node] = state
@@ -321,26 +309,14 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 	comments := e.collectHTMLCommentStats(inspection.Root)
 	tagged := e.render(TagHidden)
 	stripped := ""
-	if tagged.hasConcealed && !e.memoryExhausted {
+	if tagged.hasConcealed {
 		stripped = e.render(StripHidden).text
 	}
 	confidentChars := 0
-	if !e.memoryExhausted {
-		confidentChars = e.confidentVisibleCharacters(inspection.Text)
-	}
-	if e.memoryExhausted {
-		budget.consumeMemory(memory)
-		return extractedContent{
-			Text: tagged.text, VisibleText: tagged.visible, StrippedText: stripped,
-			Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
-			HTMLComments: comments, CSSIncomplete: inspection.UnresolvedStylesheet || inspection.Usage.CSSLimitExceeded,
-			ExtractionIncomplete: true,
-		}
-	}
-	if e.stopped || budget.useFallback() {
-		budget.consumeMemory(memory)
-		return budget.extractFallback(source)
-	}
+
+	confidentChars = e.confidentVisibleCharacters(inspection.Text)
+
+	budget.checkStage()
 	cssIncomplete := inspection.UnresolvedStylesheet || inspection.Usage.CSSLimitExceeded
 	if cssIncomplete {
 		// Unevaluated or resource-limited CSS can alter any element in this
@@ -348,7 +324,6 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 		// image analysis.
 		confidentChars = 0
 	}
-	budget.consumeMemory(memory)
 	return extractedContent{
 		Text: tagged.text, VisibleText: tagged.visible, ConfidentVisibleChars: confidentChars, StrippedText: stripped,
 		Links: e.links.links, ImageRefs: e.images.refs, HasConcealedContent: tagged.hasConcealed,
@@ -362,9 +337,26 @@ func (budget *extractionBudget) extractFallback(source string) extractedContent 
 	if !budget.beginFallback() {
 		return extractedContent{ExtractionIncomplete: true, HTMLMemoryLimitExceeded: budget.memoryLimitExceeded, HTMLCPULimitExceeded: budget.cpuLimitExceeded}
 	}
-	content := extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallback)
+	var content extractedContent
+	{
+		var complete bool
+		budget.fallback.prefix = ""
+		content, complete = runExtraction(budget, func() extractedContent {
+			return extractBoundedHTMLFallback(source, budget.compactURLs, budget.fallback)
+		})
+		if !complete {
+			prefix := budget.fallback.prefix
+			if strings.Contains(prefix, "<") || !utf8.ValidString(prefix) {
+				prefix = ""
+			}
+			content = extractedContent{Text: prefix, HTMLFallbackUsed: true, ExtractionIncomplete: true}
+		}
+	}
+
 	budget.observeFallback()
 	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
+	content.HTMLMemoryLimitExceeded = content.HTMLMemoryLimitExceeded || budget.fallbackMemoryExceeded
+	content.HTMLFallbackMemoryLimitExceeded = budget.fallbackMemoryExceeded
 	return content
 }
 
@@ -374,35 +366,22 @@ func (budget *extractionBudget) extractFallback(source string) extractedContent 
 // analysis. Generated link destinations and image descriptions are not DOM
 // text nodes and therefore cannot inflate this count.
 func (e *htmlExtraction) confidentVisibleCharacters(states []htmlextract.Text) int {
-	stop, ok := e.textStopCallback()
-	if !ok {
-		return 0
-	}
+	stop := e.textStopCallback()
+
 	count := 0
 	for _, state := range states {
-		if e.stopRequested() {
-			return count
-		}
+		e.stopRequested()
+
 		if state.Label != "visible" || state.Node == nil {
 			continue
 		}
-		value, ok := prepareVisibleText(state.Node.Data, e.memory, stop)
-		if !ok {
-			if e.memory.Exhausted() {
-				e.stopForMemory()
-			}
-			return 0
-		}
+		value := prepareVisibleText(state.Node.Data, e.memory, stop)
+
 		if value == "" || annotationWhitespaceOnly(value) {
 			continue
 		}
-		characters, ok := confidentTextCharactersWithResources(value, e.memory, stop)
-		if !ok {
-			if e.memory.Exhausted() {
-				e.stopForMemory()
-			}
-			return 0
-		}
+		characters := confidentTextCharactersWithResources(value, e.memory, stop)
+
 		count += characters
 	}
 	return count
@@ -420,24 +399,22 @@ func (s *htmlCommentStats) add(other htmlCommentStats) {
 
 func (e *htmlExtraction) collectHTMLCommentStats(root *xhtml.Node) htmlCommentStats {
 	var stats htmlCommentStats
-	var walk func(*xhtml.Node) bool
-	walk = func(node *xhtml.Node) bool {
-		if node == nil || e.stopRequested() {
-			return !e.stopped
+	var walk func(*xhtml.Node)
+	walk = func(node *xhtml.Node) {
+		if node == nil {
+			return
 		}
+		e.stopRequested()
 		if node.Type == xhtml.CommentNode && !conditionalHTMLComment(node.Data) {
 			stats.Characters += utf8.RuneCountInString(node.Data)
 			if commentBetweenWordFragments(node) {
 				stats.WithinWords++
 			}
-			return true
+			return
 		}
 		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			if !walk(child) {
-				return false
-			}
+			walk(child)
 		}
-		return true
 	}
 	walk(root)
 	return stats
@@ -464,85 +441,45 @@ type renderedHTML struct {
 func (e *htmlExtraction) render(mode HTMLExtractionMode) renderedHTML {
 	body := newAnnotatedOutput(e.memory)
 	visible := newGuardedBuilder(e.memory)
-	if !e.walk(e.inspection.Root, mode, &body, &visible) {
-		return renderedHTML{}
-	}
-	if body.failed || visible.Failed() {
-		e.stopForMemory()
-		return renderedHTML{}
-	}
-	rawText, ok := body.String()
-	if !ok {
-		e.stopForMemory()
-		return renderedHTML{}
-	}
-	if e.stopNow() {
-		return renderedHTML{}
-	}
-	text, ok := normalizeHTMLTextGuarded(rawText, e.memory)
-	if !ok {
-		e.stopForMemory()
-		return renderedHTML{}
-	}
-	if e.stopNow() {
-		return renderedHTML{}
-	}
-	visibleText, ok := normalizeHTMLTextGuarded(visible.String(), e.memory)
-	if !ok {
-		e.stopForMemory()
-		return renderedHTML{}
-	}
-	if e.stopNow() {
-		return renderedHTML{}
-	}
+
+	e.walk(e.inspection.Root, mode, &body, &visible)
+
+	rawText := body.renderAnnotations()
+
+	e.stopNow()
+
+	text := normalizeHTMLTextGuarded(rawText, e.memory)
+
+	e.stopNow()
+
+	visibleText := normalizeHTMLTextGuarded(visible.String(), e.memory)
+
+	e.stopNow()
+
 	return renderedHTML{text: text, visible: visibleText, hasConcealed: e.hasConcealed()}
 }
 
-func (e *htmlExtraction) stopRequested() bool {
-	if e.stopped {
-		return true
-	}
-	if e.memory.Exhausted() {
-		e.stopForMemory()
-		return true
-	}
-	e.workSteps++
-	if e.workSteps == 1 || e.workSteps&255 == 0 {
-		return e.stopNow()
-	}
-	return false
+func (e *htmlExtraction) stopRequested() {
+	e.workSampler.Check()
 }
 
-func (e *htmlExtraction) stopForMemory() {
-	e.stopped = true
-	e.memoryExhausted = true
-	e.extractionIncomplete = true
-}
-
-func (e *htmlExtraction) stopNow() bool {
-	if e.stopped {
-		return true
+func (e *htmlExtraction) stopNow() {
+	if e.shouldStop != nil {
+		e.shouldStop()
 	}
-	if e.shouldStop != nil && e.shouldStop() {
-		e.stopped = true
-		e.extractionIncomplete = true
-	}
-	return e.stopped
 }
 
 func (e *htmlExtraction) hasConcealed() bool {
 	for _, state := range e.inspection.Text {
-		if e.stopRequested() {
-			return false
-		}
+		e.stopRequested()
+
 		if state.Label == "concealed" && state.Node != nil && strings.TrimSpace(state.Node.Data) != "" {
 			return true
 		}
 	}
 	for _, state := range e.inspection.Elements {
-		if e.stopRequested() {
-			return false
-		}
+		e.stopRequested()
+
 		if state.Label == "concealed" && state.Node != nil {
 			name := strings.ToLower(state.Node.Data)
 			if name == "img" || name == "input" {
@@ -553,28 +490,30 @@ func (e *htmlExtraction) hasConcealed() bool {
 	return false
 }
 
-func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *guardedBuilder) bool {
-	if n == nil || e.stopRequested() {
-		return !e.stopped
+func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *guardedBuilder) {
+	if n == nil {
+		return
 	}
+	e.stopRequested()
+
 	if n.Type == xhtml.TextNode {
 		e.writeText(n, mode, out, visible)
-		return true
+		return
 	}
 	if n.Type == xhtml.CommentNode {
 		e.writeConditionalComment(n.Data, out, visible)
-		return !e.stopped
+		return
 	}
 	if n.Type != xhtml.ElementNode && n.Type != xhtml.DocumentNode {
-		return true
+		return
 	}
 	name := strings.ToLower(n.Data)
 	if omittedHTMLElement(name) {
-		return true
+		return
 	}
 	if name == "img" {
 		e.writeImage(n, mode, out, visible)
-		return true
+		return
 	}
 	if name == "input" {
 		typ := strings.ToLower(strings.TrimSpace(firstAttr(n, "type")))
@@ -582,7 +521,7 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 			label := sanitizeSenderText(firstAttr(n, "value"))
 			e.writeElementContent(n, label, mode, out, visible)
 		}
-		return true
+		return
 	}
 	if isBlockElement(name) || name == "br" || name == "hr" {
 		out.WriteByte('\n')
@@ -601,16 +540,10 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 		visibleLabel := newGuardedBuilder(e.memory)
 		e.anchorDepth++
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			if !e.walk(child, mode, &label, &visibleLabel) {
-				e.anchorDepth--
-				return false
-			}
+			e.walk(child, mode, &label, &visibleLabel)
 		}
 		e.anchorDepth--
-		if label.failed || visibleLabel.Failed() {
-			e.stopForMemory()
-			return false
-		}
+
 		destination, ok := e.destination(firstAttr(n, "href"))
 		if ok {
 			destination = e.links.AddDestination(destination)
@@ -618,6 +551,7 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 			if plain == "" {
 				plain = "link"
 			}
+
 			if annotation, uniform := label.uniformAnnotation(); uniform {
 				out.write(annotation, "[")
 				out.write(annotation, plain)
@@ -625,31 +559,29 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 				out.write(annotation, markdownURL(destination))
 				out.write(annotation, ")")
 			} else {
-				// Preserve distinct child annotations when a label crosses a real
-				// visibility boundary.
-				out.WriteByte('[')
-				annotatedLabel, complete := label.String()
-				if !complete {
-					e.stopForMemory()
-					return false
+				{
+					// Preserve distinct child annotations when a label crosses a real
+					// visibility boundary.
+					out.WriteByte('[')
+					annotatedLabel := label.renderAnnotations()
+
+					out.WriteString(strings.TrimSpace(annotatedLabel))
+					out.WriteString("](")
+					out.WriteString(markdownURL(destination))
+					out.WriteByte(')')
 				}
-				out.WriteString(strings.TrimSpace(annotatedLabel))
-				out.WriteString("](")
-				out.WriteString(markdownURL(destination))
-				out.WriteByte(')')
 			}
+
 		} else {
 			for _, chunk := range label.chunks {
 				out.writeBytes(chunk.annotation, label.chunkBytes(chunk))
 			}
 		}
 		visible.WriteString(visibleLabel.String())
-		return true
+		return
 	}
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		if !e.walk(child, mode, out, visible) {
-			return false
-		}
+		e.walk(child, mode, out, visible)
 	}
 	if name == "blockquote" {
 		marker := "\n[quoted content ends]"
@@ -663,18 +595,17 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 		out.WriteByte('\n')
 		visible.appendByte('\n')
 	}
-	return true
+	return
 }
 
 func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode HTMLExtractionMode, out *annotatedOutput, visible *guardedBuilder) {
 	if content == "" {
 		return
 	}
-	stop, ok := e.textStopCallback()
-	if !ok {
-		return
-	}
-	promptContent, _ := rewritePlainTextURLs(content, e.compactURLs, &e.links, stop)
+
+	e.textStopCallback()
+
+	promptContent, _ := rewritePlainTextURLs(content, e.compactURLs, &e.links, e.textClockCheck)
 	state := e.elements[n]
 	if state == nil {
 		out.WriteString(promptContent)
@@ -723,23 +654,22 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 			Memory:     e.memory,
 		}),
 	)
-	if err != nil || (e.shouldStop != nil && e.shouldStop()) {
+
+	if err != nil {
 		e.omitConditionalComment(out)
 		return
 	}
+	if e.shouldStop != nil {
+		e.shouldStop()
+	}
+
 	content := newGuardedBuilder(e.memory)
 	walk := conditionalWalk{links: linkCollector{compactURLs: e.compactURLs, memory: e.memory, shouldStop: e.shouldStop}, memory: e.memory, shouldStop: e.shouldStop}
 	for _, node := range fragment {
-		if !e.walkConditionalNode(node, &content, &walk, 0) {
-			e.omitConditionalComment(out)
-			return
-		}
+		e.walkConditionalNode(node, &content, &walk, 0)
 	}
-	value, ok := normalizeHTMLTextGuarded(content.String(), e.memory)
-	if !ok {
-		e.stopForMemory()
-		return
-	}
+	value := normalizeHTMLTextGuarded(content.String(), e.memory)
+
 	if value == "" || annotationWhitespaceOnly(value) {
 		return
 	}
@@ -789,28 +719,29 @@ type conditionalWalk struct {
 	links       linkCollector
 	anchorDepth int
 	memory      *resourceguard.Memory
-	shouldStop  func() bool
+	shouldStop  func()
 }
 
-func (w *conditionalWalk) enter(depth int) bool {
-	if !w.memory.Reserve(64) {
-		return false
-	}
+func (w *conditionalWalk) enter(depth int) {
+	w.memory.Reserve(64)
+
 	w.nodes++
-	if w.nodes&255 == 0 && w.shouldStop != nil && w.shouldStop() {
-		return false
+
+	if w.nodes&255 == 0 && w.shouldStop != nil {
+		w.shouldStop()
 	}
-	return true
+
+	return
 }
 
-func (w *conditionalWalk) writeString(out *guardedBuilder, value string) bool {
-	return out.WriteString(value)
+func (w *conditionalWalk) writeString(out *guardedBuilder, value string) {
+	out.WriteString(value)
+	return
 }
 
-func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *guardedBuilder, walk *conditionalWalk, depth int) bool {
-	if !walk.enter(depth) {
-		return false
-	}
+func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *guardedBuilder, walk *conditionalWalk, depth int) {
+	walk.enter(depth)
+
 	if n.Type == xhtml.TextNode {
 		value := sanitizeSenderText(n.Data)
 		if walk.anchorDepth > 0 {
@@ -818,74 +749,58 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *guardedBuilder,
 		} else {
 			value, _ = rewritePlainTextURLs(value, e.compactURLs, &walk.links, walk.shouldStop)
 		}
-		return walk.writeString(out, value)
+		walk.writeString(out, value)
+		return
 	}
 	if n.Type != xhtml.ElementNode && n.Type != xhtml.DocumentNode {
-		return true
+		return
 	}
 	name := strings.ToLower(n.Data)
 	// Outlook conditionals can contain Office configuration XML alongside
 	// alternate message markup. It is presentation code, not recipient-facing
 	// fallback content.
 	if omittedHTMLElement(name) || name == "xml" || strings.HasPrefix(name, "o:") {
-		return true
+		return
 	}
 	if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, "a") {
 		label := newGuardedBuilder(walk.memory)
 		walk.anchorDepth++
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			if !e.walkConditionalNode(child, &label, walk, depth+1) {
-				walk.anchorDepth--
-				return false
-			}
+			e.walkConditionalNode(child, &label, walk, depth+1)
 		}
 		walk.anchorDepth--
+
 		if destination, ok := e.destination(firstAttr(n, "href")); ok {
 			destination = walk.links.AddDestination(destination)
-			if !walk.writeString(out, "[") ||
-				!walk.writeString(out, markdownLabelText(strings.TrimSpace(label.String()))) ||
-				!walk.writeString(out, "](") ||
-				!walk.writeString(out, markdownURL(destination)) ||
-				!walk.writeString(out, ")") {
-				return false
-			}
+
+			walk.writeString(out, "[")
+			walk.writeString(out, markdownLabelText(strings.TrimSpace(label.String())))
+			walk.writeString(out, "](")
+			walk.writeString(out, markdownURL(destination))
+			walk.writeString(out, ")")
 		} else {
-			if !walk.writeString(out, label.String()) {
-				return false
-			}
+			walk.writeString(out, label.String())
 		}
-		return true
+
+		return
 	}
 	if isBlockElement(name) || strings.EqualFold(n.Data, "br") {
-		if !walk.writeString(out, "\n") {
-			return false
-		}
+		walk.writeString(out, "\n")
 	}
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		if !e.walkConditionalNode(child, out, walk, depth+1) {
-			return false
-		}
+		e.walkConditionalNode(child, out, walk, depth+1)
 	}
 	if isBlockElement(name) {
-		if !walk.writeString(out, "\n") {
-			return false
-		}
+		walk.writeString(out, "\n")
 	}
-	return true
+	return
 }
 
 func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *annotatedOutput, visible *guardedBuilder) {
-	stop, ok := e.textStopCallback()
-	if !ok {
-		return
-	}
-	text, ok := prepareVisibleText(n.Data, e.memory, stop)
-	if !ok {
-		if e.memory.Exhausted() {
-			e.stopForMemory()
-		}
-		return
-	}
+	stop := e.textStopCallback()
+
+	text := prepareVisibleText(n.Data, e.memory, stop)
+
 	if text == "" {
 		return
 	}
@@ -897,10 +812,10 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 	if e.anchorDepth > 0 {
 		// Text resembling a URL inside an anchor label is sender-visible text,
 		// not an independently validated destination.
-		outText, _ = rewritePlainTextURLs(text, e.compactURLs, nil, stop)
+		outText, _ = rewritePlainTextURLs(text, e.compactURLs, nil, e.textClockCheck)
 		outText = markdownLabelText(outText)
 	} else {
-		outText, _ = rewritePlainTextURLs(text, e.compactURLs, &e.links, stop)
+		outText, _ = rewritePlainTextURLs(text, e.compactURLs, &e.links, e.textClockCheck)
 	}
 	// Presentation annotations around whitespace add noise without carrying a
 	// visibility claim about message content. This includes decoded HTML space
@@ -1004,7 +919,7 @@ func collapseHTMLFormattingWhitespace(value string) string {
 // a small sample as evidence, but do not let formatting-only padding dominate
 // the LLM input. Ordinary whitespace and short obfuscation runs are unchanged.
 func compactFormattingPadding(value string) string {
-	result, _ := compactFormattingPaddingWithResources(value, nil, nil)
+	result := compactFormattingPaddingWithResources(value, nil, nil)
 	return result
 }
 
@@ -1075,13 +990,12 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 	if explicitTrackingPixel(n) {
 		return
 	}
-	stop, ok := e.textStopCallback()
-	if !ok {
-		return
-	}
+
+	e.textStopCallback()
+
 	raw := strings.TrimSpace(firstAttr(n, "src"))
 	alt := sanitizeSenderText(firstAttr(n, "alt"))
-	alt, _ = rewritePlainTextURLs(alt, e.compactURLs, nil, stop)
+	alt, _ = rewritePlainTextURLs(alt, e.compactURLs, nil, e.textClockCheck)
 	var destination string
 	if strings.HasPrefix(strings.ToLower(raw), "cid:") {
 		id := normalizeContentID(raw[4:])
@@ -1093,11 +1007,15 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 		}
 		destination = "cid:" + markdownURL(id)
 		e.images.Add(id)
-	} else if resolved, ok := e.destination(raw); ok && (strings.HasPrefix(resolved, "http://") || strings.HasPrefix(resolved, "https://")) {
-		if alt == "" {
-			alt = "image"
+	} else {
+
+		if resolved, ok := e.destination(raw); ok && (strings.HasPrefix(resolved, "http://") || strings.HasPrefix(resolved, "https://")) {
+			if alt == "" {
+				alt = "image"
+			}
+			destination = markdownURL(e.links.AddDestination(resolved))
 		}
-		destination = markdownURL(e.links.AddDestination(resolved))
+
 	}
 	if destination == "" {
 		return
@@ -1110,8 +1028,10 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 			if mode == StripHidden {
 				annotation = outputAnnotation{kind: "stripped"}
 			} else {
-				reason, value := elementConcealmentReason(state)
-				annotation = outputAnnotation{kind: "concealed", reason: reason, value: value}
+				{
+					reason, value := elementConcealmentReason(state)
+					annotation = outputAnnotation{kind: "concealed", reason: reason, value: value}
+				}
 			}
 		case "client-dependent":
 			annotation = outputAnnotation{kind: "client-dependent"}
@@ -1146,29 +1066,31 @@ func elementConcealmentReason(state *htmlextract.Element) (string, string) {
 	return formatConcealmentReason(state.ConcealmentReasons, state.EffectiveOpacity, state.FontSize)
 }
 
-func (e *htmlExtraction) findBase(n *xhtml.Node) bool {
-	if n == nil || e.baseSeen || e.stopRequested() {
-		return !e.stopped
+func (e *htmlExtraction) findBase(n *xhtml.Node) {
+	if n == nil || e.baseSeen {
+		return
 	}
+	e.stopRequested()
+
 	if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, "template") {
-		return true
+		return
 	}
 	if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, "base") {
 		raw, present := attrPresent(n, "href")
 		if present {
 			e.baseSeen = true
+
 			if parsed, err := url.Parse(strings.TrimSpace(raw)); err == nil && parsed.IsAbs() && (parsed.Scheme == "http" || parsed.Scheme == "https") {
 				e.base = parsed
 			}
-			return true // first base href wins even when unusable
+
+			return // first base href wins even when unusable
 		}
 	}
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		if !e.findBase(child) {
-			return false
-		}
+		e.findBase(child)
 	}
-	return true
+	return
 }
 
 func (e *htmlExtraction) destination(raw string) (string, bool) {
@@ -1255,25 +1177,26 @@ func sanitizeSenderText(value string) string {
 }
 
 func normalizeHTMLText(value string) string {
-	result, _ := normalizeHTMLTextGuarded(value, nil)
+	result := normalizeHTMLTextGuarded(value, nil)
 	return result
 }
 
-func normalizeHTMLTextGuarded(value string, memory *resourceguard.Memory) (string, bool) {
+func normalizeHTMLTextGuarded(value string, memory *resourceguard.Memory) string {
 	return normalizeHTMLTextWithResources(value, memory, nil)
 }
-func normalizeHTMLTextWithResources(value string, memory *resourceguard.Memory, stop func() bool) (string, bool) {
+func normalizeHTMLTextWithResources(value string, memory *resourceguard.Memory, stop func()) string {
 	b := newGuardedBuilder(memory)
-	if !b.Grow(len(value)) {
-		return "", false
-	}
+
+	b.Grow(len(value))
+
 	space, newlines := false, 0
 	nextCheck := 0
 	for offset := 0; offset < len(value); {
 		if offset >= nextCheck {
-			if stop != nil && stop() {
-				return "", false
+			if stop != nil {
+				stop()
 			}
+
 			nextCheck = offset + resourceguard.WorkChunk
 		}
 		r, size := utf8.DecodeRuneInString(value[offset:])
@@ -1310,10 +1233,8 @@ func normalizeHTMLTextWithResources(value string, memory *resourceguard.Memory, 
 			}
 		}
 	}
-	if b.Failed() {
-		return "", false
-	}
-	return strings.Trim(b.String(), " \t\r\n\f"), true
+
+	return strings.Trim(b.String(), " \t\r\n\f")
 }
 
 func (collector *linkCollector) AddDestination(candidate string) string {
@@ -1321,34 +1242,39 @@ func (collector *linkCollector) AddDestination(candidate string) string {
 	if candidate == "" {
 		return ""
 	}
+
 	if rendered, exists := collector.rendered.Get(candidate); exists {
 		return rendered
 	}
+
 	if collector.Full() {
 		return candidate
 	}
 	raw := candidate
-	var ok bool
-	candidate, ok = promptURLWithBudget(raw, collector.compactURLs, collector.memory, collector.shouldStop)
-	if !ok {
-		return ""
-	}
+	candidate = promptURLWithBudget(raw, collector.compactURLs, collector.memory, collector.shouldStop)
+
 	if _, exists := collector.seen.Get(candidate); exists {
 		return candidate
 	}
+
 	characters := utf8.RuneCountInString(candidate)
 	if len(collector.links) >= maxExtractedLinks || collector.chars+characters > maxExtractedLinkChars {
 		collector.full = true
 		return candidate
 	}
-	if !collector.rendered.Set(collector.memory, raw, candidate) || !collector.seen.Set(collector.memory, candidate, struct{}{}) {
-		return ""
-	}
-	grown, ok := growGuardedSlice(collector.links, len(collector.links)+1, collector.memory)
-	if !ok {
-		return ""
-	}
+
+	collector.rendered.Set(collector.memory, raw, candidate)
+	collector.seen.Set(collector.memory, candidate, struct{}{})
+
+	grown := growGuardedSlice(collector.links, len(collector.links)+1, collector.memory)
+
 	collector.links = append(grown, candidate)
 	collector.chars += characters
 	return candidate
+}
+
+func analyzeControlledHTML(source string, limits htmlextract.Limits, budget *extractionBudget) (htmlextract.Document, error) {
+	var usage htmlextract.ResourceUsage
+	defer func() { budget.consumeHTML(usage) }()
+	return htmlextract.AnalyzeControlled([]byte(source), limits, budget.stageStop, &usage)
 }

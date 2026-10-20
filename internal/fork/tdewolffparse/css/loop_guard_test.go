@@ -1,7 +1,8 @@
 package css
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
-	"errors"
 	"io"
 	"runtime"
 	"strings"
@@ -27,15 +28,23 @@ func TestURLRecognitionNoCopyAndCancellation(t *testing.T) {
 	}
 	for _, parserOwned := range []bool{false, true} {
 		input := parse.NewInputString("")
-		limits := ResourceLimits{ShouldStop: func() bool { return true }}
+		limits := ResourceLimits{ShouldStop: func() {
+			if true {
+				termination.
+					Fail(termination.
+						Failure{Code: termination.
+						CPUExceeded,
+					})
+			}
+
+			return
+		}}
 		if parserOwned {
 			l = NewParserWithLimits(input, false, limits).l
 		} else {
 			l = NewLexerWithLimits(input, limits)
 		}
-		if l.isURLName([]byte(strings.Repeat(`\`, 4096)+"url")) || !errors.Is(l.Err(), ErrResourceStopped) {
-			t.Fatalf("parser=%v err=%v", parserOwned, l.Err())
-		}
+		expectTermination(t, termination.CPUExceeded, func() { l.isURLName([]byte(strings.Repeat(`\`, 4096) + "url")) })
 	}
 }
 func TestSyntaxErrorsDoNotAllocateDiagnostics(t *testing.T) {
@@ -91,18 +100,18 @@ func TestPostTokenWorkCancellation(t *testing.T) {
 		func(p *Parser) { p.appendCustomCommentSpace(nil, []byte(strings.Repeat("x", 4096))) },
 		func(p *Parser) { p.lowerCopy([]byte(strings.Repeat("A", 4096))) },
 	} {
-		p := NewParserWithLimits(parse.NewInputString(""), true, ResourceLimits{Memory: resourceguard.NewMemory(1 << 20), ShouldStop: func() bool { return true }})
-		func() {
-			defer func() {
-				if _, ok := recover().(resourceAbort); !ok {
-					t.Fatal("no resource abort")
-				}
-			}()
-			run(p)
-		}()
-		if !errors.Is(p.Err(), ErrResourceStopped) {
-			t.Fatal(p.Err())
-		}
+		p := NewParserWithLimits(parse.NewInputString(""), true, ResourceLimits{Memory: resourceguard.NewMemory(1 << 20), ShouldStop: func() {
+			if true {
+				termination.
+					Fail(termination.
+						Failure{Code: termination.
+						CPUExceeded,
+					})
+			}
+
+			return
+		}})
+		expectTermination(t, termination.CPUExceeded, func() { run(p) })
 	}
 }
 
@@ -114,9 +123,8 @@ func TestUnicodeRangeLookaheadIsBounded(t *testing.T) {
 		"u+abc" + strings.Repeat("?", 256<<10),
 	} {
 		input := parse.NewInputString(source)
-		input.SetProgressCheck(func() error {
+		input.SetProgressCheck(func() {
 			t.Fatal("Unicode-range lookahead scanned 1024 bytes")
-			return ErrResourceStopped
 		})
 		l := NewLexer(input)
 		if l.consumeUnicodeRangeToken() || input.Offset() != 0 {
@@ -135,20 +143,28 @@ func TestTokenCompactionCannotSkipCheckpoints(t *testing.T) {
 	source := "p:1" + strings.Repeat(" 1", 2000) + ";"
 	input := parse.NewInputString(source)
 	checksAfterLexing := 0
-	p := NewParserWithLimits(input, true, ResourceLimits{ShouldStop: func() bool {
+	p := NewParserWithLimits(input, true, ResourceLimits{ShouldStop: func() {
 		if input.Offset() == len(source) {
 			checksAfterLexing++
-			return true
+			if true {
+				termination.
+					Fail(termination.
+						Failure{Code: termination.
+						CPUExceeded,
+					})
+			}
+
+			return
 		}
-		return false
+		return
 	}})
-	grammar, _, _ := p.Next()
-	if grammar != ErrorGrammar || !errors.Is(p.Err(), ErrResourceStopped) || checksAfterLexing != 1 {
-		t.Fatalf("grammar=%v err=%v post-lexing checks=%d", grammar, p.Err(), checksAfterLexing)
+	expectTermination(t, termination.CPUExceeded, func() { p.Next() })
+	if checksAfterLexing != 1 {
+		t.Fatalf("post-lexing checks=%d", checksAfterLexing)
 	}
 
 	p = NewParser(parse.NewInputString(source), true)
-	grammar, _, _ = p.Next()
+	grammar, _, _ := p.Next()
 	if grammar != DeclarationGrammar || len(p.Values()) != 4001 {
 		t.Fatalf("compaction changed: grammar=%v tokens=%d", grammar, len(p.Values()))
 	}

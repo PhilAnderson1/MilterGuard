@@ -1,5 +1,7 @@
 package cascadia
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	html "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
@@ -11,9 +13,7 @@ import (
 func TestCompiledStructuresAreCharged(t *testing.T) {
 	for _, source := range []string{strings.Repeat(".a", 1024), strings.TrimSpace(strings.Repeat("a ", 1024))} {
 		memory := resourceguard.NewMemory(int64(len(source)))
-		if _, err := ParseGroupWithMemory(source, memory); err == nil || !memory.Exhausted() {
-			t.Fatal("source-only budget admitted structures")
-		}
+		expectTermination(t, termination.MemoryExceeded, func() { ParseGroupWithMemory(source, memory) })
 		memory = resourceguard.NewMemory(1 << 20)
 		group, err := ParseGroupWithMemory(source, memory)
 		if err != nil {
@@ -26,32 +26,27 @@ func TestCompiledStructuresAreCharged(t *testing.T) {
 		}
 		t.Logf("source=%d compilation=%d withMetadata=%d", len(source), compiled, memory.Used())
 		tight := resourceguard.NewMemory(1)
-		if _, err := MetadataWithMemory(group[0], tight); err == nil || !tight.Exhausted() {
-			t.Fatal("metadata bypassed budget")
-		}
+		expectTermination(t, termination.MemoryExceeded, func() { MetadataWithMemory(group[0], tight) })
 	}
 }
 func TestSelectorCompilationSharesBudget(t *testing.T) {
 	memory := resourceguard.NewMemory(2000)
-	for i := 0; i < 100; i++ {
-		_, err := ParseGroupWithMemory(`p.notice:not(.hidden)`, memory)
-		if err != nil {
-			if !memory.Exhausted() {
+	expectTermination(t, termination.MemoryExceeded, func() {
+		for i := 0; i < 100; i++ {
+			if _, err := ParseGroupWithMemory(`p.notice:not(.hidden)`, memory); err != nil {
 				t.Fatal(err)
 			}
-			return
 		}
-	}
-	t.Fatal("compilation reset the shared budget")
+	})
 }
 func TestShortAttributeMatchesSampleClock(t *testing.T) {
 	group, _ := ParseGroup(`.notice`)
 	n := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "class", Val: "notice"}}}
 	calls := 0
-	ctrl := NewMatchControl(func() bool { calls++; return false })
+	ctrl := NewMatchControl(func() { calls++; return })
 	for i := 0; i < 1000; i++ {
-		matched, stopped := ctrl.Match(group, n)
-		if !matched || stopped {
+		matched := ctrl.Match(group, n)
+		if !matched {
 			t.Fatal("match changed")
 		}
 	}
@@ -75,13 +70,17 @@ func TestLongAttributeOperationsStopInsideScan(t *testing.T) {
 		}
 		n := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: test.key, Val: test.value}}}
 		calls := 0
-		ctrl := NewMatchControl(func() bool { calls++; return calls == 2 })
-		matched, stopped := ctrl.Match(group, n)
-		if matched || !stopped || calls != 2 {
-			t.Fatalf("%s: matched=%v stopped=%v calls=%d", test.selector, matched, stopped, calls)
-		}
-		if _, stopped := ctrl.Match(group, n); !stopped {
-			t.Fatal("stop was not latched")
+		ctrl := NewMatchControl(func() {
+			calls++
+			if calls == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
+		})
+		expectTermination(t, termination.CPUExceeded, func() { ctrl.Match(group, n) })
+		if calls != 2 {
+			t.Fatalf("%s: calls=%d", test.selector, calls)
 		}
 	}
 }
@@ -93,8 +92,8 @@ func TestSubstringPreparationIsReused(t *testing.T) {
 	n := &html.Node{Type: html.ElementNode, Data: "p", Attr: []html.Attribute{{Key: "x", Val: strings.Repeat("A", 2048) + "b"}}}
 	ctrl := NewMatchControl(nil)
 	allocations := testing.AllocsPerRun(100, func() {
-		matched, stopped := ctrl.Match(group, n)
-		if !matched || stopped {
+		matched := ctrl.Match(group, n)
+		if !matched {
 			t.Fatal("match changed")
 		}
 	})
@@ -112,8 +111,8 @@ func TestSubstringCrossesSamplingBoundary(t *testing.T) {
 		group, _ := ParseGroup(`[x*="aab"` + flag + `]`)
 		for _, value := range []string{strings.Repeat("x", 1023) + "aab", strings.Repeat("a", 2048) + "b"} {
 			n := &html.Node{Type: html.ElementNode, Attr: []html.Attribute{{Key: "x", Val: value}}}
-			matched, stopped := NewMatchControl(func() bool { return false }).Match(group, n)
-			if !matched || stopped {
+			matched := NewMatchControl(func() { return }).Match(group, n)
+			if !matched {
 				t.Fatal("lost boundary-spanning match")
 			}
 		}
@@ -138,7 +137,5 @@ func TestSubstringTableAndPositiveMetadataAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	memory := resourceguard.NewMemory(int64(unsafe.Sizeof(CompoundMetadata{})))
-	if _, err := MetadataWithMemory(group[0], memory); err == nil || !memory.Exhausted() {
-		t.Fatal("positive matcher array escaped metadata admission")
-	}
+	expectTermination(t, termination.MemoryExceeded, func() { MetadataWithMemory(group[0], memory) })
 }

@@ -29,16 +29,16 @@ func (t *Table[K, V]) View() map[K]V     { return t.data }
 func (t *Table[K, V]) Len() int          { return len(t.data) }
 func (t *Table[K, V]) Get(k K) (V, bool) { v, ok := t.data[k]; return v, ok }
 
-func (t *Table[K, V]) Set(m *Memory, k K, v V) bool    { return t.set(m, k, v, false) }
+func (t *Table[K, V]) Set(m *Memory, k K, v V)         { t.set(m, k, v, false) }
 func (t *Table[K, V]) TrySet(m *Memory, k K, v V) bool { return t.set(m, k, v, true) }
 func (t *Table[K, V]) set(m *Memory, k K, v V, optional bool) bool {
-	if m.Exhausted() {
-		return false
-	}
+	m.unavailable()
+
 	if _, exists := t.data[k]; exists {
 		t.data[k] = v
 		return true
 	}
+
 	cost := int64(0)
 	if t.data == nil {
 		cost = tableBaseBytes[K, V]()
@@ -50,8 +50,8 @@ func (t *Table[K, V]) set(m *Memory, k K, v V, optional bool) bool {
 		if !m.TryReserve(cost) {
 			return false
 		}
-	} else if !m.Reserve(cost) {
-		return false
+	} else {
+		m.Reserve(cost)
 	}
 	if t.data == nil {
 		t.data = make(map[K]V)
@@ -69,28 +69,29 @@ func (t *Table[K, V]) Release() { t.data = nil; t.highWater = 0 }
 
 // Init admits a known entry count once; subsequent Set operations up to that
 // count consume the existing allowance. Replacing a table charges it anew.
-func (t *Table[K, V]) Init(m *Memory, count int) bool {
+func (t *Table[K, V]) Init(m *Memory, count int) {
 	size, ok := storageBytes(count, uintptr(tableEntryBytes[K, V]()))
 	if !ok || size > int64(^uint64(0)>>1)-tableBaseBytes[K, V]() {
-		return m.reject()
+		m.reject()
+		return
 	}
-	if m.Exhausted() || !m.Reserve(size+tableBaseBytes[K, V]()) {
-		return false
-	}
+
+	m.Reserve(size + tableBaseBytes[K, V]())
+
 	t.data = make(map[K]V, count)
 	t.highWater = count
-	return true
+	return
 }
 
 // MakeMap transfers a preadmitted native map to a caller that can prove a bound
 // on distinct keys. Inserting more than count keys requires Table instead.
 // The allowance includes runtime growth/rounding; key/value referents are separate.
-func MakeMap[K comparable, V any](m *Memory, count int) (map[K]V, bool) {
+func MakeMap[K comparable, V any](m *Memory, count int) map[K]V {
 	var t Table[K, V]
-	if !t.Init(m, count) {
-		return nil, false
-	}
-	return t.data, true
+
+	t.Init(m, count)
+
+	return t.data
 }
 
 // TryCacheEntry admits the initial index and first map entry atomically. A
@@ -107,7 +108,7 @@ func TryCacheEntry[K comparable, V any](m *Memory, tables *[]Table[K, V], count,
 	if !ok || size > int64(^uint64(0)>>1)-first || !m.TryReserve(size+first) {
 		return false
 	}
-	owned, _ := MakeSlice[Table[K, V]](nil, count, count)
+	owned := MakeSlice[Table[K, V]](nil, count, count)
 	owned[index].Set(nil, key, value)
 	*tables = owned
 	return true

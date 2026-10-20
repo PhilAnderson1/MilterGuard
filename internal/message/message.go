@@ -118,14 +118,19 @@ type Analysis struct {
 }
 
 // HTMLProcessingControl supplies cooperative CPU checks and a per-stage memory
-// allowance. BeginFallback admits the transition once; FallbackShouldStop must
+// allowance. BeginFallback admits the transition once; CheckFallback must
 // check only the fallback CPU allowance. Each stage shares its memory allowance
 // across all of its MIME parts. StopOnMemoryLimit prevents fallback after a
 // primary memory failure. Memory callbacks report each stage independently;
 // observation callbacks run after extraction. Callbacks must be inexpensive.
 type HTMLProcessingControl struct {
-	ShouldFallback              func() bool
-	FallbackShouldStop          func() bool
+	// Typed checks return normally or raise a shared CPU/cancellation signal.
+	// Both checks use the same termination contract as guarded allocations.
+	CheckPrimary  func()
+	CheckFallback func()
+
+	// CPULimitExceeded reports a recovered CPU termination before fallback policy runs.
+	CPULimitExceeded            func(fallback bool)
 	BeginFallback               func() bool
 	MemoryLimitExceeded         func()
 	FallbackMemoryLimitExceeded func()

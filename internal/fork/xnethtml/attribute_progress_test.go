@@ -1,7 +1,10 @@
 package html
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"fmt"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 	"strings"
 	"testing"
 )
@@ -21,37 +24,40 @@ func TestAttributeProcessingCancellation(t *testing.T) {
 				}
 				source.WriteString(">")
 				armed, calls := false, 0
-				z := NewTokenizerWithStop(strings.NewReader(source.String()), func() bool {
+				z := NewTokenizerWithStop(strings.NewReader(source.String()), func() {
 					if armed {
 						calls++
-						return true
+						if true {
+							termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+						}
+
+						return
 					}
-					return false
+					return
 				})
 				if z.Next() != StartTagToken {
 					t.Fatal(z.Err())
 				}
 				// Exercise periodic sampling, not the first-operation check.
-				z.guard.stopChecks = 1
+				z.guard.sampler = resourceguard.NewStopSampler(256, z.guard.limits.ShouldStop)
+				z.guard.sampler.Check()
 				armed = true
-				if materialize {
-					if token := z.Token(); token.Type != ErrorToken || len(token.Attr) != 0 {
-						t.Fatal("cancelled Token returned partial attributes")
-					}
-				} else {
-					for {
-						key, val, more := z.TagAttr()
-						if !more {
-							if key != nil || val != nil {
-								t.Fatal("cancelled TagAttr returned data")
+				expectTermination(t, termination.CPUExceeded, func() {
+					if materialize {
+						z.Token()
+					} else {
+						for {
+							_, _, more := z.TagAttr()
+							if !more {
+								break
 							}
-							break
 						}
 					}
+				})
+				if calls != 1 {
+					t.Fatalf("calls=%d", calls)
 				}
-				if z.Err() != ErrResourceStopped || calls != 1 {
-					t.Fatalf("err=%v calls=%d", z.Err(), calls)
-				}
+
 				if !longValue && z.nAttrReturned >= 256 {
 					t.Fatalf("processed %d attributes before stopping", z.nAttrReturned)
 				}

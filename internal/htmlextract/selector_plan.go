@@ -60,21 +60,18 @@ type selectorAncestorActivation struct {
 	attributes [][]selectorRef
 }
 
-func (a *activeAncestorBuckets) reset(selectorCount int, memory *resourceguard.Memory) bool {
+func (a *activeAncestorBuckets) reset(selectorCount int, memory *resourceguard.Memory) {
 	if len(a.counts) < selectorCount {
 		a.buckets = allocatedSlice[[]selectorRef](memory, 0, selectorCount)
 		a.counts = allocatedSlice[int](memory, selectorCount, selectorCount)
 		a.positions = allocatedSlice[int](memory, selectorCount, selectorCount)
-		if memory.Exhausted() {
-			return false
-		}
 	} else {
 		clear(a.counts)
 		clear(a.positions)
 	}
 	clear(a.buckets)
 	a.buckets = a.buckets[:0]
-	return true
+	return
 }
 
 func (a *activeAncestorBuckets) add(bucket []selectorRef) {
@@ -159,21 +156,19 @@ func (p *selectorPlan) makeForeignCaseUncertain(memory *resourceguard.Memory) {
 	// with HTML/foreign namespace case rules instead of Cascadia's lowercase
 	// type matcher.
 	name := p.complexity.compounds[len(p.complexity.compounds)-1].OriginalTypeName
+
 	if _, ok := canonicalSVGTagNames[name]; !ok {
 		name = ""
 	}
+
 	if name == "" {
 		name, _ = canonicalSVGTypeSelector(p.scopePrefix)
 	}
 	if name != "" {
-		lower, ok := resourceguard.LowerASCII(memory, name, nil)
-		if !ok {
-			return
-		}
-		matcher, ok := resourceguard.New(memory, foreignTypeMatcher{name: name, lower: lower})
-		if !ok {
-			return
-		}
+		lower := resourceguard.LowerASCII(memory, name, nil)
+
+		matcher := resourceguard.New(memory, foreignTypeMatcher{name: name, lower: lower})
+
 		p.scope = matcher
 		return
 	}
@@ -237,10 +232,8 @@ func compileAncestorChain(complexity selectorComplexity, memory *resourceguard.M
 	if descendants < 2 && !complexity.attributeSensitive() {
 		return nil
 	}
-	matchers, ok := resourceguard.MakeSlice[cascadia.Matcher](memory, len(complexity.compounds), len(complexity.compounds))
-	if !ok {
-		return nil
-	}
+	matchers := resourceguard.MakeSlice[cascadia.Matcher](memory, len(complexity.compounds), len(complexity.compounds))
+
 	for i, compound := range complexity.compounds {
 		if compound.Matcher == nil {
 			return nil
@@ -289,11 +282,11 @@ type selectorIndex struct {
 }
 
 func planSelectorList(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int) ([]selectorPlan, int, bool) {
-	plans, branches, exceeded, _ := planSelectorListWithStop(source, nextSequence, memory, remainingBranches, nil)
+	plans, branches, exceeded := planSelectorListWithStop(source, nextSequence, memory, remainingBranches, nil)
 	return plans, branches, exceeded
 }
 
-func planSelectorListWithStop(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int, shouldStop func() bool) (plans []selectorPlan, branches int, exceeded, stopped bool) {
+func planSelectorListWithStop(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int, shouldStop func()) (plans []selectorPlan, branches int, exceeded bool) {
 	iterator := cascadia.NewSelectorListIteratorWithStop(source, shouldStop)
 	for {
 		branch, ok := iterator.Next()
@@ -307,20 +300,17 @@ func planSelectorListWithStop(source string, nextSequence *int, memory *resource
 		branches++
 		plan, keep := planSelectorBranch(branch, *nextSequence, memory)
 		if plan.invalidSyntax {
-			return nil, branches, false, false
+			return nil, branches, false
 		}
 		if keep {
-			var admitted bool
-			plans, admitted = growSlice(plans, 1, memory, shouldStop)
-			if !admitted {
-				return plans, branches, false, iterator.Stopped() || !memory.Exhausted()
-			}
+			plans = growSlice(plans, 1, memory, shouldStop)
+
 			plans = append(plans, plan)
 			(*nextSequence)++
 		}
 	}
 	if iterator.EmptyBranch() {
-		return nil, branches, exceeded, iterator.Stopped()
+		return nil, branches, exceeded
 	}
 	// Ordinary comma lists are not forgiving. A parser rejection of unknown
 	// validity must make every surviving branch conservative, not just itself.
@@ -334,14 +324,12 @@ func planSelectorListWithStop(source string, nextSequence *int, memory *resource
 			break
 		}
 	}
-	return plans, branches, exceeded, iterator.Stopped()
+	return plans, branches, exceeded
 }
 
 func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memory) (selectorPlan, bool) {
 	group, err := cascadia.ParseCSSGroupWithMemory(branch, memory)
-	if memory.Exhausted() {
-		return selectorPlan{}, false
-	}
+
 	if err == nil && len(group) == 1 {
 		metadata, err := cascadia.MetadataWithMemory(group[0], memory)
 		if err != nil {
@@ -364,10 +352,8 @@ func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memor
 	if fallbackErr != nil {
 		return selectorPlan{}, false
 	}
-	compounds, ok := resourceguard.MakeSlice[compoundComplexity](memory, 1, 1)
-	if !ok {
-		return selectorPlan{}, false
-	}
+	compounds := resourceguard.MakeSlice[compoundComplexity](memory, 1, 1)
+
 	compounds[0] = compoundComplexity{FullyPositive: true}
 	plan := selectorPlan{
 		source:          branch,
@@ -378,12 +364,14 @@ func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memor
 		generatedPseudo: fallback.GeneratedPseudo,
 		parseRejected:   true,
 	}
+
 	if _, ok := canonicalSVGTagNames[fallback.OriginalTypeName]; ok {
 		plan.foreignCaseType = true
 		plan.makeForeignCaseUncertain(memory)
 	} else {
 		plan.makeUncertain(memory)
 	}
+
 	return plan, true
 }
 

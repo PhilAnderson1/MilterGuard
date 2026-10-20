@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -653,6 +654,35 @@ func TestCommandIncompleteExtractionReturnsProcessingFailure(t *testing.T) {
 			var processingErr *commandBodyProcessingError
 			if len(lines) != 0 || !errors.As(err, &processingErr) {
 				t.Fatalf("lines=%q error=%v", lines, err)
+			}
+		})
+	}
+}
+
+func TestCommandBodyCancellationStopsWithAndWithoutCPUClock(t *testing.T) {
+	for _, cpu := range []int{0, 250} {
+		t.Run(fmt.Sprint(cpu), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			msg := message.New(4096)
+			msg.AddHeader("Content-Type", "text/html")
+			msg.AddBody([]byte("<p>help</p>"))
+			reads := 0
+			clock := func() (time.Duration, bool) {
+				reads++
+				// Cancel after initial measurement, before extraction's first checkpoint.
+				cancel()
+				return 0, true
+			}
+			if cpu == 0 {
+				cancel()
+			}
+			lines, err := commandMessageLinesWithResourceLimits(ctx, msg, 4096, 8<<20, cpu, clock)
+			if len(lines) != 0 || err == nil || !strings.Contains(err.Error(), "interrupted") {
+				t.Fatalf("lines=%v err=%v", lines, err)
+			}
+			if cpu == 0 && reads != 0 {
+				t.Fatal("disabled CPU clock was sampled")
 			}
 		})
 	}

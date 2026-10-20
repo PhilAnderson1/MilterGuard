@@ -112,28 +112,16 @@ func NewParser(r *parse.Input, isInline bool) *Parser {
 // NewParserWithLimits returns a parser with limits enforced at the operations
 // that retain construct tokens, copy custom-property values, and grow stacks.
 func NewParserWithLimits(r *parse.Input, isInline bool, limits ResourceLimits) *Parser {
-	guard := newResourceGuard(limits)
-	check, ok := resourceguard.ErrorCheck(limits.Memory, limits.ShouldStop, ErrResourceStopped)
-	if !ok {
-		return &Parser{resourceErr: &ResourceLimitError{"memory bytes", int(limits.Memory.Limit())}}
-	}
-	if check != nil {
-		r.SetProgressCheck(check)
-	}
-	return newParser(r, isInline, guard)
+	r.SetProgressCheck(limits.ShouldStop)
+	return newParser(r, isInline, newResourceGuard(limits))
 }
 
 func newParser(r *parse.Input, isInline bool, guard *resourceGuard) *Parser {
 	l := newLexer(r, guard)
-	p, ok := resourceguard.New(guard.memory(), Parser{l: l, guard: guard})
-	if !ok {
-		return &Parser{resourceErr: guard.allocationError()}
-	}
-	p.state, ok = resourceguard.MakeSlice[State](guard.memory(), 0, 4)
-	if !ok {
-		p.resourceErr = guard.allocationError()
-		return p
-	}
+	p := resourceguard.New(guard.memory(), Parser{l: l, guard: guard})
+
+	p.state = resourceguard.MakeSlice[State](guard.memory(), 0, 4)
+
 	if isInline {
 		p.state = append(p.state, (*Parser).parseDeclarationList)
 	} else {
@@ -226,9 +214,8 @@ func (p *Parser) initBuf() {
 }
 
 func (p *Parser) pushBuf(tt TokenType, data []byte) {
-	if err := p.guard.step(); err != nil {
-		p.abort(err)
-	}
+	p.guard.step()
+
 	p.buf = append(growParserSlice(p.buf, 1, p), Token{tt, data})
 }
 
@@ -302,16 +289,14 @@ func (p *Parser) rejectUnsafeDelimiter(tt TokenType) {
 }
 
 func (p *Parser) appendCustomValue(value, data []byte) []byte {
-	if err := p.guard.step(); err != nil {
-		p.abort(err)
-	}
+	p.guard.step()
+
 	return append(growParserSlice(value, len(data), p), data...)
 }
 
 func (p *Parser) appendCustomCommentSpace(value, comment []byte) []byte {
-	if err := p.guard.step(); err != nil {
-		p.abort(err)
-	}
+	p.guard.step()
+
 	value = growParserSlice(value, len(comment), p)
 	nextCheck := 1024
 	for i := range comment {
@@ -383,18 +368,20 @@ func (p *Parser) parseDeclarationList() GrammarType {
 
 func (p *Parser) parseAtRule() GrammarType {
 	p.initBuf()
+
 	// Bound the at-keyword before Copy allocates storage for it. The keyword
 	// is part of the at-rule construct even though it is exposed separately
 	// from Values.
-	if err := p.guard.step(); err != nil {
-		p.abort(err)
-	}
+	p.guard.step()
+
 	p.data = p.lowerCopy(p.data)
 	atRuleName := p.data
 	if len(atRuleName) > 1 && atRuleName[1] == '-' {
+
 		if i := bytes.IndexByte(atRuleName[2:], '-'); i != -1 {
 			atRuleName = atRuleName[i+2:] // skip vendor specific prefix
 		}
+
 	}
 	atRule := ToHash(atRuleName[1:])
 
@@ -410,9 +397,10 @@ func (p *Parser) parseAtRule() GrammarType {
 			} else {
 				p.pushState((*Parser).parseAtRuleUnknown)
 			}
+
 			return BeginAtRuleGrammar
 		} else if (tt == SemicolonToken || tt == RightBraceToken) && p.level == 0 || tt == ErrorToken {
-			p.prevEnd = (tt == RightBraceToken)
+			p.prevEnd = tt == RightBraceToken
 			return AtRuleGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
 			p.openComponentToken(tt)
@@ -429,6 +417,7 @@ func (p *Parser) parseAtRule() GrammarType {
 			}
 			p.closeComponent(tt)
 		}
+
 		if first {
 			if tt == LeftParenthesisToken || tt == LeftBracketToken {
 				p.prevWS = false
@@ -442,6 +431,7 @@ func (p *Parser) parseAtRule() GrammarType {
 		} else {
 			skipWS = false
 		}
+
 		if tt == LeftParenthesisToken {
 			skipWS = true
 		}
@@ -597,16 +587,20 @@ func (p *Parser) parseDeclaration() GrammarType {
 				if p.buf[i].TokenType == WhitespaceToken {
 					// remove whitespace preceded or followed by any of ,/:!=
 					if 0 < j {
+
 						if data := p.buf[j-1].Data; len(data) == 1 && (data[0] == ',' || data[0] == '/' || data[0] == ':' || data[0] == '!' || data[0] == '=') {
 							i++
 							continue
 						}
+
 					}
 					if i+1 < len(p.buf) {
+
 						if data := p.buf[i+1].Data; len(data) == 1 && (data[0] == ',' || data[0] == '/' || data[0] == ':' || data[0] == '!' || data[0] == '=') {
 							i++
 							continue
 						}
+
 						if j < i {
 							p.buf[j] = p.buf[i]
 						}
@@ -623,7 +617,7 @@ func (p *Parser) parseDeclaration() GrammarType {
 			p.buf = p.buf[:j]
 			p.originalData = p.data
 			p.data = p.lowerCopy(p.data)
-			p.prevEnd = (tt == RightBraceToken)
+			p.prevEnd = tt == RightBraceToken
 			return DeclarationGrammar
 		} else if tt == LeftBraceToken && p.level == 0 && p.isStylesheet {
 			// nested ruleset
@@ -640,6 +634,7 @@ func (p *Parser) parseDeclaration() GrammarType {
 			}
 			p.closeComponent(tt)
 		}
+
 		if (p.prevWS || p.prevComment) && p.buf[len(p.buf)-1].TokenType != WhitespaceToken {
 			p.pushBuf(WhitespaceToken, wsBytes)
 		}
@@ -656,7 +651,7 @@ func (p *Parser) parseDeclarationError(tt TokenType, data []byte) GrammarType {
 	p.tt, p.data = tt, data
 	for {
 		if (tt == SemicolonToken || tt == RightBraceToken) && p.level == 0 || tt == ErrorToken {
-			p.prevEnd = (tt == RightBraceToken)
+			p.prevEnd = tt == RightBraceToken
 			if tt == SemicolonToken {
 				p.pushBuf(tt, data)
 			}
@@ -679,22 +674,23 @@ func (p *Parser) parseDeclarationError(tt TokenType, data []byte) GrammarType {
 func (p *Parser) parseCustomProperty() GrammarType {
 	p.originalData = p.data
 	p.initBuf()
+
 	// The property name borrows input storage. The caller owns any retained
 	// copy; this checkpoint is only for cooperative cancellation.
-	if err := p.guard.step(); err != nil {
-		p.abort(err)
-	}
+	p.guard.step()
+
 	if tt, data := p.popToken(false); tt != ColonToken {
 		p.l.r.Move(-len(data))
 		p.parseError = true
 		p.l.r.Move(len(data))
 		return ErrorGrammar
 	}
+
 	val := []byte{}
 	for {
 		tt, data := p.rawToken()
 		if (tt == SemicolonToken || tt == RightBraceToken) && p.level == 0 || tt == ErrorToken {
-			p.prevEnd = (tt == RightBraceToken)
+			p.prevEnd = tt == RightBraceToken
 			p.buf = append(growParserSlice(p.buf, 1, p), Token{CustomPropertyValueToken, val})
 			return CustomPropertyGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
@@ -709,6 +705,7 @@ func (p *Parser) parseCustomProperty() GrammarType {
 			}
 			p.closeComponent(tt)
 		}
+
 		if tt == CommentToken {
 			// CSS comments separate adjacent tokens. Preserve their source width
 			// so construct-byte accounting remains exact while exposing ordinary

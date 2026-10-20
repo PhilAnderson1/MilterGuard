@@ -29,7 +29,7 @@ func Number(b []byte) int {
 			return 0
 		}
 	}
-	firstDigit := (b[i] >= '0' && b[i] <= '9')
+	firstDigit := b[i] >= '0' && b[i] <= '9'
 	if firstDigit {
 		i++
 		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
@@ -53,6 +53,7 @@ func Number(b []byte) int {
 	} else if !firstDigit {
 		return 0
 	}
+
 	iOld := i
 	if i < len(b) && (b[i] == 'e' || b[i] == 'E') {
 		i++
@@ -215,15 +216,17 @@ func QuoteEntity(b []byte) (quote byte, n int) {
 				}
 			}
 		} else {
-			i := 2
-			for i < len(b) && b[i] == '0' {
-				i++
-			}
-			if i+2 < len(b) && b[i] == '3' && b[i+2] == ';' {
-				if b[i+1] == '4' {
-					return '"', i + 3 // &#34;
-				} else if b[i+1] == '9' {
-					return '\'', i + 3 // &#39;
+			{
+				i := 2
+				for i < len(b) && b[i] == '0' {
+					i++
+				}
+				if i+2 < len(b) && b[i] == '3' && b[i+2] == ';' {
+					if b[i+1] == '4' {
+						return '"', i + 3 // &#34;
+					} else if b[i+1] == '9' {
+						return '\'', i + 3 // &#39;
+					}
 				}
 			}
 		}
@@ -234,6 +237,7 @@ func QuoteEntity(b []byte) (quote byte, n int) {
 			return '\'', 6 // &apos;
 		}
 	}
+
 	return 0, 0
 }
 
@@ -306,30 +310,34 @@ func replaceEntities(b []byte, i int, entitiesMap map[string][]byte, revEntities
 				r = append(r, ';')
 			}
 		} else {
-			c := 0
-			for ; j < len(b) && c < 128 && b[j] >= '0' && b[j] <= '9'; j++ {
-				c = c*10 + int(b[j]-'0')
+			{
+				c := 0
+				for ; j < len(b) && c < 128 && b[j] >= '0' && b[j] <= '9'; j++ {
+					c = c*10 + int(b[j]-'0')
+				}
+				if j <= i+2 || 128 <= c {
+					return b, j - 1
+				}
+				r = []byte{byte(c)}
 			}
-			if j <= i+2 || 128 <= c {
-				return b, j - 1
-			}
-			r = []byte{byte(c)}
 		}
 	} else {
-		for ; j < len(b) && j-i-1 <= MaxEntityLength && b[j] != ';'; j++ {
-			if !(b[j] >= '0' && b[j] <= '9' || b[j] >= 'a' && b[j] <= 'z' || b[j] >= 'A' && b[j] <= 'Z') {
-				// invalid character reference character
-				break
+		{
+			for ; j < len(b) && j-i-1 <= MaxEntityLength && b[j] != ';'; j++ {
+				if !(b[j] >= '0' && b[j] <= '9' || b[j] >= 'a' && b[j] <= 'z' || b[j] >= 'A' && b[j] <= 'Z') {
+					// invalid character reference character
+					break
+				}
 			}
-		}
-		if len(b) <= j || j == i+1 || b[j] != ';' {
-			return b, i
-		}
+			if len(b) <= j || j == i+1 || b[j] != ';' {
+				return b, i
+			}
 
-		var ok bool
-		r, ok = entitiesMap[string(b[i+1:j])]
-		if !ok {
-			return b, j
+			var ok bool
+			r, ok = entitiesMap[string(b[i+1:j])]
+			if !ok {
+				return b, j
+			}
 		}
 	}
 
@@ -337,6 +345,7 @@ func replaceEntities(b []byte, i int, entitiesMap map[string][]byte, revEntities
 	n := j + 1 - i
 	if j < len(b) && b[j] == ';' && 2 < n {
 		if len(r) == 1 {
+
 			if q, ok := revEntitiesMap[r[0]]; ok {
 				if len(q) == len(b[i:j+1]) && bytes.Equal(q, b[i:j+1]) {
 					return b, j
@@ -349,6 +358,7 @@ func replaceEntities(b []byte, i int, entitiesMap map[string][]byte, revEntities
 					return b, k
 				}
 			}
+
 		}
 
 		copy(b[i:], r)

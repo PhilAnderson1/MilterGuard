@@ -45,9 +45,11 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 		}
 	} else {
 		if len(s.runtime.ancestorRecent) < ancestorCount {
+
 			if recent, ok := resourceguard.TryMakeSlice[ancestorStateEntry](s.memory, ancestorCount, ancestorCount); ok {
 				s.runtime.ancestorRecent = recent
 			}
+
 		}
 		if len(s.runtime.ancestorRecent) >= ancestorCount {
 			recent = &s.runtime.ancestorRecent[plan.ancestorCache]
@@ -59,39 +61,36 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 		if current.Type != html.ElementNode {
 			continue
 		}
-		if !budget.check() {
-			return false, false
-		}
+
+		budget.check()
+
 		if mapStates {
+
 			if state, cached := states[current]; cached {
 				parentState = state
 				break
 			}
+
 		} else if recent != nil && recent.node == current {
 			parentState = recent.state
 			break
 		}
-		var ok bool
-		nodes, ok = growSlice(nodes, 1, s.memory, s.shouldStop)
-		if !ok {
-			return false, false
-		}
+
+		nodes = growSlice(nodes, 1, s.memory, s.shouldStop)
+
 		nodes = append(nodes, current)
 	}
 	s.runtime.ancestorNodes = nodes
-	match := func(index int, node *html.Node) (bool, bool) {
-		if !budget.check() {
-			return false, false
-		}
+	match := func(index int, node *html.Node) bool {
+		budget.check()
+
 		return s.matchSelector(plan.ancestorChain[index], node)
 	}
 	for nodeIndex := len(nodes) - 1; nodeIndex >= 0; nodeIndex-- {
 		node := nodes[nodeIndex]
 		state := ancestorChainState{}
-		matched, complete := match(0, node)
-		if !complete {
-			return false, false
-		}
+		matched := match(0, node)
+
 		if matched {
 			state.matched = 1
 		}
@@ -102,10 +101,8 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 			if !eligible {
 				continue
 			}
-			matched, complete := match(compoundIndex, node)
-			if !complete {
-				return false, false
-			}
+			matched := match(compoundIndex, node)
+
 			if matched {
 				state.matched |= uint64(1) << compoundIndex
 			}
@@ -117,10 +114,8 @@ func (s *sheet) matchAncestorChain(plan *selectorPlan, n *html.Node, context sel
 		// admission never repeatedly scans attacker-controlled child lists.
 		// Tests and internal callers without prepared metadata cache
 		// conservatively; the shared cache-unit ceiling still bounds retention.
-		hasElementChild, complete := preparedHasElementChild(node, context.elements, budget)
-		if !complete {
-			return false, false
-		}
+		hasElementChild := preparedHasElementChild(node, context.elements, budget)
+
 		if hasElementChild {
 			if mapStates {
 				if len(s.runtime.ancestorStates) < ancestorCount {
@@ -187,19 +182,14 @@ func (s *sheet) buildSelectorIndex() {
 				bucket = 5
 			}
 			if bucket < 0 {
-				var ok bool
-				index.universal, ok = resourceguard.Append(s.memory, index.universal, s.shouldStop, ref)
-				if !ok {
-					s.abandonCascade()
-					return
-				}
+				index.universal = resourceguard.Append(s.memory, index.universal, s.shouldStop, ref)
 			} else {
-				table := &buckets[bucket]
-				refs, _ := table.Get(plan.key.value)
-				refs, ok := resourceguard.Append(s.memory, refs, s.shouldStop, ref)
-				if !ok || !table.Set(s.memory, plan.key.value, refs) {
-					s.abandonCascade()
-					return
+				{
+					table := &buckets[bucket]
+					refs, _ := table.Get(plan.key.value)
+					refs = resourceguard.Append(s.memory, refs, s.shouldStop, ref)
+
+					table.Set(s.memory, plan.key.value, refs)
 				}
 			}
 		}
@@ -237,25 +227,22 @@ func ruleHasEffectiveSelectorPlan(rule *rule) bool {
 	return false
 }
 
-func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *cpuGuard) (selectorAttributeCandidates, bool) {
+func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *cpuGuard) selectorAttributeCandidates {
 	var result selectorAttributeCandidates
 	needID := len(s.index.ids) != 0 || len(s.index.ancestorIDs) != 0
 	needClass := len(s.index.classes) != 0 || len(s.index.ancestorClasses) != 0
 	if len(node.Attr) == 0 || !needID && !needClass {
-		return result, true
+		return result
 	}
+
 	if cached, ok := s.runtime.attributeCandidates.View()[node]; ok {
-		return cached, true
+		return cached
 	}
-	if !budget.check() {
-		return result, false
-	}
+
+	budget.check()
+
 	if len(s.runtime.attributeMarks) < s.index.count {
-		var ok bool
-		s.runtime.attributeMarks, ok = resourceguard.MakeSlice[uint32](s.memory, s.index.count, s.index.count)
-		if !ok {
-			return result, false
-		}
+		s.runtime.attributeMarks = resourceguard.MakeSlice[uint32](s.memory, s.index.count, s.index.count)
 	}
 	s.runtime.attributeGeneration++
 	if s.runtime.attributeGeneration == 0 {
@@ -263,27 +250,27 @@ func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *cpuGuard) (se
 		s.runtime.attributeGeneration = 1
 	}
 	generation := s.runtime.attributeGeneration
-	appendBucket := func(out *[][]selectorRef, bucket []selectorRef) bool {
+	appendBucket := func(out *[][]selectorRef, bucket []selectorRef) {
 		if len(bucket) == 0 || s.runtime.attributeMarks[bucket[0].sequence] == generation {
-			return true
+			return
 		}
 		s.runtime.attributeMarks[bucket[0].sequence] = generation
-		grown, ok := growSlice(*out, 1, s.memory, s.shouldStop)
-		if !ok {
-			return false
-		}
+		grown := growSlice(*out, 1, s.memory, s.shouldStop)
+
 		*out = append(grown, bucket)
-		return true
+		return
 	}
-	appendIndexed := func(value string, direct, ancestor map[string][]selectorRef) bool {
-		return budget.check() && appendBucket(&result.direct, direct[value]) && appendBucket(&result.ancestor, ancestor[value])
+	appendIndexed := func(value string, direct, ancestor map[string][]selectorRef) {
+		budget.check()
+		appendBucket(&result.direct, direct[value])
+		appendBucket(&result.ancestor, ancestor[value])
+		return
 	}
 	var id, classes string
 	idSeen, classSeen := !needID, !needClass
 	for _, attribute := range node.Attr {
-		if !budget.check() {
-			return result, false
-		}
+		budget.check()
+
 		switch attribute.Key {
 		case "id":
 			if !idSeen {
@@ -298,67 +285,68 @@ func (s *sheet) attributeCandidateBuckets(node *html.Node, budget *cpuGuard) (se
 			break
 		}
 	}
-	if id != "" && !appendIndexed(id, s.index.ids, s.index.ancestorIDs) {
-		return result, false
+
+	if id != "" {
+		appendIndexed(id, s.index.ids, s.index.ancestorIDs)
 	}
+
 	for start := 0; start < len(classes); {
 		for start < len(classes) && isCSSSpace(classes[start]) {
-			if !budget.check() {
-				return result, false
-			}
+			budget.check()
+
 			start++
 		}
 		end := start
 		for end < len(classes) && !isCSSSpace(classes[end]) {
-			if !budget.check() {
-				return result, false
-			}
+			budget.check()
+
 			end++
 		}
-		if end > start && !appendIndexed(classes[start:end], s.index.classes, s.index.ancestorClasses) {
-			return result, false
+
+		if end > start {
+			appendIndexed(classes[start:end], s.index.classes, s.index.ancestorClasses)
 		}
+
 		start = end
 	}
 	// Negative entries only pay off when another viewing case or ancestor
 	// activation may reuse this lookup. Positive entries also avoid reallocation.
 	if len(result.direct)+len(result.ancestor) == 0 && !s.runtime.cacheMatches && !s.hasAncestorSelectorIndex() {
-		return result, true
+		return result
 	}
-	if !s.runtime.attributeCandidates.Set(s.memory, node, result) {
-		return result, false
-	}
-	return result, true
+
+	s.runtime.attributeCandidates.Set(s.memory, node, result)
+
+	return result
 }
 
 func (s *sheet) hasAncestorSelectorIndex() bool {
 	return len(s.index.ancestorTags) != 0 || len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0
 }
 
-func preparedHasElementChild(node *html.Node, elements map[*html.Node]elementPreparation, budget *cpuGuard) (bool, bool) {
+func preparedHasElementChild(node *html.Node, elements map[*html.Node]elementPreparation, budget *cpuGuard) bool {
 	if elements != nil {
-		return elements[node].hasElementChild, true
+		return elements[node].hasElementChild
 	}
 	// Package-level matcher tests can operate without a parsedDocument. Keep
 	// that path bounded too rather than reintroducing an uncharged child scan.
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
-		if !budget.check() {
-			return false, false
-		}
+		budget.check()
+
 		if child.Type == html.ElementNode {
-			return true, true
+			return true
 		}
 	}
-	return false, true
+	return false
 }
 
 // activateAncestorBuckets records the current element's ancestor-index keys
 // for its children. Attribute parsing is reused through the bounded cache,
 // avoiding a parent-pointer walk during candidate collection.
-func (s *sheet) activateAncestorBuckets(node *html.Node, budget *cpuGuard) (selectorAncestorActivation, bool) {
+func (s *sheet) activateAncestorBuckets(node *html.Node, budget *cpuGuard) selectorAncestorActivation {
 	var activation selectorAncestorActivation
 	if !s.runtime.activeAncestors.enabled || !s.hasAncestorSelectorIndex() {
-		return activation, true
+		return activation
 	}
 	tag := node.Data
 	if node.Namespace != "" {
@@ -366,17 +354,15 @@ func (s *sheet) activateAncestorBuckets(node *html.Node, budget *cpuGuard) (sele
 	}
 	activation.tag = s.index.ancestorTags[tag]
 	if len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
-		attributes, complete := s.attributeCandidateBuckets(node, budget)
-		if !complete {
-			return selectorAncestorActivation{}, false
-		}
+		attributes := s.attributeCandidateBuckets(node, budget)
+
 		activation.attributes = attributes.ancestor
 	}
 	s.runtime.activeAncestors.add(activation.tag)
 	for _, bucket := range activation.attributes {
 		s.runtime.activeAncestors.add(bucket)
 	}
-	return activation, true
+	return activation
 }
 
 func (s *sheet) deactivateAncestorBuckets(activation selectorAncestorActivation) {
@@ -393,16 +379,12 @@ func (s *sheet) deactivateAncestorBuckets(activation selectorAncestorActivation)
 // selector plan belongs to exactly one bucket, so the first reference also
 // serves as that bucket's stable identity. Marking before append prevents a
 // repeated ancestor key from expanding the same bucket at every tree level.
-func (s *sheet) collectCandidates(n *html.Node, budget *cpuGuard) ([]selectorRef, bool) {
+func (s *sheet) collectCandidates(n *html.Node, budget *cpuGuard) []selectorRef {
 	if s.index.count == 0 {
-		return nil, true
+		return nil
 	}
 	if len(s.runtime.candidateMarks) < s.index.count {
-		var ok bool
-		s.runtime.candidateMarks, ok = resourceguard.MakeSlice[uint32](s.memory, s.index.count, s.index.count)
-		if !ok {
-			return nil, false
-		}
+		s.runtime.candidateMarks = resourceguard.MakeSlice[uint32](s.memory, s.index.count, s.index.count)
 	}
 	s.runtime.candidateGeneration++
 	if s.runtime.candidateGeneration == 0 {
@@ -411,54 +393,43 @@ func (s *sheet) collectCandidates(n *html.Node, budget *cpuGuard) ([]selectorRef
 	}
 	generation := s.runtime.candidateGeneration
 	refs := s.runtime.candidateScratch[:0]
-	appendBucket := func(bucket []selectorRef) bool {
+	appendBucket := func(bucket []selectorRef) {
 		if len(bucket) == 0 || s.runtime.candidateMarks[bucket[0].sequence] == generation {
-			return true
+			return
 		}
-		if budget != nil && !budget.check() {
-			return false
+
+		if budget != nil {
+			budget.check()
 		}
+
 		s.runtime.candidateMarks[bucket[0].sequence] = generation
-		var ok bool
-		refs, ok = growSlice(refs, len(bucket), s.memory, s.shouldStop)
-		if !ok {
-			return false
-		}
+		refs = growSlice(refs, len(bucket), s.memory, s.shouldStop)
+
 		for _, ref := range bucket {
-			if !budget.check() {
-				return false
-			}
+			budget.check()
+
 			refs = append(refs, ref)
 		}
-		return true
+		return
 	}
 	tag := n.Data
 	if n.Namespace != "" {
 		tag = asciiLowerWithBudget(tag, budget)
 	}
-	if !appendBucket(s.index.universal) || !appendBucket(s.index.tags[tag]) {
-		s.runtime.candidateScratch = refs
-		return nil, false
-	}
+
+	appendBucket(s.index.universal)
+	appendBucket(s.index.tags[tag])
+
 	if len(s.index.ids) != 0 || len(s.index.classes) != 0 {
-		attributes, complete := s.attributeCandidateBuckets(n, budget)
-		if !complete {
-			s.runtime.candidateScratch = refs
-			return nil, false
-		}
+		attributes := s.attributeCandidateBuckets(n, budget)
+
 		for _, bucket := range attributes.direct {
-			if !appendBucket(bucket) {
-				s.runtime.candidateScratch = refs
-				return nil, false
-			}
+			appendBucket(bucket)
 		}
 	}
 	if s.runtime.activeAncestors.enabled {
 		for _, bucket := range s.runtime.activeAncestors.buckets {
-			if !appendBucket(bucket) {
-				s.runtime.candidateScratch = refs
-				return nil, false
-			}
+			appendBucket(bucket)
 		}
 	} else if s.hasAncestorSelectorIndex() {
 		for ancestor := n.Parent; ancestor != nil; ancestor = ancestor.Parent {
@@ -469,30 +440,24 @@ func (s *sheet) collectCandidates(n *html.Node, budget *cpuGuard) ([]selectorRef
 			if ancestor.Namespace != "" {
 				ancestorTag = asciiLowerWithBudget(ancestorTag, budget)
 			}
-			if !appendBucket(s.index.ancestorTags[ancestorTag]) {
-				s.runtime.candidateScratch = refs
-				return nil, false
-			}
+
+			appendBucket(s.index.ancestorTags[ancestorTag])
+
 			if len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
-				attributes, complete := s.attributeCandidateBuckets(ancestor, budget)
-				if !complete {
-					s.runtime.candidateScratch = refs
-					return nil, false
-				}
+				attributes := s.attributeCandidateBuckets(ancestor, budget)
+
 				for _, bucket := range attributes.ancestor {
-					if !appendBucket(bucket) {
-						s.runtime.candidateScratch = refs
-						return nil, false
-					}
+					appendBucket(bucket)
 				}
 			}
 		}
 	}
+
 	// No sort is required: candidate.beats compares declaration importance,
 	// inline origin, specificity and source order explicitly. Keeping discovery
 	// order avoids an O(n log n) phase without changing cascade results.
 	s.runtime.candidateScratch = refs
-	return refs, true
+	return refs
 }
 
 func isCSSSpace(c byte) bool {

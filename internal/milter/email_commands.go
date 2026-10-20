@@ -14,6 +14,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 	"github.com/PhilAnderson1/MilterGuard/internal/threadcpu"
 )
 
@@ -202,9 +203,13 @@ func (e *commandBodyProcessingError) Error() string { return e.reason }
 func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Message, maxBytes, memoryBytes int64, maxCPUMilliseconds int, clock func() (time.Duration, bool)) ([]string, error) {
 	control := message.HTMLProcessingControl{MemoryBytes: memoryBytes}
 	if maxCPUMilliseconds <= 0 {
-		stopped := func() bool { return ctx.Err() != nil }
-		control.ShouldFallback = stopped
-		control.FallbackShouldStop = stopped
+		check := func() {
+			if ctx.Err() != nil {
+				termination.Fail(termination.Failure{Code: termination.Cancelled})
+			}
+		}
+		control.CheckPrimary = check
+		control.CheckFallback = check
 		lines, err := commandMessageLinesWithHTMLControl(m, maxBytes, control)
 		if ctx.Err() != nil {
 			return nil, &commandBodyProcessingError{reason: "command body processing was interrupted"}
@@ -242,8 +247,18 @@ func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Messa
 		}
 		return exceeded
 	}
-	control.ShouldFallback = shouldStop
-	control.FallbackShouldStop = shouldStop
+	check := func() {
+		if shouldStop() {
+			code := termination.CPUExceeded
+			if interrupted || clockFailed {
+				code = termination.Cancelled
+			}
+			termination.Fail(termination.Failure{Code: code})
+		}
+	}
+	control.CheckPrimary = check
+	control.CheckFallback = check
+	control.BeginFallback = func() bool { return !interrupted && !clockFailed && !exceeded }
 	lines, err := commandMessageLinesWithHTMLControl(m, maxBytes, control)
 	shouldStop() // Catch a limit crossed after the final extraction checkpoint.
 	switch {

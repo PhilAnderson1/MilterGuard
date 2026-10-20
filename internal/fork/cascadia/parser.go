@@ -77,8 +77,8 @@ func (p *parser) parseEscape() (result string, err error) {
 		p.i = i
 		var encoded [4]byte
 		n := utf8.EncodeRune(encoded[:], rune(v))
-		text, ok := resourceguard.CopyString(p.memory, encoded[:n], nil)
-		requireSelectorStorage(ok)
+		text := resourceguard.CopyString(p.memory, encoded[:n], nil)
+
 		return text, nil
 	}
 
@@ -89,7 +89,7 @@ func (p *parser) parseEscape() (result string, err error) {
 }
 
 // toLowerASCII is retained for unguarded package callers and tests.
-func toLowerASCII(s string) string { out, _ := resourceguard.LowerASCII(nil, s, nil); return out }
+func toLowerASCII(s string) string { out := resourceguard.LowerASCII(nil, s, nil); return out }
 
 func hexDigit(c byte) bool {
 	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
@@ -129,7 +129,8 @@ func (p *parser) parseIdentifier() (result string, err error) {
 	result, err = p.parseName()
 	if numPrefix > 0 && err == nil {
 		var b strings.Builder
-		requireSelectorStorage(resourceguard.GrowText(p.memory, &b, numPrefix+len(result), nil))
+		resourceguard.GrowText(p.memory, &b, numPrefix+len(result), nil)
+
 		for range numPrefix {
 			b.WriteByte(prefix)
 		}
@@ -721,8 +722,11 @@ func (p *parser) parseSimpleSelectorSequence() (Sel, error) {
 	}
 	switch p.s[p.i] {
 	case '*':
-		if err := p.takeComponent(); err != nil {
-			return nil, err
+		{
+			err := p.takeComponent()
+			if err != nil {
+				return nil, err
+			}
 		}
 		// It's the universal selector. Just skip over it, since it doesn't affect the meaning.
 		p.i++
@@ -732,8 +736,11 @@ func (p *parser) parseSimpleSelectorSequence() (Sel, error) {
 	case '#', '.', '[', ':':
 		// There's no type selector. Wait to process the other till the main loop.
 	default:
-		if err := p.takeComponent(); err != nil {
-			return nil, err
+		{
+			err := p.takeComponent()
+			if err != nil {
+				return nil, err
+			}
 		}
 		r, err := p.parseTypeSelector()
 		if err != nil {
@@ -807,7 +814,6 @@ loop:
 			}
 			selectors = selectorAppend(p.memory, selectors, ns)
 		}
-
 	}
 	if len(selectors) == 1 && pseudoElement == "" { // no need wrap the selectors in compoundSelector
 		return selectors[0], nil
@@ -886,16 +892,16 @@ func (p *parser) parseSelectorGroup() (SelectorGroup, error) {
 }
 
 func (p *parser) writeString(b *strings.Builder, text string) {
-	requireSelectorStorage(resourceguard.WriteString(p.memory, b, text, nil))
+	resourceguard.WriteString(p.memory, b, text, nil)
 }
 func (p *parser) concat(left, right string) string {
-	s, ok := resourceguard.Concat(p.memory, left, right, nil)
-	requireSelectorStorage(ok)
+	s := resourceguard.Concat(p.memory, left, right, nil)
+
 	return s
 }
 func (p *parser) lowerASCII(s string) string {
-	out, ok := resourceguard.LowerASCII(p.memory, s, nil)
-	requireSelectorStorage(ok)
+	out := resourceguard.LowerASCII(p.memory, s, nil)
+
 	return out
 }
 
@@ -914,7 +920,8 @@ func (p *parser) lowerUnicode(s string) string {
 		return s
 	}
 	var b strings.Builder
-	requireSelectorStorage(resourceguard.GrowText(p.memory, &b, size, nil))
+	resourceguard.GrowText(p.memory, &b, size, nil)
+
 	for _, r := range s {
 		b.WriteRune(unicode.ToLower(r))
 	}

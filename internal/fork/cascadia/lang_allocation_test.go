@@ -1,6 +1,7 @@
 package cascadia
 
 import (
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 	"strings"
 	"testing"
 
@@ -37,12 +38,10 @@ func TestLanguageLowercaseAccounting(t *testing.T) {
 			}
 			if charged > 0 {
 				p.memory = resourceguard.NewMemory(charged - 1)
-				defer func() {
-					if _, ok := recover().(allocationAbort); !ok || !p.memory.Exhausted() {
-						t.Fatal("missing allocation admission failure")
-					}
-				}()
-				p.lowerUnicode(source)
+				expectTermination(t, termination.MemoryExceeded, func() { p.lowerUnicode(source) })
+				if !p.memory.Exhausted() {
+					t.Fatal("missing exhaustion")
+				}
 			}
 		})
 	}
@@ -54,9 +53,7 @@ func TestLanguageSelectorAdmitsLowercaseCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	baseline := memory.Used()
-	if _, err := ParseGroupWithMemory(":lang(EN-US)", resourceguard.NewMemory(baseline)); err != errSelectorMemory {
-		t.Fatalf("missing lowercase admission: %v", err)
-	}
+	expectTermination(t, termination.MemoryExceeded, func() { ParseGroupWithMemory(":lang(EN-US)", resourceguard.NewMemory(baseline)) })
 	memory = resourceguard.NewMemory(baseline + 8)
 	group, err := ParseGroupWithMemory(":lang(EN-US)", memory)
 	if err != nil || len(group) != 1 || group[0].String() != ":lang(en-us)" || memory.Used() != baseline+8 {

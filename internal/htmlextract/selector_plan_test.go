@@ -1,5 +1,7 @@
 package htmlextract
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"reflect"
 	"strings"
@@ -55,16 +57,16 @@ func TestAncestorChainBeyondBitsetCapacityIsUncertain(t *testing.T) {
 func TestPreparedMathDeclarationUsesCPUControl(t *testing.T) {
 	value := `calc(1px + 1px)`
 	tokens, status := lexValue(value, nil)
-	guard := &cpuGuard{shouldStop: func() bool { return true }}
-	prepared := prepareDeclaration(declaration{
-		prop: fontSize, value: value, valueTokens: tokens, valueStatus: status, tokensReady: true,
-	}, guard)
-	if !guard.stopped {
-		t.Fatal("math declaration validation did not sample the CPU control")
-	}
-	if !prepared.validityReady || prepared.validity != valueUnsupported {
-		t.Fatalf("stopped declaration validity = (%d, %t), want unsupported", prepared.validity, prepared.validityReady)
-	}
+	guard := testCPUGuard(cpuGuard{shouldStop: func() {
+		{
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
+	}})
+	expectTermination(t, termination.CPUExceeded, func() {
+		prepareDeclaration(declaration{prop: fontSize, value: value, valueTokens: tokens, valueStatus: status, tokensReady: true}, guard)
+	})
 }
 
 func TestUncertainSelectorScopePreservesFinalSiblingCombinator(t *testing.T) {
@@ -293,25 +295,19 @@ func TestActiveAncestorCandidatesMatchParentWalk(t *testing.T) {
 	walk = func(node *html.Node) {
 		if node.Type == html.ElementNode {
 			active.enabled = false
-			walked, complete := s.collectCandidates(node, nil)
+			walked := s.collectCandidates(node, nil)
 			walked = append([]selectorRef(nil), walked...)
 			active.enabled = true
-			if !complete {
-				t.Fatal("parent-walk candidate collection failed")
-			}
-			indexed, complete := s.collectCandidates(node, nil)
+
+			indexed := s.collectCandidates(node, nil)
 			indexed = append([]selectorRef(nil), indexed...)
-			if !complete || !reflect.DeepEqual(refSet(indexed), refSet(walked)) {
-				t.Fatalf("candidate mismatch for <%s>: active=%v walked=%v complete=%t", node.Data, refSet(indexed), refSet(walked), complete)
+			if !reflect.DeepEqual(refSet(indexed), refSet(walked)) {
+				t.Fatalf("candidate mismatch for <%s>: active=%v walked=%v complete=%t", node.Data, refSet(indexed), refSet(walked), true)
 			}
 		}
 		var activation selectorAncestorActivation
 		if node.Type == html.ElementNode && node.FirstChild != nil {
-			var complete bool
-			activation, complete = s.activateAncestorBuckets(node, nil)
-			if !complete {
-				t.Fatalf("cannot activate <%s>", node.Data)
-			}
+			activation = s.activateAncestorBuckets(node, nil)
 		}
 		for child := node.FirstChild; child != nil; child = child.NextSibling {
 			walk(child)
@@ -363,8 +359,15 @@ func TestOversizedFallbackKeepsUncertainty(t *testing.T) {
 func TestSelectorPlanningStopsInsideBranch(t *testing.T) {
 	calls := 0
 	sequence := 0
-	plans, branches, exceeded, stopped := planSelectorListWithStop(strings.Repeat("a", 20000), &sequence, nil, maxSelectorBranches, func() bool { calls++; return calls == 2 })
-	if len(plans) != 0 || branches != 0 || exceeded || !stopped || calls != 2 {
-		t.Fatalf("%d %d %v %d", len(plans), branches, exceeded, calls)
+	expectTermination(t, termination.CPUExceeded, func() {
+		planSelectorListWithStop(strings.Repeat("a", 20000), &sequence, nil, maxSelectorBranches, func() {
+			calls++
+			if calls == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+		})
+	})
+	if calls != 2 || sequence != 0 {
+		t.Fatalf("calls=%d sequence=%d", calls, sequence)
 	}
 }

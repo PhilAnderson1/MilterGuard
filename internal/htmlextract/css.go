@@ -87,22 +87,15 @@ func (d *declaration) recordVariableDependencies(budget *cpuGuard) {
 	if !d.hasVars || !d.tokensReady || d.valueStatus != valueResolved {
 		return
 	}
-	var ok bool
-	d.variableBlocks, ok = indexValueBlocks(d.valueTokens, budget)
-	if !ok {
-		return
-	}
+	d.variableBlocks = indexValueBlocks(d.valueTokens, budget)
+
 	d.variableDependencies = variableRefs(d.valueTokens, budget)
 	d.dependenciesReady = true
 }
 
 func (d *declaration) setPrepared(value Value, status valueStatus, budget *cpuGuard) {
-	var ok bool
-	d.prepared, ok = resourceguard.New(budget.allocationMemory(), preparedDeclaration{value: value, status: status})
-	if !ok {
-		d.discardTransientState()
-		return
-	}
+	d.prepared = resourceguard.New(budget.allocationMemory(), preparedDeclaration{value: value, status: status})
+
 	d.validity = status
 	d.validityReady = true
 	// The prepared value is the complete runtime representation. Keeping the
@@ -130,7 +123,7 @@ func (d *declaration) discardTransientState() {
 // element's inherited/root style. Variables and shorthands are handled by the
 // caller because their substituted value may change this answer.
 func contextualDeclaration(d declaration, budget *cpuGuard) bool {
-	value, _ := normalizeCSSKeywordWithBudget(d.value, budget)
+	value := normalizeCSSKeywordWithBudget(d.value, budget)
 	if value == "inherit" || value == "unset" {
 		return true
 	}
@@ -163,7 +156,7 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 		d.hasVars = hasVariablesWithBudget(d.value, budget)
 	}
 	if d.custom != "" {
-		d.keyword, _ = normalizeCSSKeywordWithBudget(d.value, budget)
+		d.keyword = normalizeCSSKeywordWithBudget(d.value, budget)
 	}
 	if (d.custom != "" || d.hasVars) && !d.tokensReady {
 		d.ensureTokens(budget)
@@ -172,9 +165,9 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 	if d.prop == animationProperty && d.custom == "" {
 		// Cache context-independent name parsing, including escaped identifiers
 		// that the conservative hasVars fast path initially treated as dynamic.
-		if !d.hasVars || (d.tokensReady && !tokensHaveVariables(d.valueTokens)) {
+		if !d.hasVars || d.tokensReady && !tokensHaveVariables(d.valueTokens) {
 			value := parseAnimationValue(d.value, d.animationShorthand, budget)
-			d.animation, _ = resourceguard.New(budget.allocationMemory(), value)
+			d.animation = resourceguard.New(budget.allocationMemory(), value)
 		}
 		return d
 	}
@@ -188,7 +181,7 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 		}
 		d.setPrepared(prepared.value, prepared.status, budget)
 	} else if d.custom == "" && !d.hasVars && !d.shorthand && !d.unsupported {
-		value, _ := normalizeCSSKeywordWithBudget(d.value, budget)
+		value := normalizeCSSKeywordWithBudget(d.value, budget)
 		if (d.prop == fontSize || d.prop == opacity) && isMath(value) && d.tokensReady && d.valueStatus == valueResolved {
 			d.mathLiterals = prepareMathLiterals(d.valueTokens, budget)
 			_, d.validity = evalPreparedMathTokens(d.prop, value, d.valueTokens, d.mathLiterals, &initialStyle, &initialStyle, budget)
@@ -197,6 +190,7 @@ func prepareDeclaration(d declaration, budget *cpuGuard) declaration {
 		}
 		d.setValidity(d.validity)
 	}
+
 	return d
 }
 
@@ -208,10 +202,8 @@ func prepareDeclarations(ds []declaration, budget *cpuGuard) []declaration {
 }
 
 func (s *sheet) prepareDeclaration(d declaration) declaration {
-	if !s.checkCPU() {
-		d.discardTransientState()
-		return d
-	}
+	s.checkCPU()
+
 	d = prepareDeclaration(d, s.cpu)
 	return d
 }
@@ -269,41 +261,35 @@ type sheet struct {
 	unsupportedNesting   bool
 	unsupportedColours   int
 	runtime              sheetRuntime
-	shouldStop           func() bool
+	shouldStop           func()
 	selectorControl      *cascadia.MatchControl
 	cpu                  *cpuGuard
 	memory               *resourceguard.Memory
-	stopped              bool
 }
 
 // admitCSS applies the cumulative source and work bounds. Per-construct and
 // stack limits are enforced where the local CSS parser grows those resources.
 func (s *sheet) admitCSS(text string) bool {
-	if s.cascadeIncomplete || s.stopped {
+	if s.cascadeIncomplete {
 		return false
 	}
 	if len(text) > s.limits.CSSBytes || s.cssBytes > s.limits.CSSBytes-len(text) {
 		s.abandonCascade()
 		return false
 	}
+
 	// Sample before entering the parser; its loops and declaration processing
 	// continue sampling the shared cooperative stop callback.
-	if !s.checkCPU() {
-		return false
-	}
+	s.checkCPU()
+
 	s.cssBytes += len(text)
 	return true
 }
 
-func (s *sheet) checkCPU() bool {
-	if s.stopped {
-		return false
+func (s *sheet) checkCPU() {
+	if s.cpu != nil {
+		s.cpu.check()
 	}
-	if s.cpu != nil && !s.cpu.check() {
-		s.stopped = true
-		return false
-	}
-	return true
 }
 
 func (s *sheet) abandonCascade() {
@@ -395,7 +381,7 @@ func (s *sheet) invalidateMediaCache() {
 
 func tokenString(v []css.Token) string { return tokenStringWithBudget(v, nil) }
 func tokenStringWithBudget(v []css.Token, budget *cpuGuard) string {
-	value, _ := trimCSSWhitespaceWithBudget(rawTokenStringWithBudget(v, budget), budget)
+	value := trimCSSWhitespaceWithBudget(rawTokenStringWithBudget(v, budget), budget)
 	return value
 }
 
@@ -405,18 +391,17 @@ func rawTokenStringWithBudget(v []css.Token, budget *cpuGuard) string {
 	var b strings.Builder
 	size := 0
 	for _, t := range v {
-		if !budget.check() {
-			return ""
-		}
+		budget.check()
+
 		size += len(t.Data)
 	}
-	if !growBuilder(&b, size, budget) {
-		return ""
-	}
+
+	growBuilder(&b, size, budget)
+
 	for _, t := range v {
-		if !budget.check() || !writeBudgetedBytes(&b, t.Data, budget) {
-			return ""
-		}
+		budget.check()
+
+		writeBudgetedBytes(&b, t.Data, budget)
 	}
 	return b.String()
 }
@@ -441,25 +426,19 @@ func cssUnescape(value string) string { return cssUnescapeWithBudget(value, nil)
 // replacement rune, so 3/2 of the input length bounds the decoded UTF-8 size.
 func cssUnescapeWithBudget(value string, budget *cpuGuard) string {
 	if indexByteWithBudget(value, '\\', budget) < 0 {
-		if budget.stopNow(false) {
-			return ""
-		}
 		return value
 	}
-	if budget.stopNow(false) {
-		return ""
-	}
+
 	capacity := len(value) + len(value)/2
 	var out strings.Builder
-	if !growBuilder(&out, capacity, budget) {
-		return ""
-	}
+
+	growBuilder(&out, capacity, budget)
+
 	sampled := 0
 	for i := 0; i < len(value); {
 		if i-sampled >= stringWorkChunk {
-			if budget.stopNow(true) {
-				return ""
-			}
+			budget.checkpoint()
+
 			sampled = i
 		}
 		if value[i] != '\\' || i+1 == len(value) {
@@ -480,7 +459,7 @@ func cssUnescapeWithBudget(value string, budget *cpuGuard) string {
 			continue
 		}
 		start := i
-		for i < len(value) && i-start < 6 && ((value[i] >= '0' && value[i] <= '9') || (value[i] >= 'a' && value[i] <= 'f') || (value[i] >= 'A' && value[i] <= 'F')) {
+		for i < len(value) && i-start < 6 && (value[i] >= '0' && value[i] <= '9' || value[i] >= 'a' && value[i] <= 'f' || value[i] >= 'A' && value[i] <= 'F') {
 			i++
 		}
 		if i > start {
@@ -595,24 +574,22 @@ func parseUnretainedCSSTokensWithBudget(ts []css.Token, fallback string, budget 
 		endByte += len(ts[i].Data)
 		hasComment = hasComment || ts[i].TokenType == css.CommentToken
 	}
-	// Building the owned text can fail on memory exhaustion or cancellation.
-	// Reject missing text before applying offsets from the original tokens.
+	// Reject inconsistent token/source bounds before slicing. Resource failures
+	// unwind before this function receives the owned source.
 	if endByte > len(fallback) {
 		return parsedDeclarationValue{status: valueUnsupported}
 	}
 	text := fallback[startByte:endByte]
 	if hasComment {
 		var out strings.Builder
-		if !growBuilder(&out, endByte-startByte, budget) {
-			return parsedDeclarationValue{status: valueUnsupported}
-		}
+
+		growBuilder(&out, endByte-startByte, budget)
+
 		for i := start; i < end; i++ {
 			if ts[i].TokenType == css.CommentToken {
 				out.WriteByte(' ')
 			} else {
-				if !writeBudgetedBytes(&out, ts[i].Data, budget) {
-					return parsedDeclarationValue{status: valueUnsupported}
-				}
+				writeBudgetedBytes(&out, ts[i].Data, budget)
 			}
 		}
 		text = out.String()
@@ -661,17 +638,15 @@ func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string
 	originalTokens := ts
 	preparedTokens := ts[:0]
 	for i := start; i < end; i++ {
-		if !budget.check() {
-			return parsedDeclarationValue{status: valueUnsupported}
-		}
+		budget.check()
+
 		t := ts[i]
 		hasFunction = hasFunction || t.kind == css.FunctionToken
 		if t.kind == css.CommentToken {
 			// Keep tokens on either side of a comment from being accidentally
 			// joined into a different token.
-			if !writeBudgetedString(&out, " ", budget) {
-				return parsedDeclarationValue{status: valueUnsupported}
-			}
+			writeBudgetedString(&out, " ", budget)
+
 			preparedTokens = append(preparedTokens, valueToken{kind: css.WhitespaceToken, raw: " "})
 			continue
 		}
@@ -686,9 +661,9 @@ func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string
 				unsafe = true
 			}
 		}
-		if !writeBudgetedString(&out, raw, budget) {
-			return parsedDeclarationValue{status: valueUnsupported}
-		}
+
+		writeBudgetedString(&out, raw, budget)
+
 		preparedTokens = append(preparedTokens, valueToken{kind: t.kind, raw: raw})
 	}
 	clear(originalTokens[len(preparedTokens):])
@@ -709,10 +684,8 @@ func (s *sheet) declarations(prop, value string) []declaration {
 }
 
 func ownedValueTokens(values []css.Token, raw string, budget *cpuGuard) ([]valueToken, valueStatus) {
-	tokens, ok := resourceguard.MakeSlice[valueToken](budget.allocationMemory(), 0, len(values))
-	if !ok {
-		return nil, valueUnsupported
-	}
+	tokens := resourceguard.MakeSlice[valueToken](budget.allocationMemory(), 0, len(values))
+
 	offset := 0
 	for _, token := range values {
 		next := offset + len(token.Data)
@@ -798,7 +771,7 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	imp := parsed.important
 	custom := strings.HasPrefix(prop, "--")
 	s.unsupportedColours += parsed.unsupportedColours
-	if custom && (parsed.status == valueInvalid || (parsed.status == valueResolved && !validVariableFunctions(parsed.tokens, s.cpu))) {
+	if custom && (parsed.status == valueInvalid || parsed.status == valueResolved && !validVariableFunctions(parsed.tokens, s.cpu)) {
 		return nil
 	}
 	prepared := func(d declaration) declaration {
@@ -850,10 +823,8 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 			}
 		}
 		properties := propertyList[:count]
-		out, ok := resourceguard.MakeSlice[declaration](s.memory, 0, len(properties))
-		if !ok {
-			return nil
-		}
+		out := resourceguard.MakeSlice[declaration](s.memory, 0, len(properties))
+
 		hasVariables := tokensHaveVariables(parsed.tokens)
 		for i, property := range properties {
 			if hasVariables {
@@ -877,10 +848,8 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 			return nil
 		}
 		properties := [...]int{overflowX, overflowY}
-		out, ok := resourceguard.MakeSlice[declaration](s.memory, 0, len(properties))
-		if !ok {
-			return nil
-		}
+		out := resourceguard.MakeSlice[declaration](s.memory, 0, len(properties))
+
 		for i, property := range properties {
 			d := declaration{
 				prop: property, value: value, important: imp, order: s.order, shorthand: true,
@@ -916,18 +885,16 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 		affected = []int{fontSize}
 	case "all":
 		if !tokensHaveVariables(parsed.tokens) {
-			keyword, ok := normalizeCSSKeywordWithBudget(value, s.cpu)
-			if ok && keyword != "initial" && keyword != "inherit" && keyword != "unset" && keyword != "revert" && keyword != "revert-layer" {
+			keyword := normalizeCSSKeywordWithBudget(value, s.cpu)
+			if keyword != "initial" && keyword != "inherit" && keyword != "unset" && keyword != "revert" && keyword != "revert-layer" {
 				return nil
 			}
 		}
 		return declarationList(s.cpu, prepared(declaration{prop: allShorthandProperty, value: value, important: imp, order: s.order, unsupported: true}))
 	}
 	if len(affected) > 0 {
-		out, ok := resourceguard.MakeSlice[declaration](s.memory, 0, len(affected))
-		if !ok {
-			return nil
-		}
+		out := resourceguard.MakeSlice[declaration](s.memory, 0, len(affected))
+
 		for _, p := range affected {
 			out = append(out, prepared(declaration{prop: p, value: value, important: imp, order: s.order, unsupported: true}))
 		}
@@ -1005,12 +972,14 @@ func marginShorthandValuesWithBudget(value string, budget *cpuGuard) ([4]string,
 		// CSS keywords and unit identifiers are ASCII case-insensitive. Normalize
 		// before this shorthand-specific validation, which runs earlier than the
 		// ordinary declaration resolver's normalization.
-		component, _ = normalizeCSSKeywordWithBudget(component, budget)
+		component = normalizeCSSKeywordWithBudget(component, budget)
 		out[i] = component
 		property := [...]int{marginTop, marginRight, marginBottom, marginLeft}[i]
+
 		if _, status := resolveLayoutPropertyWithBudget(property, component, budget); status == valueInvalid {
 			return [4]string{}, false, false
 		}
+
 	}
 	return out, true, false
 }
@@ -1090,10 +1059,8 @@ func (s *sheet) attachMediaCondition(firstRule int, media string) {
 				s.abandonCascade()
 				return
 			}
-			if !frames.Set(s.memory, parent, frame) {
-				s.abandonCascade()
-				return
-			}
+
+			frames.Set(s.memory, parent, frame)
 		}
 		s.rules[i].conditions = frame
 	}

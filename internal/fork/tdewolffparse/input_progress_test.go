@@ -1,7 +1,7 @@
 package parse
 
 import (
-	"errors"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 	"strings"
 	"testing"
 )
@@ -17,9 +17,9 @@ func TestProgressCountsRereads(t *testing.T) {
 	} {
 		t.Run(rewind.name, func(t *testing.T) {
 			z := NewInputString(strings.Repeat("a", 2048))
-			stopped := errors.New("stopped")
+			var failure termination.Failure
 			calls := 0
-			z.SetProgressCheck(func() error { calls++; return stopped })
+			z.SetProgressCheck(func() { calls++; termination.Fail(termination.Failure{Code: termination.Cancelled}) })
 			// Repeated short speculative scans never reach position 1024.
 			for i := 0; i < 3; i++ {
 				z.Move(256)
@@ -29,14 +29,13 @@ func TestProgressCountsRereads(t *testing.T) {
 			if calls != 0 {
 				t.Fatalf("premature checkpoint: %d calls", calls)
 			}
-			z.Move(1)
-			if calls != 1 || z.Err() != stopped || z.Peek(0) != 0 {
-				t.Fatalf("calls=%d err=%v", calls, z.Err())
-			}
-			z.SetProgressCheck(func() error { t.Fatal("called after stop"); return nil })
-			z.Move(1024)
-			if z.Err() != stopped {
-				t.Fatalf("lost stop error: %v", z.Err())
+			func() {
+				defer termination.Recover(&failure)
+				z.Move(1)
+				t.Fatal("checkpoint returned after cancellation")
+			}()
+			if calls != 1 || failure.Code != termination.Cancelled {
+				t.Fatalf("calls=%d failure=%+v", calls, failure)
 			}
 		})
 	}
@@ -47,7 +46,7 @@ func TestProgressCountsRuneBytes(t *testing.T) {
 		t.Run(runeText, func(t *testing.T) {
 			z := NewInputString(strings.Repeat(runeText, 2048))
 			calls := 0
-			z.SetProgressCheck(func() error { calls++; return nil })
+			z.SetProgressCheck(func() { calls++ })
 			for z.Offset()+len(runeText) < 1024 {
 				z.MoveRune()
 			}

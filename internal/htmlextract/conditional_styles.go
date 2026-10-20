@@ -2,7 +2,6 @@ package htmlextract
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"strings"
 
@@ -14,11 +13,10 @@ import (
 // Microsoft Office conditional comment. These rules apply only in some mail
 // clients, so their origin is always uncertain.
 func (s *sheet) parseMSOConditionalStyles(data string) {
-	if !s.checkCPU() {
-		return
-	}
+	s.checkCPU()
+
 	fragment, ok := msoConditionalFragmentWithBudget(data, s.cpu)
-	if !ok || s.cascadeIncomplete || s.stopped {
+	if !ok || s.cascadeIncomplete {
 		return
 	}
 	// Most MSO comments contain alternate table markup rather than CSS. Avoid
@@ -26,11 +24,11 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 	if !containsASCIIFoldWithBudget(fragment, "<style", s.cpu) {
 		return
 	}
+
 	// Tokenizing the conditional markup is work in addition to parsing any CSS
 	// it contains. Sample before starting; the tokenizer samples during its scan.
-	if !s.checkCPU() {
-		return
-	}
+	s.checkCPU()
+
 	z := html.NewTokenizerWithLimits(strings.NewReader(fragment), html.ResourceLimits{ShouldStop: s.shouldStop, Memory: s.memory})
 	var style []byte
 	var styleNode html.Node
@@ -45,22 +43,15 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 			return true
 		}
 		text := ownedString(style, s.resourceBudget())
-		if s.memory.Exhausted() {
-			s.abandonCascade()
-			return false
-		}
+
 		s.parseStylesheet(text, attr(&styleNode, "media"), uncertainStylesheetOrigin)
 		style = style[:0]
-		return !s.cascadeIncomplete && !s.stopped
+		return !s.cascadeIncomplete
 	}
 	for {
 		tokenType := z.Next()
 		switch tokenType {
 		case html.ErrorToken:
-			if errors.Is(z.Err(), html.ErrResourceStopped) {
-				s.stopped = true
-				return
-			}
 			if z.Err() != nil && z.Err() != io.EOF {
 				s.abandonCascade()
 				return
@@ -75,10 +66,9 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 			styleNode = html.Node{Type: html.ElementNode, Data: "style"}
 			for hasAttributes {
 				key, value, more := z.TagAttr()
-				if !retainConditionalStyleAttribute(&styleNode, key, value, s.memory, s.shouldStop) {
-					s.abandonCascade()
-					return
-				}
+
+				retainConditionalStyleAttribute(&styleNode, key, value, s.memory, s.shouldStop)
+
 				hasAttributes = more
 			}
 			inStyle = true
@@ -92,12 +82,8 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 				s.abandonCascade()
 				return
 			}
-			var admitted bool
-			style, admitted = growSlice(style, len(raw), s.memory, s.shouldStop)
-			if !admitted {
-				s.abandonCascade()
-				return
-			}
+			style = growSlice(style, len(raw), s.memory, s.shouldStop)
+
 			style = append(style, raw...)
 		case html.EndTagToken:
 			name, _ := z.TagName()
@@ -114,7 +100,7 @@ func (s *sheet) parseMSOConditionalStyles(data string) {
 // comment allocate a large synthetic html.Node outside the document's normal
 // attribute accounting. Keep the first occurrence, matching x/net/html's tree
 // builder treatment of duplicate HTML attributes.
-func retainConditionalStyleAttribute(style *html.Node, key, value []byte, memory *resourceguard.Memory, stops ...resourceguard.Stop) bool {
+func retainConditionalStyleAttribute(style *html.Node, key, value []byte, memory *resourceguard.Memory, stops ...resourceguard.Stop) {
 	var stop resourceguard.Stop
 	if len(stops) != 0 {
 		stop = stops[0]
@@ -126,22 +112,17 @@ func retainConditionalStyleAttribute(style *html.Node, key, value []byte, memory
 	case "media":
 		name = "media"
 	default:
-		return true
+		return
 	}
 	if hasAttr(style, name) {
-		return true
+		return
 	}
-	text, ok := resourceguard.CopyString(memory, value, stop)
-	if !ok {
-		return false
-	}
-	var admitted bool
-	style.Attr, admitted = growSlice(style.Attr, 1, memory, nil)
-	if !admitted {
-		return false
-	}
+	text := resourceguard.CopyString(memory, value, stop)
+
+	style.Attr = growSlice(style.Attr, 1, memory, nil)
+
 	style.Attr = append(style.Attr, html.Attribute{Key: name, Val: text})
-	return true
+	return
 }
 
 func msoConditionalFragment(data string) (string, bool) {
@@ -279,8 +260,11 @@ func (p *msoConditionParser) parseAtom() uint32 {
 	case equalASCIIFold(word, "IE"):
 		return msoIEMask()
 	case equalASCIIFold(word, "mso"):
-		if version, ok := p.optionalNumber(); ok {
-			return msoVersionMask("eq", version)
+		{
+			version, ok := p.optionalNumber()
+			if ok {
+				return msoVersionMask("eq", version)
+			}
 		}
 		return msoConditionUniverse
 	case equalASCIIFold(word, "lt"), equalASCIIFold(word, "lte"), equalASCIIFold(word, "gt"), equalASCIIFold(word, "gte"):
@@ -420,9 +404,10 @@ func containsASCIIFold(value, target string) bool {
 }
 func containsASCIIFoldWithBudget(value, target string, budget *cpuGuard) bool {
 	for start := 0; start+len(target) <= len(value); start++ {
-		if start%stringWorkChunk == 0 && len(value) > stringWorkChunk && budget.stopNow(true) {
-			return false
+		if start%stringWorkChunk == 0 && len(value) > stringWorkChunk {
+			budget.checkpoint()
 		}
+
 		if equalASCIIFold(value[start:start+len(target)], target) {
 			return true
 		}
@@ -435,9 +420,10 @@ func lastASCIIFoldIndex(value, target string) int {
 }
 func lastASCIIFoldIndexWithBudget(value, target string, budget *cpuGuard) int {
 	for start := len(value) - len(target); start >= 0; start-- {
-		if start%stringWorkChunk == 0 && len(value) > stringWorkChunk && budget.stopNow(true) {
-			return -1
+		if start%stringWorkChunk == 0 && len(value) > stringWorkChunk {
+			budget.checkpoint()
 		}
+
 		if equalASCIIFold(value[start:start+len(target)], target) {
 			return start
 		}
@@ -452,14 +438,11 @@ type msoRevealedState struct {
 	uncertain int
 }
 
-func (s *msoRevealedState) update(marker msoRevealedMarker, budget *cpuGuard) bool {
+func (s *msoRevealedState) update(marker msoRevealedMarker, budget *cpuGuard) {
 	switch marker {
 	case msoRevealedStart, msoRevealedUniversalStart:
-		var ok bool
-		s.stack, ok = growSlice(s.stack, 1, budget.allocationMemory(), budget.allocationStop)
-		if !ok {
-			return false
-		}
+		s.stack = growSlice(s.stack, 1, budget.allocationMemory(), budget.allocationStop)
+
 		uncertain := marker == msoRevealedStart
 		s.stack = append(s.stack, uncertain)
 		if uncertain {
@@ -474,5 +457,5 @@ func (s *msoRevealedState) update(marker msoRevealedMarker, budget *cpuGuard) bo
 			s.stack = s.stack[:last]
 		}
 	}
-	return true
+	return
 }

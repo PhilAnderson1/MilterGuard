@@ -10,42 +10,37 @@ import (
 // whitespace, soft line breaks and state changes that produce no output.
 type decodeReader struct {
 	reader     io.Reader
-	shouldStop func() bool
+	shouldStop func()
 }
 
-func newDecodeReader(reader io.Reader, shouldStop func() bool) io.Reader {
+func newDecodeReader(reader io.Reader, shouldStop func()) io.Reader {
 	if shouldStop == nil {
 		return reader
 	}
 	return &decodeReader{reader: reader, shouldStop: shouldStop}
 }
 func (r *decodeReader) Read(p []byte) (int, error) {
-	if r.shouldStop() {
-		return 0, resourceguard.ErrStopped
-	}
+	r.shouldStop()
+
 	return r.reader.Read(p[:min(len(p), 32<<10)])
-}
-func stoppedMIMEContent() extractedContent {
-	return extractedContent{Text: "[MIME decoding stopped]", ExtractionIncomplete: true, HTMLCPULimitExceeded: true}
 }
 
 // Some recovery-oriented decoders replace input errors with their own syntax
-// errors. Keep cancellation separate so those errors cannot start a retry.
+// errors. Checkpoints unwind past that ordinary error channel, preventing retries.
 type decodeControl struct {
-	shouldStop func() bool
-	stopped    bool
+	shouldStop func()
 	memory     func() *resourceguard.Memory
 }
 
-func (c *decodeControl) check() bool {
-	if !c.stopped && c.shouldStop != nil {
-		c.stopped = c.shouldStop()
+func (c *decodeControl) check() {
+	if c.shouldStop != nil {
+		c.shouldStop()
 	}
-	return c.stopped
 }
 
-// The coordinator selects an allocation owner; decoding never needs the
-// primary ledger. Fixed-size decoder scratch remains outside the ledger.
+// The coordinator supplies the active primary or fallback ledger. Body
+// buffering and copies are charged; fixed-size decoder scratch remains outside
+// the ledger. Nil is reserved for standalone unbudgeted helpers.
 func (c *decodeControl) allocationMemory() *resourceguard.Memory {
 	if c.memory == nil {
 		return nil
@@ -53,13 +48,9 @@ func (c *decodeControl) allocationMemory() *resourceguard.Memory {
 	return c.memory()
 }
 func (c *decodeControl) copyString(value []byte) string {
-	if c.check() {
-		return ""
-	}
-	text, ok := resourceguard.CopyString(c.allocationMemory(), value, c.check)
-	if !ok {
-		c.stopped = true
-	}
+	c.check()
+	text := resourceguard.CopyString(c.allocationMemory(), value, c.check)
+
 	return text
 }
 func (c *decodeControl) readAll(reader io.Reader) ([]byte, error) {
@@ -69,15 +60,10 @@ func (c *decodeControl) readAll(reader io.Reader) ([]byte, error) {
 	var scratch [resourceguard.WorkChunk]byte
 	buffer := newGuardedBuilder(nil)
 	for {
-		if c.check() {
-			return buffer.Bytes(), resourceguard.ErrStopped
-		}
+		c.check()
 		n, err := reader.Read(scratch[:])
 		buffer.memory = c.allocationMemory()
-		if _, writeErr := buffer.Write(scratch[:n]); writeErr != nil {
-			c.stopped = true
-			return buffer.Bytes(), writeErr
-		}
+		_, _ = buffer.Write(scratch[:n])
 		if err == io.EOF {
 			return buffer.Bytes(), nil
 		}

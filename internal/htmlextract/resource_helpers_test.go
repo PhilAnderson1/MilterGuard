@@ -1,5 +1,7 @@
 package htmlextract
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"runtime"
 	"strings"
@@ -14,34 +16,43 @@ func TestEscapeDecodingAdmissionAndSemantics(t *testing.T) {
 		{`\110000`, "\ufffd"}, {`\1f600`, "😀"}, {"a\\\r\nb", "ab"},
 		{`a\`, `a\`}, {`\g`, `g`},
 	} {
-		budget := &cpuGuard{memory: resourceguard.NewMemory(1024)}
+		budget := testCPUGuard(cpuGuard{memory: resourceguard.NewMemory(1024)})
+
 		if got := cssUnescapeWithBudget(tc.input, budget); got != tc.want {
 			t.Fatalf("decode %q = %q; want %q", tc.input, got, tc.want)
 		}
+
 	}
-	budget := &cpuGuard{memory: resourceguard.NewMemory(1)}
-	if got := cssUnescapeWithBudget(`\72 ed`, budget); got != "" || !budget.memory.Exhausted() {
-		t.Fatal("decoding bypassed admission")
-	}
+	budget := testCPUGuard(cpuGuard{memory: resourceguard.NewMemory(1)})
+	expectTermination(t, termination.MemoryExceeded, func() { cssUnescapeWithBudget(`\72 ed`, budget) })
 }
 
 func TestResourceHelpersObserveCancellation(t *testing.T) {
 	for _, operation := range []string{"escaped", "plain", "comment", "reverse"} {
 		t.Run(operation, func(t *testing.T) {
 			calls := 0
-			budget := &cpuGuard{shouldStop: func() bool { calls++; return calls == 2 }}
-			switch operation {
-			case "escaped":
-				cssUnescapeWithBudget(strings.Repeat(`\78`, 20000), budget)
-			case "plain":
-				cssUnescapeWithBudget(strings.Repeat("x", 60000), budget)
-			case "comment":
-				containsASCIIFoldWithBudget(strings.Repeat("x", 60000), "<style", budget)
-			case "reverse":
-				lastASCIIFoldIndexWithBudget(strings.Repeat("x", 60000), "<![endif]", budget)
-			}
-			if calls != 2 || !budget.stopped {
-				t.Fatalf("calls=%d stopped=%v", calls, budget.stopped)
+			budget := testCPUGuard(cpuGuard{shouldStop: func() {
+				calls++
+				if calls == 2 {
+					termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+				}
+
+				return
+			}})
+			expectTermination(t, termination.CPUExceeded, func() {
+				switch operation {
+				case "escaped":
+					cssUnescapeWithBudget(strings.Repeat(`\78`, 20000), budget)
+				case "plain":
+					cssUnescapeWithBudget(strings.Repeat("x", 60000), budget)
+				case "comment":
+					containsASCIIFoldWithBudget(strings.Repeat("x", 60000), "<style", budget)
+				case "reverse":
+					lastASCIIFoldIndexWithBudget(strings.Repeat("x", 60000), "<![endif]", budget)
+				}
+			})
+			if calls != 2 {
+				t.Fatalf("calls=%d", calls)
 			}
 		})
 	}
@@ -87,11 +98,10 @@ func TestResourceHelperAllocationAmplification(t *testing.T) {
 
 func TestMediaApplicabilityChargesTemporaryWork(t *testing.T) {
 	memory := resourceguard.NewMemory(4096)
-	s := sheet{memory: memory, cpu: &cpuGuard{memory: memory}}
-	for i := 0; i < 100 && !memory.Exhausted(); i++ {
-		s.mediaCanApply("screen and (min-width:1px)")
-	}
-	if !memory.Exhausted() {
-		t.Fatal("repeated temporary media parsing bypassed the shared budget")
-	}
+	s := sheet{memory: memory, cpu: testCPUGuard(cpuGuard{memory: memory})}
+	expectTermination(t, termination.MemoryExceeded, func() {
+		for i := 0; i < 100; i++ {
+			s.mediaCanApply("screen and (min-width:1px)")
+		}
+	})
 }

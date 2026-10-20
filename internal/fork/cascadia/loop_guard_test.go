@@ -1,5 +1,7 @@
 package cascadia
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"strings"
 	"testing"
@@ -20,11 +22,16 @@ func TestCancelledCompositeResults(t *testing.T) {
 			parent.AppendChild(&html.Node{Type: html.ElementNode, Data: "i"})
 		}
 		calls := 0
-		control := NewMatchControl(func() bool { calls++; return true })
-		if matched, stopped := control.Match(sel, parent.LastChild); matched || !stopped {
-			t.Fatalf("%s: %v %v", source, matched, stopped)
-		}
-		control.Match(sel, parent.LastChild)
+		control := NewMatchControl(func() {
+			calls++
+			if true {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
+		})
+		expectTermination(t, termination.CPUExceeded, func() { control.Match(sel, parent.LastChild) })
+
 		if calls != 1 {
 			t.Fatal(calls)
 		}
@@ -34,9 +41,17 @@ func TestCancelledCompositeResults(t *testing.T) {
 func TestSelectorIteratorCancellationAndBoundaries(t *testing.T) {
 	for _, source := range []string{strings.Repeat(" ", 10000), strings.Repeat(" ,", 5000), "[x='" + strings.Repeat("x", 10000) + "']", strings.Repeat(`\a`, 5000)} {
 		calls := 0
-		it := NewSelectorListIteratorWithStop(source, func() bool { calls++; return calls == 2 })
-		if _, ok := it.Next(); ok || !it.Stopped() || calls != 2 {
-			t.Fatalf("iterator: ok=%v stopped=%v calls=%d", ok, it.Stopped(), calls)
+		it := NewSelectorListIteratorWithStop(source, func() {
+			calls++
+			if calls == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
+		})
+		expectTermination(t, termination.CPUExceeded, func() { it.Next() })
+		if calls != 2 {
+			t.Fatalf("iterator calls=%d", calls)
 		}
 	}
 	source := ` , a[x="a,b"], :not(.a,.b), x\,y , z\ `
@@ -57,9 +72,7 @@ func TestFallbackBoundsAndAdmission(t *testing.T) {
 	if err != nil || got.Key.Kind != 0 || got.PositiveSource != "" || !got.GeneratedPseudo {
 		t.Fatalf("%+v %v", got, err)
 	}
-	if _, err := ConservativeFallbackWithMemory("DIV:unsupported", resourceguard.NewMemory(1)); err == nil {
-		t.Fatal("missing admission")
-	}
+	expectTermination(t, termination.MemoryExceeded, func() { ConservativeFallbackWithMemory("DIV:unsupported", resourceguard.NewMemory(1)) })
 	if allocs := testing.AllocsPerRun(10, func() { ConservativeFallback(source) }); allocs != 0 {
 		t.Fatal(allocs)
 	}
@@ -97,9 +110,17 @@ func TestCancellationInsideNestedTraversal(t *testing.T) {
 			target = n
 		}
 		calls := 0
-		control := NewMatchControl(func() bool { calls++; return calls == 2 })
-		if matched, stopped := control.Match(sel, target); matched || !stopped || calls != 2 {
-			t.Fatalf("%q: %v %v %d", combinator, matched, stopped, calls)
+		control := NewMatchControl(func() {
+			calls++
+			if calls == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
+		})
+		expectTermination(t, termination.CPUExceeded, func() { control.Match(sel, target) })
+		if calls != 2 {
+			t.Fatalf("%q: calls=%d", combinator, calls)
 		}
 	}
 }

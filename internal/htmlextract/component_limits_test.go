@@ -44,7 +44,7 @@ func TestColourComponentLimits(t *testing.T) {
 		{"rgb(1 2 3 / .5 / .5)", false},
 	} {
 		_, status := readColour(test.value)
-		if (status == valueResolved) != test.valid {
+		if status == valueResolved != test.valid {
 			t.Errorf("readColour(%q) status = %v; valid = %v", test.value, status, test.valid)
 		}
 	}

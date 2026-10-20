@@ -243,10 +243,8 @@ func (z *Tokenizer) Err() error {
 // It sets z.err if the underlying reader returns an error.
 // Pre-condition: z.err == nil.
 func (z *Tokenizer) readByte() byte {
-	if err := z.guard.readByte(); err != nil {
-		z.err = err
-		return 0
-	}
+	z.guard.readByte()
+
 	if z.raw.end >= len(z.buf) {
 		// Our buffer is exhausted and we have to read from z.r. Check if the
 		// previous read resulted in an error.
@@ -266,6 +264,7 @@ func (z *Tokenizer) readByte() byte {
 			buf1 = z.buf[:d]
 		}
 		copy(buf1, z.buf[z.raw.start:z.raw.end])
+
 		if x := z.raw.start; x != 0 {
 			// Adjust the data/attr spans to refer to the same contents after the copy.
 			z.data.start -= x
@@ -281,6 +280,7 @@ func (z *Tokenizer) readByte() byte {
 				z.attr[i][1].end -= x
 			}
 		}
+
 		z.raw.start, z.raw.end, z.buf = 0, d, buf1[:d]
 		// Now that we have copied the live bytes to the start of the buffer,
 		// we read from z.r into the remainder.
@@ -909,9 +909,12 @@ func (z *Tokenizer) readTag(saveAttr bool) {
 	attributeCount := 0
 	// Read the tag name and attribute key/value pairs.
 	z.readTagName()
-	if z.skipWhiteSpace(); z.err != nil {
+
+	z.skipWhiteSpace()
+	if z.err != nil {
 		return
 	}
+
 	for {
 		c := z.readByte()
 		if z.err != nil || c == '>' {
@@ -937,10 +940,13 @@ func (z *Tokenizer) readTag(saveAttr bool) {
 		keyBytes := z.buf[z.pendingAttr[0].start:z.pendingAttr[0].end]
 		key := z.guard.ownedString(lowerWithGuard(z.guard.copyBytes(keyBytes), z.guard))
 		if saveAttr && z.pendingAttr[0].start != z.pendingAttr[0].end && !z.attrNames.View()[key] {
-			z.guard.must(z.attrNames.Set(z.guard.memory(), key, true))
+			z.attrNames.Set(z.guard.memory(), key, true)
+
 			z.attr = append(growResourceSlice(z.attr, 1, z.guard), z.pendingAttr)
 		}
-		if z.skipWhiteSpace(); z.err != nil {
+
+		z.skipWhiteSpace()
+		if z.err != nil {
 			break
 		}
 	}
@@ -1066,9 +1072,6 @@ func (z *Tokenizer) readTagAttrVal() {
 
 // Next scans the next token and returns its type.
 func (z *Tokenizer) Next() (tt TokenType) {
-	if z.guard != nil {
-		defer func() { z.catchResourceAbort(recover()); tt = z.tt }()
-	}
 	z.raw.start = z.raw.end
 	z.data.start = z.raw.end
 	z.data.end = z.raw.end
@@ -1248,14 +1251,6 @@ var (
 // Text returns the unescaped text of a text, comment or doctype token. The
 // contents of the returned slice may change on the next call to Next.
 func (z *Tokenizer) Text() (text []byte) {
-	if z.guard != nil {
-		defer func() {
-			z.catchResourceAbort(recover())
-			if z.tt == ErrorToken {
-				text = nil
-			}
-		}()
-	}
 	switch z.tt {
 	case TextToken, CommentToken, DoctypeToken:
 		s := z.buf[z.data.start:z.data.end]
@@ -1277,14 +1272,6 @@ func (z *Tokenizer) Text() (text []byte) {
 // `<IMG SRC="foo">`) and whether the tag has attributes.
 // The contents of the returned slice may change on the next call to Next.
 func (z *Tokenizer) TagName() (name []byte, hasAttr bool) {
-	if z.guard != nil {
-		defer func() {
-			z.catchResourceAbort(recover())
-			if z.tt == ErrorToken {
-				name, hasAttr = nil, false
-			}
-		}()
-	}
 	if z.data.start < z.data.end {
 		switch z.tt {
 		case StartTagToken, EndTagToken, SelfClosingTagToken:
@@ -1302,14 +1289,6 @@ func (z *Tokenizer) TagName() (name []byte, hasAttr bool) {
 // attribute for the current tag token and whether there are more attributes.
 // The contents of the returned slices may change on the next call to Next.
 func (z *Tokenizer) TagAttr() (key, val []byte, moreAttr bool) {
-	if z.guard != nil {
-		defer func() {
-			z.catchResourceAbort(recover())
-			if z.tt == ErrorToken {
-				key, val, moreAttr = nil, nil, false
-			}
-		}()
-	}
 	if z.nAttrReturned < len(z.attr) {
 		switch z.tt {
 		case StartTagToken, SelfClosingTagToken:
@@ -1329,14 +1308,6 @@ func (z *Tokenizer) TagAttr() (key, val []byte, moreAttr bool) {
 // Token returns the current Token. The result's Data and Attr values remain
 // valid after subsequent Next calls.
 func (z *Tokenizer) Token() (t Token) {
-	if z.guard != nil {
-		defer func() {
-			z.catchResourceAbort(recover())
-			if z.tt == ErrorToken {
-				t = Token{Type: ErrorToken}
-			}
-		}()
-	}
 	t = Token{Type: z.tt}
 	switch z.tt {
 	case TextToken, CommentToken, DoctypeToken:
@@ -1360,10 +1331,13 @@ func (z *Tokenizer) Token() (t Token) {
 			}
 			t.Attr = append(t.Attr, Attribute{"", name, z.guard.ownedString(val)})
 		}
-		if a := atom.Lookup(name); a != 0 {
-			t.DataAtom, t.Data = a, a.String()
-		} else {
-			t.DataAtom, t.Data = 0, z.guard.ownedString(name)
+		{
+			a := atom.Lookup(name)
+			if a != 0 {
+				t.DataAtom, t.Data = a, a.String()
+			} else {
+				t.DataAtom, t.Data = 0, z.guard.ownedString(name)
+			}
 		}
 	}
 	return t
@@ -1382,9 +1356,8 @@ func NewTokenizer(r io.Reader) *Tokenizer {
 }
 
 // NewTokenizerWithStop returns a tokenizer that samples shouldStop while
-// consuming input. If shouldStop returns true, the tokenizer reports
-// ErrResourceStopped.
-func NewTokenizerWithStop(r io.Reader, shouldStop func() bool) *Tokenizer {
+// consuming input. A checkpoint returns normally or unwinds the operation.
+func NewTokenizerWithStop(r io.Reader, shouldStop func()) *Tokenizer {
 	return NewTokenizerWithLimits(r, ResourceLimits{ShouldStop: shouldStop})
 }
 
@@ -1400,15 +1373,10 @@ func NewTokenizerFragment(r io.Reader, contextTag string) *Tokenizer {
 	return newTokenizer(r, contextTag, nil)
 }
 func newTokenizer(r io.Reader, contextTag string, g *resourceGuard) *Tokenizer {
-	z, ok := resourceguard.New(g.memory(), Tokenizer{r: r, guard: g})
-	if !ok {
-		return &Tokenizer{err: &ResourceLimitError{"memory bytes", g.memory().Limit()}}
-	}
-	z.buf, ok = resourceguard.MakeSlice[byte](g.memory(), 0, 4096)
-	if !ok {
-		z.err = &ResourceLimitError{"memory bytes", g.memory().Limit()}
-		return z
-	}
+	z := resourceguard.New(g.memory(), Tokenizer{r: r, guard: g})
+
+	z.buf = resourceguard.MakeSlice[byte](g.memory(), 0, 4096)
+
 	if contextTag != "" {
 		// Per the "Parsing HTML Fragments" portion of the spec:
 		//    For performance reasons, an implementation that does not report errors
@@ -1429,17 +1397,4 @@ func newTokenizer(r io.Reader, contextTag string, g *resourceGuard) *Tokenizer {
 		}
 	}
 	return z
-}
-
-// Guarded standalone tokenizer accessors report resource failures through Err,
-// just as Next does. Only intentional resource aborts are intercepted.
-func (z *Tokenizer) catchResourceAbort(value any) {
-	if value == nil {
-		return
-	}
-	abort, ok := value.(resourceAbort)
-	if !ok {
-		panic(value)
-	}
-	z.err, z.tt = abort.err, ErrorToken
 }

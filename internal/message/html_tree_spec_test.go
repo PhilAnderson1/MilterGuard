@@ -1,5 +1,7 @@
 package message
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"strings"
 	"testing"
@@ -64,9 +66,11 @@ func TestAnnotatedOutputAppendsEquivalentRunsWithoutFragmenting(t *testing.T) {
 	if len(output.chunks) != 1 || output.data.Len() != 4096 {
 		t.Fatalf("buffer shape = %d chunks, %d bytes", len(output.chunks), output.data.Len())
 	}
-	if got, complete := output.String(); !complete || got != `<invisible reason="display:none">`+strings.Repeat("x", 4096)+`</invisible>` {
+
+	if got := output.renderAnnotations(); got != `<invisible reason="display:none">`+strings.Repeat("x", 4096)+`</invisible>` {
 		t.Fatalf("rendered append-only output = %q", got)
 	}
+
 }
 
 func TestTreeExtractorDoesNotAnnotateWhitespaceOrDecodedNBSP(t *testing.T) {
@@ -262,17 +266,20 @@ func TestConditionalFragmentReportsCooperativeStop(t *testing.T) {
 	fragment := `[if mso]>` + strings.Repeat(`<p>notice</p>`, 300) + `<![endif]`
 	for _, stopAt := range []int{1, 3} {
 		calls := 0
-		budget := newExtractionBudgetWithControl(HTMLProcessingControl{ShouldFallback: func() bool {
+		budget := newExtractionBudgetWithControl(HTMLProcessingControl{CheckPrimary: func() {
 			calls++
-			return calls >= stopAt
+			if calls >= stopAt {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
 		}})
 		var out annotatedOutput
 		var visible guardedBuilder
-		e := htmlExtraction{shouldStop: budget.useFallback}
-		e.writeConditionalComment(fragment, &out, &visible)
-		rendered, _ := out.String()
-		if !e.extractionIncomplete || !budget.cpuLimitExceeded || !strings.Contains(rendered, conditionalOmissionMarker) || visible.Len() != 0 {
-			t.Fatalf("stop at check %d was not reported: output=%q visible=%q", stopAt, rendered, visible.String())
+		e := htmlExtraction{shouldStop: budget.checkStage}
+		expectTermination(t, termination.CPUExceeded, func() { e.writeConditionalComment(fragment, &out, &visible) })
+		if visible.Len() != 0 {
+			t.Fatal("partial conditional text published")
 		}
 	}
 }
@@ -283,13 +290,17 @@ func TestRenderReportsCooperativeStop(t *testing.T) {
 		root.AppendChild(&xhtml.Node{Type: xhtml.ElementNode, Data: "div"})
 	}
 	checks := 0
-	e := htmlExtraction{inspection: htmlextract.Document{Root: root}, shouldStop: func() bool {
+	e := htmlExtraction{inspection: htmlextract.Document{Root: root}, shouldStop: func() {
 		checks++
-		return checks == 2
+		if checks == 2 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
 	}}
-	e.render(TagHidden)
-	if !e.stopped || !e.extractionIncomplete || checks != 2 {
-		t.Fatalf("stopped=%v incomplete=%v checks=%d, want true/true/2", e.stopped, e.extractionIncomplete, checks)
+	expectTermination(t, termination.CPUExceeded, func() { e.render(TagHidden) })
+	if checks != 2 {
+		t.Fatalf("checks=%d", checks)
 	}
 }
 
@@ -424,15 +435,15 @@ func TestBoundedHTMLFallbackStreamsAttributesAndKeepsFirstDestination(t *testing
 
 func TestFallbackTokenizerHonoursSeparateCPUStop(t *testing.T) {
 	checks := 0
-	got := extractBoundedHTMLFallback(strings.Repeat("<x>", 2000)+"late text", true, testFallbackResources(func() bool {
+	b := newExtractionBudgetWithControl(HTMLProcessingControl{CheckPrimary: func() { t.Fatal("fallback polled primary") }, CheckFallback: func() {
 		checks++
-		return checks > 1
-	}))
-	if !got.HTMLCPULimitExceeded || !got.ExtractionIncomplete || !got.HTMLFallbackUsed {
-		t.Fatalf("fallback flags = %+v", got)
-	}
-	if checks < 2 {
-		t.Fatalf("fallback stop checks = %d, want at least 2", checks)
+		if checks > 1 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+	}})
+	got := b.extractFallback(strings.Repeat("<x>", 2000) + "late text")
+	if !got.HTMLCPULimitExceeded || !got.ExtractionIncomplete || !got.HTMLFallbackUsed || checks != 2 {
+		t.Fatalf("checks=%d fallback=%+v", checks, got)
 	}
 }
 

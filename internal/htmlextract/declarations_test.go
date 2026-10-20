@@ -46,8 +46,8 @@ func TestDeclarationPreparationInvariants(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := prepareDeclaration(test.declaration, &cpuGuard{})
-			if (got.prepared != nil) != test.prepared || got.validityReady != test.validityReady ||
+			got := prepareDeclaration(test.declaration, testCPUGuard(cpuGuard{}))
+			if got.prepared != nil != test.prepared || got.validityReady != test.validityReady ||
 				got.tokensReady != test.tokensReady || got.dependenciesReady != test.dependenciesReady {
 				t.Fatalf("preparation state = prepared:%t validity:%t tokens:%t dependencies:%t",
 					got.prepared != nil, got.validityReady, got.tokensReady, got.dependenciesReady)

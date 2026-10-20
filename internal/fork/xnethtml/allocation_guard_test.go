@@ -2,9 +2,9 @@ package html
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 	"strings"
 	"testing"
 	"unsafe"
@@ -19,13 +19,16 @@ func TestOrdinaryAttributesParticipateInSharedBudget(t *testing.T) {
 	source.WriteString("></div>")
 	for _, limit := range []int64{128 << 10, 4 << 20} {
 		memory := resourceguard.NewMemory(limit)
-		root, err := ParseWithOptions(strings.NewReader(source.String()), ParseOptionResourceLimits(ResourceLimits{Memory: memory}))
 		if limit == 128<<10 {
-			var limited *ResourceLimitError
-			if !errors.As(err, &limited) || !memory.Exhausted() || root != nil {
-				t.Fatalf("small budget accepted attributes: %v", err)
+			expectTermination(t, termination.MemoryExceeded, func() {
+				ParseWithOptions(strings.NewReader(source.String()), ParseOptionResourceLimits(ResourceLimits{Memory: memory}))
+			})
+			if !memory.Exhausted() {
+				t.Fatal("missing exhaustion")
 			}
 		} else {
+			root, err := ParseWithOptions(strings.NewReader(source.String()), ParseOptionResourceLimits(ResourceLimits{Memory: memory}))
+
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -43,19 +46,7 @@ func TestOrdinaryAttributesParticipateInSharedBudget(t *testing.T) {
 
 func expectMemoryAbort(t *testing.T, action func()) {
 	t.Helper()
-	defer func() {
-		v := recover()
-		abort, ok := v.(resourceAbort)
-		if !ok {
-			t.Fatalf("panic=%v", v)
-		}
-		var limited *ResourceLimitError
-		if !errors.As(abort.err, &limited) || limited.Resource != "memory bytes" {
-			t.Fatalf("error=%v", abort.err)
-		}
-	}()
-	action()
-	t.Fatal("expected memory abort")
+	expectTermination(t, termination.MemoryExceeded, action)
 }
 func TestTokenAttributeArrayReservedBeforeAllocation(t *testing.T) {
 	z := NewTokenizer(strings.NewReader(`<div a=x b=y>`))
@@ -63,9 +54,7 @@ func TestTokenAttributeArrayReservedBeforeAllocation(t *testing.T) {
 		t.Fatal(z.Err())
 	}
 	z.guard = &resourceGuard{limits: ResourceLimits{Memory: resourceguard.NewMemory(int64(2*unsafe.Sizeof(Attribute{})) - 1)}}
-	if token := z.Token(); token.Type != ErrorToken || z.Err() == nil {
-		t.Fatalf("token=%v err=%v", token.Type, z.Err())
-	}
+	expectTermination(t, termination.MemoryExceeded, func() { z.Token() })
 }
 func TestTokenizerReusesNameMapAllowance(t *testing.T) {
 	z := NewTokenizer(strings.NewReader(`<p a=x><p a=x>`))

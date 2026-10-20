@@ -17,106 +17,74 @@ var ErrInvalidAttributeOperator = errors.New("cascadia: invalid attribute operat
 
 var ErrInvalidSelector = errors.New("cascadia: invalid selector")
 
-var errSelectorMemory = errors.New("cascadia: memory limit exceeded")
-
-type allocationAbort struct{}
-
-func requireSelectorStorage(ok bool) {
-	if !ok {
-		panic(allocationAbort{})
-	}
-}
 func selectorObject[T Sel](memory *resourceguard.Memory, value T) Sel {
-	out, ok := resourceguard.Box(memory, value)
-	requireSelectorStorage(ok)
+	out := resourceguard.Box(memory, value)
+
 	return out.(Sel)
 }
 func selectorSlice[T any](memory *resourceguard.Memory, length, capacity int) []T {
-	out, ok := resourceguard.MakeSlice[T](memory, length, capacity)
-	requireSelectorStorage(ok)
+	out := resourceguard.MakeSlice[T](memory, length, capacity)
+
 	return out
 }
 func selectorAppend[T any](memory *resourceguard.Memory, s []T, value T) []T {
-	out, ok := resourceguard.Append(memory, s, nil, value)
-	requireSelectorStorage(ok)
-	return out
-}
+	out := resourceguard.Append(memory, s, nil, value)
 
-// Only allocation aborts are recovered; programming errors remain visible.
-func recoverAllocation(err *error) {
-	if value := recover(); value != nil {
-		if _, ok := value.(allocationAbort); !ok {
-			panic(value)
-		}
-		*err = errSelectorMemory
-	}
+	return out
 }
 
 // MatchControl carries cooperative cancellation across successive selector
 // matches so the caller's CPU-time check is sampled periodically across the
 // complete cascade rather than once for every selector.
 type MatchControl struct {
-	shouldStop func() bool
-	steps      uint32
-	stopped    bool
+	sampler    resourceguard.StopSampler
+	shouldStop func()
 }
 
-func NewMatchControl(shouldStop func() bool) *MatchControl {
-	g, _ := NewMatchControlWithMemory(shouldStop, nil)
+func NewMatchControl(shouldStop func()) *MatchControl {
+	g := NewMatchControlWithMemory(shouldStop, nil)
 	return g
 }
 
 // step samples the caller's relatively expensive CPU-time callback rather
 // than invoking it for every simple selector operation.
-func (g *MatchControl) step() bool {
-	if g == nil || g.stopped {
-		return g != nil && g.stopped
+func (g *MatchControl) step() {
+	if g != nil {
+		g.sampler.Check()
 	}
-	g.steps++
-	if g.steps == 1 || g.steps&255 == 0 {
-		return g.checkNow()
-	}
-	return false
 }
 
 // checkNow samples the caller at an operation checkpoint or within a long scan.
-func (g *MatchControl) checkNow() bool {
-	if g == nil || g.stopped {
-		return g != nil && g.stopped
+func (g *MatchControl) checkNow() {
+	if g != nil && g.shouldStop != nil {
+		g.shouldStop()
 	}
-	g.stopped = g.shouldStop != nil && g.shouldStop()
-	return g.stopped
 }
 
-// Match evaluates m and reports whether cooperative cancellation stopped the
-// operation. Once stopped, the control remains stopped for later calls.
-func (g *MatchControl) Match(m Matcher, n *html.Node) (matched, stopped bool) {
-	matched = matchResource(m, n, g)
-	return matched && !g.stopped, g.stopped
-}
+// Match reports whether m matches n. Resource termination unwinds to the caller.
+func (g *MatchControl) Match(m Matcher, n *html.Node) bool { return matchResource(m, n, g) }
 
 type resourceMatcher interface {
 	matchResource(*html.Node, *MatchControl) bool
 }
 
 func matchResource(m Matcher, n *html.Node, guard *MatchControl) bool {
-	if guard.step() {
-		return false
-	}
+	guard.step()
+
 	if matcher, ok := m.(resourceMatcher); ok {
 		return matcher.matchResource(n, guard)
 	}
+
 	return m.Match(n)
 }
 
 // MatchWithStop matches n while periodically invoking shouldStop from inside
-// selector-controlled loops. stopped distinguishes cancellation from an
-// ordinary non-match.
-func MatchWithStop(m Matcher, n *html.Node, shouldStop func() bool) (matched, stopped bool) {
+// selector-controlled loops. Resource termination bypasses the match result.
+func MatchWithStop(m Matcher, n *html.Node, shouldStop func()) bool {
 	return NewMatchControl(shouldStop).Match(m, n)
 }
 
 // NewMatchControlWithMemory admits the state retained across selector matches.
-func NewMatchControlWithMemory(stop func() bool, m *resourceguard.Memory) (*MatchControl, bool) {
-	return resourceguard.New(m, MatchControl{shouldStop: stop})
+func NewMatchControlWithMemory(stop func(), m *resourceguard.Memory) *MatchControl {
+	return resourceguard.New(m, MatchControl{shouldStop: stop, sampler: resourceguard.NewStopSampler(256, stop)})
 }

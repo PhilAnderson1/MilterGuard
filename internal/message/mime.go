@@ -3,7 +3,6 @@ package message
 import (
 	"bytes"
 	"encoding/base64"
-	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -17,6 +16,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml/charset"
 	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 )
 
 const (
@@ -25,26 +25,31 @@ const (
 )
 
 type extractionBudget struct {
+	primaryMemory *resourceguard.Memory
+	stageStop     func()
+
+	checkPrimary              func()
+	checkFallback             func()
+	terminal                  termination.Failure
 	parts                     int
 	htmlParts                 int
 	htmlBytesRemaining        int
 	decodedTextBytesRemaining int64
 	cssBytesRemaining         int
-	memoryBytesRemaining      int64
 	memoryBytesLimit          int64
-	shouldFallback            func() bool
-	fallbackShouldStop        func() bool
-	cpuLimitExceeded          bool
-	fallback                  *fallbackResources
-	allowFallback             func() bool
-	fallbackMemoryExceeded    bool
-	onFallbackMemoryLimit     func()
-	memoryLimitExceeded       bool
-	onMemoryLimit             func()
-	stopOnMemoryLimit         bool
-	compactURLs               bool
-	countingStop              func() bool
-	countingStage             *fallbackResources
+
+	onCPULimit             func(fallback bool)
+	cpuLimitExceeded       bool
+	fallback               *fallbackResources
+	allowFallback          func() bool
+	fallbackMemoryExceeded bool
+	onFallbackMemoryLimit  func()
+	memoryLimitExceeded    bool
+	onMemoryLimit          func()
+	stopOnMemoryLimit      bool
+	compactURLs            bool
+	countingStop           func()
+	countingSampler        resourceguard.StopSampler
 }
 
 func newExtractionBudget() *extractionBudget {
@@ -57,18 +62,20 @@ func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBu
 		limits.MemoryBytes = control.MemoryBytes
 	}
 	return &extractionBudget{
+		primaryMemory:             resourceguard.NewMemory(limits.MemoryBytes),
+		checkPrimary:              control.CheckPrimary,
+		onCPULimit:                control.CPULimitExceeded,
+		checkFallback:             control.CheckFallback,
 		htmlBytesRemaining:        limits.InputBytes,
 		decodedTextBytesRemaining: int64(limits.InputBytes),
 		cssBytesRemaining:         limits.CSSBytes,
-		memoryBytesRemaining:      limits.MemoryBytes,
 		memoryBytesLimit:          limits.MemoryBytes,
-		shouldFallback:            control.ShouldFallback,
-		fallbackShouldStop:        control.FallbackShouldStop,
-		compactURLs:               !control.DisableURLCompaction,
-		onMemoryLimit:             control.MemoryLimitExceeded,
-		allowFallback:             control.BeginFallback,
-		onFallbackMemoryLimit:     control.FallbackMemoryLimitExceeded,
-		stopOnMemoryLimit:         control.StopOnMemoryLimit,
+
+		compactURLs:           !control.DisableURLCompaction,
+		onMemoryLimit:         control.MemoryLimitExceeded,
+		allowFallback:         control.BeginFallback,
+		onFallbackMemoryLimit: control.FallbackMemoryLimitExceeded,
+		stopOnMemoryLimit:     control.StopOnMemoryLimit,
 	}
 }
 
@@ -79,62 +86,11 @@ func (b *extractionBudget) setDecodedTextByteLimit(bytes int64) {
 	b.decodedTextBytesRemaining = bytes
 }
 
-func (b *extractionBudget) useFallback() bool {
-	if b.fallback != nil || b.cpuLimitExceeded || b.memoryStopped() {
-		return true
-	}
-	if b.shouldFallback != nil && b.shouldFallback() {
-		b.cpuLimitExceeded = true
-		return true
-	}
-	return false
-}
-
 // Output and decoding use the active stage. Once fallback starts, the primary
 // allowance is never sampled again, including for later MIME parts.
-func (b *extractionBudget) outputShouldStop() bool {
-	if b.fallback != nil {
-		return b.fallbackStop()
-	}
-	if b.memoryStopped() {
-		return true
-	}
-	if b.cpuLimitExceeded {
-		return b.fallbackStop()
-	}
-	if b.useFallback() {
-		if b.fallbackShouldStop != nil {
-			return b.fallbackStop()
-		}
-		return true
-	}
-	return false
-}
+func (b *extractionBudget) outputShouldStop() { b.checkStage() }
 
-func (b *extractionBudget) fallbackStop() bool {
-	if !b.beginFallback() {
-		return true
-	}
-	stopped := b.fallback.stopped()
-	b.observeFallback()
-	return stopped
-}
-
-func (b *extractionBudget) decodingShouldStop() bool {
-	if b.fallback != nil {
-		return b.fallbackStop()
-	}
-	if b.memoryStopped() {
-		return true
-	}
-	if !b.useFallback() {
-		return false
-	}
-	if b.fallbackShouldStop == nil {
-		return true
-	}
-	return b.fallbackStop()
-}
+func (b *extractionBudget) decodingShouldStop() { b.checkStage() }
 
 func (b *extractionBudget) memoryStopped() bool {
 	return b.memoryLimitExceeded && b.stopOnMemoryLimit
@@ -151,7 +107,9 @@ func (b *extractionBudget) noteMemoryLimit() {
 }
 
 func (b *extractionBudget) consumeMemory(memory *resourceguard.Memory) {
-	b.memoryBytesRemaining = remainingInt64(b.memoryBytesRemaining, memory.Used())
+	if memory != b.primaryMemory {
+		b.primaryMemory.Reserve(memory.Used())
+	}
 	if memory.Exhausted() {
 		b.noteMemoryLimit()
 	}
@@ -166,17 +124,20 @@ func (b *extractionBudget) takePart() bool {
 }
 
 func (b *extractionBudget) htmlLimits(bytes int) (htmlextract.Limits, bool) {
-	if b.memoryBytesRemaining <= 0 {
-		b.noteMemoryLimit()
+	remaining := b.remainingMemory()
+	if remaining <= 0 {
+		// Starting HTML analysis requires storage. Reject at the owner so this
+		// cannot become an ordinary structural-limit result or an inline retry.
+		b.primaryMemory.Reserve(1)
 	}
-	if b.htmlParts > maxHTMLParts || bytes > b.htmlBytesRemaining || b.cssBytesRemaining <= 0 || b.memoryBytesRemaining <= 0 {
+	if b.htmlParts > maxHTMLParts || bytes > b.htmlBytesRemaining || b.cssBytesRemaining <= 0 {
 		b.htmlBytesRemaining = 0
 		return htmlextract.Limits{}, false
 	}
 	b.htmlBytesRemaining -= bytes
 	limits := htmlextract.DefaultLimits()
 	limits.CSSBytes = b.cssBytesRemaining
-	limits.MemoryBytes = b.memoryBytesRemaining
+	limits.MemoryBytes = remaining
 	return limits, true
 }
 
@@ -185,26 +146,10 @@ func (b *extractionBudget) consumeHTML(usage htmlextract.ResourceUsage) {
 		b.noteMemoryLimit()
 	}
 	b.cssBytesRemaining = remainingInt(b.cssBytesRemaining, usage.CSSBytes)
-	b.memoryBytesRemaining = remainingInt64(b.memoryBytesRemaining, usage.MemoryBytes)
+	b.primaryMemory.Reserve(usage.MemoryBytes)
 }
 
-func (b *extractionBudget) reserveOutputMemory(bytes int64) bool {
-	if b.fallback != nil {
-		ok := b.fallback.memory.Reserve(bytes)
-		b.observeFallback()
-		return ok
-	}
-	if bytes <= 0 {
-		return true
-	}
-	if bytes > b.memoryBytesRemaining {
-		b.memoryBytesRemaining = 0
-		b.noteMemoryLimit()
-		return false
-	}
-	b.memoryBytesRemaining -= bytes
-	return true
-}
+func (b *extractionBudget) reserveOutputMemory(bytes int64) { b.allocationMemory().Reserve(bytes) }
 
 func remainingInt64(remaining, used int64) int64 {
 	if used >= remaining {
@@ -257,6 +202,31 @@ func extractMIME(contentType, encoding, contentID string, data []byte, depth int
 }
 
 func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte, depth int, budget *extractionBudget) extractedContent {
+	var retained extractedContent
+	decodedRemaining := budget.decodedTextBytesRemaining
+	htmlParts := budget.htmlParts
+	retry := false
+	result, complete := runExtraction(budget, func() extractedContent {
+		if retry {
+			budget.decodedTextBytesRemaining = decodedRemaining
+			budget.htmlParts = htmlParts
+		}
+		retry = true
+		return extractMIMEOnce(contentType, encoding, contentID, data, depth, budget, &retained)
+	})
+	if !complete {
+		retained.ExtractionIncomplete = true
+		retained.MIMEIncomplete = true
+		result = retained
+	}
+	result.HTMLCPULimitExceeded = result.HTMLCPULimitExceeded || budget.cpuLimitExceeded
+	result.HTMLPrimaryMemoryLimitExceeded = budget.memoryLimitExceeded
+	result.HTMLFallbackMemoryLimitExceeded = budget.fallbackMemoryExceeded
+	result.HTMLMemoryLimitExceeded = result.HTMLMemoryLimitExceeded || budget.memoryLimitExceeded || budget.fallbackMemoryExceeded
+	return result
+}
+
+func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth int, budget *extractionBudget, retained *extractedContent) extractedContent {
 	if depth > 8 {
 		return extractedContent{Text: "[MIME nesting limit reached]", MIMEIncomplete: true}
 	}
@@ -271,44 +241,50 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		incomplete, complete := validateOpaqueTransfer(encoding, data, budget.outputShouldStop)
 		return extractedContent{Text: attachmentMarker(mediaType, params["name"]), TransferIncomplete: incomplete, ExtractionIncomplete: !complete, HTMLCPULimitExceeded: budget.cpuLimitExceeded}
 	}
-	decoded, transferIncomplete := decodeTransferRecoveringWithResources(encoding, data, budget.decodingShouldStop, budget.fallbackMemory)
-	if decoded == nil && transferIncomplete && budget.cpuLimitExceeded {
-		return stoppedMIMEContent()
-	}
+	decoded, transferIncomplete := decodeTransferRecoveringWithResources(encoding, data, budget.decodingShouldStop, budget.allocationMemory)
 	if strings.HasPrefix(mediaType, "multipart/") {
 		boundary := params["boundary"]
 		if boundary == "" {
 			return extractedContent{Text: "[multipart message has no boundary]", MIMEIncomplete: true, TransferIncomplete: transferIncomplete}
 		}
 		reader := multipart.NewReader(bytes.NewReader(decoded), boundary)
+
+		reader = multipart.NewReader(newDecodeReader(bytes.NewReader(decoded), budget.stageStop), boundary)
+
+		partIndex := 0
 		var parts []extractedContent
 		var alternativeHTML, alternativePlain extractedContent
 		var mimeIncomplete, nestedTransferIncomplete, processingStopped bool
 		var nestedExtractionIncomplete bool
 		for {
-			if budget.outputShouldStop() {
-				mimeIncomplete = true
-				processingStopped = true
-				break
-			}
-			part, err := reader.NextPart()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
+			if budget.parts >= maxMIMEParts {
 				mimeIncomplete = true
 				break
 			}
-			if !budget.takePart() {
-				mimeIncomplete = true
-				break
+			var part *multipart.Part
+			var body []byte
+			var readErr error
+			partStopped := false
+			{
+				read, complete := readRestartableMIMEPart(&reader, decoded, boundary, partIndex, budget)
+				if !complete {
+					mimeIncomplete = true
+					processingStopped = true
+					break
+				}
+				part, body, readErr = read.part, read.body, read.err
+				if part == nil {
+					if readErr != io.EOF {
+						mimeIncomplete = true
+					}
+					break
+				}
 			}
-			// The complete message body has already been bounded by Message.maxBytes.
-			// Do not impose a smaller per-part limit here: doing so would silently
-			// discard evidence from otherwise retained messages.
-			decoder := decodeControl{shouldStop: budget.decodingShouldStop, memory: budget.fallbackMemory}
-			body, readErr := decoder.readAll(part)
+
+			budget.takePart()
+			partIndex++
 			mimeIncomplete = mimeIncomplete || readErr != nil
+
 			partContentType := part.Header.Get("Content-Type")
 			if mediaType == "multipart/digest" && strings.TrimSpace(partContentType) == "" {
 				partContentType = "message/rfc822"
@@ -316,11 +292,22 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 			content := extractMIMEWithBudget(partContentType, part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-ID"), body, depth+1, budget)
 			mimeIncomplete = mimeIncomplete || content.MIMEIncomplete
 			nestedTransferIncomplete = nestedTransferIncomplete || content.TransferIncomplete
-			nestedExtractionIncomplete = nestedExtractionIncomplete || content.ExtractionIncomplete || decoder.stopped
+			nestedExtractionIncomplete = nestedExtractionIncomplete || content.ExtractionIncomplete || partStopped
+			if retained != nil && hasExtractedContent(content) {
+				*retained = content
+			}
+			if budget.terminal.Code != termination.None {
+				if !hasExtractedContent(content) {
+					content = retainedMIMEPart(parts)
+				}
+				content.ExtractionIncomplete = true
+				content.MIMEIncomplete = true
+				return content
+			}
 			if !hasExtractedContent(content) {
 				if mediaType != "multipart/alternative" {
 					var ok bool
-					parts, ok = resourceguard.Append(budget.fallbackMemory(), parts, nil, content)
+					parts, ok = appendMIMEPart(budget, parts, content)
 					if !ok {
 						mimeIncomplete = true
 						processingStopped = true
@@ -333,7 +320,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 				continue
 			}
 			var ok bool
-			parts, ok = resourceguard.Append(budget.fallbackMemory(), parts, nil, content)
+			parts, ok = appendMIMEPart(budget, parts, content)
 			if !ok {
 				mimeIncomplete = true
 				processingStopped = true
@@ -355,6 +342,12 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 				}
 			}
 		}
+		if budget.terminal.Code != termination.None {
+			content := retainedMIMEPart(parts)
+			content.ExtractionIncomplete = true
+			content.MIMEIncomplete = true
+			return content
+		}
 		if mediaType == "multipart/alternative" {
 			var selected extractedContent
 			switch {
@@ -374,100 +367,90 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 			selected.HTMLCPULimitExceeded = selected.HTMLCPULimitExceeded || budget.cpuLimitExceeded
 			return selected
 		}
-		var combined extractedContent
-		if len(parts) == 0 && hasExtractedContent(alternativePlain) {
-			combined = alternativePlain
-		}
-		imageRefs := imageRefCollector{memory: budget.fallbackMemory()}
-		links := linkCollector{compactURLs: budget.compactURLs, memory: budget.fallbackMemory(), shouldStop: budget.outputShouldStop}
-		var textParts, visibleTextParts, strippedTextParts []string
-		visibleMatchesText := true
-		for _, part := range parts {
-			if budget.outputShouldStop() {
-				if combined.Text == "" {
-					combined = part
+		assemble := func() extractedContent {
+			var combined extractedContent
+			if len(parts) == 0 && hasExtractedContent(alternativePlain) {
+				combined = alternativePlain
+			}
+			imageRefs := imageRefCollector{memory: budget.allocationMemory()}
+			links := linkCollector{compactURLs: budget.compactURLs, memory: budget.allocationMemory(), shouldStop: budget.outputShouldStop}
+			var textParts, visibleTextParts, strippedTextParts []string
+			visibleMatchesText := true
+			for _, part := range parts {
+				budget.outputShouldStop()
+
+				combined.HTML = combined.HTML || part.HTML
+				combined.ConfidentVisibleChars += part.ConfidentVisibleChars
+				combined.HasConcealedContent = combined.HasConcealedContent || part.HasConcealedContent
+				combined.ExtractionIncomplete = combined.ExtractionIncomplete || part.ExtractionIncomplete
+				combined.HTMLFallbackUsed = combined.HTMLFallbackUsed || part.HTMLFallbackUsed
+				combined.HTMLCPULimitExceeded = combined.HTMLCPULimitExceeded || part.HTMLCPULimitExceeded
+				combined.CSSIncomplete = combined.CSSIncomplete || part.CSSIncomplete
+				combined.HTMLComments.add(part.HTMLComments)
+				if !hasExtractedContent(part) {
+					continue
 				}
-				combined.ExtractionIncomplete = true
-				processingStopped = true
-				break
-			}
-			combined.HTML = combined.HTML || part.HTML
-			combined.ConfidentVisibleChars += part.ConfidentVisibleChars
-			combined.HasConcealedContent = combined.HasConcealedContent || part.HasConcealedContent
-			combined.ExtractionIncomplete = combined.ExtractionIncomplete || part.ExtractionIncomplete
-			combined.HTMLFallbackUsed = combined.HTMLFallbackUsed || part.HTMLFallbackUsed
-			combined.HTMLCPULimitExceeded = combined.HTMLCPULimitExceeded || part.HTMLCPULimitExceeded
-			combined.CSSIncomplete = combined.CSSIncomplete || part.CSSIncomplete
-			combined.HTMLComments.add(part.HTMLComments)
-			if !hasExtractedContent(part) {
-				continue
-			}
-			visibleMatchesText = visibleMatchesText && sameStringStorage(part.Text, part.VisibleText)
-			var ok bool
-			textParts, ok = resourceguard.Append(budget.fallbackMemory(), textParts, nil, part.Text)
-			if !ok {
-				combined = part
-				processingStopped = true
-				break
-			}
-			visibleTextParts, ok = resourceguard.Append(budget.fallbackMemory(), visibleTextParts, nil, part.VisibleText)
-			if !ok {
-				processingStopped = true
-				break
-			}
-			stripped := part.StrippedText
-			if stripped == "" && !part.HasConcealedContent {
-				stripped = part.Text
-			}
-			if stripped != "" {
-				strippedTextParts, ok = resourceguard.Append(budget.fallbackMemory(), strippedTextParts, nil, stripped)
-				if !ok {
-					processingStopped = true
-					break
+				visibleMatchesText = visibleMatchesText && sameStringStorage(part.Text, part.VisibleText)
+				textParts = resourceguard.Append(budget.allocationMemory(), textParts, nil, part.Text)
+
+				visibleTextParts = resourceguard.Append(budget.allocationMemory(), visibleTextParts, nil, part.VisibleText)
+
+				stripped := part.StrippedText
+				if stripped == "" && !part.HasConcealedContent {
+					stripped = part.Text
 				}
+				if stripped != "" {
+					strippedTextParts = resourceguard.Append(budget.allocationMemory(), strippedTextParts, nil, stripped)
+				}
+				for _, destination := range part.Links {
+					links.AddDestination(destination)
+				}
+				imageRefs.AddAll(part.ImageRefs)
+				combined.Images = resourceguard.Append(budget.allocationMemory(), combined.Images, nil, part.Images...)
 			}
-			for _, destination := range part.Links {
-				links.AddDestination(destination)
-			}
-			imageRefs.AddAll(part.ImageRefs)
-			combined.Images, ok = resourceguard.Append(budget.fallbackMemory(), combined.Images, nil, part.Images...)
-			if !ok {
-				processingStopped = true
-				break
-			}
-		}
-		combined.ImageRefs = imageRefs.refs
-		combined.Links = links.links
-		var complete bool
-		if len(textParts) > 0 {
-			combined.Text, complete = joinExtractedText(textParts, "\n\n", budget)
-		} else {
-			complete = !processingStopped
-		}
-		processingStopped = processingStopped || !complete
-		if complete {
-			if !combined.HasConcealedContent {
-				combined.StrippedText = combined.Text
+			combined.ImageRefs = imageRefs.refs
+			combined.Links = links.links
+			var complete bool
+			if len(textParts) > 0 {
+				combined.Text, complete = joinExtractedText(textParts, "\n\n", budget)
 			} else {
-				combined.StrippedText, complete = joinExtractedText(strippedTextParts, "\n\n", budget)
-				processingStopped = processingStopped || !complete
+				complete = !processingStopped
 			}
-		}
-		if !complete {
-			processingStopped = true
-		} else if budget.outputShouldStop() {
-			processingStopped = true
-		} else if visibleMatchesText {
-			combined.VisibleText = combined.Text
-		} else {
-			combined.VisibleText, complete = joinExtractedText(visibleTextParts, "\n\n", budget)
 			processingStopped = processingStopped || !complete
+			if complete {
+				if !combined.HasConcealedContent {
+					combined.StrippedText = combined.Text
+				} else {
+					combined.StrippedText, complete = joinExtractedText(strippedTextParts, "\n\n", budget)
+					processingStopped = processingStopped || !complete
+				}
+			}
+			if !complete {
+				processingStopped = true
+			} else {
+				budget.outputShouldStop()
+
+				if visibleMatchesText {
+					combined.VisibleText = combined.Text
+				} else {
+					combined.VisibleText, complete = joinExtractedText(visibleTextParts, "\n\n", budget)
+					processingStopped = processingStopped || !complete
+				}
+			}
+			combined.MIMEIncomplete = mimeIncomplete
+			combined.ExtractionIncomplete = combined.ExtractionIncomplete || processingStopped || nestedExtractionIncomplete
+			combined.TransferIncomplete = transferIncomplete || nestedTransferIncomplete
+			combined.HTML = combined.HTML || budget.htmlParts > 0
+			combined.HTMLCPULimitExceeded = combined.HTMLCPULimitExceeded || budget.cpuLimitExceeded
+			return combined
 		}
-		combined.MIMEIncomplete = mimeIncomplete
-		combined.ExtractionIncomplete = combined.ExtractionIncomplete || processingStopped || nestedExtractionIncomplete
-		combined.TransferIncomplete = transferIncomplete || nestedTransferIncomplete
-		combined.HTML = combined.HTML || budget.htmlParts > 0
-		combined.HTMLCPULimitExceeded = combined.HTMLCPULimitExceeded || budget.cpuLimitExceeded
+
+		combined, complete := runExtraction(budget, assemble)
+		if !complete {
+			combined = retainedMIMEPart(parts)
+			combined.ExtractionIncomplete = true
+			combined.MIMEIncomplete = true
+		}
 		return combined
 	}
 	if mediaType == "message/rfc822" {
@@ -483,33 +466,24 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 		return content
 	}
 	if mediaType == "text/html" {
-		text := decodeHTMLCharsetWithResources(params["charset"], decoded, budget.htmlBytesRemaining, budget.decodingShouldStop, budget.fallbackMemory)
-		if text == "" && len(decoded) > 0 && budget.cpuLimitExceeded {
-			return stoppedMIMEContent()
-		}
+		text := decodeHTMLCharsetWithResources(params["charset"], decoded, budget.htmlBytesRemaining, budget.decodingShouldStop, budget.allocationMemory)
 		content := htmlToTextWithBudget(text, budget)
 		content.HTML = true
 		content.TransferIncomplete = transferIncomplete
 		return content
 	}
-	text, complete := decodeCharsetWithResources(params["charset"], decoded, budget.decodedTextBytesRemaining, budget.decodingShouldStop, budget.fallbackMemory)
-	if text == "" && len(decoded) > 0 && budget.cpuLimitExceeded {
-		return stoppedMIMEContent()
-	}
+	text, complete := decodeCharsetWithResources(params["charset"], decoded, budget.decodedTextBytesRemaining, budget.decodingShouldStop, budget.allocationMemory)
 	budget.decodedTextBytesRemaining -= int64(len(text))
-	if budget.outputShouldStop() {
-		return extractedContent{
-			Text: text, VisibleText: text,
-			TransferIncomplete: transferIncomplete, ExtractionIncomplete: true, HTMLCPULimitExceeded: budget.cpuLimitExceeded,
-		}
-	}
-	links := linkCollector{compactURLs: budget.compactURLs, memory: budget.fallbackMemory(), shouldStop: budget.outputShouldStop}
+
+	budget.outputShouldStop()
+
+	links := linkCollector{compactURLs: budget.compactURLs, memory: budget.allocationMemory(), shouldStop: budget.outputShouldStop}
 	promptText, urlsComplete := rewritePlainTextURLs(text, budget.compactURLs, &links, budget.outputShouldStop)
-	confidentChars, counted := budget.confidentCharacters(text)
+	confidentChars := budget.confidentCharacters(text)
 	return extractedContent{
 		Text: promptText, VisibleText: text,
 		ConfidentVisibleChars: confidentChars,
-		Links:                 links.links, TransferIncomplete: transferIncomplete, ExtractionIncomplete: !complete || !urlsComplete || !counted,
+		Links:                 links.links, TransferIncomplete: transferIncomplete, ExtractionIncomplete: !complete || !urlsComplete,
 		HTMLMemoryLimitExceeded: budget.memoryLimitExceeded || budget.fallbackMemoryExceeded,
 		HTMLCPULimitExceeded:    budget.cpuLimitExceeded,
 	}
@@ -528,15 +502,12 @@ func joinExtractedText(parts []string, separator string, budget *extractionBudge
 	if len(parts) == 1 {
 		return parts[0], true
 	}
+
 	// strings.Join is one indivisible copy. Check immediately before it so a
 	// limit crossed by the preceding combine phase cannot start another full
 	// output pass.
-	if budget.outputShouldStop() {
-		if budget.fallback != nil {
-			return parts[0], false
-		}
-		return "", false
-	}
+	budget.outputShouldStop()
+
 	total := int64(len(separator)) * int64(len(parts)-1)
 	const maxInt64 = int64(^uint64(0) >> 1)
 	for _, part := range parts {
@@ -546,12 +517,7 @@ func joinExtractedText(parts []string, separator string, budget *extractionBudge
 		}
 		total += int64(len(part))
 	}
-	if !budget.reserveOutputMemory(total) {
-		if budget.fallback != nil {
-			return parts[0], false
-		}
-		return "", false
-	}
+	budget.reserveOutputMemory(total)
 	return strings.Join(parts, separator), true
 }
 
@@ -560,7 +526,7 @@ func extractAttachedMessage(data []byte, depth int, budget *extractionBudget) ex
 	if err != nil {
 		return extractedContent{Text: "[attached message could not be parsed]", MIMEIncomplete: true}
 	}
-	decoder := decodeControl{shouldStop: budget.decodingShouldStop, memory: budget.fallbackMemory}
+	decoder := decodeControl{shouldStop: budget.decodingShouldStop, memory: budget.allocationMemory}
 	body, err := decoder.readAll(attached.Body)
 	if err != nil {
 		return extractedContent{Text: "[attached message body could not be read]", MIMEIncomplete: true}
@@ -584,11 +550,11 @@ func decodeCharset(label string, data []byte, maxBytes int64) (string, bool) {
 	return decodeCharsetWithStop(label, data, maxBytes, nil)
 }
 
-func decodeCharsetWithStop(label string, data []byte, maxBytes int64, shouldStop func() bool) (string, bool) {
+func decodeCharsetWithStop(label string, data []byte, maxBytes int64, shouldStop func()) (string, bool) {
 	return decodeCharsetWithResources(label, data, maxBytes, shouldStop, nil)
 }
 
-func decodeCharsetWithResources(label string, data []byte, maxBytes int64, shouldStop func() bool, memory func() *resourceguard.Memory) (string, bool) {
+func decodeCharsetWithResources(label string, data []byte, maxBytes int64, shouldStop func(), memory func() *resourceguard.Memory) (string, bool) {
 	control := decodeControl{shouldStop: shouldStop, memory: memory}
 	if maxBytes < 0 {
 		maxBytes = 0
@@ -596,14 +562,12 @@ func decodeCharsetWithResources(label string, data []byte, maxBytes int64, shoul
 	bounded := func(value []byte) (string, bool) {
 		text := control.copyString(value)
 		if !utf8.ValidString(text) {
-			if !control.allocationMemory().Reserve(int64(len(text)) * 3) {
-				control.stopped = true
-				return "", false
-			}
+			control.allocationMemory().Reserve(int64(len(text)) * 3)
+
 			text = strings.ToValidUTF8(text, "�")
 		}
 		if int64(len(text)) <= maxBytes {
-			return text, !control.stopped
+			return text, true
 		}
 		end := int(maxBytes)
 		for end > 0 && !utf8.RuneStart(text[end]) {
@@ -616,21 +580,17 @@ func decodeCharsetWithResources(label string, data []byte, maxBytes int64, shoul
 		return bounded(data)
 	}
 	if utf8.Valid(data) {
+
 		if _, canonical := charset.Lookup(label); canonical == "utf-8" {
 			return bounded(data)
 		}
+
 	}
 	reader, err := charset.NewReaderLabel(label, newDecodeReader(bytes.NewReader(data), control.check))
-	if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
-		return "", false
-	}
 	if err != nil {
 		return bounded(data)
 	}
 	decoded, err := control.readAll(newDecodeReader(io.LimitReader(reader, maxBytes+1), control.check))
-	if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
-		return "", false
-	}
 	if err != nil {
 		return bounded(data)
 	}
@@ -644,11 +604,11 @@ func decodeHTMLCharset(label string, data []byte, maxBytes int) string {
 	return decodeHTMLCharsetWithStop(label, data, maxBytes, nil)
 }
 
-func decodeHTMLCharsetWithStop(label string, data []byte, maxBytes int, shouldStop func() bool) string {
+func decodeHTMLCharsetWithStop(label string, data []byte, maxBytes int, shouldStop func()) string {
 	return decodeHTMLCharsetWithResources(label, data, maxBytes, shouldStop, nil)
 }
 
-func decodeHTMLCharsetWithResources(label string, data []byte, maxBytes int, shouldStop func() bool, memory func() *resourceguard.Memory) string {
+func decodeHTMLCharsetWithResources(label string, data []byte, maxBytes int, shouldStop func(), memory func() *resourceguard.Memory) string {
 	control := decodeControl{shouldStop: shouldStop, memory: memory}
 	if maxBytes < 0 {
 		maxBytes = 0
@@ -665,37 +625,27 @@ func decodeHTMLCharsetWithResources(label string, data []byte, maxBytes int, sho
 		}
 		return control.copyString(value)
 	}
+
 	if encoding, canonical := charset.Lookup(strings.TrimSpace(label)); encoding != nil {
 		if canonical == "utf-8" && utf8.Valid(data) {
 			return bounded(data)
 		}
 		reader, err := charset.NewReaderLabel(label, newDecodeReader(bytes.NewReader(data), control.check))
-		if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
-			return ""
-		}
 		if err != nil {
 			return bounded(data)
 		}
 		decoded, err := control.readAll(newDecodeReader(io.LimitReader(reader, readLimit), control.check))
-		if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
-			return ""
-		}
 		if err != nil {
 			return bounded(data)
 		}
 		return bounded(decoded)
 	}
+
 	reader, err := charset.NewReader(newDecodeReader(bytes.NewReader(data), control.check), "text/html")
-	if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
-		return ""
-	}
 	if err != nil {
 		return bounded(data)
 	}
 	decoded, err := control.readAll(newDecodeReader(io.LimitReader(reader, readLimit), control.check))
-	if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
-		return ""
-	}
 	if err != nil {
 		return bounded(data)
 	}
@@ -725,27 +675,21 @@ func decodeTransferRecovering(encoding string, data []byte) ([]byte, bool) {
 	return decodeTransferRecoveringWithStop(encoding, data, nil)
 }
 
-func decodeTransferRecoveringWithStop(encoding string, data []byte, shouldStop func() bool) ([]byte, bool) {
+func decodeTransferRecoveringWithStop(encoding string, data []byte, shouldStop func()) ([]byte, bool) {
 	return decodeTransferRecoveringWithResources(encoding, data, shouldStop, nil)
 }
 
-func decodeTransferRecoveringWithResources(encoding string, data []byte, shouldStop func() bool, memory func() *resourceguard.Memory) ([]byte, bool) {
+func decodeTransferRecoveringWithResources(encoding string, data []byte, shouldStop func(), memory func() *resourceguard.Memory) ([]byte, bool) {
 	control := decodeControl{shouldStop: shouldStop, memory: memory}
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":
 		decoded, err := control.readAll(newDecodeReader(base64.NewDecoder(base64.StdEncoding, newDecodeReader(bytes.NewReader(data), control.check)), control.check))
-		if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
-			return nil, true
-		}
 		if err == nil {
 			return decoded, false
 		}
 		// Some senders omit the final MIME padding. RawStdEncoding accepts that
 		// specific variation without ignoring arbitrary corrupt characters.
 		unpadded, rawErr := control.readAll(newDecodeReader(base64.NewDecoder(base64.RawStdEncoding, newDecodeReader(bytes.NewReader(data), control.check)), control.check))
-		if control.stopped || errors.Is(rawErr, resourceguard.ErrStopped) {
-			return nil, true
-		}
 		if rawErr == nil {
 			return unpadded, false
 		}
@@ -755,9 +699,6 @@ func decodeTransferRecoveringWithResources(encoding string, data []byte, shouldS
 		return data, true
 	case "quoted-printable":
 		decoded, err := control.readAll(newDecodeReader(quotedprintable.NewReader(newDecodeReader(bytes.NewReader(data), control.check)), control.check))
-		if control.stopped || errors.Is(err, resourceguard.ErrStopped) {
-			return nil, true
-		}
 		if err == nil || len(decoded) > 0 {
 			return decoded, err != nil
 		}
@@ -772,7 +713,7 @@ func decodeTransferRecoveringWithResources(encoding string, data []byte, shouldS
 // validateOpaqueTransfer preserves recovery decoder diagnostics, including
 // unpadded Base64, while bounding temporary decoded storage and sampling CPU
 // controls between reads. It returns transfer incompleteness and work completion.
-func validateOpaqueTransfer(encoding string, data []byte, shouldStop func() bool) (bool, bool) {
+func validateOpaqueTransfer(encoding string, data []byte, shouldStop func()) (bool, bool) {
 	encoding = strings.ToLower(strings.TrimSpace(encoding))
 	if encoding != "base64" && encoding != "quoted-printable" {
 		switch encoding {
@@ -785,9 +726,10 @@ func validateOpaqueTransfer(encoding string, data []byte, shouldStop func() bool
 	var buf [32 << 10]byte
 	consume := func(reader io.Reader) (error, bool) {
 		for {
-			if shouldStop != nil && shouldStop() {
-				return nil, false
+			if shouldStop != nil {
+				shouldStop()
 			}
+
 			_, err := reader.Read(buf[:])
 			if err == io.EOF {
 				return nil, true

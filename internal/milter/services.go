@@ -31,7 +31,6 @@ type analysisService struct {
 	ai                    config.AIConfig
 	log                   *slog.Logger
 	slots                 chan struct{}
-	threadCPUTime         func() (time.Duration, bool)
 	domainLookupTimeout   time.Duration
 	authenticationTimeout time.Duration
 	milterTimeout         time.Duration

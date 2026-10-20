@@ -183,9 +183,11 @@ func readColourWithBudget(s string, budget *cpuGuard) (RGBA, valueStatus) {
 	if s == "transparent" {
 		return RGBA{}, valueResolved
 	}
+
 	if v, ok := named[s]; ok {
 		s = v
 	}
+
 	var c [4]float64
 	c[3] = 1
 	if strings.HasPrefix(s, "#") {
@@ -214,28 +216,35 @@ func readColourWithBudget(s string, budget *cpuGuard) (RGBA, valueStatus) {
 				c[i] /= 255
 			}
 		}
-	} else if open := strings.IndexByte(s, '('); open > 0 && strings.HasSuffix(s, ")") {
-		name := s[:open]
-		body := s[open+1 : len(s)-1]
-		switch name {
-		case "rgb", "rgba":
-			return finiteColourResult(parseRGBFunctionWithBudget(body, budget))
-		case "hsl", "hsla":
-			return finiteColourResult(parseHSLFunctionWithBudget(body, budget))
-		case "hwb":
-			return finiteColourResult(parseHWBFunctionWithBudget(body, budget))
-		default:
-			return RGBA{}, valueUnsupported
-		}
 	} else {
-		if strings.Contains(s, "(") {
-			return RGBA{}, valueUnsupported
+
+		if open := strings.IndexByte(s, '('); open > 0 && strings.HasSuffix(s, ")") {
+			name := s[:open]
+			body := s[open+1 : len(s)-1]
+			switch name {
+			case "rgb", "rgba":
+				return finiteColourResult(parseRGBFunctionWithBudget(body, budget))
+			case "hsl", "hsla":
+				return finiteColourResult(parseHSLFunctionWithBudget(body, budget))
+			case "hwb":
+				return finiteColourResult(parseHWBFunctionWithBudget(body, budget))
+			default:
+				return RGBA{}, valueUnsupported
+			}
+		} else {
+			if strings.Contains(s, "(") {
+				return RGBA{}, valueUnsupported
+			}
+
+			// Named colours outside the documented basic set remain unresolved.
+
+			if _, ok := unsupportedColourNames[s]; ok {
+				return RGBA{}, valueUnsupported
+			}
+
+			return RGBA{}, valueInvalid
 		}
-		// Named colours outside the documented basic set remain unresolved.
-		if _, ok := unsupportedColourNames[s]; ok {
-			return RGBA{}, valueUnsupported
-		}
-		return RGBA{}, valueInvalid
+
 	}
 	return RGBA{c[0] / 255, c[1] / 255, c[2] / 255, c[3]}, valueResolved
 }

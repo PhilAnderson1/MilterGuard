@@ -188,10 +188,14 @@ func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl)
 	content.MIMEIncomplete = content.MIMEIncomplete || m.MIMEHeadersTruncated
 	content.ExtractionIncomplete = content.ExtractionIncomplete || m.BodyTruncated
 	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
-	normalizeExtractedUTF8(&content, budget)
+	_, normalized := runExtraction(budget, func() struct{} { normalizeExtractedUTF8(&content, budget); return struct{}{} })
+	if !normalized {
+		content.ExtractionIncomplete = true
+		discardInvalidUTF8(&content)
+	}
 	budget.observeFallback()
 	if control.ObserveMemoryUsage != nil {
-		control.ObserveMemoryUsage(budget.memoryBytesLimit-budget.memoryBytesRemaining, budget.memoryBytesLimit)
+		control.ObserveMemoryUsage(budget.memoryBytesLimit-budget.remainingMemory(), budget.memoryBytesLimit)
 	}
 	if control.ObserveFallbackMemoryUsage != nil && budget.fallback != nil {
 		control.ObserveFallbackMemoryUsage(budget.fallback.memory.Used(), budget.fallback.memory.Limit())
@@ -207,17 +211,12 @@ func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl)
 // guarded replacement; if that cannot finish, discard only the invalid fields.
 func normalizeExtractedUTF8(content *extractedContent, budget *extractionBudget) {
 	fields := []*string{&content.Text, &content.VisibleText, &content.StrippedText}
-	stopped := false
 	for _, field := range fields {
 		if utf8.ValidString(*field) {
 			continue
 		}
-		if stopped || budget.outputShouldStop() || !budget.fallbackMemory().Reserve(int64(len(*field))*3) {
-			stopped = true
-			*field = ""
-			content.ExtractionIncomplete = true
-			continue
-		}
+		budget.checkStage()
+		budget.allocationMemory().Reserve(int64(len(*field)) * 3)
 		*field = strings.ToValidUTF8(*field, "�")
 	}
 }
@@ -272,7 +271,7 @@ func stripInvisibleFormatting(value string) string {
 	previousSpace := false
 	changed := false
 	for _, r := range value {
-		if unicode.In(r, unicode.Cf) || r == '\u034f' || (r == ' ' && previousSpace) {
+		if unicode.In(r, unicode.Cf) || r == '\u034f' || r == ' ' && previousSpace {
 			changed = true
 			break
 		}
@@ -518,7 +517,7 @@ func runeByteOffsets(value string, runeIndexes ...int) []int {
 // rewritePlainTextURLs handles URLs embedded in otherwise unstructured text.
 // HTML href/src destinations take the direct rendering path and do not need a
 // second scan over the completed body.
-func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shouldStop func() bool) (string, bool) {
+func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shouldStop func()) (string, bool) {
 	if links.Full() {
 		return text, true
 	}
@@ -530,17 +529,12 @@ func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shoul
 	last := 0
 	changed := false
 	compactionStopped := false
-	complete := walkPlainHTTPURLs(text, -1, shouldStop, func(link string, start, end int) bool {
+	walkPlainHTTPURLs(text, -1, shouldStop, func(link string, start, end int) bool {
 		var displayed string
 		if links != nil {
 			displayed = links.AddDestination(link)
 		} else {
-			var ok bool
-			displayed, ok = promptURLWithBudget(link, compact, nil, shouldStop)
-			if !ok {
-				compactionStopped = true
-				return false
-			}
+			displayed = promptURLWithBudget(link, compact, nil, shouldStop)
 		}
 		if displayed == "" {
 			compactionStopped = true
@@ -550,35 +544,32 @@ func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shoul
 			return !links.Full()
 		}
 		if !changed {
-			if !rewritten.Grow(len(text)) {
-				compactionStopped = true
-				return false
-			}
+			rewritten.Grow(len(text))
 		}
-		if !rewritten.WriteString(text[last:start]) || !rewritten.WriteString(displayed) {
-			compactionStopped = true
-			return false
-		}
+
+		rewritten.WriteString(text[last:start])
+		rewritten.WriteString(displayed)
+
 		last = end
 		changed = true
 		return !links.Full()
 	})
-	complete = complete && !compactionStopped
+	complete := !compactionStopped
 	if !changed {
 		return text, complete
 	}
-	if !rewritten.WriteString(text[last:]) {
-		return text, false
-	}
+
+	rewritten.WriteString(text[last:])
+
 	return rewritten.String(), complete
 }
 
-func walkPlainHTTPURLs(text string, limit int, shouldStop func() bool, visit func(link string, start, end int) bool) bool {
+func walkPlainHTTPURLs(text string, limit int, shouldStop func(), visit func(link string, start, end int) bool) {
 	found := 0
 	for search := 0; search < len(text) && (limit < 0 || found < limit); {
 		start := nextHTTPPrefix(text, search)
 		if start < 0 {
-			return true
+			return
 		}
 		end := start
 		for end < len(text) && !plainURLDelimiter(text[end]) {
@@ -586,12 +577,13 @@ func walkPlainHTTPURLs(text string, limit int, shouldStop func() bool, visit fun
 		}
 		link := trimPlainURLPunctuation(text[start:end])
 		if link != "" {
-			if found&255 == 0 && shouldStop != nil && shouldStop() {
-				return false
+			if found&255 == 0 && shouldStop != nil {
+				shouldStop()
 			}
+
 			linkEnd := start + len(link)
 			if !visit(link, start, linkEnd) {
-				return true
+				return
 			}
 			found++
 			search = linkEnd
@@ -599,7 +591,7 @@ func walkPlainHTTPURLs(text string, limit int, shouldStop func() bool, visit fun
 		}
 		search = start + 1
 	}
-	return true
+	return
 }
 
 func nextHTTPPrefix(text string, start int) int {
@@ -660,7 +652,7 @@ func boundedLinks(candidates []string) []string {
 	for _, candidate := range candidates {
 		candidate = strings.TrimSpace(candidate)
 		parsed, err := url.Parse(candidate)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || seen[candidate] {
+		if err != nil || parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Hostname() == "" || seen[candidate] {
 			continue
 		}
 		candidateChars := utf8.RuneCountInString(candidate)
@@ -689,4 +681,13 @@ func boundedLinksMissingFromBody(candidates []string, body string) []string {
 		}
 	}
 	return missing
+}
+
+// Boundary cleanup cannot allocate or resume extraction.
+func discardInvalidUTF8(content *extractedContent) {
+	for _, value := range []*string{&content.Text, &content.VisibleText, &content.StrippedText} {
+		if !utf8.ValidString(*value) {
+			*value = ""
+		}
+	}
 }

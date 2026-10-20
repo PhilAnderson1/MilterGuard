@@ -54,7 +54,7 @@ func cssTypeAttributeAppliesWithBudget(n *html.Node, budget *cpuGuard) bool {
 }
 
 func (s *sheet) stylesheetLink(n *html.Node) (href, media string, applies bool) {
-	if s.cascadeIncomplete || s.stopped {
+	if s.cascadeIncomplete {
 		return "", "", false
 	}
 	if n.Namespace != "" || n.Data != "link" || hasAttr(n, "disabled") {
@@ -77,17 +77,14 @@ func (s *sheet) stylesheetLink(n *html.Node) (href, media string, applies bool) 
 // Inspect borrowed words without lowercasing or collecting the entire rel
 // attribute. Preserve strings.Fields whitespace semantics, including Unicode.
 func (s *sheet) hasStylesheetRelation(rel string) bool {
-	if !s.checkCPU() {
-		return false
-	}
+	s.checkCPU()
+
 	stylesheet := false
 	start, nextCheck := 0, stringWorkChunk
 	for i, r := range rel {
 		if i >= nextCheck {
-			if s.cpu.stopNow(true) {
-				s.stopped = true
-				return false
-			}
+			s.cpu.checkpoint()
+
 			nextCheck = i + stringWorkChunk
 		}
 		if unicode.IsSpace(r) {
@@ -104,9 +101,8 @@ func (s *sheet) hasStylesheetRelation(rel string) bool {
 }
 
 func (s *sheet) parseMediaCondition(value string) mediaCondition {
-	if !s.checkCPU() {
-		return unknownMedia[:]
-	}
+	s.checkCPU()
+
 	return parseMediaWithBudget(value, s.resourceBudget())
 }
 
@@ -114,10 +110,10 @@ func (s *sheet) mediaCanApply(value string) bool {
 	if trimCSSWhitespace(value) == "" {
 		return true
 	}
+
 	// Applicability is a one-shot question; do not retain its parsed condition.
-	if !s.checkCPU() {
-		return true
-	}
+	s.checkCPU()
+
 	for _, alternative := range parseMediaWithBudget(value, s.resourceBudget()) {
 		if !alternative.never {
 			return true
@@ -131,7 +127,7 @@ func (s *sheet) loadStylesheetReference(href, media string) {
 	// consume CPU and transient memory; the resulting rules would be discarded.
 	// Keep this guard at the shared boundary so it covers both link elements and
 	// nested @import rules.
-	if s.cascadeIncomplete || s.stopped {
+	if s.cascadeIncomplete {
 		return
 	}
 	remaining := s.limits.CSSBytes - s.cssBytes
@@ -202,7 +198,7 @@ func importReferenceWithBudget(values []css.Token, budget *cpuGuard) cssImportRe
 		start++
 	}
 	if start < len(values) {
-		first, _ := normalizeCSSKeywordWithBudget(ownedString(values[start].Data, budget), budget)
+		first := normalizeCSSKeywordWithBudget(ownedString(values[start].Data, budget), budget)
 		if first == "layer" || strings.HasPrefix(first, "layer(") || strings.HasPrefix(first, "supports(") {
 			// Cascade layers and supports() need semantics the extractor does not
 			// model. Do not apply the imported sheet unconditionally.

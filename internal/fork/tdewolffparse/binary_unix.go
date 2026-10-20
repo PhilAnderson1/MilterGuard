@@ -90,14 +90,22 @@ func NewBinaryReaderMmapPath(filename string) (*BinaryReader, error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
-	} else if mmap, err := newBinaryReaderMmap(f); err != nil {
-		f.Close()
-		return nil, err
-	} else if err := f.Close(); err != nil {
-		mmap.Close()
-		return nil, err
 	} else {
-		return NewBinaryReader(mmap), nil
+
+		if mmap, err := newBinaryReaderMmap(f); err != nil {
+			f.Close()
+			return nil, err
+		} else {
+
+			if err := f.Close(); err != nil {
+				mmap.Close()
+				return nil, err
+			} else {
+				return NewBinaryReader(mmap), nil
+			}
+
+		}
+
 	}
 }
 

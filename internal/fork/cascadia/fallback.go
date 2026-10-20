@@ -27,7 +27,6 @@ func ConservativeFallback(source string) FallbackMetadata {
 
 // ConservativeFallbackWithMemory bounds rejected input and admits owned keys.
 func ConservativeFallbackWithMemory(source string, memory *resourceguard.Memory) (result FallbackMetadata, err error) {
-	defer recoverAllocation(&err)
 	if len(source) > maxSelectorBytes {
 		// Keep the entire rule uncertain. A bounded suffix check retains the same
 		// generated-content handling without scanning or normalizing the source.

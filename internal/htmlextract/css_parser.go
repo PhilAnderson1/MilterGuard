@@ -61,7 +61,7 @@ func (p *cssParseSession) run(s *sheet) cssParseResult {
 		return p.result()
 	}
 	for {
-		if s.cascadeIncomplete || s.stopped {
+		if s.cascadeIncomplete {
 			return p.result()
 		}
 		grammar, tokenType, data := p.parser.Next()
@@ -93,10 +93,6 @@ func (p *cssParseSession) run(s *sheet) cssParseResult {
 func (p *cssParseSession) handleError(s *sheet, tokenType css.TokenType, values []css.Token) bool {
 	if !p.parser.HasParseError() {
 		err := p.parser.Err()
-		if errors.Is(err, css.ErrResourceStopped) {
-			s.stopped = true
-			return true
-		}
 		var limitErr *css.ResourceLimitError
 		if errors.As(err, &limitErr) || errors.Is(err, css.ErrUnsafeDelimiter) {
 			if p.inline {
@@ -108,7 +104,7 @@ func (p *cssParseSession) handleError(s *sheet, tokenType css.TokenType, values 
 		return true
 	}
 	insideNestedGroup := len(p.atRules) > 0 && p.atRules[len(p.atRules)-1].nested
-	if !p.inline && p.rulesetDepth > 0 && (hasTopLevelCSSBlock(values) || (p.current < 0 && insideNestedGroup)) {
+	if !p.inline && p.rulesetDepth > 0 && (hasTopLevelCSSBlock(values) || p.current < 0 && insideNestedGroup) {
 		s.noteUnsupportedNesting()
 	}
 	// Recovery inside an inline at-rule can consume its closing brace without
@@ -141,9 +137,9 @@ func (p *cssParseSession) beginAtRule(s *sheet, name string, values []css.Token)
 	// event restores it.
 	enclosingRule := p.current
 	p.current = -1
-	if !s.checkCPU() {
-		return true
-	}
+
+	s.checkCPU()
+
 	var condition mediaCondition
 	switch asciiLowerWithBudget(name, s.cpu) {
 	case "@media":
@@ -164,12 +160,8 @@ func (p *cssParseSession) beginAtRule(s *sheet, name string, values []css.Token)
 		return true
 	}
 	parentNested := len(p.atRules) > 0 && p.atRules[len(p.atRules)-1].nested
-	var ok bool
-	p.atRules, ok = growSlice(p.atRules, 1, s.memory, s.shouldStop)
-	if !ok {
-		s.abandonCascade()
-		return true
-	}
+	p.atRules = growSlice(p.atRules, 1, s.memory, s.shouldStop)
+
 	p.atRules = append(p.atRules, atRuleFrame{enclosingRule: enclosingRule, nested: cssNestingGroup(name) && (enclosingRule >= 0 || parentNested), rulesetDepth: p.rulesetDepth})
 	return false
 }
@@ -185,9 +177,8 @@ func (p *cssParseSession) endAtRule() {
 }
 
 func (p *cssParseSession) atRule(s *sheet, name string, values []css.Token) bool {
-	if !s.checkCPU() {
-		return true
-	}
+	s.checkCPU()
+
 	name = asciiLowerWithBudget(name, s.cpu)
 	if name == "@import" {
 		if p.importsAllowed && p.conditions == nil {
@@ -217,22 +208,12 @@ func (p *cssParseSession) beginRuleset(s *sheet, values []css.Token) bool {
 		return false
 	}
 	selector := tokenStringWithBudget(values, s.cpu)
-	if !s.checkCPU() {
-		return true
-	}
-	plans, branches, exceeded, stopped := planSelectorListWithStop(selector, &s.planCount, s.memory, maxSelectorBranches-s.selectorBranches, s.shouldStop)
-	if stopped {
-		s.stopped = true
-		return true
-	}
+
+	s.checkCPU()
+
+	plans, branches, exceeded := planSelectorListWithStop(selector, &s.planCount, s.memory, maxSelectorBranches-s.selectorBranches, s.shouldStop)
 	s.selectorBranches += branches
-	if s.stopped {
-		return true
-	}
-	if s.memory.Exhausted() {
-		s.abandonCascade()
-		return true
-	}
+
 	if exceeded {
 		s.abandonCascade()
 		return true
@@ -247,12 +228,8 @@ func (p *cssParseSession) beginRuleset(s *sheet, values []css.Token) bool {
 			plans[i].makeUncertain(s.memory)
 		}
 	}
-	var ok bool
-	s.rules, ok = growSlice(s.rules, 1, s.memory, s.shouldStop)
-	if !ok {
-		s.abandonCascade()
-		return true
-	}
+	s.rules = growSlice(s.rules, 1, s.memory, s.shouldStop)
+
 	s.rules = append(s.rules, rule{plans: plans, conditions: p.conditions})
 	p.current = len(s.rules) - 1
 	return false
@@ -266,16 +243,16 @@ func (p *cssParseSession) endRuleset() {
 }
 
 func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, property string, values []css.Token) bool {
-	if !s.checkCPU() {
-		return true
-	}
+	s.checkCPU()
+
 	if original := p.parser.OriginalData(); len(original) != 0 {
 		property = ownedString(original, s.cpu)
 	}
+
 	property = normalizeDeclarationPropertyWithBudget(property, s.cpu)
 	insideNestedGroup := len(p.atRules) > 0 && p.atRules[len(p.atRules)-1].nested
 	if !p.inline && p.rulesetDepth > 0 && grammar != css.CustomPropertyGrammar &&
-		(hasTopLevelCSSBlock(values) || (p.current < 0 && insideNestedGroup)) {
+		(hasTopLevelCSSBlock(values) || p.current < 0 && insideNestedGroup) {
 		s.noteUnsupportedNesting()
 		return false
 	}
@@ -294,26 +271,21 @@ func (p *cssParseSession) declaration(s *sheet, grammar css.GrammarType, propert
 	} else {
 		declarations = s.declarationsFromParsed(property, parseUnretainedCSSTokensWithBudget(values, value, s.cpu), false)
 	}
+
 	if len(declarations) > maxCSSDeclarations-s.declarationCount {
 		s.abandonCascade()
 		return true
 	}
 	s.declarationCount += len(declarations)
 	if p.inline {
-		var ok bool
-		p.out, ok = growSlice(p.out, len(declarations), s.memory, s.shouldStop)
-		if !ok {
-			s.abandonCascade()
-			return true
-		}
+		p.out = growSlice(p.out, len(declarations), s.memory, s.shouldStop)
+
 		p.out = append(p.out, declarations...)
 	} else if p.current >= 0 {
-		out, ok := growSlice(s.rules[p.current].decls, len(declarations), s.memory, s.shouldStop)
-		if !ok {
-			s.abandonCascade()
-			return true
-		}
+		out := growSlice(s.rules[p.current].decls, len(declarations), s.memory, s.shouldStop)
+
 		s.rules[p.current].decls = append(out, declarations...)
 	}
+
 	return false
 }

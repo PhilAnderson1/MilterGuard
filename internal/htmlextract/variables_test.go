@@ -1,5 +1,7 @@
 package htmlextract
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	"fmt"
 	"strings"
@@ -218,44 +220,38 @@ func TestVariableExpansionUsesSharedMemoryBudget(t *testing.T) {
 	b.WriteString(`display:var(--v29)">T</p>`)
 	limits := DefaultLimits()
 	limits.MemoryBytes = 1 << 20
-	document, err := (processor{Limits: limits}).process([]byte(b.String()))
-	if err == nil || !strings.Contains(err.Error(), "memory bytes") {
-		t.Fatalf("document=%+v err=%v", document, err)
-	}
-	if document.Usage.MemoryBytes != limits.MemoryBytes {
-		t.Fatalf("memory usage=%d want=%d", document.Usage.MemoryBytes, limits.MemoryBytes)
+	_, usage, err, failure := captureAnalysis([]byte(b.String()), limits)
+	if err != nil || failure.Code != termination.MemoryExceeded || usage.MemoryBytes != limits.MemoryBytes {
+		t.Fatalf("failure=%+v usage=%+v err=%v", failure, usage, err)
 	}
 }
 
 func TestExpandedValueLexingUsesSharedResourceBudget(t *testing.T) {
 	memory := resourceguard.NewMemory(8 << 10)
-	budget := &cpuGuard{memory: memory}
-	if _, status := lexValue(strings.Repeat("()", 1_000), budget); status != valueUnsupported {
-		t.Fatalf("status=%v, want valueUnsupported", status)
-	}
-	if !memory.Exhausted() {
-		t.Fatal("token-dense value did not exhaust the shared memory budget")
-	}
+	budget := testCPUGuard(cpuGuard{memory: memory})
+	expectTermination(t, termination.MemoryExceeded, func() { lexValue(strings.Repeat("()", 1000), budget) })
 
 	stops := 0
-	budget = &cpuGuard{shouldStop: func() bool {
+	budget = testCPUGuard(cpuGuard{shouldStop: func() {
 		stops++
-		return true
-	}}
-	if _, status := lexValue(strings.Repeat("()", 1_000), budget); status != valueUnsupported {
-		t.Fatalf("CPU-stopped status=%v, want valueUnsupported", status)
-	}
-	if stops == 0 || !budget.stopped {
-		t.Fatalf("CPU stop callback calls=%d stopped=%v", stops, budget.stopped)
+		{
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+
+		return
+	}})
+	expectTermination(t, termination.CPUExceeded, func() { lexValue(strings.Repeat("()", 1000), budget) })
+	if stops == 0 {
+		t.Fatal("missing CPU checkpoint")
 	}
 }
 
 func TestCSSValueRecursionLimits(t *testing.T) {
 	mathValue := strings.Repeat("calc(", maxCSSValueDepth+1) + "1px" + strings.Repeat(")", maxCSSValueDepth+1)
-	if _, status := evalMath(fontSize, mathValue, &initialStyle, &initialStyle, &cpuGuard{}); status != valueUnsupported {
+	if _, status := evalMath(fontSize, mathValue, &initialStyle, &initialStyle, testCPUGuard(cpuGuard{})); status != valueUnsupported {
 		t.Fatalf("deep math status=%v, want valueUnsupported", status)
 	}
-	if value := substituteTokens(nil, nil, &cpuGuard{}, maxCSSValueDepth); value.status != valueUnsupported {
+	if value := substituteTokens(nil, nil, testCPUGuard(cpuGuard{}), maxCSSValueDepth); value.status != valueUnsupported {
 		t.Fatalf("deep variable substitution status=%v, want valueUnsupported", value.status)
 	}
 }
@@ -274,11 +270,8 @@ func TestVariableExpandedShorthandLexingCannotEscapeMemoryBudget(t *testing.T) {
 	input := []byte(`<style>` + cssText.String() + `</style><div>T</div>`)
 	limits := DefaultLimits()
 	limits.MemoryBytes = 4 << 20
-	document, err := (processor{Limits: limits}).process(input)
-	if err == nil || !strings.Contains(err.Error(), "memory bytes") {
-		t.Fatalf("document=%+v err=%v", document, err)
-	}
-	if document.Usage.MemoryBytes != limits.MemoryBytes {
-		t.Fatalf("memory usage=%d want=%d", document.Usage.MemoryBytes, limits.MemoryBytes)
+	_, usage, err, failure := captureAnalysis(input, limits)
+	if err != nil || failure.Code != termination.MemoryExceeded || usage.MemoryBytes != limits.MemoryBytes {
+		t.Fatalf("failure=%+v usage=%+v err=%v", failure, usage, err)
 	}
 }

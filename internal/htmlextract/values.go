@@ -66,11 +66,8 @@ func resolve(p int, s string, parent, root *Style) (Value, valueStatus) {
 }
 
 func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (Value, valueStatus) {
-	var normalized bool
-	s, normalized = normalizeCSSKeywordWithBudget(s, budget)
-	if !normalized {
-		return Value{}, valueUnsupported
-	}
+	s = normalizeCSSKeywordWithBudget(s, budget)
+
 	if p >= properties {
 		return resolveLayoutPropertyWithBudget(p, s, budget)
 	}
@@ -167,34 +164,40 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 				return Value{Text: s}, valueUnsupported
 			}
 		} else {
-			absolute := map[string]float64{
-				"xx-small": 9, "x-small": 12, "small": 13, "medium": 16,
-				"large": 18, "x-large": 24, "xx-large": 32, "xxx-large": 48,
-			}
-			if v, ok := absolute[s]; ok {
-				return Value{Text: numberStringWithBudget(v, "px", budget), Number: v, Known: true}, valueResolved
-			}
-			if s == "smaller" || s == "larger" {
-				if !parent[fontSize].Known {
-					return Value{Text: s}, valueResolved
+			{
+				absolute := map[string]float64{
+					"xx-small": 9, "x-small": 12, "small": 13, "medium": 16,
+					"large": 18, "x-large": 24, "xx-large": 32, "xxx-large": 48,
 				}
-				factor := .8
-				if s == "larger" {
-					factor = 1.2
+
+				if v, ok := absolute[s]; ok {
+					return Value{Text: numberStringWithBudget(v, "px", budget), Number: v, Known: true}, valueResolved
 				}
-				v := parent[fontSize].Number * factor
-				return Value{Text: numberStringWithBudget(v, "px", budget), Number: v, Known: parent[fontSize].Known}, valueResolved
-			}
-			if v, ok := numberWithBudget(s, budget); ok {
-				if v == 0 {
-					return Value{Text: "0px", Known: true}, valueResolved
+
+				if s == "smaller" || s == "larger" {
+					if !parent[fontSize].Known {
+						return Value{Text: s}, valueResolved
+					}
+					factor := .8
+					if s == "larger" {
+						factor = 1.2
+					}
+					v := parent[fontSize].Number * factor
+					return Value{Text: numberStringWithBudget(v, "px", budget), Number: v, Known: parent[fontSize].Known}, valueResolved
+				}
+
+				if v, ok := numberWithBudget(s, budget); ok {
+					if v == 0 {
+						return Value{Text: "0px", Known: true}, valueResolved
+					}
+					return Value{}, valueInvalid
+				}
+
+				if strings.Contains(s, "(") || s == "math" {
+					return Value{Text: s}, valueUnsupported
 				}
 				return Value{}, valueInvalid
 			}
-			if strings.Contains(s, "(") || s == "math" {
-				return Value{Text: s}, valueUnsupported
-			}
-			return Value{}, valueInvalid
 		}
 		v, ok := numberWithBudget(num, budget)
 		if !ok || v < 0 {
@@ -420,7 +423,7 @@ func computedLineHeight(v Value, fontNumber float64, fontKnown bool, budget *cpu
 		return v
 	}
 	_, unit, found := splitLength(v.Text)
-	if !found || (unit.suffix != "%" && unit.suffix != "em") || !fontKnown {
+	if !found || unit.suffix != "%" && unit.suffix != "em" || !fontKnown {
 		return v
 	}
 	pixels := v.Number * fontNumber

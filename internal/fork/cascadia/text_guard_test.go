@@ -1,5 +1,7 @@
 package cascadia
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
 	html "github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
@@ -34,9 +36,18 @@ func TestEmptyPseudoClassInterruptsLongWhitespace(t *testing.T) {
 	n := &html.Node{Type: html.ElementNode, Data: "p"}
 	n.AppendChild(&html.Node{Type: html.TextNode, Data: strings.Repeat(" \u00a0", 10000)})
 	calls := 0
-	_, stopped := MatchWithStop(s, n, func() bool { calls++; return calls == 2 })
-	if !stopped || calls != 2 {
-		t.Fatalf("stopped=%v calls=%d", stopped, calls)
+	expectTermination(t, termination.CPUExceeded, func() {
+		MatchWithStop(s, n, func() {
+			calls++
+			if calls == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+
+			return
+		})
+	})
+	if calls != 2 {
+		t.Fatalf("calls=%d", calls)
 	}
 	if !s.Match(n) {
 		t.Fatal("Unicode whitespace semantics changed")

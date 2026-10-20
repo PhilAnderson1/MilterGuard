@@ -1,7 +1,8 @@
 package html
 
+import "github.com/PhilAnderson1/MilterGuard/internal/termination"
+
 import (
-	"errors"
 	"runtime"
 	"strings"
 	"testing"
@@ -58,29 +59,33 @@ func TestDecoderStopsInsideToken(t *testing.T) {
 			}
 			calls := 0
 			decoding := false
-			z := NewTokenizerWithStop(strings.NewReader(source), func() bool {
+			z := NewTokenizerWithStop(strings.NewReader(source), func() {
 				if !decoding {
-					return false
+					return
 				}
 				calls++
-				return true
+				if true {
+					termination.Fail(termination.
+						Failure{Code: termination.
+						CPUExceeded,
+					},
+					)
+				}
+
+				return
 			})
 			z.Next()
 			decoding = true
-			if attribute {
-				z.TagName()
-				_, val, more := z.TagAttr()
-				if val != nil || more {
-					t.Fatal("partial attribute escaped cancellation")
+			expectTermination(t, termination.CPUExceeded, func() {
+				if attribute {
+					z.TagName()
+					z.TagAttr()
+				} else {
+					z.Text()
 				}
-			} else if value := z.Text(); value != nil {
-				t.Fatal("partial text escaped cancellation")
-			}
-			if !errors.Is(z.Err(), ErrResourceStopped) || calls != 1 {
-				t.Fatalf("attribute=%v calls=%d err=%v", attribute, calls, z.Err())
-			}
-			if z.Next() != ErrorToken || z.Token().Type != ErrorToken {
-				t.Fatal("resource failure was not sticky")
+			})
+			if calls != 1 {
+				t.Fatalf("attribute=%v calls=%d", attribute, calls)
 			}
 		}
 	}
@@ -124,11 +129,9 @@ func TestDiscardedTokensConsumeBudget(t *testing.T) {
 		strings.Repeat(strings.Repeat(" ", 10000)+"</ignored>", 100),
 	} {
 		memory := resourceguard.NewMemory(256 << 10)
-		root, err := ParseWithOptions(strings.NewReader(source), ParseOptionResourceLimits(ResourceLimits{Memory: memory}))
-		var limited *ResourceLimitError
-		if root != nil || !errors.As(err, &limited) || limited.Resource != "memory bytes" {
-			t.Fatalf("discarded tokens passed: %v", err)
-		}
+		expectTermination(t, termination.MemoryExceeded, func() {
+			ParseWithOptions(strings.NewReader(source), ParseOptionResourceLimits(ResourceLimits{Memory: memory}))
+		})
 	}
 }
 
@@ -139,11 +142,9 @@ func TestTokenCopiesAdmittedBeforeAllocation(t *testing.T) {
 		z.guard = &resourceGuard{limits: ResourceLimits{Memory: resourceguard.NewMemory(1)}}
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
-		token := z.Token()
+		expectTermination(t, termination.MemoryExceeded, func() { z.Token() })
 		runtime.ReadMemStats(&after)
-		if token.Type != ErrorToken || z.Err() == nil {
-			t.Fatal("copy passed admission")
-		}
+
 		if after.TotalAlloc-before.TotalAlloc > 64<<10 {
 			t.Fatal("token copied before reservation")
 		}
@@ -173,16 +174,20 @@ func TestGuardedStringNormalization(t *testing.T) {
 		}
 	}
 	calls := 0
-	g := &resourceGuard{limits: ResourceLimits{ShouldStop: func() bool { calls++; return true }}}
-	func() {
-		defer func() {
-			abort, ok := recover().(resourceAbort)
-			if !ok || !errors.Is(abort.err, ErrResourceStopped) {
-				t.Fatal("mapping did not stop")
-			}
-		}()
-		mapStringWithGuard(strings.Repeat("A", 10000), unicode.ToLower, g)
-	}()
+	g := &resourceGuard{limits: ResourceLimits{ShouldStop: func() {
+		calls++
+		if true {
+			termination.Fail(termination.
+				Failure{Code: termination.
+				CPUExceeded,
+			},
+			)
+		}
+
+		return
+	}}}
+	expectTermination(t, termination.CPUExceeded, func() { mapStringWithGuard(strings.Repeat("A", 10000), unicode.ToLower, g) })
+
 	if calls != 1 {
 		t.Fatalf("calls=%d", calls)
 	}
@@ -198,16 +203,20 @@ func TestEntityDecoderProgress(t *testing.T) {
 	} {
 		for _, attribute := range []bool{false, true} {
 			calls := 0
-			g := &resourceGuard{limits: ResourceLimits{ShouldStop: func() bool { calls++; return true }}}
-			func() {
-				defer func() {
-					abort, ok := recover().(resourceAbort)
-					if !ok || !errors.Is(abort.err, ErrResourceStopped) {
-						t.Fatalf("decoder failed to cancel: %v", abort)
-					}
-				}()
-				unescapeWithGuard([]byte(source), attribute, g)
-			}()
+			g := &resourceGuard{limits: ResourceLimits{ShouldStop: func() {
+				calls++
+				if true {
+					termination.Fail(termination.
+						Failure{Code: termination.
+						CPUExceeded,
+					},
+					)
+				}
+
+				return
+			}}}
+			expectTermination(t, termination.CPUExceeded, func() { unescapeWithGuard([]byte(source), attribute, g) })
+
 			if calls != 1 {
 				t.Fatalf("decoder callbacks=%d", calls)
 			}

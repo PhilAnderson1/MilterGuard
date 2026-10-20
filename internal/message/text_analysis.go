@@ -1,7 +1,6 @@
 package message
 
 import (
-	"io"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -9,26 +8,24 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
-func prepareVisibleText(value string, memory *resourceguard.Memory, stop func() bool) (string, bool) {
-	if memory.Exhausted() || stop != nil && stop() {
-		return "", false
+func prepareVisibleText(value string, memory *resourceguard.Memory, stop func()) string {
+	if stop != nil {
+		stop()
 	}
-	value, ok := sanitizeSenderTextWithResources(value, memory, stop)
-	if !ok || stop != nil && stop() {
-		return "", false
+	value = sanitizeSenderTextWithResources(value, memory, stop)
+	if stop != nil {
+		stop()
 	}
 	return compactFormattingPaddingWithResources(value, memory, stop)
 }
 
 func confidentTextCharacters(value string) int {
-	count, _ := confidentTextCharactersWithResources(value, nil, nil)
+	count := confidentTextCharactersWithResources(value, nil, nil)
 	return count
 }
-func confidentTextCharactersWithResources(value string, memory *resourceguard.Memory, stop func() bool) (int, bool) {
-	value, ok := prepareVisibleText(value, memory, stop)
-	if !ok {
-		return 0, false
-	}
+func confidentTextCharactersWithResources(value string, memory *resourceguard.Memory, stop func()) int {
+	value = prepareVisibleText(value, memory, stop)
+
 	// Count normalized text directly: constructing a normalized copy solely to
 	// count it wastes both memory and processing time.
 	count, trimmed, meaningful := 0, 0, false
@@ -36,9 +33,10 @@ func confidentTextCharactersWithResources(value string, memory *resourceguard.Me
 	nextCheck := 0
 	for offset := 0; offset < len(value); {
 		if offset >= nextCheck {
-			if stop != nil && stop() {
-				return 0, false
+			if stop != nil {
+				stop()
 			}
+
 			nextCheck = offset + resourceguard.WorkChunk
 		}
 		r, size := utf8.DecodeRuneInString(value[offset:])
@@ -46,9 +44,10 @@ func confidentTextCharactersWithResources(value string, memory *resourceguard.Me
 		if r == utf8.RuneError && size == 1 {
 			for offset < len(value) {
 				if offset >= nextCheck {
-					if stop != nil && stop() {
-						return 0, false
+					if stop != nil {
+						stop()
 					}
+
 					nextCheck = offset + resourceguard.WorkChunk
 				}
 				next, n := utf8.DecodeRuneInString(value[offset:])
@@ -78,74 +77,59 @@ func confidentTextCharactersWithResources(value string, memory *resourceguard.Me
 		}
 	}
 	if !meaningful {
-		return 0, true
+		return 0
 	}
-	return trimmed, true
+	return trimmed
 }
 
 // Every text node consults the same extraction state. Bind its callback once
 // instead of allocating an escaping method value for each node and pass.
-func (e *htmlExtraction) textStopCallback() (func() bool, bool) {
-	if e.textShouldStop == nil {
-		stop, ok := resourceguard.BindStop(e.memory, e, func(extraction *htmlExtraction) bool { return extraction.stopNow() })
-		if !ok {
-			e.stopForMemory()
-			return nil, false
-		}
-		e.textShouldStop = stop
+func (e *htmlExtraction) textStopCallback() func() {
+	if e.textClockCheck == nil {
+		e.textClockCheck = resourceguard.BindCheckpoint(e.memory, e, func(e *htmlExtraction) { e.stopNow() })
 	}
-	return e.textShouldStop, true
-}
-
-type countingStopTarget struct {
-	budget *extractionBudget
-	stage  *fallbackResources
+	if e.textShouldStop == nil {
+		e.textStopSampler = resourceguard.NewStopSampler(10, e.textClockCheck)
+		e.textShouldStop = resourceguard.BindCheckpoint(e.memory, e, func(e *htmlExtraction) {
+			e.textStopSampler.Check()
+		})
+	}
+	return e.textShouldStop
 }
 
 // Count optional evidence using the active stage's ledger. A stage transition
 // stops this optional work rather than continuing against the retired ledger.
-func (b *extractionBudget) confidentCharacters(value string) (int, bool) {
-	if b.outputShouldStop() {
-		return 0, false
-	}
-	stage := b.fallback
-	memory := b.fallbackMemory()
-	if memory == nil {
-		memory = resourceguard.NewMemory(b.memoryBytesRemaining)
-		defer b.consumeMemory(memory)
-	}
-	if b.countingStop == nil || b.countingStage != stage {
-		stop, ok := resourceguard.BindStop(memory, countingStopTarget{budget: b, stage: stage}, func(target countingStopTarget) bool {
-			return target.budget.outputShouldStop() || target.budget.fallback != target.stage
-		})
-		if !ok {
-			b.observeFallback()
-			return 0, false
+func (b *extractionBudget) confidentCharacters(value string) int {
+	b.checkStage()
+	if b.countingStop == nil {
+		if b.stageStop == nil {
+			b.stageStop = resourceguard.BindCheckpoint(b.allocationMemory(), b, (*extractionBudget).checkStage)
 		}
-		b.countingStop, b.countingStage = stop, stage
+		b.countingSampler = resourceguard.NewStopSampler(10, b.stageStop)
+		b.countingStop = resourceguard.BindCheckpoint(b.allocationMemory(), b, func(b *extractionBudget) {
+			b.countingSampler.Check()
+		})
 	}
-	count, ok := confidentTextCharactersWithResources(value, memory, b.countingStop)
-	b.observeFallback()
-	return count, ok
+	return confidentTextCharactersWithResources(value, b.allocationMemory(), b.countingStop)
 }
 
 // Detect long formatting runs without allocating a rune array. Ordinary text
 // borrows the input; compacted output owns one guarded backing buffer.
-func compactFormattingPaddingWithResources(value string, memory *resourceguard.Memory, stop func() bool) (string, bool) {
+func compactFormattingPaddingWithResources(value string, memory *resourceguard.Memory, stop func()) string {
 	const threshold, retained = 32, 8
 	runLength, hasFormat, needsCompaction := 0, false, false
 	nextCheck := 0
-	check := func(offset int) bool {
+	check := func(offset int) {
 		if offset < nextCheck {
-			return false
+			return
 		}
 		nextCheck = offset + resourceguard.WorkChunk
-		return memory.Exhausted() || stop != nil && stop()
+		if stop != nil {
+			stop()
+		}
 	}
 	for offset, r := range value {
-		if check(offset) {
-			return "", false
-		}
+		check(offset)
 		if !preheaderPaddingRune(r) {
 			runLength = 0
 			hasFormat = false
@@ -159,48 +143,41 @@ func compactFormattingPaddingWithResources(value string, memory *resourceguard.M
 		}
 	}
 	if !needsCompaction {
-		return value, true
+		return value
 	}
 	var out strings.Builder
-	if !resourceguard.GrowText(memory, &out, len(value), stop) {
-		return "", false
-	}
+
+	resourceguard.GrowText(memory, &out, len(value), stop)
+
 	nextCheck = 0
 	for start := 0; start < len(value); {
-		if check(start) {
-			return "", false
-		}
+		check(start)
 		r, size := utf8.DecodeRuneInString(value[start:])
 		if !preheaderPaddingRune(r) {
 			if r == utf8.RuneError && size == 1 {
-				if !resourceguard.WriteString(memory, &out, "�", stop) {
-					return "", false
-				}
+				resourceguard.WriteString(memory, &out, "�", stop)
+
 				start++
 				continue
 			}
 			end := start + size
 			for end < len(value) {
-				if check(end) {
-					return "", false
-				}
+				check(end)
 				r, size = utf8.DecodeRuneInString(value[end:])
 				if preheaderPaddingRune(r) || r == utf8.RuneError && size == 1 {
 					break
 				}
 				end += size
 			}
-			if !resourceguard.WriteString(memory, &out, value[start:end], stop) {
-				return "", false
-			}
+
+			resourceguard.WriteString(memory, &out, value[start:end], stop)
+
 			start = end
 			continue
 		}
 		end, keepEnd, count, format := start, start, 0, false
 		for end < len(value) {
-			if check(end) {
-				return "", false
-			}
+			check(end)
 			r, size = utf8.DecodeRuneInString(value[end:])
 			if !preheaderPaddingRune(r) {
 				break
@@ -215,70 +192,128 @@ func compactFormattingPaddingWithResources(value string, memory *resourceguard.M
 		if !format || count < threshold {
 			keepEnd = end
 		}
+
 		// Padding runes are valid UTF-8; invalid bytes took the replacement path,
 		// preserving the previous []rune conversion's replacement semantics.
-		if !resourceguard.WriteString(memory, &out, value[start:keepEnd], stop) {
-			return "", false
-		}
+		resourceguard.WriteString(memory, &out, value[start:keepEnd], stop)
+
 		start = end
 	}
-	return out.String(), true
+	return out.String()
 }
 
-// The regexp can read a long unmatched annotation. Sample its input as well as
-// output copies so malformed sender text cannot hide work inside the library.
-type annotationReader struct {
-	reader            strings.Reader
-	stop              func() bool
-	nextCheck, offset int
-	stopped           bool
+// annotationScanner borrows the input and checks cancellation between bounded
+// scans. Match state survives chunk boundaries; no carry buffer is needed.
+type annotationScanner struct {
+	value     string
+	memory    *resourceguard.Memory
+	stop      func()
+	nextCheck int
 }
 
-func (r *annotationReader) ReadRune() (rune, int, error) {
-	if r.offset >= r.nextCheck {
-		r.nextCheck = r.offset + resourceguard.WorkChunk
-		if r.stop != nil && r.stop() {
-			r.stopped = true
-			return 0, 0, io.EOF
+func (s *annotationScanner) check(offset int) {
+	if offset >= s.nextCheck {
+		s.nextCheck = offset + resourceguard.WorkChunk
+		if s.stop != nil {
+			s.stop()
 		}
 	}
-	c, n, err := r.reader.ReadRune()
-	r.offset += n
-	return c, n, err
 }
-func sanitizeSenderTextWithResources(value string, memory *resourceguard.Memory, stop func() bool) (string, bool) {
-	if memory.Exhausted() || stop != nil && stop() {
-		return "", false
+func (s *annotationScanner) find(start int, want byte) int {
+	for start < len(s.value) {
+		s.check(start)
+		end := min(s.nextCheck, len(s.value))
+
+		if i := strings.IndexByte(s.value[start:end], want); i >= 0 {
+			return start + i
+		}
+
+		start = end
 	}
-	if !strings.Contains(value, "<") {
-		return value, true
+	return -1
+}
+func annotationSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
+}
+func annotationWord(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
+}
+
+// The old regexp used Unicode simple folding. Long s is the only non-ASCII
+// equivalent appearing in these fixed names; retain that spelling as well.
+func annotationNameEnd(value string, start int) int {
+	for _, name := range [...]string{"invisible", "visibility-varies-by-viewport-size", "visibility-uncertain", "hidden-content-stripped"} {
+		pos := start
+		matched := true
+		for i := 0; i < len(name); i++ {
+			if pos == len(value) {
+				matched = false
+				break
+			}
+			c := value[pos]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c == name[i] {
+				pos++
+				continue
+			}
+			if name[i] == 's' && strings.HasPrefix(value[pos:], "ſ") {
+				pos += len("ſ")
+				continue
+			}
+			matched = false
+			break
+		}
+		if matched && (pos == len(value) || !annotationWord(value[pos])) {
+			return pos
+		}
 	}
+	return -1
+}
+func sanitizeSenderTextWithResources(value string, memory *resourceguard.Memory, stop func()) string {
+	scanner := annotationScanner{value: value, memory: memory, stop: stop}
+	scanner.check(0)
 	var out strings.Builder
-	offset := 0
-	for {
-		reader, ok := resourceguard.New(memory, annotationReader{reader: *strings.NewReader(value[offset:]), stop: stop})
-		if !ok {
-			return "", false
+	copied, search := 0, 0
+	for search < len(value) {
+		start := scanner.find(search, '<')
+		if start < 0 {
+			break
 		}
-		match, ok := resourceguard.RegexpFindReaderIndex(memory, reservedAnnotation, reader)
-		if !ok || reader.stopped {
-			return "", false
+		pos := start + 1
+		if pos < len(value) && value[pos] == '/' {
+			pos++
 		}
-		if match == nil {
-			if offset == 0 {
-				return value, true
-			}
-			if !resourceguard.WriteString(memory, &out, value[offset:], stop) {
-				return "", false
-			}
-			return out.String(), true
+		for pos < len(value) && annotationSpace(value[pos]) {
+			scanner.check(pos)
+			pos++
 		}
-		if offset == 0 && !resourceguard.GrowText(memory, &out, len(value), stop) {
-			return "", false
+		nameEnd := annotationNameEnd(value, pos)
+		if nameEnd < 0 {
+			// No '<' can occur in the whitespace just scanned. Do not rescan it.
+			search = pos
+			continue
 		}
-		if !resourceguard.WriteString(memory, &out, value[offset:offset+match[0]], stop) {
-			return "", false
+		end := scanner.find(nameEnd, '>')
+		if end < 0 {
+			break
 		}
-		offset += match[1]
+
+		if copied == 0 {
+			resourceguard.GrowText(memory, &out, len(value), stop)
+		}
+
+		resourceguard.WriteString(memory, &out, value[copied:start], stop)
+
+		copied = end + 1
+		search = copied
 	}
+	if copied == 0 {
+		return value
+	}
+
+	resourceguard.WriteString(memory, &out, value[copied:], stop)
+
+	return out.String()
 }
