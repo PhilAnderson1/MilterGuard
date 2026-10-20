@@ -21,16 +21,16 @@ type FallbackMetadata struct {
 // type, ID, and class prefix. Unsupported namespaces retain a lowercase local
 // type name when doing so is safe.
 func ConservativeFallback(source string) FallbackMetadata {
-	result, _ := ConservativeFallbackWithMemory(source, nil)
+	result := ConservativeFallbackWithMemory(source, nil)
 	return result
 }
 
 // ConservativeFallbackWithMemory bounds rejected input and admits owned keys.
-func ConservativeFallbackWithMemory(source string, memory *resourceguard.Memory) (result FallbackMetadata, err error) {
+func ConservativeFallbackWithMemory(source string, memory *resourceguard.Memory) (result FallbackMetadata) {
 	if len(source) > maxSelectorBytes {
 		// Keep the entire rule uncertain. A bounded suffix check retains the same
 		// generated-content handling without scanning or normalizing the source.
-		return FallbackMetadata{GeneratedPseudo: generatedSuffix(source)}, nil
+		return FallbackMetadata{GeneratedPseudo: generatedSuffix(source)}
 	}
 
 	start, brackets, parens := 0, 0, 0
@@ -91,7 +91,7 @@ func ConservativeFallbackWithMemory(source string, memory *resourceguard.Memory)
 		OriginalTypeName: original,
 	}
 	result.GeneratedPseudo = generatedSuffix(compound)
-	return result, nil
+	return result
 }
 
 func conservativePositivePrefix(compound string) (prefix, originalType string) {

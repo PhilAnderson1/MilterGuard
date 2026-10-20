@@ -335,9 +335,6 @@ func (t attrSelector) matchResource(n *html.Node, guard *MatchControl) bool {
 			continue
 		}
 		matched := t.matchValue(a.Val, guard)
-		if guard != nil && false {
-			return false
-		}
 		if t.operation == "!=" {
 			if matched {
 				return false
@@ -491,9 +488,7 @@ func descendantMatchResource(a, d Matcher, n *html.Node, guard *MatchControl) bo
 	}
 
 	for p := n.Parent; p != nil; p = p.Parent {
-		if guard != nil && false {
-			return false
-		}
+		// matchResource samples once per visited ancestor.
 		if matchResource(a, p, guard) {
 			return true
 		}
@@ -536,9 +531,7 @@ func siblingMatchResource(s1, s2 Matcher, adjacent bool, n *html.Node, guard *Ma
 
 	// Walk backwards looking for element that matches s1
 	for c := n.PrevSibling; c != nil; c = c.PrevSibling {
-		if guard != nil && false {
-			return false
-		}
+		// matchResource samples once per visited sibling.
 		if matchResource(s1, c, guard) {
 			return true
 		}
@@ -575,9 +568,6 @@ func (s SelectorGroup) Match(n *html.Node) bool {
 
 func (s SelectorGroup) matchResource(n *html.Node, guard *MatchControl) bool {
 	for _, sel := range s {
-		if guard != nil && false {
-			return false
-		}
 		if matchResource(sel, n, guard) {
 			return true
 		}

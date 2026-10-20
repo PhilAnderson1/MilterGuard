@@ -12,7 +12,6 @@ type fallbackResources struct {
 
 	check       func()
 	memory      *resourceguard.Memory
-	cpuStopped  bool
 	textStop    func()
 	textSampler resourceguard.StopSampler
 }
@@ -52,9 +51,6 @@ func (b *extractionBudget) beginFallback() bool {
 func (b *extractionBudget) observeFallback() {
 	if b.fallback == nil {
 		return
-	}
-	if b.fallback.cpuStopped {
-		b.cpuLimitExceeded = true
 	}
 	if b.fallback.memory.Exhausted() && !b.fallbackMemoryExceeded {
 		b.fallbackMemoryExceeded = true

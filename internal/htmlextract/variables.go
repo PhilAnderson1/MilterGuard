@@ -59,17 +59,6 @@ func tokensHaveVariables(tokens []valueToken) bool {
 	return false
 }
 
-func containsFold(s, substr string) bool {
-	if substr == "" {
-		return true
-	}
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if equalASCIIFold(s[i:i+len(substr)], substr) {
-			return true
-		}
-	}
-	return false
-}
 func tokenText(ts []valueToken) string { return tokenTextWithBudget(ts, nil) }
 
 func tokenTextWithBudget(ts []valueToken, budget *cpuGuard) string {

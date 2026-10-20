@@ -20,9 +20,9 @@ func TestCompiledStructuresAreCharged(t *testing.T) {
 			t.Fatal(err)
 		}
 		compiled := memory.Used()
-		metadata, err := MetadataWithMemory(group[0], memory)
-		if err != nil || len(metadata.Compounds) == 0 || memory.Used() <= compiled {
-			t.Fatalf("metadata: %v", err)
+		metadata := MetadataWithMemory(group[0], memory)
+		if len(metadata.Compounds) == 0 || memory.Used() <= compiled {
+			t.Fatal("metadata missing or uncharged")
 		}
 		t.Logf("source=%d compilation=%d withMetadata=%d", len(source), compiled, memory.Used())
 		tight := resourceguard.NewMemory(1)

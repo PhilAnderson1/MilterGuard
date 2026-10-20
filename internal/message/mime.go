@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"io"
-	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
@@ -230,7 +229,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 	if depth > 8 {
 		return extractedContent{Text: "[MIME nesting limit reached]", MIMEIncomplete: true}
 	}
-	mediaType, params, err := mime.ParseMediaType(contentType)
+	mediaType, params, err := resourceguard.ParseMediaType(budget.allocationMemory(), contentType)
 	if err != nil || mediaType == "" {
 		mediaType = "text/plain"
 	}
@@ -247,9 +246,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 		if boundary == "" {
 			return extractedContent{Text: "[multipart message has no boundary]", MIMEIncomplete: true, TransferIncomplete: transferIncomplete}
 		}
-		reader := multipart.NewReader(bytes.NewReader(decoded), boundary)
-
-		reader = multipart.NewReader(newDecodeReader(bytes.NewReader(decoded), budget.stageStop), boundary)
+		reader := multipart.NewReader(newDecodeReader(bytes.NewReader(decoded), budget.stageStop), boundary)
 
 		partIndex := 0
 		var parts []extractedContent
@@ -264,7 +261,6 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 			var part *multipart.Part
 			var body []byte
 			var readErr error
-			partStopped := false
 			{
 				read, complete := readRestartableMIMEPart(&reader, decoded, boundary, partIndex, budget)
 				if !complete {
@@ -292,7 +288,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 			content := extractMIMEWithBudget(partContentType, part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-ID"), body, depth+1, budget)
 			mimeIncomplete = mimeIncomplete || content.MIMEIncomplete
 			nestedTransferIncomplete = nestedTransferIncomplete || content.TransferIncomplete
-			nestedExtractionIncomplete = nestedExtractionIncomplete || content.ExtractionIncomplete || partStopped
+			nestedExtractionIncomplete = nestedExtractionIncomplete || content.ExtractionIncomplete
 			if retained != nil && hasExtractedContent(content) {
 				*retained = content
 			}
@@ -330,7 +326,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 				break
 			}
 			if mediaType == "multipart/alternative" {
-				partMediaType, _, _ := mime.ParseMediaType(partContentType)
+				partMediaType, _, _ := resourceguard.ParseMediaType(budget.allocationMemory(), partContentType)
 				switch {
 				case content.HTML:
 					// HTML with CID resources is normally wrapped in
@@ -410,31 +406,20 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 			}
 			combined.ImageRefs = imageRefs.refs
 			combined.Links = links.links
-			var complete bool
 			if len(textParts) > 0 {
-				combined.Text, complete = joinExtractedText(textParts, "\n\n", budget)
-			} else {
-				complete = !processingStopped
+				combined.Text = joinExtractedText(textParts, "\n\n", budget)
 			}
-			processingStopped = processingStopped || !complete
-			if complete {
+			if len(textParts) > 0 || !processingStopped {
 				if !combined.HasConcealedContent {
 					combined.StrippedText = combined.Text
 				} else {
-					combined.StrippedText, complete = joinExtractedText(strippedTextParts, "\n\n", budget)
-					processingStopped = processingStopped || !complete
+					combined.StrippedText = joinExtractedText(strippedTextParts, "\n\n", budget)
 				}
-			}
-			if !complete {
-				processingStopped = true
-			} else {
 				budget.outputShouldStop()
-
 				if visibleMatchesText {
 					combined.VisibleText = combined.Text
 				} else {
-					combined.VisibleText, complete = joinExtractedText(visibleTextParts, "\n\n", budget)
-					processingStopped = processingStopped || !complete
+					combined.VisibleText = joinExtractedText(visibleTextParts, "\n\n", budget)
 				}
 			}
 			combined.MIMEIncomplete = mimeIncomplete
@@ -478,12 +463,12 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 	budget.outputShouldStop()
 
 	links := linkCollector{compactURLs: budget.compactURLs, memory: budget.allocationMemory(), shouldStop: budget.outputShouldStop}
-	promptText, urlsComplete := rewritePlainTextURLs(text, budget.compactURLs, &links, budget.outputShouldStop)
+	promptText := rewritePlainTextURLs(text, budget.compactURLs, &links, budget.allocationMemory(), budget.outputShouldStop)
 	confidentChars := budget.confidentCharacters(text)
 	return extractedContent{
 		Text: promptText, VisibleText: text,
 		ConfidentVisibleChars: confidentChars,
-		Links:                 links.links, TransferIncomplete: transferIncomplete, ExtractionIncomplete: !complete || !urlsComplete,
+		Links:                 links.links, TransferIncomplete: transferIncomplete, ExtractionIncomplete: !complete,
 		HTMLMemoryLimitExceeded: budget.memoryLimitExceeded || budget.fallbackMemoryExceeded,
 		HTMLCPULimitExceeded:    budget.cpuLimitExceeded,
 	}
@@ -495,12 +480,12 @@ func sameStringStorage(a, b string) bool {
 	return len(a) == len(b) && (len(a) == 0 || unsafe.StringData(a) == unsafe.StringData(b))
 }
 
-func joinExtractedText(parts []string, separator string, budget *extractionBudget) (string, bool) {
+func joinExtractedText(parts []string, separator string, budget *extractionBudget) string {
 	if len(parts) == 0 {
-		return "", true
+		return ""
 	}
 	if len(parts) == 1 {
-		return parts[0], true
+		return parts[0]
 	}
 
 	// strings.Join is one indivisible copy. Check immediately before it so a
@@ -513,12 +498,12 @@ func joinExtractedText(parts []string, separator string, budget *extractionBudge
 	for _, part := range parts {
 		if int64(len(part)) > maxInt64-total {
 			budget.reserveOutputMemory(maxInt64)
-			return "", false
+			termination.Fail(termination.Failure{Code: termination.MemoryExceeded, Limit: budget.allocationMemory().Limit()})
 		}
 		total += int64(len(part))
 	}
 	budget.reserveOutputMemory(total)
-	return strings.Join(parts, separator), true
+	return strings.Join(parts, separator)
 }
 
 func extractAttachedMessage(data []byte, depth int, budget *extractionBudget) extractedContent {

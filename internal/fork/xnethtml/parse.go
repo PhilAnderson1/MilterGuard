@@ -439,6 +439,7 @@ func (p *parser) reconstructActiveFormattingElements() {
 	}
 	i := len(p.afe) - 1
 	for n.Type != scopeMarkerNode && p.oe.index(n) == -1 {
+		p.guard.stop()
 		if i == 0 {
 			i = -1
 			break
@@ -1321,6 +1322,7 @@ func (p *parser) inBodyEndTagFormatting(tagAtom a.Atom, tagName string) {
 		// Step 6. Find the formatting element.
 		var formattingElement *Node
 		for j := len(p.afe) - 1; j >= 0; j-- {
+			p.guard.stop()
 			if p.afe[j].Type == scopeMarkerNode {
 				break
 			}
@@ -1376,6 +1378,7 @@ func (p *parser) inBodyEndTagFormatting(tagAtom a.Atom, tagName string) {
 		// Step 14.1.
 		j := 0
 		for {
+			p.guard.stop()
 			// Step 14.2.
 			j++
 			// Step. 14.3.

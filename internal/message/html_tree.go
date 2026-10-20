@@ -1,7 +1,6 @@
 package message
 
 import (
-	"fmt"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -283,6 +282,7 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 
 	e := htmlExtraction{
 		workSampler: resourceguard.NewStopSampler(256, budget.stageStop),
+		images:      imageRefCollector{memory: memory},
 		inspection:  inspection,
 		states:      make(map[*xhtml.Node]*htmlextract.Text, len(inspection.Text)),
 		elements:    make(map[*xhtml.Node]*htmlextract.Element, len(inspection.Elements)),
@@ -518,7 +518,7 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 	if name == "input" {
 		typ := strings.ToLower(strings.TrimSpace(firstAttr(n, "type")))
 		if typ == "submit" || typ == "button" || typ == "reset" {
-			label := sanitizeSenderText(firstAttr(n, "value"))
+			label := sanitizeSenderTextWithResources(firstAttr(n, "value"), e.memory, e.textStopCallback())
 			e.writeElementContent(n, label, mode, out, visible)
 		}
 		return
@@ -556,7 +556,7 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 				out.write(annotation, "[")
 				out.write(annotation, plain)
 				out.write(annotation, "](")
-				out.write(annotation, markdownURL(destination))
+				out.write(annotation, escapeMarkdown(destination, true, e.memory, e.stopNow))
 				out.write(annotation, ")")
 			} else {
 				{
@@ -567,7 +567,7 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 
 					out.WriteString(strings.TrimSpace(annotatedLabel))
 					out.WriteString("](")
-					out.WriteString(markdownURL(destination))
+					out.WriteString(escapeMarkdown(destination, true, e.memory, e.stopNow))
 					out.WriteByte(')')
 				}
 			}
@@ -605,7 +605,7 @@ func (e *htmlExtraction) writeElementContent(n *xhtml.Node, content string, mode
 
 	e.textStopCallback()
 
-	promptContent, _ := rewritePlainTextURLs(content, e.compactURLs, &e.links, e.textClockCheck)
+	promptContent := rewritePlainTextURLs(content, e.compactURLs, &e.links, e.memory, e.textClockCheck)
 	state := e.elements[n]
 	if state == nil {
 		out.WriteString(promptContent)
@@ -743,11 +743,11 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *guardedBuilder,
 	walk.enter(depth)
 
 	if n.Type == xhtml.TextNode {
-		value := sanitizeSenderText(n.Data)
+		value := sanitizeSenderTextWithResources(n.Data, walk.memory, walk.shouldStop)
 		if walk.anchorDepth > 0 {
-			value, _ = rewritePlainTextURLs(value, e.compactURLs, nil, walk.shouldStop)
+			value = rewritePlainTextURLs(value, e.compactURLs, nil, walk.memory, walk.shouldStop)
 		} else {
-			value, _ = rewritePlainTextURLs(value, e.compactURLs, &walk.links, walk.shouldStop)
+			value = rewritePlainTextURLs(value, e.compactURLs, &walk.links, walk.memory, walk.shouldStop)
 		}
 		walk.writeString(out, value)
 		return
@@ -774,9 +774,9 @@ func (e *htmlExtraction) walkConditionalNode(n *xhtml.Node, out *guardedBuilder,
 			destination = walk.links.AddDestination(destination)
 
 			walk.writeString(out, "[")
-			walk.writeString(out, markdownLabelText(strings.TrimSpace(label.String())))
+			walk.writeString(out, escapeMarkdown(strings.TrimSpace(label.String()), false, walk.memory, walk.shouldStop))
 			walk.writeString(out, "](")
-			walk.writeString(out, markdownURL(destination))
+			walk.writeString(out, escapeMarkdown(destination, true, e.memory, e.stopNow))
 			walk.writeString(out, ")")
 		} else {
 			walk.writeString(out, label.String())
@@ -812,10 +812,10 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 	if e.anchorDepth > 0 {
 		// Text resembling a URL inside an anchor label is sender-visible text,
 		// not an independently validated destination.
-		outText, _ = rewritePlainTextURLs(text, e.compactURLs, nil, e.textClockCheck)
-		outText = markdownLabelText(outText)
+		outText = rewritePlainTextURLs(text, e.compactURLs, nil, e.memory, e.textClockCheck)
+		outText = escapeMarkdown(outText, false, e.memory, e.textClockCheck)
 	} else {
-		outText, _ = rewritePlainTextURLs(text, e.compactURLs, &e.links, e.textClockCheck)
+		outText = rewritePlainTextURLs(text, e.compactURLs, &e.links, e.memory, e.textClockCheck)
 	}
 	// Presentation annotations around whitespace add noise without carrying a
 	// visibility claim about message content. This includes decoded HTML space
@@ -994,10 +994,11 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 	e.textStopCallback()
 
 	raw := strings.TrimSpace(firstAttr(n, "src"))
-	alt := sanitizeSenderText(firstAttr(n, "alt"))
-	alt, _ = rewritePlainTextURLs(alt, e.compactURLs, nil, e.textClockCheck)
+	alt := sanitizeSenderTextWithResources(firstAttr(n, "alt"), e.memory, e.textStopCallback())
+	alt = rewritePlainTextURLs(alt, e.compactURLs, nil, e.memory, e.textClockCheck)
 	var destination string
-	if strings.HasPrefix(strings.ToLower(raw), "cid:") {
+	if len(raw) >= 4 && strings.EqualFold(raw[:4], "cid:") {
+		e.memory.Reserve(int64(len(raw)-4) * 4)
 		id := normalizeContentID(raw[4:])
 		if id == "" {
 			return
@@ -1005,7 +1006,7 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 		if alt == "" {
 			alt = "embedded image"
 		}
-		destination = "cid:" + markdownURL(id)
+		destination = resourceguard.Concat(e.memory, "cid:", escapeMarkdown(id, true, e.memory, e.stopNow), e.stopNow)
 		e.images.Add(id)
 	} else {
 
@@ -1013,7 +1014,7 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 			if alt == "" {
 				alt = "image"
 			}
-			destination = markdownURL(e.links.AddDestination(resolved))
+			destination = escapeMarkdown(e.links.AddDestination(resolved), true, e.memory, e.stopNow)
 		}
 
 	}
@@ -1040,7 +1041,7 @@ func (e *htmlExtraction) writeImage(n *xhtml.Node, mode HTMLExtractionMode, out 
 		}
 	}
 	out.write(annotation, " ![")
-	out.write(annotation, markdownLabelText(alt))
+	out.write(annotation, escapeMarkdown(alt, false, e.memory, e.textClockCheck))
 	out.write(annotation, "](")
 	out.write(annotation, destination)
 	out.write(annotation, ") ")
@@ -1080,7 +1081,7 @@ func (e *htmlExtraction) findBase(n *xhtml.Node) {
 		if present {
 			e.baseSeen = true
 
-			if parsed, err := url.Parse(strings.TrimSpace(raw)); err == nil && parsed.IsAbs() && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+			if parsed, err := resourceguard.ParseURL(e.memory, strings.TrimSpace(raw)); err == nil && parsed.IsAbs() && (parsed.Scheme == "http" || parsed.Scheme == "https") {
 				e.base = parsed
 			}
 
@@ -1094,13 +1095,36 @@ func (e *htmlExtraction) findBase(n *xhtml.Node) {
 }
 
 func (e *htmlExtraction) destination(raw string) (string, bool) {
-	raw = strings.TrimSpace(strings.Map(func(r rune) rune {
-		if r == '\r' || r == '\n' || r == '\t' || r == '\x00' {
-			return -1
+	stop := e.stopNow
+	// Preserve URL cleaning semantics, but own any replacement buffers.
+	clean := newGuardedBuilder(e.memory)
+	changed := false
+	nextCheck := 0
+	for offset, r := range raw {
+		if offset >= nextCheck {
+			stop()
+			nextCheck = offset + resourceguard.WorkChunk
 		}
-		return r
-	}, raw))
-	var encoded strings.Builder
+		removed := r == '\r' || r == '\n' || r == '\t' || r == 0
+		invalid := false
+		// RuneError also represents invalid leading bytes; inspect its decoded width.
+		if r == utf8.RuneError {
+			_, width := utf8.DecodeRuneInString(raw[offset:])
+			invalid = width == 1
+		}
+		if !changed && (removed || invalid) {
+			clean.Grow(len(raw))
+			clean.WriteString(raw[:offset])
+			changed = true
+		}
+		if changed && !removed {
+			clean.appendRune(r)
+		}
+	}
+	if changed {
+		raw = clean.String()
+	}
+	raw = strings.TrimSpace(raw)
 	authorityEnd := 0
 	if scheme := strings.Index(raw, "://"); scheme >= 0 {
 		authorityEnd = len(raw)
@@ -1108,22 +1132,37 @@ func (e *htmlExtraction) destination(raw string) (string, bool) {
 			authorityEnd = scheme + 3 + rest
 		}
 	}
+	encoded := newGuardedBuilder(e.memory)
+	changed = false
 	for i := 0; i < len(raw); i++ {
+		if i%resourceguard.WorkChunk == 0 {
+			stop()
+		}
 		c := raw[i]
 		if c < 0x20 || c == 0x7f {
 			if authorityEnd > 0 && i < authorityEnd {
 				return "", false
 			}
-			fmt.Fprintf(&encoded, "%%%02X", c)
-		} else {
-			encoded.WriteByte(c)
+			if !changed {
+				encoded.Grow(len(raw))
+				encoded.WriteString(raw[:i])
+				changed = true
+			}
+			const hex = "0123456789ABCDEF"
+			encoded.appendByte('%')
+			encoded.appendByte(hex[c>>4])
+			encoded.appendByte(hex[c&15])
+		} else if changed {
+			encoded.appendByte(c)
 		}
 	}
-	raw = encoded.String()
+	if changed {
+		raw = encoded.String()
+	}
 	if raw == "" {
 		return "", false
 	}
-	parsed, err := url.Parse(raw)
+	parsed, err := resourceguard.ParseURL(e.memory, raw)
 	if err != nil {
 		return "", false
 	}
@@ -1135,9 +1174,11 @@ func (e *htmlExtraction) destination(raw string) (string, bool) {
 		if (scheme == "http" || scheme == "https") && parsed.Hostname() == "" {
 			return "", false
 		}
+		reserveResolvedURL(e.memory, raw, nil)
 		return parsed.String(), true
 	}
 	if e.base != nil {
+		reserveResolvedURL(e.memory, raw, e.base)
 		return e.base.ResolveReference(parsed).String(), true
 	}
 	return raw, true
@@ -1167,13 +1208,6 @@ func isBlockElement(name string) bool {
 		return true
 	}
 	return false
-}
-
-func sanitizeSenderText(value string) string {
-	if !strings.Contains(value, "<") {
-		return value
-	}
-	return reservedAnnotation.ReplaceAllString(value, "")
 }
 
 func normalizeHTMLText(value string) string {

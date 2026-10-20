@@ -1,6 +1,7 @@
 package css
 
 import (
+	parse "github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
 	"testing"
 
 	"github.com/tdewolff/test"
@@ -31,4 +32,21 @@ func TestHsl2Rgb(t *testing.T) {
 	test.T(t, r, 1.0)
 	test.T(t, g, 1.0)
 	test.T(t, b, 1.0)
+}
+
+// These upstream lexer probes are test-only; production uses guarded parser entrypoints.
+// IsIdent returns true if the bytes are a valid identifier.
+func IsIdent(b []byte) bool {
+	l := NewLexer(parse.NewInputBytes(b))
+	l.consumeIdentToken()
+	l.r.Restore()
+	return l.r.Pos() == len(b)
+}
+
+// IsURLUnquoted returns true if the bytes are a valid unquoted URL.
+func IsURLUnquoted(b []byte) bool {
+	l := NewLexer(parse.NewInputBytes(b))
+	l.consumeUnquotedURL()
+	l.r.Restore()
+	return l.r.Pos() == len(b)
 }

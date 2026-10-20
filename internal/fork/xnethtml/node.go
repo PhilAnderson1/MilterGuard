@@ -133,8 +133,6 @@ func (n *Node) RemoveChild(c *Node) {
 	c.NextSibling = nil
 }
 
-// reparentChildren reparents all of src's child nodes to dst.
-func reparentChildren(dst, src *Node) { reparentChildrenWithGuard(dst, src, nil) }
 func reparentChildrenWithGuard(dst, src *Node, guard *resourceGuard) {
 	for {
 		child := src.FirstChild
@@ -145,19 +143,6 @@ func reparentChildrenWithGuard(dst, src *Node, guard *resourceGuard) {
 		src.RemoveChild(child)
 		dst.AppendChild(child)
 	}
-}
-
-// clone returns a new node with the same type, data and attributes.
-// The clone has no parent, no siblings and no children.
-func (n *Node) clone() *Node {
-	m := &Node{
-		Type:     n.Type,
-		DataAtom: n.DataAtom,
-		Data:     n.Data,
-		Attr:     make([]Attribute, len(n.Attr)),
-	}
-	copy(m.Attr, n.Attr)
-	return m
 }
 
 // nodeStack is a stack of nodes.

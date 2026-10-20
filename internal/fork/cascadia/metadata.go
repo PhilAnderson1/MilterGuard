@@ -44,12 +44,12 @@ type SelectorMetadata struct {
 
 // Metadata derives structural information from an already compiled selector.
 func Metadata(selector Sel) SelectorMetadata {
-	metadata, _ := MetadataWithMemory(selector, nil)
+	metadata := MetadataWithMemory(selector, nil)
 	return metadata
 }
 
 // MetadataWithMemory accounts for arrays owned by metadata before allocating.
-func MetadataWithMemory(selector Sel, memory *resourceguard.Memory) (result SelectorMetadata, err error) {
+func MetadataWithMemory(selector Sel, memory *resourceguard.Memory) (result SelectorMetadata) {
 	compoundCount := selectorCompoundCount(selector)
 	metadata := SelectorMetadata{
 		Compounds: selectorSlice[CompoundMetadata](memory, 0, compoundCount),
@@ -61,7 +61,7 @@ func MetadataWithMemory(selector Sel, memory *resourceguard.Memory) (result Sele
 	metadata.Inactive = selectorNeverMatches(selector)
 	metadata.PseudoElement = selector.PseudoElement()
 	metadata.Supported = metadata.PseudoElement == "" && selectorSupportedForEmail(selector)
-	return metadata, nil
+	return metadata
 }
 
 func selectorCompoundCount(selector Sel) int {

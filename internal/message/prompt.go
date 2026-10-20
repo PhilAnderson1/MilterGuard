@@ -517,28 +517,19 @@ func runeByteOffsets(value string, runeIndexes ...int) []int {
 // rewritePlainTextURLs handles URLs embedded in otherwise unstructured text.
 // HTML href/src destinations take the direct rendering path and do not need a
 // second scan over the completed body.
-func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shouldStop func()) (string, bool) {
+func rewritePlainTextURLs(text string, compact bool, links *linkCollector, memory *resourceguard.Memory, shouldStop func()) string {
 	if links.Full() {
-		return text, true
-	}
-	var memory *resourceguard.Memory
-	if links != nil {
-		memory = links.memory
+		return text
 	}
 	rewritten := newGuardedBuilder(memory)
 	last := 0
 	changed := false
-	compactionStopped := false
 	walkPlainHTTPURLs(text, -1, shouldStop, func(link string, start, end int) bool {
 		var displayed string
 		if links != nil {
 			displayed = links.AddDestination(link)
 		} else {
-			displayed = promptURLWithBudget(link, compact, nil, shouldStop)
-		}
-		if displayed == "" {
-			compactionStopped = true
-			return false
+			displayed = promptURLWithBudget(link, compact, memory, shouldStop)
 		}
 		if displayed == link {
 			return !links.Full()
@@ -554,14 +545,13 @@ func rewritePlainTextURLs(text string, compact bool, links *linkCollector, shoul
 		changed = true
 		return !links.Full()
 	})
-	complete := !compactionStopped
 	if !changed {
-		return text, complete
+		return text
 	}
 
 	rewritten.WriteString(text[last:])
 
-	return rewritten.String(), complete
+	return rewritten.String()
 }
 
 func walkPlainHTTPURLs(text string, limit int, shouldStop func(), visit func(link string, start, end int) bool) {

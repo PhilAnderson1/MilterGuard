@@ -479,9 +479,9 @@ func TestHTMLMemoryBudgetIsSharedAcrossParts(t *testing.T) {
 func TestMultipartJoinReservesOutputBeforeAllocation(t *testing.T) {
 	budget := newExtractionBudget()
 	initial := budget.remainingMemory()
-	joined, complete := joinExtractedText([]string{"only"}, "\n\n", budget)
-	if !complete || joined != "only" || budget.remainingMemory() != initial {
-		t.Fatalf("single-part join: joined=%q complete=%v remaining=%d", joined, complete, budget.remainingMemory())
+	joined := joinExtractedText([]string{"only"}, "\n\n", budget)
+	if joined != "only" || budget.remainingMemory() != initial {
+		t.Fatalf("single-part join: joined=%q remaining=%d", joined, budget.remainingMemory())
 	}
 
 	budget = newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 5})
@@ -491,9 +491,9 @@ func TestMultipartJoinReservesOutputBeforeAllocation(t *testing.T) {
 	}
 
 	budget = newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 6})
-	joined, complete = joinExtractedText([]string{"ab", "cd"}, "\n\n", budget)
-	if !complete || joined != "ab\n\ncd" || budget.remainingMemory() != 0 {
-		t.Fatalf("bounded join: joined=%q complete=%v remaining=%d", joined, complete, budget.remainingMemory())
+	joined = joinExtractedText([]string{"ab", "cd"}, "\n\n", budget)
+	if joined != "ab\n\ncd" || budget.remainingMemory() != 0 {
+		t.Fatalf("bounded join: joined=%q remaining=%d", joined, budget.remainingMemory())
 	}
 }
 
@@ -508,8 +508,8 @@ func TestMultipartJoinsCheckCPUBetweenCopies(t *testing.T) {
 		return
 	}})
 
-	if joined, complete := joinExtractedText([]string{"a", "b"}, "", budget); !complete || joined != "ab" {
-		t.Fatalf("first join: joined=%q complete=%v", joined, complete)
+	if joined := joinExtractedText([]string{"a", "b"}, "", budget); joined != "ab" {
+		t.Fatalf("first join: joined=%q", joined)
 	}
 
 	expectTermination(t, termination.CPUExceeded, func() { joinExtractedText([]string{"c", "d"}, "", budget) })

@@ -1,23 +1,5 @@
 package css
 
-import "github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
-
-// IsIdent returns true if the bytes are a valid identifier.
-func IsIdent(b []byte) bool {
-	l := NewLexer(parse.NewInputBytes(b))
-	l.consumeIdentToken()
-	l.r.Restore()
-	return l.r.Pos() == len(b)
-}
-
-// IsURLUnquoted returns true if the bytes are a valid unquoted URL.
-func IsURLUnquoted(b []byte) bool {
-	l := NewLexer(parse.NewInputBytes(b))
-	l.consumeUnquotedURL()
-	l.r.Restore()
-	return l.r.Pos() == len(b)
-}
-
 // HSL2RGB converts HSL to RGB with all of range [0,1]
 // from http://www.w3.org/TR/css3-color/#hsl-color
 func HSL2RGB(h, s, l float64) (float64, float64, float64) {

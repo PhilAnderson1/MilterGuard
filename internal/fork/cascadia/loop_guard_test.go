@@ -68,9 +68,9 @@ func TestSelectorIteratorCancellationAndBoundaries(t *testing.T) {
 }
 func TestFallbackBoundsAndAdmission(t *testing.T) {
 	source := strings.Repeat("A", maxSelectorBytes+1) + ":before"
-	got, err := ConservativeFallbackWithMemory(source, resourceguard.NewMemory(1))
-	if err != nil || got.Key.Kind != 0 || got.PositiveSource != "" || !got.GeneratedPseudo {
-		t.Fatalf("%+v %v", got, err)
+	got := ConservativeFallbackWithMemory(source, resourceguard.NewMemory(1))
+	if got.Key.Kind != 0 || got.PositiveSource != "" || !got.GeneratedPseudo {
+		t.Fatalf("%+v", got)
 	}
 	expectTermination(t, termination.MemoryExceeded, func() { ConservativeFallbackWithMemory("DIV:unsupported", resourceguard.NewMemory(1)) })
 	if allocs := testing.AllocsPerRun(10, func() { ConservativeFallback(source) }); allocs != 0 {

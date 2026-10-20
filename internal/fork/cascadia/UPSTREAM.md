@@ -42,8 +42,9 @@ Local changes:
 - Metadata reuses compiled compound matchers without serializing them back to
   selector text. `MetadataWithMemory` reserves compound, combinator and
   positive-matcher storage before allocation; `Metadata` retains its unguarded
-  compatibility interface. Allocation aborts become errors at guarded compile
-  and metadata boundaries, without swallowing unrelated panics.
+  interface. Required allocation failures unwind with the shared termination
+  signal. Metadata APIs return only metadata; compile APIs return ordinary
+  selector errors and never convert budget failures to errors.
 - `ConservativeFallback` recovers only a safe rightmost positive candidate
   from rejected syntax, keeping malformed and unsupported branches local
   without adding selector parsing to the caller.
@@ -54,8 +55,8 @@ Local changes:
   Selector-list scanning supports sampled cancellation; fallback applies the
   compiler's input bound and admits owned normalized keys before allocation.
   `NewSelectorListIterator` avoids an intermediate branch slice;
-  `NewSelectorListIteratorWithStop` adds byte-sampled cancellation exposed through
-  `Stopped`, separately from normal end of iteration. Trimming is tracked during
+  `NewSelectorListIteratorWithStop` adds byte-sampled cancellation that unwinds
+  immediately, separately from normal end of iteration. Trimming is tracked during
   scanning rather than performed as another unchecked pass.
 - `ConservativeFallbackWithMemory` admits owned normalized candidate keys.
   Oversized fallback input returns unconstrained metadata, with a bounded
@@ -66,8 +67,8 @@ Structural compilation limits and rejected extensions apply to all compilation
 entry points. Memory accounting is opt-in through the memory-aware APIs, and
 matching cancellation is opt-in through `MatchControl` / `MatchWithStop`.
 Legacy `Match`, query and filter APIs do not acquire a resource guard implicitly.
-`MatchControl` masks a cancelled result to `(false, true)`, including negation,
-and remains stopped for later calls. The caller still owns accounting for any
+`MatchControl` propagates termination immediately, including through negation;
+it has no stopped latch or cancellation return value. The caller still owns accounting for any
 result collections outside the guarded matching API.
 
 Local regression tests cover compilation/matching limits, allocation admission,
@@ -82,7 +83,7 @@ exact-multiple sampling because they increment by one per operation.
 
 Selector rejection returns shared `ErrInvalidSelector` without formatting or
 retaining source text, names, offsets, or per-failure messages. Memory failures
-retain their distinct shared error. Unsupported-selector recovery is unchanged.
+raise the distinct shared termination signal. Unsupported-selector recovery is unchanged.
 
 Language-selector Unicode lowercasing sizes and admits its output before one
 allocation. It preserves strings.ToLower behavior for valid and malformed UTF-8;
@@ -93,3 +94,7 @@ Nth-selector integers are accumulated with overflow checks in the digit scan.
 Overflow returns the shared invalid-selector error, avoiding strconv.NumError
 input copies and a second scan. Leading zeros and the native-int range are
 preserved.
+
+Traversal loops calling `matchResource` once per visited node obtain their
+sampled checkpoint there; they must preserve that call or add an explicit
+checkpoint when changing the traversal.

@@ -91,7 +91,7 @@ func TestPlainURLCompactionCancellationIsIncomplete(t *testing.T) {
 		if collect {
 			links = &linkCollector{compactURLs: true, shouldStop: stop}
 		}
-		expectTermination(t, termination.CPUExceeded, func() { rewritePlainTextURLs(input, true, links, stop) })
+		expectTermination(t, termination.CPUExceeded, func() { rewritePlainTextURLs(input, true, links, nil, stop) })
 		if calls != 3 {
 			t.Fatalf("checks=%d", calls)
 		}

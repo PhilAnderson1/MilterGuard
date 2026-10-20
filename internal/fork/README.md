@@ -42,8 +42,10 @@ Token string copies are admitted before allocation, including discarded tokens;
 transferring those strings into nodes does not charge them again. Entity decoding
 bounds named lookups, samples long scans, and reserves complete replacement
 buffers before growth. Normalized strings and doctype attributes have their own
-allocation admission. Guarded standalone tokenizers expose decoding cancellation
-through `Err()` rather than leaking an internal resource-abort panic.
+allocation admission. Guarded standalone tokenizers propagate CPU, memory and cancellation failures
+with the shared termination signal, including from token accessors. Their callers
+must establish an extraction-stage recovery boundary. `Err()` reports ordinary
+I/O/tokenizer outcomes, not resource-budget termination.
 
 The Cascadia fork rejects selector inputs above 16 KiB, more than 1,024 simple
 selector components, or more than 64 nested selector groups. Its nonstandard

@@ -18,8 +18,9 @@ Local changes:
   buffers, and name-map storage allowances have explicit accounting owners.
   Stack and merge-array growth reserves complete replacement arrays before
   allocation, replacing after-the-fact capacity-delta accounting and the
-  redundant open-element guard hook. Resource aborts are returned as errors
-  from the option-aware parsing APIs.
+  redundant open-element guard hook. Structural limits are returned as errors
+  from the option-aware parsing APIs; CPU, memory and cancellation failures
+  unwind with the shared termination signal.
 - Entity decoding bounds named-reference lookup by the entity vocabulary and
   samples long numeric references and decoded output every 1,024 source bytes.
   It keeps the in-place path where possible, admitting each complete owned
@@ -27,9 +28,10 @@ Local changes:
   allocation even for discarded tokens; nodes charge their own structures,
   not strings transferred from tokens or shared by clones. Doctype attributes
   and normalized strings likewise have explicit construction-time admission.
-- Guarded standalone tokenizer accessors report intentional resource failures
-  through `Err()` and `ErrorToken`, including cancellation during decoding.
-  Unexpected panics remain visible. Tree-builder NUL replacement, frameset
+- Guarded standalone tokenizer accessors propagate the shared termination
+  signal, including cancellation during decoding. Callers establish the
+  extraction-stage recovery boundary; `Err()` and `ErrorToken` report ordinary
+  I/O/tokenizer outcomes. Unexpected panics remain visible. Tree-builder NUL replacement, frameset
   filtering and doctype lowercasing sample their scans and admit output storage.
 - Tag and attribute access replaces NUL bytes only when they are present,
   avoiding upstream's unconditional copies for ordinary tokens.
@@ -65,14 +67,15 @@ The shared memory budget is monotonic: replacement
 arrays remain charged even after their predecessors become unreachable. Charges
 are allocation allowances, not an exact Go heap/RSS ceiling.
 
-Resource errors preserve their typed identity through parser setup and parsing.
-The new outer recovery boundaries catch only resource aborts; the upstream inner
-`parse` recovery still converts other parsing panics into errors. Standalone
-resource-aware tokenizer boundaries rethrow unexpected panics.
+Structural-limit errors preserve their typed identity through setup and parsing.
+Parser recovery converts only fork-local structural aborts at the outer boundary
+and rethrows shared termination signals. The local `parse` recovery converts
+other parsing panics into a generic parse error. Standalone tokenizers have no
+resource recovery boundary.
 
 Fragment parsing samples cancellation while walking context ancestors and
 collecting result nodes. Result-slice growth is admitted to the shared memory
-budget before allocation or detachment; resource failures return no partial list.
+budget before allocation or detachment; budget termination unwinds without publishing a partial list.
 
 Local regression tests cover allocation admission, decoder cancellation, token
 ownership, attribute/node/stack limits, normalization and guarded tree operations.
@@ -99,5 +102,9 @@ their inner checks; short values accumulate toward the existing sampled check.
 standalone tokenizer consumers, including conditional-comment style extraction.
 It admits the initial buffer and tokenizer/guard storage before construction;
 later allocations use the existing tokenizer accounting. Admission failures
-are reported through `Next`/`Err`. `NewTokenizerWithStop` delegates to this
+unwind immediately, including during construction. `NewTokenizerWithStop` delegates to this
 constructor with no memory budget.
+
+Active-formatting reconstruction and adoption-agency scans advance the shared
+CPU sampler within a token, including the inner reparenting loop. Unused
+unguarded node-clone and reparenting wrappers have been removed.

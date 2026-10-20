@@ -33,9 +33,6 @@ func (b *extractionBudget) recordTermination(f termination.Failure, fallback boo
 	switch f.Code {
 	case termination.CPUExceeded:
 		b.cpuLimitExceeded = true
-		if fallback {
-			b.fallback.cpuStopped = true
-		}
 		if b.onCPULimit != nil {
 			b.onCPULimit(fallback)
 		}

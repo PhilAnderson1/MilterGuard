@@ -155,10 +155,6 @@ func (p *cssParseSession) beginAtRule(s *sheet, name string, values []css.Token)
 		condition = unknownMedia[:]
 	}
 	p.conditions = newConditionFrame(condition, p.conditions, s.memory)
-	if p.conditions == nil {
-		s.abandonCascade()
-		return true
-	}
 	parentNested := len(p.atRules) > 0 && p.atRules[len(p.atRules)-1].nested
 	p.atRules = growSlice(p.atRules, 1, s.memory, s.shouldStop)
 

@@ -177,10 +177,6 @@ func (l *Lexer) Next() (tt TokenType, data []byte) {
 		return ErrorToken, nil
 	}
 	defer func() {
-		if l.resourceErr != nil {
-			tt, data = ErrorToken, nil
-			return
-		}
 		if tt == ErrorToken {
 			return
 		}

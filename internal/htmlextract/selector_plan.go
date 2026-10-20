@@ -331,10 +331,7 @@ func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memor
 	group, err := cascadia.ParseCSSGroupWithMemory(branch, memory)
 
 	if err == nil && len(group) == 1 {
-		metadata, err := cascadia.MetadataWithMemory(group[0], memory)
-		if err != nil {
-			return selectorPlan{}, false
-		}
+		metadata := cascadia.MetadataWithMemory(group[0], memory)
 		if metadata.Inactive {
 			return selectorPlan{}, false
 		}
@@ -348,10 +345,7 @@ func planSelectorBranch(branch string, sequence int, memory *resourceguard.Memor
 	if err == cascadia.ErrInvalidAttributeValue || err == cascadia.ErrInvalidAttributeOperator {
 		return selectorPlan{invalidSyntax: true}, false
 	}
-	fallback, fallbackErr := cascadia.ConservativeFallbackWithMemory(branch, memory)
-	if fallbackErr != nil {
-		return selectorPlan{}, false
-	}
+	fallback := cascadia.ConservativeFallbackWithMemory(branch, memory)
 	compounds := resourceguard.MakeSlice[compoundComplexity](memory, 1, 1)
 
 	compounds[0] = compoundComplexity{FullyPositive: true}

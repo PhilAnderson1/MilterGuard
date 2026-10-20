@@ -71,12 +71,6 @@ func (collector *imageRefCollector) AddAll(candidates []string) {
 	}
 }
 
-func markdownLabelText(value string) string {
-	value = strings.ReplaceAll(value, `\`, `\\`)
-	value = strings.ReplaceAll(value, "[", `\[`)
-	return strings.ReplaceAll(value, "]", `\]`)
-}
-
 func markdownURL(value string) string { return markdownURLReplacer.Replace(value) }
 
 // extractBoundedHTMLFallback owns no primary-stage state. Admission and
@@ -198,9 +192,8 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 	textStop := resources.textStopCallback()
 	value = sanitizeSenderTextWithResources(value, memory, textStop)
 	value = normalizeHTMLTextWithResources(value, memory, textStop)
-	var urlsComplete bool
-	value, urlsComplete = rewritePlainTextURLs(value, compactURLs, &links, shouldStop)
-	return extractedContent{Text: value, HTMLFallbackUsed: true, Links: links.links, ImageRefs: images.refs, ExtractionIncomplete: !complete || !urlsComplete}
+	value = rewritePlainTextURLs(value, compactURLs, &links, memory, shouldStop)
+	return extractedContent{Text: value, HTMLFallbackUsed: true, Links: links.links, ImageRefs: images.refs, ExtractionIncomplete: !complete}
 }
 
 func fallbackDestination(raw string, base *url.URL) (string, bool) {
@@ -211,6 +204,21 @@ func fallbackDestinationWithBudget(raw string, base *url.URL, memory *resourcegu
 	if err != nil || strings.TrimSpace(raw) == "" {
 		return "", false
 	}
+	reserveResolvedURL(memory, raw, base)
+
+	if !u.IsAbs() && base != nil {
+		u = base.ResolveReference(u)
+	}
+	if u.IsAbs() {
+		scheme := strings.ToLower(u.Scheme)
+		if scheme != "http" && scheme != "https" && scheme != "mailto" && scheme != "tel" {
+			return "", false
+		}
+	}
+	return u.String(), true
+}
+
+func reserveResolvedURL(memory *resourceguard.Memory, raw string, base *url.URL) {
 	// ResolveReference and URL.String can copy/escape components. Admit a
 	// conservative allowance for their intermediates before calling either.
 	size := len(raw)
@@ -224,15 +232,39 @@ func fallbackDestinationWithBudget(raw string, base *url.URL, memory *resourcegu
 	}
 
 	memory.Reserve(int64(size)*16 + 1024)
+}
 
-	if !u.IsAbs() && base != nil {
-		u = base.ResolveReference(u)
-	}
-	if u.IsAbs() {
-		scheme := strings.ToLower(u.Scheme)
-		if scheme != "http" && scheme != "https" && scheme != "mailto" && scheme != "tel" {
-			return "", false
+// escapeMarkdown owns any label/URL escaping buffer. Unchanged strings are borrowed.
+func escapeMarkdown(value string, urlMode bool, memory *resourceguard.Memory, stop func()) string {
+	out := newGuardedBuilder(memory)
+	changed := false
+	for i := 0; i < len(value); i++ {
+		if i%resourceguard.WorkChunk == 0 && stop != nil {
+			stop()
+		}
+		c := value[i]
+		escape := c == '\\' || (!urlMode && (c == '[' || c == ']')) || (urlMode && (c == ' ' || c == '(' || c == ')' || c == '<' || c == '>'))
+		if escape {
+			if !changed {
+				out.Grow(len(value))
+				out.WriteString(value[:i])
+				changed = true
+			}
+			if urlMode {
+				const hex = "0123456789ABCDEF"
+				out.appendByte('%')
+				out.appendByte(hex[c>>4])
+				out.appendByte(hex[c&15])
+			} else {
+				out.appendByte('\\')
+				out.appendByte(c)
+			}
+		} else if changed {
+			out.appendByte(c)
 		}
 	}
-	return u.String(), true
+	if !changed {
+		return value
+	}
+	return out.String()
 }

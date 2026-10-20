@@ -1055,10 +1055,6 @@ func (s *sheet) attachMediaCondition(firstRule int, media string) {
 		frame, _ := frames.Get(parent)
 		if frame == nil {
 			frame = newConditionFrame(condition, parent, s.memory)
-			if frame == nil {
-				s.abandonCascade()
-				return
-			}
 
 			frames.Set(s.memory, parent, frame)
 		}

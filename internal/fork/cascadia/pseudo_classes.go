@@ -35,7 +35,7 @@ func (s relativePseudoClassSelector) matchResource(n *html.Node, guard *MatchCon
 	case "not":
 		// matches elements that do not match a.
 		matched := matchResource(s.match, n, guard)
-		return !matched && (guard == nil || true)
+		return !matched
 	case "has":
 		//  matches elements with any descendant that matches a.
 		return hasDescendantMatchResource(n, s.match, guard)
@@ -54,9 +54,7 @@ func hasChildMatch(n *html.Node, a SelectorGroup) bool {
 
 func hasChildMatchResource(n *html.Node, a SelectorGroup, guard *MatchControl) bool {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if guard != nil && false {
-			return false
-		}
+		// matchResource samples once per visited child.
 		if matchResource(a, c, guard) {
 			return true
 		}
@@ -75,6 +73,7 @@ func hasDescendantMatchResource(n *html.Node, a SelectorGroup, guard *MatchContr
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		guard.step()
 
+		// matchResource samples once per visited child.
 		if matchResource(a, c, guard) || c.Type == html.ElementNode && hasDescendantMatchResource(c, a, guard) {
 			return true
 		}

@@ -1164,10 +1164,7 @@ func TestPlainURLRewriteStopsCollectingAtLinkLimit(t *testing.T) {
 		fmt.Fprintf(&text, "http://%d.example.test/ ", i)
 	}
 	collector := linkCollector{compactURLs: true}
-	rewritten, complete := rewritePlainTextURLs(text.String(), true, &collector, nil)
-	if !complete {
-		t.Fatal("link limit was reported as interrupted processing")
-	}
+	rewritten := rewritePlainTextURLs(text.String(), true, &collector, collector.memory, nil)
 	if len(collector.links) != maxExtractedLinks || !collector.Full() {
 		t.Fatalf("collected=%d full=%v, want %d/true", len(collector.links), collector.Full(), maxExtractedLinks)
 	}

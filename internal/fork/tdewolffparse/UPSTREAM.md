@@ -42,7 +42,8 @@ Local compatibility changes:
   `SetProgressCheck` installs the callback and `CheckProgress` explicitly checks
   scans that do not move the input cursor. Sampling counts positive byte movement,
   including `MoveRune` and rereads after `Rewind`, negative `Move`, or `Reset`;
-  rewinding does not refund work. An error becomes sticky input state.
+  rewinding does not refund work. A terminating callback unwinds immediately;
+  ordinary reader errors remain input state.
 - CSS Unicode-range lookahead stops after detecting a seventh digit or wildcard,
   preserving rejection of overlong ranges without an input-sized speculative
   scan and rewind. Both range endpoints and wildcard runs are bounded.
@@ -69,9 +70,10 @@ Local compatibility changes:
   shared `css.ErrSyntax` value. They do not generate or store diagnostic text
   or positions, avoiding unaccounted allocations during error recovery.
 
-Allocation and cancellation failures use the existing typed resource error
-boundary (`ResourceLimitError` / `ErrResourceStopped`); unsafe top-level closers
-report `ErrUnsafeDelimiter`. Syntax errors deliberately omit upstream
+Memory, CPU and cancellation failures unwind with the shared termination signal
+and must be caught at the caller's extraction-stage boundary. Parser recovery
+passes those signals through. `ResourceLimitError` describes structural token
+and nesting limits only; unsafe top-level closers report `ErrUnsafeDelimiter`. Syntax errors deliberately omit upstream
 `parse.Error` line/context diagnostics in both constructors; `HasParseError`
 still distinguishes recovery from terminal errors. CPU cancellation is
 cooperative, and memory accounting is monotonic rather than a hard heap ceiling.
@@ -93,3 +95,6 @@ and their diagnostic-only tests were removed. Binary/mmap helpers return a
 shared failure value instead of formatting unused range/file diagnostics. CSS
 internal errors use shared values; resource errors retain their type and fields
 but return constant text. Underlying I/O errors still pass through unchanged.
+
+Unused identifier/URL lexer probes live only in upstream tests; production
+callers use resource-aware lexer/parser entrypoints.
