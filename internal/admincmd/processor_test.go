@@ -261,7 +261,7 @@ func TestRejectionDetailUsesBoundedHTMLFallback(t *testing.T) {
 	source := &messageSourceStub{contents: raw}
 	p := New(Dependencies{
 		Rejections: repository, MessageSource: source, MaxMessageSize: 1 << 20,
-		MaxHTMLParseCPUMilliseconds: 1,
+		MaxHTMLParseMemoryBytes: 1 << 20,
 	})
 
 	response, err := p.ExecuteLine(context.Background(), "REJECTION 7", Actor{DefaultRecipient: "user@example.com"})
