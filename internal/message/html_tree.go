@@ -2,7 +2,6 @@ package message
 
 import (
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -32,8 +31,6 @@ type annotationUsage struct {
 	UsedHiddenContentStrippedTag          bool
 	UsedQuotedContentTag                  bool
 }
-
-var reservedAnnotation = regexp.MustCompile(`(?is)</?\s*(?:invisible|visibility-varies-by-viewport-size|visibility-uncertain|hidden-content-stripped|quoted-content)\b[^>]*>`)
 
 type htmlExtraction struct {
 	inspection           htmlextract.Document
@@ -374,7 +371,7 @@ func (e *htmlExtraction) confidentVisibleCharacters(states []htmlextract.Text) i
 		}
 		value := prepareVisibleText(state.Node.Data, e.memory, stop)
 
-		if value == "" || annotationWhitespaceOnly(value) {
+		if value == "" || annotationWhitespaceOnly(value, stop) {
 			continue
 		}
 		characters := confidentTextCharactersWithResources(value, e.memory, stop)
@@ -667,9 +664,10 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 	for _, node := range fragment {
 		e.walkConditionalNode(node, &content, &walk, 0)
 	}
-	value := normalizeHTMLTextWithResources(content.String(), e.memory, e.textStopCallback())
+	stop := e.textStopCallback()
+	value := normalizeHTMLTextWithResources(content.String(), e.memory, stop)
 
-	if value == "" || annotationWhitespaceOnly(value) {
+	if value == "" || annotationWhitespaceOnly(value, stop) {
 		return
 	}
 	for _, destination := range walk.links.links {
@@ -821,14 +819,14 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 	// entities such as &nbsp; (U+00A0) and standalone runs of invisible formatting
 	// characters. Formatting characters embedded in meaningful text still follow
 	// that text's visibility state and remain available as obfuscation evidence.
-	if annotationWhitespaceOnly(text) {
+	if annotationWhitespaceOnly(text, stop) {
 		// Source indentation between inline elements is ordinary collapsible HTML
 		// whitespace, not a rendered line break. Preserve non-collapsible Unicode
 		// spacing and formatting evidence, while folding ASCII HTML whitespace to
 		// the single space a browser would render.
 		spacing := outText
-		if inlineFormattingGap(n) {
-			spacing = collapseHTMLFormattingWhitespace(outText)
+		if inlineFormattingGap(n, stop) {
+			spacing = collapseHTMLFormattingWhitespace(outText, e.memory, stop)
 		}
 		out.WriteString(spacing)
 		if state.Label != "concealed" {
@@ -856,16 +854,16 @@ func (e *htmlExtraction) writeText(n *xhtml.Node, mode HTMLExtractionMode, out *
 	}
 }
 
-func inlineFormattingGap(n *xhtml.Node) bool {
-	return inlineRenderedNode(n.PrevSibling) && inlineRenderedNode(n.NextSibling)
+func inlineFormattingGap(n *xhtml.Node, stop resourceguard.Stop) bool {
+	return inlineRenderedNode(n.PrevSibling, stop) && inlineRenderedNode(n.NextSibling, stop)
 }
 
-func inlineRenderedNode(n *xhtml.Node) bool {
+func inlineRenderedNode(n *xhtml.Node, stop resourceguard.Stop) bool {
 	if n == nil {
 		return false
 	}
 	if n.Type == xhtml.TextNode {
-		return !annotationWhitespaceOnly(n.Data)
+		return !annotationWhitespaceOnly(n.Data, stop)
 	}
 	if n.Type != xhtml.ElementNode {
 		return false
@@ -892,23 +890,31 @@ func inlineStyleUsesBlockLayout(n *xhtml.Node) bool {
 	return block
 }
 
-func collapseHTMLFormattingWhitespace(value string) string {
-	var out strings.Builder
+func collapseHTMLFormattingWhitespace(value string, memory *resourceguard.Memory, stop resourceguard.Stop) string {
+	out := newGuardedBuilder(memory)
+	out.Grow(len(value))
 	pendingSpace := false
-	for _, r := range value {
+	nextCheck := 0
+	for offset, r := range value {
+		if offset >= nextCheck {
+			if stop != nil {
+				stop()
+			}
+			nextCheck = offset + resourceguard.WorkChunk
+		}
 		switch r {
 		case ' ', '\t', '\n', '\f', '\r':
 			pendingSpace = true
 		default:
 			if pendingSpace {
-				out.WriteByte(' ')
+				out.appendByte(' ')
 				pendingSpace = false
 			}
-			out.WriteRune(r)
+			out.appendRune(r)
 		}
 	}
 	if pendingSpace {
-		out.WriteByte(' ')
+		out.appendByte(' ')
 	}
 	return out.String()
 }
@@ -917,11 +923,6 @@ func collapseHTMLFormattingWhitespace(value string) string {
 // Unicode characters hundreds of times to occupy inbox-preview width. Preserve
 // a small sample as evidence, but do not let formatting-only padding dominate
 // the LLM input. Ordinary whitespace and short obfuscation runs are unchanged.
-func compactFormattingPadding(value string) string {
-	result := compactFormattingPaddingWithResources(value, nil, nil)
-	return result
-}
-
 func preheaderPaddingRune(r rune) bool {
 	if unicode.IsSpace(r) {
 		return true
@@ -933,11 +934,18 @@ func preheaderPaddingRune(r rune) bool {
 	return false
 }
 
-func annotationWhitespaceOnly(value string) bool {
+func annotationWhitespaceOnly(value string, stop resourceguard.Stop) bool {
 	if value == "" {
 		return false
 	}
-	for _, r := range value {
+	nextCheck := 0
+	for offset, r := range value {
+		if offset >= nextCheck {
+			if stop != nil {
+				stop()
+			}
+			nextCheck = offset + resourceguard.WorkChunk
+		}
 		if !preheaderPaddingRune(r) {
 			return false
 		}

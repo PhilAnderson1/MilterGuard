@@ -1040,14 +1040,13 @@ func inBodyIM(p *parser) bool {
 			p.framesetOK = false
 		case a.A:
 			for i := len(p.afe) - 1; i >= 0 && p.afe[i].Type != scopeMarkerNode; i-- {
-
+				p.guard.stop()
 				if n := p.afe[i]; n.Type == ElementNode && n.DataAtom == a.A {
 					p.inBodyEndTagFormatting(a.A, "a")
 					p.oe.remove(n)
 					p.afe.remove(n)
 					break
 				}
-
 			}
 			p.reconstructActiveFormattingElements()
 			p.addFormattingElement()

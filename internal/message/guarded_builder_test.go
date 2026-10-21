@@ -29,6 +29,38 @@ func TestGuardedBuilderChargesCompleteReplacementAllocation(t *testing.T) {
 	}
 }
 
+func TestFormattingWhitespaceCollapseUsesResourceControls(t *testing.T) {
+	input := strings.Repeat("\u00a0", resourceguard.WorkChunk)
+	expectTermination(t, termination.MemoryExceeded, func() {
+		collapseHTMLFormattingWhitespace(input, resourceguard.NewMemory(int64(len(input)-1)), nil)
+	})
+
+	memory := resourceguard.NewMemory(int64(len(input)))
+	if got := collapseHTMLFormattingWhitespace(input, memory, nil); got != input || memory.Used() != int64(len(input)) {
+		t.Fatalf("collapsed length=%d charged=%d, want %d", len(got), memory.Used(), len(input))
+	}
+
+	for name, scan := range map[string]func(string, resourceguard.Stop){
+		"classification": func(value string, stop resourceguard.Stop) { annotationWhitespaceOnly(value, stop) },
+		"collapse":       func(value string, stop resourceguard.Stop) { collapseHTMLFormattingWhitespace(value, nil, stop) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			expectTermination(t, termination.CPUExceeded, func() {
+				scan(input, func() {
+					calls++
+					if calls == 2 {
+						termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+					}
+				})
+			})
+			if calls != 2 {
+				t.Fatalf("CPU checks=%d, want 2", calls)
+			}
+		})
+	}
+}
+
 func TestAnnotatedOutputStopsBeforeUnbudgetedChunkAllocation(t *testing.T) {
 	var sample outputChunk
 	chunkBytes := int64(unsafe.Sizeof(sample))

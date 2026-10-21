@@ -196,9 +196,6 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 	return extractedContent{Text: value, HTMLFallbackUsed: true, Links: links.links, ImageRefs: images.refs, ExtractionIncomplete: !complete}
 }
 
-func fallbackDestination(raw string, base *url.URL) (string, bool) {
-	return fallbackDestinationWithBudget(raw, base, nil)
-}
 func fallbackDestinationWithBudget(raw string, base *url.URL, memory *resourceguard.Memory) (string, bool) {
 	u, err := resourceguard.ParseURL(memory, strings.TrimSpace(raw))
 	if err != nil || strings.TrimSpace(raw) == "" {

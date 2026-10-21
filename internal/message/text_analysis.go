@@ -19,10 +19,6 @@ func prepareVisibleText(value string, memory *resourceguard.Memory, stop func())
 	return compactFormattingPaddingWithResources(value, memory, stop)
 }
 
-func confidentTextCharacters(value string) int {
-	count := confidentTextCharactersWithResources(value, nil, nil)
-	return count
-}
 func confidentTextCharactersWithResources(value string, memory *resourceguard.Memory, stop func()) int {
 	value = prepareVisibleText(value, memory, stop)
 

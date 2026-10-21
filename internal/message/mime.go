@@ -23,18 +23,15 @@ const (
 )
 
 type extractionBudget struct {
+	extractionProgress
+
 	primaryMemory *resourceguard.Memory
 	stageStop     func()
 
-	checkPrimary              func()
-	checkFallback             func()
-	terminal                  termination.Failure
-	parts                     int
-	htmlParts                 int
-	htmlBytesRemaining        int
-	decodedTextBytesRemaining int64
-	cssBytesRemaining         int
-	memoryBytesLimit          int64
+	checkPrimary     func()
+	checkFallback    func()
+	terminal         termination.Failure
+	memoryBytesLimit int64
 
 	onCPULimit             func(fallback bool)
 	cpuLimitExceeded       bool
@@ -50,6 +47,16 @@ type extractionBudget struct {
 	countingSampler        resourceguard.StopSampler
 }
 
+// extractionProgress contains the traversal allowances that must rewind when
+// an interrupted MIME operation is replayed under the fallback stage.
+type extractionProgress struct {
+	parts                     int
+	htmlParts                 int
+	htmlBytesRemaining        int
+	decodedTextBytesRemaining int64
+	cssBytesRemaining         int
+}
+
 func newExtractionBudget() *extractionBudget {
 	return newExtractionBudgetWithControl(HTMLProcessingControl{})
 }
@@ -60,14 +67,16 @@ func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBu
 		limits.MemoryBytes = control.MemoryBytes
 	}
 	return &extractionBudget{
-		primaryMemory:             resourceguard.NewMemory(limits.MemoryBytes),
-		checkPrimary:              control.CheckPrimary,
-		onCPULimit:                control.CPULimitExceeded,
-		checkFallback:             control.CheckFallback,
-		htmlBytesRemaining:        limits.InputBytes,
-		decodedTextBytesRemaining: int64(limits.InputBytes),
-		cssBytesRemaining:         limits.CSSBytes,
-		memoryBytesLimit:          limits.MemoryBytes,
+		extractionProgress: extractionProgress{
+			htmlBytesRemaining:        limits.InputBytes,
+			decodedTextBytesRemaining: int64(limits.InputBytes),
+			cssBytesRemaining:         limits.CSSBytes,
+		},
+		primaryMemory:    resourceguard.NewMemory(limits.MemoryBytes),
+		checkPrimary:     control.CheckPrimary,
+		onCPULimit:       control.CPULimitExceeded,
+		checkFallback:    control.CheckFallback,
+		memoryBytesLimit: limits.MemoryBytes,
 
 		compactURLs:           !control.DisableURLCompaction,
 		onMemoryLimit:         control.MemoryLimitExceeded,
@@ -202,16 +211,12 @@ type extractedImage struct {
 func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte, depth int, budget *extractionBudget) extractedContent {
 	var retained extractedContent
 	// Replay restores traversal/output allowances, never allocation ledgers or
-	// terminal outcomes. Keep this list in sync with extractionBudget progress fields.
-	decodedRemaining := budget.decodedTextBytesRemaining
-	parts, htmlParts := budget.parts, budget.htmlParts
-	htmlBytes, cssBytes := budget.htmlBytesRemaining, budget.cssBytesRemaining
+	// terminal outcomes.
+	progress := budget.extractionProgress
 	retry := false
 	result, complete := runExtraction(budget, func() extractedContent {
 		if retry {
-			budget.decodedTextBytesRemaining = decodedRemaining
-			budget.parts, budget.htmlParts = parts, htmlParts
-			budget.htmlBytesRemaining, budget.cssBytesRemaining = htmlBytes, cssBytes
+			budget.extractionProgress = progress
 		}
 		retry = true
 		return extractMIMEOnce(contentType, encoding, contentID, data, depth, budget, &retained)
@@ -506,19 +511,11 @@ func joinExtractedText(parts []string, separator string, budget *extractionBudge
 	return strings.Join(parts, separator)
 }
 
-// decodeCharset converts MIME text bodies to UTF-8 after their transfer
-// encoding has been decoded. Unknown labels and malformed encoded text retain
-// the original content so that a bad charset declaration cannot erase the
-// message body. The boolean reports whether the complete decoded value fit in
-// maxBytes; truncation always ends at a UTF-8 boundary.
-func decodeCharset(label string, data []byte, maxBytes int64) (string, bool) {
-	return decodeCharsetWithStop(label, data, maxBytes, nil)
-}
-
-func decodeCharsetWithStop(label string, data []byte, maxBytes int64, shouldStop func()) (string, bool) {
-	return decodeCharsetWithResources(label, data, maxBytes, shouldStop, nil)
-}
-
+// decodeCharsetWithResources converts MIME text bodies to UTF-8 after their
+// transfer encoding has been decoded. Unknown labels and malformed encoded
+// text retain the original content so that a bad charset declaration cannot
+// erase the message body. The boolean reports whether the complete decoded
+// value fit in maxBytes; truncation always ends at a UTF-8 boundary.
 func decodeCharsetWithResources(label string, data []byte, maxBytes int64, shouldStop func(), memory func() *resourceguard.Memory) (string, bool) {
 	control := decodeControl{shouldStop: shouldStop, memory: memory}
 	if maxBytes < 0 {
@@ -562,17 +559,9 @@ func decodeCharsetWithResources(label string, data []byte, maxBytes int64, shoul
 	return bounded(decoded)
 }
 
-// decodeHTMLCharset keeps a usable MIME declaration authoritative. Without
-// one, HTML's own BOM or early meta declaration can identify its encoding;
-// this does not parse the document or change the HTML extractor.
-func decodeHTMLCharset(label string, data []byte, maxBytes int) string {
-	return decodeHTMLCharsetWithStop(label, data, maxBytes, nil)
-}
-
-func decodeHTMLCharsetWithStop(label string, data []byte, maxBytes int, shouldStop func()) string {
-	return decodeHTMLCharsetWithResources(label, data, maxBytes, shouldStop, nil)
-}
-
+// decodeHTMLCharsetWithResources keeps a usable MIME declaration authoritative.
+// Without one, HTML's own BOM or early meta declaration can identify its
+// encoding; this does not parse the document or change the HTML extractor.
 func decodeHTMLCharsetWithResources(label string, data []byte, maxBytes int, shouldStop func(), memory func() *resourceguard.Memory) string {
 	control := decodeControl{shouldStop: shouldStop, memory: memory}
 	if maxBytes < 0 {
@@ -632,18 +621,10 @@ func normalizeContentID(value string) string {
 	return strings.ToLower(value)
 }
 
-// decodeTransferRecovering is deliberately recovery-oriented: message extraction keeps
-// readable evidence from malformed encodings and accepts omitted Base64
-// padding. Attachment inspection uses a separate strict decoder so incomplete
-// data cannot be reported as successfully scanned.
-func decodeTransferRecovering(encoding string, data []byte) ([]byte, bool) {
-	return decodeTransferRecoveringWithStop(encoding, data, nil)
-}
-
-func decodeTransferRecoveringWithStop(encoding string, data []byte, shouldStop func()) ([]byte, bool) {
-	return decodeTransferRecoveringWithResources(encoding, data, shouldStop, nil)
-}
-
+// decodeTransferRecoveringWithResources keeps readable evidence from malformed
+// encodings and accepts omitted Base64 padding. Attachment inspection uses a
+// separate strict decoder so incomplete data cannot be reported as successfully
+// scanned.
 func decodeTransferRecoveringWithResources(encoding string, data []byte, shouldStop func(), memory func() *resourceguard.Memory) ([]byte, bool) {
 	control := decodeControl{shouldStop: shouldStop, memory: memory}
 	switch strings.ToLower(strings.TrimSpace(encoding)) {

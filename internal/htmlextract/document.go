@@ -344,9 +344,6 @@ func (d *parsedDocument) storePreparation(n *html.Node, prepared elementPreparat
 	return
 }
 
-func boundedStyleText(style *html.Node, maximum int) (string, bool) {
-	return boundedStyleTextWithBudget(style, maximum, nil)
-}
 func boundedStyleTextWithBudget(style *html.Node, maximum int, budget *cpuGuard) (string, bool) {
 	if maximum < 0 {
 		return "", false

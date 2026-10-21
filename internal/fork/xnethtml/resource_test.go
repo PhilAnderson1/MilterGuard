@@ -110,6 +110,31 @@ func TestTreeBuilderStopCheckIsSampled(t *testing.T) {
 	}
 }
 
+func TestAnchorActiveFormattingScanChecksCPU(t *testing.T) {
+	checks := 0
+	guard := &resourceGuard{limits: ResourceLimits{ShouldStop: func() {
+		checks++
+		if checks == 2 {
+			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+		}
+	}}}
+	guard.sampler = resourceguard.NewStopSampler(256, guard.limits.ShouldStop)
+	formatting := make(nodeStack, 300)
+	for i := range formatting {
+		formatting[i] = &Node{Type: ElementNode, DataAtom: atom.B, Data: "b"}
+	}
+	p := parser{
+		guard: guard,
+		afe:   formatting,
+		tok:   Token{Type: StartTagToken, DataAtom: atom.A, Data: "a"},
+	}
+
+	expectTermination(t, termination.CPUExceeded, func() { inBodyIM(&p) })
+	if checks != 2 {
+		t.Fatalf("CPU checks=%d, want 2", checks)
+	}
+}
+
 func TestTreeBuilderAllocationTerminatesBeforeCPUCheckpoint(t *testing.T) {
 	memory := resourceguard.NewMemory(1)
 	checks := 0
