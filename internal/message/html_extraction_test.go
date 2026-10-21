@@ -1128,14 +1128,14 @@ func TestPlainURLHarvestingPreservesBalancedDelimiters(t *testing.T) {
 func TestNextHTTPPrefixScansCaseInsensitively(t *testing.T) {
 	text := "highway HAZE hTtPs://mixed.example then HTTP://upper.example"
 	first := strings.Index(text, "hTtPs://")
-	if got := nextHTTPPrefix(text, 0); got != first {
+	if got := nextHTTPPrefix(text, 0, nil); got != first {
 		t.Fatalf("first prefix = %d, want %d", got, first)
 	}
 	second := strings.Index(text, "HTTP://")
-	if got := nextHTTPPrefix(text, first+1); got != second {
+	if got := nextHTTPPrefix(text, first+1, nil); got != second {
 		t.Fatalf("second prefix = %d, want %d", got, second)
 	}
-	if got := nextHTTPPrefix(strings.Repeat("highway haze ", 4096), 0); got != -1 {
+	if got := nextHTTPPrefix(strings.Repeat("highway haze ", 4096), 0, nil); got != -1 {
 		t.Fatalf("non-URL text matched at %d", got)
 	}
 }
@@ -1191,7 +1191,7 @@ func BenchmarkNextHTTPPrefixDenseNoMatch(b *testing.B) {
 	b.SetBytes(int64(len(text)))
 	b.ResetTimer()
 	for range b.N {
-		if nextHTTPPrefix(text, 0) != -1 {
+		if nextHTTPPrefix(text, 0, nil) != -1 {
 			b.Fatal("unexpected URL match")
 		}
 	}

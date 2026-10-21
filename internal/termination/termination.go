@@ -14,7 +14,9 @@ const (
 
 // Failure contains bounded diagnostic data. It never retains input text.
 type Failure struct {
-	Code  Code
+	Code Code
+	// Limit is the memory allowance in bytes for MemoryExceeded, otherwise zero.
+	// CPU enforcement retains only a deadline; its allowance belongs to the caller.
 	Limit int64
 }
 

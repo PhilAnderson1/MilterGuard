@@ -165,13 +165,27 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 			}
 		} else {
 			{
-				absolute := map[string]float64{
-					"xx-small": 9, "x-small": 12, "small": 13, "medium": 16,
-					"large": 18, "x-large": 24, "xx-large": 32, "xxx-large": 48,
+				var absolute float64
+				switch s {
+				case "xx-small":
+					absolute = 9
+				case "x-small":
+					absolute = 12
+				case "small":
+					absolute = 13
+				case "medium":
+					absolute = 16
+				case "large":
+					absolute = 18
+				case "x-large":
+					absolute = 24
+				case "xx-large":
+					absolute = 32
+				case "xxx-large":
+					absolute = 48
 				}
-
-				if v, ok := absolute[s]; ok {
-					return Value{Text: numberStringWithBudget(v, "px", budget), Number: v, Known: true}, valueResolved
+				if absolute != 0 {
+					return Value{Text: numberStringWithBudget(absolute, "px", budget), Number: absolute, Known: true}, valueResolved
 				}
 
 				if s == "smaller" || s == "larger" {

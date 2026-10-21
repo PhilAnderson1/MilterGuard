@@ -557,15 +557,22 @@ func rewritePlainTextURLs(text string, compact bool, links *linkCollector, memor
 func walkPlainHTTPURLs(text string, limit int, shouldStop func(), visit func(link string, start, end int) bool) {
 	found := 0
 	for search := 0; search < len(text) && (limit < 0 || found < limit); {
-		start := nextHTTPPrefix(text, search)
+		start := nextHTTPPrefix(text, search, shouldStop)
 		if start < 0 {
 			return
 		}
 		end := start
+		nextCheck := start + resourceguard.WorkChunk
 		for end < len(text) && !plainURLDelimiter(text[end]) {
+			if end >= nextCheck {
+				if shouldStop != nil {
+					shouldStop()
+				}
+				nextCheck += resourceguard.WorkChunk
+			}
 			end++
 		}
-		link := trimPlainURLPunctuation(text[start:end])
+		link := trimPlainURLPunctuation(text[start:end], shouldStop)
 		if link != "" {
 			if found&255 == 0 && shouldStop != nil {
 				shouldStop()
@@ -584,8 +591,15 @@ func walkPlainHTTPURLs(text string, limit int, shouldStop func(), visit func(lin
 	return
 }
 
-func nextHTTPPrefix(text string, start int) int {
+func nextHTTPPrefix(text string, start int, shouldStop func()) int {
+	nextCheck := start + resourceguard.WorkChunk
 	for candidate := start; candidate < len(text); candidate++ {
+		if candidate >= nextCheck {
+			if shouldStop != nil {
+				shouldStop()
+			}
+			nextCheck += resourceguard.WorkChunk
+		}
 		if (text[candidate] == 'h' || text[candidate] == 'H') && hasHTTPPrefix(text[candidate:]) {
 			return candidate
 		}
@@ -602,16 +616,25 @@ func plainURLDelimiter(character byte) bool {
 	}
 }
 
-func trimPlainURLPunctuation(value string) string {
+func trimPlainURLPunctuation(value string, shouldStop func()) string {
 	parentheses, brackets, braces := 0, 0, 0
-	for index, character := range value {
+	nextCheck := resourceguard.WorkChunk
+scan:
+	for index := 0; index < len(value); index++ {
+		if index >= nextCheck {
+			if shouldStop != nil {
+				shouldStop()
+			}
+			nextCheck += resourceguard.WorkChunk
+		}
+		character := value[index]
 		switch character {
 		case '(':
 			parentheses++
 		case ')':
 			if parentheses == 0 {
 				value = value[:index]
-				return strings.TrimRight(value, ".,;:!?")
+				break scan
 			}
 			parentheses--
 		case '[':
@@ -619,7 +642,7 @@ func trimPlainURLPunctuation(value string) string {
 		case ']':
 			if brackets == 0 {
 				value = value[:index]
-				return strings.TrimRight(value, ".,;:!?")
+				break scan
 			}
 			brackets--
 		case '{':
@@ -627,12 +650,23 @@ func trimPlainURLPunctuation(value string) string {
 		case '}':
 			if braces == 0 {
 				value = value[:index]
-				return strings.TrimRight(value, ".,;:!?")
+				break scan
 			}
 			braces--
 		}
 	}
-	return strings.TrimRight(value, ".,;:!?")
+	end := len(value)
+	nextCheck = end - resourceguard.WorkChunk
+	for end > 0 && strings.ContainsRune(".,;:!?", rune(value[end-1])) {
+		if end <= nextCheck {
+			if shouldStop != nil {
+				shouldStop()
+			}
+			nextCheck -= resourceguard.WorkChunk
+		}
+		end--
+	}
+	return value[:end]
 }
 
 func boundedLinks(candidates []string) []string {

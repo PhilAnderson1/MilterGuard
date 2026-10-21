@@ -85,3 +85,18 @@ func (m *Memory) TryReserve(bytes int64) bool {
 	m.Reserve(bytes)
 	return true
 }
+
+// RecordUsage transfers charges already admitted by a child ledger. It is not
+// allocation admission: the child must be limited to the parent's remaining
+// allowance, with no intervening parent charges. It never raises during deferred
+// cleanup. An overrun exhausts the parent, so subsequent admissions fail closed.
+func (m *Memory) RecordUsage(bytes int64) {
+	if m == nil || m.exhausted || bytes <= 0 {
+		return
+	}
+	if m.limit <= 0 || m.used > m.limit || bytes > m.limit-m.used {
+		m.exhausted = true
+		return
+	}
+	m.used += bytes
+}

@@ -89,7 +89,7 @@ func UnescapePathBytes(m *Memory, text string, stop Stop) ([]byte, error) {
 	// needs a temporary string allowance; the mutable output always has an owner.
 	escaped := false
 	for i := 0; i < len(text); i++ {
-		if i%WorkChunk == 0 {
+		if i > 0 && i%WorkChunk == 0 {
 			if stop != nil {
 				stop()
 			}
@@ -97,6 +97,7 @@ func UnescapePathBytes(m *Memory, text string, stop Stop) ([]byte, error) {
 
 		if text[i] == '%' {
 			escaped = true
+			break
 		}
 	}
 

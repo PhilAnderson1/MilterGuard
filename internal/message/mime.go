@@ -105,9 +105,11 @@ func (b *extractionBudget) noteMemoryLimit() {
 	}
 }
 
+// consumeMemory transfers admitted child usage during normal return or unwind.
+// The child limit is the primary remainder; primary charges wait for this transfer.
 func (b *extractionBudget) consumeMemory(memory *resourceguard.Memory) {
 	if memory != b.primaryMemory {
-		b.primaryMemory.Reserve(memory.Used())
+		b.primaryMemory.RecordUsage(memory.Used())
 	}
 	if memory.Exhausted() {
 		b.noteMemoryLimit()
@@ -140,12 +142,14 @@ func (b *extractionBudget) htmlLimits(bytes int) (htmlextract.Limits, bool) {
 	return limits, true
 }
 
+// consumeHTML publishes usage bounded by htmlLimits, including during unwind.
+// No primary charges may intervene between admitting those limits and this call.
 func (b *extractionBudget) consumeHTML(usage htmlextract.ResourceUsage) {
 	if usage.MemoryLimitExceeded {
 		b.noteMemoryLimit()
 	}
 	b.cssBytesRemaining = remainingInt(b.cssBytesRemaining, usage.CSSBytes)
-	b.primaryMemory.Reserve(usage.MemoryBytes)
+	b.primaryMemory.RecordUsage(usage.MemoryBytes)
 }
 
 func (b *extractionBudget) reserveOutputMemory(bytes int64) { b.allocationMemory().Reserve(bytes) }
@@ -311,9 +315,6 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 					if !ok {
 						mimeIncomplete = true
 						processingStopped = true
-						if len(parts) == 0 {
-							alternativePlain = content
-						}
 						break
 					}
 				}

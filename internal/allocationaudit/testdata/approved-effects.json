@@ -1260,7 +1260,7 @@
   "internal/htmlextract/values.go::resolveLayoutProperty:1": "99aaa012abe4bd739812fab902c6f21ea52309e1d473fb0695ce32374932e654",
   "internal/htmlextract/values.go::resolveLayoutPropertyWithBudget:1": "c832f865dc0ff9ec88316353629aa05585173bdba429e68491b775852ab763b8",
   "internal/htmlextract/values.go::resolveLineHeightWithBudget:1": "872f30e014dc9222ddb1e12622c5073e7de9b51288ee805c8e28462c784a0421",
-  "internal/htmlextract/values.go::resolveWithBudget:1": "9cfe936741a7136e0c2a10a79fd4fe3e5b892d4ce731fa523675613e6c347653",
+  "internal/htmlextract/values.go::resolveWithBudget:1": "4854cbe9deff69fdb064ddececb275cd9064b2772b8f72b7de828c67fffdb240",
   "internal/htmlextract/variables.go::(*variableScope).colourSchemeDependent:1": "25370a1a3f8f3f81ffd63a83811c026526ca6e748d90809e2fb6b0aea5c18ab4",
   "internal/htmlextract/variables.go::(*variableScope).get:1": "72117650356db81306915a137b140aa4840b0f849b5c156510c7580f3a2df1e1",
   "internal/htmlextract/variables.go::\u003cinit\u003e:1": "1f79b8aa3df1520a5e0764e6549726da1cfcbfb1a5f40db52afd9fc6d3c4ddab",

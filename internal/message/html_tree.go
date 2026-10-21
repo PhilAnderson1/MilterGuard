@@ -103,9 +103,7 @@ func (o *annotatedOutput) writeBytes(annotation outputAnnotation, value []byte) 
 	}
 	start := o.data.Len()
 
-	if _, err := o.data.Write(value); err != nil {
-		return
-	}
+	o.data.Write(value)
 
 	o.extendChunk(annotation, start)
 }
