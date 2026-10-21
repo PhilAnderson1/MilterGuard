@@ -30,9 +30,10 @@ type annotationUsage struct {
 	UsedVisibilityVariesByViewportSizeTag bool
 	UsedVisibilityUncertainTag            bool
 	UsedHiddenContentStrippedTag          bool
+	UsedQuotedContentTag                  bool
 }
 
-var reservedAnnotation = regexp.MustCompile(`(?is)</?\s*(?:invisible|visibility-varies-by-viewport-size|visibility-uncertain|hidden-content-stripped)\b[^>]*>`)
+var reservedAnnotation = regexp.MustCompile(`(?is)</?\s*(?:invisible|visibility-varies-by-viewport-size|visibility-uncertain|hidden-content-stripped|quoted-content)\b[^>]*>`)
 
 type htmlExtraction struct {
 	inspection           htmlextract.Document
@@ -129,11 +130,14 @@ func (o *annotatedOutput) plainText() string {
 	return o.data.String()
 }
 
-func (o *annotatedOutput) uniformAnnotation() (outputAnnotation, bool) {
+func (o *annotatedOutput) uniformAnnotation(stop resourceguard.Stop) (outputAnnotation, bool) {
 	var found outputAnnotation
 	haveContent := false
 	for _, chunk := range o.chunks {
-		if annotationWhitespaceOnlyBytes(o.chunkBytes(chunk)) {
+		if stop != nil {
+			stop()
+		}
+		if annotationWhitespaceOnlyBytesWithStop(o.chunkBytes(chunk), stop) {
 			continue
 		}
 		if !haveContent {
@@ -148,7 +152,7 @@ func (o *annotatedOutput) uniformAnnotation() (outputAnnotation, bool) {
 	return found, haveContent
 }
 
-func (o *annotatedOutput) renderAnnotations() string {
+func (o *annotatedOutput) renderAnnotations(stop resourceguard.Stop) string {
 	out := newGuardedBuilder(o.memory)
 	pending := newGuardedBuilder(o.memory)
 	var active outputAnnotation
@@ -189,14 +193,17 @@ func (o *annotatedOutput) renderAnnotations() string {
 	}
 	lastWasStripped := false
 	for _, chunk := range o.chunks {
+		if stop != nil {
+			stop()
+		}
 		value := o.chunkBytes(chunk)
-		if annotationWhitespaceOnlyBytes(value) {
-			_, _ = pending.Write(value)
+		if annotationWhitespaceOnlyBytesWithStop(value, stop) {
+			pending.writeWithStop(value, stop)
 			continue
 		}
 		if chunk.annotation.kind == "stripped" {
 			closeActive()
-			_, _ = out.Write(pending.Bytes())
+			out.writeWithStop(pending.Bytes(), stop)
 			pending.Reset()
 			if !lastWasStripped {
 				open(chunk.annotation)
@@ -207,32 +214,28 @@ func (o *annotatedOutput) renderAnnotations() string {
 		lastWasStripped = false
 		if chunk.annotation.kind == "" {
 			closeActive()
-			_, _ = out.Write(pending.Bytes())
+			out.writeWithStop(pending.Bytes(), stop)
 			pending.Reset()
-			_, _ = out.Write(value)
+			out.writeWithStop(value, stop)
 			continue
 		}
 		if !haveActive || active != chunk.annotation {
 			closeActive()
-			_, _ = out.Write(pending.Bytes())
+			out.writeWithStop(pending.Bytes(), stop)
 			pending.Reset()
 			open(chunk.annotation)
 			active = chunk.annotation
 			haveActive = true
 		} else {
-			_, _ = out.Write(pending.Bytes())
+			out.writeWithStop(pending.Bytes(), stop)
 			pending.Reset()
 		}
-		_, _ = out.Write(value)
+		out.writeWithStop(value, stop)
 	}
 	closeActive()
-	_, _ = out.Write(pending.Bytes())
+	out.writeWithStop(pending.Bytes(), stop)
 
 	return out.String()
-}
-
-func htmlToText(source string) extractedContent {
-	return htmlToTextWithBudget(source, newExtractionBudget())
 }
 
 func htmlToTextWithBudget(source string, budget *extractionBudget) extractedContent {
@@ -248,10 +251,6 @@ func htmlToTextWithBudget(source string, budget *extractionBudget) extractedCont
 		return content
 	}
 	return extractTreeHTMLWithLimits(source, limits, budget)
-}
-
-func extractTreeHTML(source string) extractedContent {
-	return htmlToText(source)
 }
 
 func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget *extractionBudget) extractedContent {
@@ -442,15 +441,16 @@ func (e *htmlExtraction) render(mode HTMLExtractionMode) renderedHTML {
 
 	e.walk(e.inspection.Root, mode, &body, &visible)
 
-	rawText := body.renderAnnotations()
+	stop := e.textStopCallback()
+	rawText := body.renderAnnotations(stop)
 
 	e.stopNow()
 
-	text := normalizeHTMLTextGuarded(rawText, e.memory)
+	text := normalizeHTMLTextWithResources(rawText, e.memory, stop)
 
 	e.stopNow()
 
-	visibleText := normalizeHTMLTextGuarded(visible.String(), e.memory)
+	visibleText := normalizeHTMLTextWithResources(visible.String(), e.memory, stop)
 
 	e.stopNow()
 
@@ -526,12 +526,12 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 		visible.appendByte('\n')
 	}
 	if name == "blockquote" {
-		marker := "[quoted content begins]\n"
+		marker := "<quoted-content>\n"
 		if e.anchorDepth > 0 {
-			marker = `\[quoted content begins\] `
+			marker = "<quoted-content> "
 		}
 		out.WriteString(marker)
-		visible.WriteString("[quoted content begins]\n")
+		visible.WriteString("<quoted-content>\n")
 	}
 	if name == "a" {
 		label := newAnnotatedOutput(e.memory)
@@ -550,7 +550,8 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 				plain = "link"
 			}
 
-			if annotation, uniform := label.uniformAnnotation(); uniform {
+			stop := e.textStopCallback()
+			if annotation, uniform := label.uniformAnnotation(stop); uniform {
 				out.write(annotation, "[")
 				out.write(annotation, plain)
 				out.write(annotation, "](")
@@ -561,7 +562,7 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 					// Preserve distinct child annotations when a label crosses a real
 					// visibility boundary.
 					out.WriteByte('[')
-					annotatedLabel := label.renderAnnotations()
+					annotatedLabel := label.renderAnnotations(stop)
 
 					out.WriteString(strings.TrimSpace(annotatedLabel))
 					out.WriteString("](")
@@ -582,12 +583,12 @@ func (e *htmlExtraction) walk(n *xhtml.Node, mode HTMLExtractionMode, out *annot
 		e.walk(child, mode, out, visible)
 	}
 	if name == "blockquote" {
-		marker := "\n[quoted content ends]"
+		marker := "\n</quoted-content>"
 		if e.anchorDepth > 0 {
-			marker = ` \[quoted content ends\]`
+			marker = " </quoted-content>"
 		}
 		out.WriteString(marker)
-		visible.WriteString("\n[quoted content ends]")
+		visible.WriteString("\n</quoted-content>")
 	}
 	if isBlockElement(name) {
 		out.WriteByte('\n')
@@ -666,7 +667,7 @@ func (e *htmlExtraction) writeConditionalComment(data string, out *annotatedOutp
 	for _, node := range fragment {
 		e.walkConditionalNode(node, &content, &walk, 0)
 	}
-	value := normalizeHTMLTextGuarded(content.String(), e.memory)
+	value := normalizeHTMLTextWithResources(content.String(), e.memory, e.textStopCallback())
 
 	if value == "" || annotationWhitespaceOnly(value) {
 		return
@@ -944,16 +945,24 @@ func annotationWhitespaceOnly(value string) bool {
 	return true
 }
 
-func annotationWhitespaceOnlyBytes(value []byte) bool {
+func annotationWhitespaceOnlyBytesWithStop(value []byte, stop resourceguard.Stop) bool {
 	if len(value) == 0 {
 		return false
 	}
+	checked := 0
 	for len(value) > 0 {
 		r, size := utf8.DecodeRune(value)
 		if !preheaderPaddingRune(r) {
 			return false
 		}
 		value = value[size:]
+		checked += size
+		if checked >= resourceguard.WorkChunk {
+			if stop != nil {
+				stop()
+			}
+			checked = 0
+		}
 	}
 	return true
 }
@@ -1208,14 +1217,6 @@ func isBlockElement(name string) bool {
 	return false
 }
 
-func normalizeHTMLText(value string) string {
-	result := normalizeHTMLTextGuarded(value, nil)
-	return result
-}
-
-func normalizeHTMLTextGuarded(value string, memory *resourceguard.Memory) string {
-	return normalizeHTMLTextWithResources(value, memory, nil)
-}
 func normalizeHTMLTextWithResources(value string, memory *resourceguard.Memory, stop func()) string {
 	b := newGuardedBuilder(memory)
 

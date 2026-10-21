@@ -473,11 +473,12 @@ func annotationUsageFromBody(body string) annotationUsage {
 		UsedVisibilityVariesByViewportSizeTag: strings.Contains(body, "<visibility-varies-by-viewport-size>"),
 		UsedVisibilityUncertainTag:            strings.Contains(body, "<visibility-uncertain>"),
 		UsedHiddenContentStrippedTag:          strings.Contains(body, "<hidden-content-stripped/>"),
+		UsedQuotedContentTag:                  strings.Contains(body, "<quoted-content>"),
 	}
 }
 
 func writeAnnotationExplanations(b *strings.Builder, usage annotationUsage) {
-	if !usage.UsedInvisibleTag && !usage.UsedVisibilityVariesByViewportSizeTag && !usage.UsedVisibilityUncertainTag && !usage.UsedHiddenContentStrippedTag {
+	if !usage.UsedInvisibleTag && !usage.UsedVisibilityVariesByViewportSizeTag && !usage.UsedVisibilityUncertainTag && !usage.UsedHiddenContentStrippedTag && !usage.UsedQuotedContentTag {
 		return
 	}
 	b.WriteString("\nHTML-TO-TEXT EXTRACTOR ANNOTATIONS:\n")
@@ -492,6 +493,9 @@ func writeAnnotationExplanations(b *strings.Builder, usage annotationUsage) {
 	}
 	if usage.UsedHiddenContentStrippedTag {
 		b.WriteString("- <hidden-content-stripped/>: Location where invisible text was removed.\n")
+	}
+	if usage.UsedQuotedContentTag {
+		b.WriteString("- <quoted-content>…</quoted-content>: Content contained in an HTML block quotation, commonly earlier correspondence.\n")
 	}
 }
 

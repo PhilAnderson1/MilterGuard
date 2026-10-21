@@ -21,9 +21,9 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/milter"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 	"github.com/PhilAnderson1/MilterGuard/internal/sqlitedb"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
-	"github.com/PhilAnderson1/MilterGuard/internal/threadcpu"
 	"github.com/mattn/go-isatty"
 	"github.com/peterh/liner"
 )
@@ -131,8 +131,8 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "unexpected positional arguments")
 		return 2
 	}
-	if err := checkThreadCPUClock(threadcpu.Now); err != nil {
-		logger.Error("cannot enforce content-processing CPU limit", "error", err)
+	if !resourceguard.ThreadCPUAvailable() {
+		logger.Error("cannot enforce content-processing CPU limit", "error", "thread CPU clock is unavailable")
 		return 2
 	}
 
@@ -170,16 +170,6 @@ func run() int {
 		return 1
 	}
 	return 0
-}
-
-func checkThreadCPUClock(clock func() (time.Duration, bool)) error {
-	if clock == nil {
-		return errors.New("thread CPU clock is unavailable")
-	}
-	if _, ok := clock(); !ok {
-		return errors.New("thread CPU clock is unavailable on this operating environment")
-	}
-	return nil
 }
 
 type interactiveCommandProcessor interface {

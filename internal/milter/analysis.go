@@ -171,17 +171,23 @@ func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Messag
 		ObserveFallbackMemoryUsage:  func(used, limit int64) { usage.fallbackMemoryBytes = used },
 	}
 	maximum := time.Duration(s.ai.MaxHTMLParseCPUMilliseconds) * time.Millisecond
-	if maximum != 0 {
+	if maximum > 0 {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 	}
 	var budget resourceguard.CPUBudget
-	budget.Reset(maximum)
-	check := func() {
+	checkCancellation := func() {
 		if ctx.Err() != nil {
 			termination.Fail(termination.Failure{Code: termination.Cancelled})
 		}
-		budget.Check()
+	}
+	check := checkCancellation
+	if maximum > 0 {
+		budget.Reset(maximum)
+		check = func() {
+			checkCancellation()
+			budget.Check()
+		}
 	}
 	control.CheckPrimary = check
 	control.CheckFallback = check
@@ -196,7 +202,9 @@ func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Messag
 		if ctx.Err() != nil || (usage.primaryCPUExceeded || usage.primaryMemoryExceeded) && !continueAfterLimit {
 			return false
 		}
-		budget.Reset(maximum)
+		if maximum > 0 {
+			budget.Reset(maximum)
+		}
 		return true
 	}
 	prepared := msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control)

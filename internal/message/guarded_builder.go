@@ -45,6 +45,15 @@ func (b *guardedBuilder) Write(value []byte) (int, error) {
 	return len(value), nil
 }
 
+// writeWithStop bounds both backing-array replacement and copying for text
+// passes which already divide their work into checkpoint-sized chunks.
+func (b *guardedBuilder) writeWithStop(value []byte, stop resourceguard.Stop) {
+	if len(value) == 0 {
+		return
+	}
+	b.buf = resourceguard.Append(b.memory, b.buf, stop, value...)
+}
+
 func (b *guardedBuilder) WriteString(value string) {
 	b.ensure(len(value))
 

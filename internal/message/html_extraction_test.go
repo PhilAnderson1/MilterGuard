@@ -47,15 +47,18 @@ func TestHTMLMarksQuotedContentAndPreservesItsLinks(t *testing.T) {
 	m.AddHeader("Content-Type", "text/html")
 	m.AddBody([]byte(`<p>Current reply</p><blockquote>Earlier message <a href="https://example.invalid/profile">profile</a></blockquote>`))
 	prompt := m.Prompt(1000)
-	want := "Current reply\n\n[quoted content begins]\nEarlier message [profile](https://example.invalid/profile)\n[quoted content ends]"
+	want := "Current reply\n\n<quoted-content>\nEarlier message [profile](https://example.invalid/profile)\n</quoted-content>"
 	if !strings.Contains(prompt, want) {
 		t.Fatalf("HTML quote structure or link was not preserved: %s", prompt)
+	}
+	if !strings.Contains(prompt, "- <quoted-content>…</quoted-content>: Content contained in an HTML block quotation, commonly earlier correspondence.") {
+		t.Fatalf("quoted-content explanation missing: %s", prompt)
 	}
 }
 
 func TestHTMLQuoteMarkersInsideAnchorDoNotBreakMarkdownLink(t *testing.T) {
 	got := htmlToText(`<a href="https://example.invalid/"><blockquote>Quoted message</blockquote></a>`)
-	want := `[\[quoted content begins\] Quoted message \[quoted content ends\]](https://example.invalid/)`
+	want := `[<quoted-content> Quoted message </quoted-content>](https://example.invalid/)`
 	if got.Text != want {
 		t.Fatalf("quoted anchor = %q, want %q", got.Text, want)
 	}

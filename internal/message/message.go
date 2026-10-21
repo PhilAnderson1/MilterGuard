@@ -119,10 +119,15 @@ type Analysis struct {
 
 // HTMLProcessingControl supplies cooperative CPU checks and a per-stage memory
 // allowance. BeginFallback admits the transition once; CheckFallback must
-// check only the fallback CPU allowance. Each stage shares its memory allowance
-// across all of its MIME parts. StopOnMemoryLimit prevents fallback after a
-// primary memory failure. Memory callbacks report each stage independently;
-// observation callbacks run after extraction. Callbacks must be inexpensive.
+// check only the fallback CPU allowance. When the checks use a per-thread CPU
+// clock, the caller must keep the extraction goroutine locked to one OS thread
+// for the lifetime of the control. BeginFallback must reset the CPU deadline to
+// the fallback allowance before returning true. A control that checks only
+// context cancellation does not require thread locking. Each stage shares its
+// memory allowance across all of its MIME parts. StopOnMemoryLimit prevents
+// fallback after a primary memory failure. Memory callbacks report each stage
+// independently; observation callbacks run after extraction. Callbacks must be
+// inexpensive.
 type HTMLProcessingControl struct {
 	// Typed checks return normally or raise a shared CPU/cancellation signal.
 	// Both checks use the same termination contract as guarded allocations.

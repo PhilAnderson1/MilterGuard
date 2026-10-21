@@ -548,18 +548,10 @@ func TestCommandMessageRequiresSmallPlainTextBody(t *testing.T) {
 }
 
 func TestCommandMessageCPUExhaustionReturnsExecutionFailure(t *testing.T) {
-	msg := message.New(4096)
+	msg := message.New(1 << 20)
 	msg.AddHeader("Content-Type", "text/html; charset=UTF-8")
-	msg.AddBody([]byte("<p>WHITELIST ADD news@example.net</p>"))
-	calls := 0
-	clock := func() (time.Duration, bool) {
-		calls++
-		if calls == 1 {
-			return 0, true
-		}
-		return 2 * time.Millisecond, true
-	}
-	lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 4096, 8<<20, 1, clock)
+	msg.AddBody([]byte("<p>WHITELIST ADD news@example.net</p>" + strings.Repeat("<div>padding</div>", 30000)))
+	lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 1<<20, 8<<20, 1)
 	if len(lines) != 0 {
 		t.Fatalf("partial commands returned after CPU exhaustion: %q", lines)
 	}
@@ -650,7 +642,7 @@ func TestCommandIncompleteExtractionReturnsProcessingFailure(t *testing.T) {
 			msg.AddHeader("Content-Type", tc.ctype)
 			msg.AddHeader("Content-Transfer-Encoding", tc.encoding)
 			msg.AddBody([]byte(tc.body))
-			lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 65536, 8<<20, 250, nil)
+			lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 65536, 8<<20, 250)
 			var processingErr *commandBodyProcessingError
 			if len(lines) != 0 || !errors.As(err, &processingErr) {
 				t.Fatalf("lines=%q error=%v", lines, err)
@@ -663,26 +655,13 @@ func TestCommandBodyCancellationStopsWithAndWithoutCPUClock(t *testing.T) {
 	for _, cpu := range []int{0, 250} {
 		t.Run(fmt.Sprint(cpu), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			cancel()
 			msg := message.New(4096)
 			msg.AddHeader("Content-Type", "text/html")
 			msg.AddBody([]byte("<p>help</p>"))
-			reads := 0
-			clock := func() (time.Duration, bool) {
-				reads++
-				// Cancel after initial measurement, before extraction's first checkpoint.
-				cancel()
-				return 0, true
-			}
-			if cpu == 0 {
-				cancel()
-			}
-			lines, err := commandMessageLinesWithResourceLimits(ctx, msg, 4096, 8<<20, cpu, clock)
+			lines, err := commandMessageLinesWithResourceLimits(ctx, msg, 4096, 8<<20, cpu)
 			if len(lines) != 0 || err == nil || !strings.Contains(err.Error(), "interrupted") {
 				t.Fatalf("lines=%v err=%v", lines, err)
-			}
-			if cpu == 0 && reads != 0 {
-				t.Fatal("disabled CPU clock was sampled")
 			}
 		})
 	}

@@ -9,9 +9,8 @@ import (
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
-	"github.com/PhilAnderson1/MilterGuard/internal/termination"
-	"github.com/PhilAnderson1/MilterGuard/internal/threadcpu"
 )
 
 // rejectionDetail retrieves and attaches the archived original on demand while
@@ -53,44 +52,19 @@ func (p *Processor) archivedVisibleBody(archived *message.Message) string {
 			MemoryBytes: p.maxHTMLParseMemoryBytes,
 		})
 	}
-	clock := threadcpu.Now
-	if p.threadCPUTime != nil {
-		clock = p.threadCPUTime
-	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	started, ok := clock()
-	if !ok {
-		return archived.VisibleBodyWithHTMLControl(MaxRejectionBodyRunes, message.HTMLProcessingControl{
-			MemoryBytes: p.maxHTMLParseMemoryBytes,
-		})
-	}
 	maximum := time.Duration(p.maxHTMLParseCPUMilliseconds) * time.Millisecond
-	checkPrimary := func() {
-		current, available := clock()
-		if available && current >= started && current-started > maximum {
-			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
-		}
-	}
-	fallbackStarted := time.Duration(0)
-	fallbackStartedOK := false
-	checkFallback := func() {
-		current, available := clock()
-		if !available {
-			return
-		}
-		if !fallbackStartedOK {
-			fallbackStarted, fallbackStartedOK = current, true
-			return
-		}
-		if current >= fallbackStarted && current-fallbackStarted > maximum {
-			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
-		}
-	}
+	var primary, fallback resourceguard.CPUBudget
+	primary.Reset(maximum)
 
 	return archived.VisibleBodyWithHTMLControl(MaxRejectionBodyRunes, message.HTMLProcessingControl{
-		CheckPrimary:  checkPrimary,
-		CheckFallback: checkFallback,
-		MemoryBytes:   p.maxHTMLParseMemoryBytes,
+		CheckPrimary:  primary.Check,
+		CheckFallback: fallback.Check,
+		BeginFallback: func() bool {
+			fallback.Reset(maximum)
+			return true
+		},
+		MemoryBytes: p.maxHTMLParseMemoryBytes,
 	})
 }

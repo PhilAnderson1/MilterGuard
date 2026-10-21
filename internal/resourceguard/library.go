@@ -52,7 +52,7 @@ func RegexpSplit(m *Memory, re *regexp.Regexp, text string, limit int) []string 
 		m.reject()
 		return nil
 	}
-	size, ok := storageBytes(limit, 128)
+	size, ok := storageBytes(limit, 256)
 	if !ok {
 		m.reject()
 		return nil

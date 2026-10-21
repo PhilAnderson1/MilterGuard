@@ -83,7 +83,6 @@ type emailCommandService struct {
 	maxMessageSize          int64
 	maxHTMLParseMemoryBytes int64
 	maxHTMLParseCPUMillis   int
-	threadCPUTime           func() (time.Duration, bool)
 }
 
 type connectionDNSService struct {

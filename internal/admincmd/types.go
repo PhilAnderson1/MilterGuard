@@ -64,7 +64,6 @@ type Dependencies struct {
 	DatabaseTimeout             time.Duration
 	ActivityExpiry              time.Duration
 	Now                         func() time.Time
-	ThreadCPUTime               func() (time.Duration, bool)
 	Logger                      *slog.Logger
 }
 
@@ -84,7 +83,6 @@ type Processor struct {
 	databaseTimeout             time.Duration
 	activityExpiry              time.Duration
 	now                         func() time.Time
-	threadCPUTime               func() (time.Duration, bool)
 	log                         *slog.Logger
 }
 
@@ -108,6 +106,6 @@ func New(deps Dependencies) *Processor {
 		maxMessageSize:  deps.MaxMessageSize, maxHTMLParseCPUMilliseconds: deps.MaxHTMLParseCPUMilliseconds,
 		maxHTMLParseMemoryBytes: deps.MaxHTMLParseMemoryBytes,
 		databaseTimeout:         deps.DatabaseTimeout, activityExpiry: deps.ActivityExpiry,
-		now: deps.Now, threadCPUTime: deps.ThreadCPUTime, log: deps.Logger,
+		now: deps.Now, log: deps.Logger,
 	}
 }

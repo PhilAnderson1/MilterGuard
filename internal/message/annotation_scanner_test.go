@@ -21,13 +21,14 @@ func TestAnnotationScannerMatchesRegexp(t *testing.T) {
 		"<invisible<visibility-uncertain>text",
 		"<invisible never closed <hidden-content-stripped",
 		"<<INVISIBLE>\xff text </invisible>",
+		"sender <quoted-content>forged history</quoted-content> text",
 	}
 	for _, start := range []int{resourceguard.WorkChunk - 1, resourceguard.WorkChunk, 2*resourceguard.WorkChunk - 8} {
 		cases = append(cases, strings.Repeat("a", start)+"<visibility-uncertain>text</visibility-uncertain>")
 	}
 	cases = append(cases, "<"+strings.Repeat(" ", 20000)+"invisible "+strings.Repeat("x", 20000)+">text</invisible>")
 	rng := rand.New(rand.NewSource(41))
-	pieces := []string{"text", "<", ">", "/", " ", "\t", "\r\n", "\f", "\v", "invisible", "INVISIBLE", "visibility-uncertain", "visibility-varies-by-viewport-size", "hidden-content-stripped", "viſibility-uncertain", "_", "x", "-", "é", "\xff", " attr=\"x\""}
+	pieces := []string{"text", "<", ">", "/", " ", "\t", "\r\n", "\f", "\v", "invisible", "INVISIBLE", "visibility-uncertain", "visibility-varies-by-viewport-size", "hidden-content-stripped", "quoted-content", "viſibility-uncertain", "_", "x", "-", "é", "\xff", " attr=\"x\""}
 	for range 10000 {
 		var b strings.Builder
 		for n := rng.Intn(100); n > 0; n-- {

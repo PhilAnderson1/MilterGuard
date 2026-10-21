@@ -13,9 +13,9 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
 	"github.com/PhilAnderson1/MilterGuard/internal/termination"
-	"github.com/PhilAnderson1/MilterGuard/internal/threadcpu"
 )
 
 const internalMessageHeader = "X-MilterGuard-Internal"
@@ -75,8 +75,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	}
 
 	lines, err := commandMessageLinesWithResourceLimits(ctx, ss.message, cfg.MaxMessageBytes,
-		ss.deps.commands.maxHTMLParseMemoryBytes, ss.deps.commands.maxHTMLParseCPUMillis,
-		ss.deps.commands.threadCPUTime)
+		ss.deps.commands.maxHTMLParseMemoryBytes, ss.deps.commands.maxHTMLParseCPUMillis)
 	if err != nil {
 		var processingErr *commandBodyProcessingError
 		if errors.As(err, &processingErr) {
@@ -200,77 +199,36 @@ type commandBodyProcessingError struct{ reason string }
 
 func (e *commandBodyProcessingError) Error() string { return e.reason }
 
-func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Message, maxBytes, memoryBytes int64, maxCPUMilliseconds int, clock func() (time.Duration, bool)) ([]string, error) {
+func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Message, maxBytes, memoryBytes int64, maxCPUMilliseconds int) ([]string, error) {
 	control := message.HTMLProcessingControl{MemoryBytes: memoryBytes}
-	if maxCPUMilliseconds <= 0 {
-		check := func() {
-			if ctx.Err() != nil {
-				termination.Fail(termination.Failure{Code: termination.Cancelled})
-			}
-		}
-		control.CheckPrimary = check
-		control.CheckFallback = check
-		lines, err := commandMessageLinesWithHTMLControl(m, maxBytes, control)
+	var cpu resourceguard.CPUBudget
+	cpuExceeded := false
+	checkCancellation := func() {
 		if ctx.Err() != nil {
-			return nil, &commandBodyProcessingError{reason: "command body processing was interrupted"}
+			termination.Fail(termination.Failure{Code: termination.Cancelled})
 		}
-		return lines, err
 	}
-	if clock == nil {
-		clock = threadcpu.Now
-	}
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	started, ok := clock()
-	if !ok {
-		return nil, &commandBodyProcessingError{reason: "command body CPU measurement is unavailable"}
-	}
-	maximum := time.Duration(maxCPUMilliseconds) * time.Millisecond
-	exceeded := false
-	clockFailed := false
-	interrupted := false
-	shouldStop := func() bool {
-		if ctx.Err() != nil {
-			interrupted = true
-			return true
-		}
-		if exceeded || clockFailed {
-			return true
-		}
-		current, currentOK := clock()
-		if !currentOK || current < started {
-			clockFailed = true
-			return true
-		}
-		if current-started > maximum {
-			exceeded = true
-		}
-		return exceeded
-	}
-	check := func() {
-		if shouldStop() {
-			code := termination.CPUExceeded
-			if interrupted || clockFailed {
-				code = termination.Cancelled
-			}
-			termination.Fail(termination.Failure{Code: code})
+	check := checkCancellation
+	if maxCPUMilliseconds > 0 {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		cpu.Reset(time.Duration(maxCPUMilliseconds) * time.Millisecond)
+		check = func() {
+			checkCancellation()
+			cpu.Check()
 		}
 	}
 	control.CheckPrimary = check
 	control.CheckFallback = check
-	control.BeginFallback = func() bool { return !interrupted && !clockFailed && !exceeded }
+	control.CPULimitExceeded = func(bool) { cpuExceeded = true }
 	lines, err := commandMessageLinesWithHTMLControl(m, maxBytes, control)
-	shouldStop() // Catch a limit crossed after the final extraction checkpoint.
-	switch {
-	case interrupted:
+	if ctx.Err() != nil {
 		return nil, &commandBodyProcessingError{reason: "command body processing was interrupted"}
-	case clockFailed:
-		return nil, &commandBodyProcessingError{reason: "command body CPU measurement failed"}
-	case exceeded:
-		return nil, &commandBodyProcessingError{reason: "command body processing exceeded the configured CPU limit"}
-	default:
-		return lines, err
 	}
+	if cpuExceeded {
+		return nil, &commandBodyProcessingError{reason: "command body processing exceeded the configured CPU limit"}
+	}
+	return lines, err
 }
 
 func (ss *session) completeInvalidEmailCommand(ctx context.Context, identity, replyTo, reason string) bool {

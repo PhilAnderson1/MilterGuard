@@ -67,7 +67,7 @@ func TestAnnotatedOutputAppendsEquivalentRunsWithoutFragmenting(t *testing.T) {
 		t.Fatalf("buffer shape = %d chunks, %d bytes", len(output.chunks), output.data.Len())
 	}
 
-	if got := output.renderAnnotations(); got != `<invisible reason="display:none">`+strings.Repeat("x", 4096)+`</invisible>` {
+	if got := output.renderAnnotations(nil); got != `<invisible reason="display:none">`+strings.Repeat("x", 4096)+`</invisible>` {
 		t.Fatalf("rendered append-only output = %q", got)
 	}
 

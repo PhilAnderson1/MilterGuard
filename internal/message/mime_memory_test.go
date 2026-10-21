@@ -16,7 +16,7 @@ func TestPrimaryMIMEBodyAllocationsAreGuarded(t *testing.T) {
 		{"quoted printable", "text/plain", "quoted-printable", strings.Repeat(strings.Repeat("=61", 20)+"=\r\n", 1024)},
 		{"charset decode", "text/plain; charset=windows-1252", "", strings.Repeat("\x92", 16<<10)},
 		{"multipart read", "multipart/mixed; boundary=x", "", "--x\r\nContent-Type: application/octet-stream\r\n\r\n" + body + "\r\n--x--\r\n"},
-		{"attached message read", "message/rfc822", "", "Content-Type: application/octet-stream\r\n\r\n" + body},
+		{"attached message header", "message/rfc822", "", "Content-ID: " + body + "\r\nContent-Type: application/octet-stream\r\n\r\nbody"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const limit = 8 << 10

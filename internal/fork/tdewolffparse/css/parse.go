@@ -8,6 +8,7 @@ import (
 
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/tdewolffparse"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 )
 
 // ErrSyntax reports a recoverable CSS syntax error without retaining diagnostics.
@@ -154,6 +155,7 @@ func (p *Parser) Next() (gt GrammarType, tt TokenType, data []byte) {
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			termination.Rethrow(recovered)
 			if _, ok := recovered.(resourceAbort); ok {
 				gt, tt, data = ErrorGrammar, ErrorToken, nil
 				return

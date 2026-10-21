@@ -6,7 +6,6 @@ import (
 	"io"
 	"mime/multipart"
 	"mime/quotedprintable"
-	"net/mail"
 	"net/url"
 	"strings"
 	"unicode/utf8"
@@ -198,10 +197,6 @@ func (c extractedContent) incomplete() bool {
 type extractedImage struct {
 	ContentID string
 	Data      []byte
-}
-
-func extractMIME(contentType, encoding, contentID string, data []byte, depth int) extractedContent {
-	return extractMIMEWithBudget(contentType, encoding, contentID, data, depth, newExtractionBudget())
 }
 
 func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte, depth int, budget *extractionBudget) extractedContent {
@@ -509,26 +504,6 @@ func joinExtractedText(parts []string, separator string, budget *extractionBudge
 	}
 	budget.reserveOutputMemory(total)
 	return strings.Join(parts, separator)
-}
-
-func extractAttachedMessage(data []byte, depth int, budget *extractionBudget) extractedContent {
-	attached, err := mail.ReadMessage(bytes.NewReader(data))
-	if err != nil {
-		return extractedContent{Text: "[attached message could not be parsed]", MIMEIncomplete: true}
-	}
-	decoder := decodeControl{shouldStop: budget.decodingShouldStop, memory: budget.allocationMemory}
-	body, err := decoder.readAll(attached.Body)
-	if err != nil {
-		return extractedContent{Text: "[attached message body could not be read]", MIMEIncomplete: true}
-	}
-	return extractMIMEWithBudget(
-		attached.Header.Get("Content-Type"),
-		attached.Header.Get("Content-Transfer-Encoding"),
-		attached.Header.Get("Content-ID"),
-		body,
-		depth+1,
-		budget,
-	)
 }
 
 // decodeCharset converts MIME text bodies to UTF-8 after their transfer

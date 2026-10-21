@@ -36,11 +36,29 @@ func TestAnnotatedOutputStopsBeforeUnbudgetedChunkAllocation(t *testing.T) {
 	output := newAnnotatedOutput(memory)
 	expectTermination(t, termination.MemoryExceeded, func() {
 		output.write(outputAnnotation{kind: "concealed", reason: "display:none"}, "x")
-		output.renderAnnotations()
+		output.renderAnnotations(nil)
 	})
 
 	if !memory.Exhausted() {
 		t.Fatal("annotated-output allocation did not exhaust the shared budget")
+	}
+}
+
+func TestAnnotatedOutputChecksCPUWithinLargeChunk(t *testing.T) {
+	memory := resourceguard.NewMemory(1 << 20)
+	output := newAnnotatedOutput(memory)
+	output.write(outputAnnotation{kind: "concealed", reason: "display:none"}, strings.Repeat(" ", resourceguard.WorkChunk*3))
+	calls := 0
+	expectTermination(t, termination.CPUExceeded, func() {
+		output.renderAnnotations(func() {
+			calls++
+			if calls == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+		})
+	})
+	if calls != 2 {
+		t.Fatalf("CPU checks = %d, want 2", calls)
 	}
 }
 

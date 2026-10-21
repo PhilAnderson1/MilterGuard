@@ -2,7 +2,6 @@ package resourceguard
 
 import (
 	"github.com/PhilAnderson1/MilterGuard/internal/termination"
-	"github.com/PhilAnderson1/MilterGuard/internal/threadcpu"
 	"runtime"
 	"testing"
 	"time"
@@ -58,7 +57,7 @@ func TestStopSamplerUnwinds(t *testing.T) {
 func TestCPUBudgetDeadlineAndFallbackReset(t *testing.T) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	if _, ok := threadcpu.Now(); !ok {
+	if !ThreadCPUAvailable() {
 		t.Skip("thread CPU clock unavailable")
 	}
 	budget := CPUBudget{deadline: 1}
@@ -69,17 +68,22 @@ func TestCPUBudgetDeadlineAndFallbackReset(t *testing.T) {
 	expectTermination(t, termination.CPUExceeded, budget.Check)
 	budget.Reset(time.Second)
 	budget.Check()
+}
+
+func TestCPUBudgetRejectsNonPositiveAllowance(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("non-positive CPU allowance accepted")
+		}
+	}()
+	var budget CPUBudget
 	budget.Reset(0)
-	if budget.deadline != 0 {
-		t.Fatal("disabled deadline retained")
-	}
-	budget.Check()
 }
 
 func TestCPUBudgetDeadlineDoesNotOverflow(t *testing.T) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	if _, ok := threadcpu.Now(); !ok {
+	if !ThreadCPUAvailable() {
 		t.Skip("thread CPU clock unavailable")
 	}
 	var budget CPUBudget

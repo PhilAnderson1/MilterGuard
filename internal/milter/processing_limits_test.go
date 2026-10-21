@@ -11,14 +11,14 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/threadcpu"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
 // Real CPU tests use a large input and a small allowance; they do not assert
 // exact clock values or a particular number of parser operations.
 func requireThreadCPU(t *testing.T) {
 	t.Helper()
-	if _, ok := threadcpu.Now(); !ok {
+	if !resourceguard.ThreadCPUAvailable() {
 		t.Skip("thread CPU clock unavailable")
 	}
 }
