@@ -164,6 +164,38 @@ func TestCSSParserSamplesCooperativeStop(t *testing.T) {
 	}
 }
 
+func TestParseDocumentPublishesCSSUsageOnTermination(t *testing.T) {
+	cssText := strings.Repeat("p,", 64) + "p{display:none}"
+	input := []byte("<style>" + cssText + "</style><p>text</p>")
+	for stopAfter := 1; stopAfter <= 256; stopAfter++ {
+		calls := 0
+		stop := func() {
+			calls++
+			if calls == stopAfter {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+		}
+		memory := resourceguard.NewMemory(DefaultLimits().MemoryBytes)
+		var usage ResourceUsage
+		p := processor{
+			Limits:     DefaultLimits(),
+			shouldStop: stop,
+			memory:     memory,
+			usage:      &usage,
+			cpu:        testCPUGuard(cpuGuard{shouldStop: stop, memory: memory}),
+		}
+		var failure termination.Failure
+		func() {
+			defer termination.Recover(&failure)
+			_, _ = p.parseDocument(input)
+		}()
+		if failure.Code == termination.CPUExceeded && usage.CSSBytes == len(cssText) {
+			return
+		}
+	}
+	t.Fatal("no parse-phase termination published admitted CSS usage")
+}
+
 func TestCSSByteLimitAppliesAcrossParserInputs(t *testing.T) {
 	limits := DefaultLimits()
 	limits.CSSBytes = len(`p{display:none}`) + len(`div{display:none}`)

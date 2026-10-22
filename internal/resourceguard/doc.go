@@ -5,7 +5,11 @@
 // map policy. Every replacement is charged in full; there are no refunds. Nil
 // budgets disable accounting. Required failure records exhaustion and unwinds
 // with termination.MemoryExceeded; it never returns a failure Boolean or error.
-// Try operations may decline optional storage without poisoning required work.
+// Try operations may decline optional storage that does not fit without
+// poisoning required work. They are not recovery operations: a valid storage
+// request against an already-exhausted ledger terminates the stage. APIs that
+// validate dimensions or indexes before consulting the ledger may reject an
+// invalid request first.
 //
 // Typed arrays charge requested payload; fixed objects round to 16 bytes. Byte
 // buffers and builders reconcile exposed capacity before publication. Native

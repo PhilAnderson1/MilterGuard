@@ -29,7 +29,11 @@ func (t *Table[K, V]) View() map[K]V     { return t.data }
 func (t *Table[K, V]) Len() int          { return len(t.data) }
 func (t *Table[K, V]) Get(k K) (V, bool) { v, ok := t.data[k]; return v, ok }
 
-func (t *Table[K, V]) Set(m *Memory, k K, v V)         { t.set(m, k, v, false) }
+func (t *Table[K, V]) Set(m *Memory, k K, v V) { t.set(m, k, v, false) }
+
+// TrySet declines a new optional entry that does not fit. It still terminates
+// on an exhausted ledger, including when overwriting an existing entry, because
+// storage operations may not resume a failed extraction stage.
 func (t *Table[K, V]) TrySet(m *Memory, k K, v V) bool { return t.set(m, k, v, true) }
 func (t *Table[K, V]) set(m *Memory, k K, v V, optional bool) bool {
 	m.unavailable()
@@ -96,6 +100,8 @@ func MakeMap[K comparable, V any](m *Memory, count int) map[K]V {
 
 // TryCacheEntry admits the initial index and first map entry atomically. A
 // declined optional cache allocates nothing and consumes no required budget.
+// An invalid index is rejected before the ledger is inspected; valid requests
+// terminate rather than resume when the ledger is already exhausted.
 func TryCacheEntry[K comparable, V any](m *Memory, tables *[]Table[K, V], count, index int, key K, value V) bool {
 	if index < 0 || index >= count {
 		return false

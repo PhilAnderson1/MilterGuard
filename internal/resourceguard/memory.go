@@ -68,7 +68,9 @@ func (m *Memory) Limit() int64 {
 }
 
 // TryReserve admits optional memoization without poisoning required work when
-// it does not fit. Like Reserve, it is owned by one operation, not concurrent.
+// a request does not fit. It is not recovery: reuse of an already-exhausted
+// ledger terminates the operation. Like Reserve, it is owned by one operation,
+// not concurrent.
 func (m *Memory) TryReserve(bytes int64) bool {
 	if m == nil {
 		return true

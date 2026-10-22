@@ -203,6 +203,7 @@ func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Messa
 	control := message.HTMLProcessingControl{MemoryBytes: memoryBytes}
 	var cpu resourceguard.CPUBudget
 	cpuExceeded := false
+	memoryExceeded := false
 	checkCancellation := func() {
 		if ctx.Err() != nil {
 			termination.Fail(termination.Failure{Code: termination.Cancelled})
@@ -221,12 +222,17 @@ func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Messa
 	control.CheckPrimary = check
 	control.CheckFallback = check
 	control.CPULimitExceeded = func(bool) { cpuExceeded = true }
+	control.MemoryLimitExceeded = func() { memoryExceeded = true }
+	control.FallbackMemoryLimitExceeded = func() { memoryExceeded = true }
 	lines, err := commandMessageLinesWithHTMLControl(m, maxBytes, control)
 	if ctx.Err() != nil {
 		return nil, &commandBodyProcessingError{reason: "command body processing was interrupted"}
 	}
 	if cpuExceeded {
 		return nil, &commandBodyProcessingError{reason: "command body processing exceeded the configured CPU limit"}
+	}
+	if memoryExceeded {
+		return nil, &commandBodyProcessingError{reason: "command body processing exceeded the configured memory limit"}
 	}
 	return lines, err
 }

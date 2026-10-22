@@ -58,8 +58,8 @@ supports the Sendmail Milter protocol.
 
 ## Early results
 
-From 30 September to 15 October 2026, MilterGuard accepted 156 legitimate
-inbound emails and recorded 284 spam or fraud rejections on one production mail
+From 30 September to 22 October 2026, MilterGuard accepted 236 legitimate
+inbound emails and recorded 475 spam or fraud rejections on one production mail
 server. One rejection was borderline: marketing outreach following a website
 signup. No other misclassifications were observed.
 

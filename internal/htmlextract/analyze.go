@@ -490,9 +490,16 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 		p.memory = resourceguard.NewMemory(p.Limits.MemoryBytes)
 	}
 
+	parseReturned := false
 	if p.usage != nil {
+		*p.usage = ResourceUsage{}
 		defer func() {
-			*p.usage = result.Usage
+			// parseDocument publishes its CSS state directly if it unwinds.
+			// Once it returns, result.Usage is authoritative and is refreshed
+			// by the later analysis-phase defer.
+			if parseReturned {
+				*p.usage = result.Usage
+			}
 			p.usage.InputBytes = len(input)
 			p.usage.MemoryBytes = p.memory.Used()
 			p.usage.MemoryLimitExceeded = p.memory.Exhausted()
@@ -510,6 +517,7 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 	p.checkpoint()
 
 	document, err := p.parseDocument(input)
+	parseReturned = true
 
 	if err != nil {
 		return Document{

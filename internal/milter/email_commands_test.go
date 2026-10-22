@@ -561,6 +561,20 @@ func TestCommandMessageCPUExhaustionReturnsExecutionFailure(t *testing.T) {
 	}
 }
 
+func TestCommandMessageMemoryExhaustionReturnsExecutionFailure(t *testing.T) {
+	msg := message.New(4096)
+	msg.AddHeader("Content-Type", "text/html; charset=UTF-8")
+	msg.AddBody([]byte("<p>HELP</p>"))
+	lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 4096, 8192, 250)
+	if len(lines) != 0 {
+		t.Fatalf("fallback commands returned after memory exhaustion: %q", lines)
+	}
+	var processingErr *commandBodyProcessingError
+	if !errors.As(err, &processingErr) || !strings.Contains(err.Error(), "memory limit") {
+		t.Fatalf("error=%v, want command execution failure", err)
+	}
+}
+
 func TestCommandMessageTrimsOversizedReplyInsteadOfRejecting(t *testing.T) {
 	msg := message.New(96)
 	msg.AddHeader("Content-Type", "text/plain; charset=UTF-8")

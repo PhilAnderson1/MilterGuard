@@ -291,6 +291,15 @@ func (w *documentWalker) prepareElement(node *html.Node, frame *documentFrame) {
 
 func (p processor) parseDocument(input []byte) (*parsedDocument, error) {
 	document := resourceguard.New(p.memory, parsedDocument{memory: p.memory})
+	if p.usage != nil {
+		// process cannot receive document when a termination unwinds this call,
+		// so publish parse-owned state while it is still reachable here.
+		defer func() {
+			p.usage.CSSBytes = document.styles.cssBytes
+			p.usage.CSSLimitExceeded = document.styles.cascadeIncomplete
+			p.usage.UnsupportedColourFunctions = document.styles.unsupportedColours
+		}()
+	}
 
 	if err := p.Limits.validate(); err != nil {
 		return document, err

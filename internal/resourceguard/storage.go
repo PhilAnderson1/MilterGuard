@@ -143,6 +143,9 @@ func MakeBytes(m *Memory, size int) []byte {
 
 // GrowText owns complete builder replacements. String views remain immutable:
 // never reuse their backing storage as mutable scratch. Reset drops ownership.
+// A termination during replacement may leave b empty or containing only a
+// copied prefix. Callers must therefore keep guarded builders inside the
+// extraction stage that owns them and discard them if that stage unwinds.
 func GrowText(m *Memory, b *strings.Builder, additional int, stop Stop) {
 	if additional < 0 || additional > int(^uint(0)>>1)-b.Len() {
 		m.reject()
@@ -185,6 +188,8 @@ func GrowText(m *Memory, b *strings.Builder, additional int, stop Stop) {
 	return
 }
 
+// WriteString appends guarded text. A termination while copying may leave b
+// with only a prefix appended, so the caller must discard b with its stage.
 func WriteString(m *Memory, b *strings.Builder, text string, stop Stop) {
 	GrowText(m, b, len(text), stop)
 
@@ -200,6 +205,8 @@ func WriteString(m *Memory, b *strings.Builder, text string, stop Stop) {
 	return
 }
 
+// WriteBytes appends guarded bytes. A termination while copying may leave b
+// with only a prefix appended, so the caller must discard b with its stage.
 func WriteBytes(m *Memory, b *strings.Builder, data []byte, stop Stop) {
 	GrowText(m, b, len(data), stop)
 
@@ -360,7 +367,9 @@ func LowerASCII(m *Memory, s string, stop Stop) string {
 }
 
 // TryMakeSlice is optional-cache admission: rejection does not poison required
-// work. Invalid dimensions fail without allocating or changing the budget.
+// work. Like all storage entry points, it terminates when reusing an exhausted
+// ledger. Invalid dimensions are rejected first, without inspecting or changing
+// the budget.
 func TryMakeSlice[T any](m *Memory, length, capacity int) ([]T, bool) {
 	var value T
 	size, ok := storageBytes(capacity, unsafe.Sizeof(value))
