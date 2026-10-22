@@ -5,8 +5,27 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 )
+
+func TestChildMemoryExhaustionTransfersOnlyAdmittedCharges(t *testing.T) {
+	b := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 100})
+	child := resourceguard.NewMemory(100)
+	child.Reserve(7)
+	var failure termination.Failure
+	func() {
+		defer termination.Recover(&failure)
+		child.Reserve(100)
+	}()
+	if failure.Code != termination.MemoryExceeded {
+		t.Fatalf("failure=%+v", failure)
+	}
+	b.consumeMemory(child)
+	if got := b.primaryMemory.Charged(); got != 7 || !b.memoryLimitExceeded {
+		t.Fatalf("transferred=%d memoryLimitExceeded=%v", got, b.memoryLimitExceeded)
+	}
+}
 
 func TestPrimaryMIMEBodyAllocationsAreGuarded(t *testing.T) {
 	body := strings.Repeat("a", 16<<10)
@@ -89,7 +108,7 @@ func TestMIMEAndHTMLShareOneReportedAllowance(t *testing.T) {
 	limit := unlimited.primaryMemory.Used() - 1
 	b := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: limit, StopOnMemoryLimit: true})
 	got = extractMIMEWithBudget("text/html", "", "", source, 0, b)
-	if !got.incomplete() || !b.memoryLimitExceeded || b.primaryMemory.Used() != limit || b.cpuLimitExceeded {
+	if !got.incomplete() || !b.memoryLimitExceeded || b.primaryMemory.Charged() <= 0 || b.primaryMemory.Charged() > limit || b.cpuLimitExceeded {
 		t.Fatalf("shared allowance bypassed: limit=%d used=%d incomplete=%v", limit, b.primaryMemory.Used(), got.incomplete())
 	}
 }

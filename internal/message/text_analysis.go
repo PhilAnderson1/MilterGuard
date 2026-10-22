@@ -98,9 +98,6 @@ func (e *htmlExtraction) textStopCallback() func() {
 func (b *extractionBudget) confidentCharacters(value string) int {
 	b.checkStage()
 	if b.countingStop == nil {
-		if b.stageStop == nil {
-			b.stageStop = resourceguard.BindCheckpoint(b.allocationMemory(), b, (*extractionBudget).checkStage)
-		}
 		b.countingSampler = resourceguard.NewStopSampler(10, b.stageStop)
 		b.countingStop = resourceguard.BindCheckpoint(b.allocationMemory(), b, func(b *extractionBudget) {
 			b.countingSampler.Check()

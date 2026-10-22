@@ -7,9 +7,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// CPUBudget holds the active stage's absolute thread-CPU deadline. Reset it
-// before use and keep the operation on one OS thread. Only the coordinator may
-// reset the deadline after an aborted stage has unwound.
+// CPUBudget holds the active stage's absolute thread-CPU deadline. Its zero
+// value is not ready for Check: callers must call Reset before installing or
+// invoking Check and keep the operation on one OS thread. Only the coordinator
+// may reset the deadline after an aborted stage has unwound.
 type CPUBudget struct {
 	deadline time.Duration
 }
@@ -28,8 +29,9 @@ func ThreadCPUAvailable() bool {
 	return ok
 }
 
-// Reset starts primary work or approved fallback from the current thread CPU
-// time. Callers that disable CPU enforcement must not install Check.
+// Reset arms the budget for primary work or an approved fallback from the
+// current thread CPU time. The coordinator must call it before each such stage.
+// Callers that disable CPU enforcement must not install Check.
 func (b *CPUBudget) Reset(maximum time.Duration) {
 	if maximum <= 0 {
 		panic("resourceguard: non-positive CPU allowance")
@@ -48,7 +50,9 @@ func (b *CPUBudget) Reset(maximum time.Duration) {
 }
 
 // Check reads the real thread CPU clock and terminates when the deadline is
-// exceeded. Sampling and cancellation are separate from CPU enforcement.
+// exceeded. Reset must have been called for the current primary or approved
+// fallback stage; calling Check on a zero-value budget is invalid. Sampling and
+// cancellation are separate from CPU enforcement.
 func (b *CPUBudget) Check() {
 	var value unix.Timespec
 	_ = unix.ClockGettime(unix.CLOCK_THREAD_CPUTIME_ID, &value)

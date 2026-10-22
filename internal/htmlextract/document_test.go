@@ -176,7 +176,7 @@ func TestParseDocumentPublishesCSSUsageOnTermination(t *testing.T) {
 			}
 		}
 		memory := resourceguard.NewMemory(DefaultLimits().MemoryBytes)
-		var usage ResourceUsage
+		var usage AnalysisUsage
 		p := processor{
 			Limits:     DefaultLimits(),
 			shouldStop: stop,
@@ -1384,7 +1384,7 @@ func TestAnalyzeEnforcesSharedMemoryBudget(t *testing.T) {
 	limits.MemoryBytes = 512
 	input := []byte(`<div ` + strings.Repeat(`data-x="value" `, 100) + `>text</div>`)
 	_, usage, err, failure := captureAnalysis(input, limits)
-	if err != nil || failure.Code != termination.MemoryExceeded || usage.MemoryBytes != limits.MemoryBytes {
+	if err != nil || failure.Code != termination.MemoryExceeded || !usage.MemoryLimitExceeded || usage.MemoryBytes > limits.MemoryBytes {
 		t.Fatalf("failure=%+v usage=%+v err=%v", failure, usage, err)
 	}
 }

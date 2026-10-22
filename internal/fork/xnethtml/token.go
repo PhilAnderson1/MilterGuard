@@ -939,7 +939,7 @@ func (z *Tokenizer) readTag(saveAttr bool) {
 		// Save pendingAttr if saveAttr and that attribute has a non-empty key, and the key hasn't been seen before.
 		if saveAttr && z.pendingAttr[0].start != z.pendingAttr[0].end {
 			keyBytes := z.buf[z.pendingAttr[0].start:z.pendingAttr[0].end]
-			key := z.guard.ownedString(lowerWithGuard(z.guard.copyBytes(keyBytes), z.guard))
+			key := resourceguard.LowerASCIIBytes(z.guard.memory(), keyBytes, z.guard.checkpoint)
 			if !z.attrNames.View()[key] {
 				z.attrNames.Set(z.guard.memory(), key, true)
 

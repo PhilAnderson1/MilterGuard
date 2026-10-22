@@ -1,9 +1,11 @@
 package resourceguard
 
 import (
-	"github.com/PhilAnderson1/MilterGuard/internal/termination"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 )
 
 func TestStorageAdmissionAndReplacement(t *testing.T) {
@@ -23,14 +25,44 @@ func TestStorageAdmissionAndReplacement(t *testing.T) {
 func TestStorageRejectsInvalidSizes(t *testing.T) {
 	for _, size := range []int{-1, int(^uint(0) >> 1)} {
 		m := NewMemory(100)
-		expectTermination(t, termination.MemoryExceeded, func() { MakeSlice[uint64](m, 0, size) })
-		if !m.Exhausted() {
-			t.Fatal("invalid size did not exhaust", size)
+		expectProgrammerPanic(t, func() { MakeSlice[uint64](m, 0, size) })
+		if m.Exhausted() || m.Used() != 0 {
+			t.Fatal("invalid size changed memory ledger", size)
 		}
 	}
-	failure := expectTermination(t, termination.MemoryExceeded, func() { MakeSlice[byte](nil, 2, 1) })
-	if failure.Limit != 0 {
-		t.Fatalf("nil ledger failure: %+v", failure)
+	expectProgrammerPanic(t, func() { MakeSlice[byte](nil, 2, 1) })
+}
+
+func TestInvalidArgumentsAreProgrammerPanics(t *testing.T) {
+	for name, work := range map[string]func(){
+		"reserve":        func() { NewMemory(10).Reserve(-1) },
+		"nil reserve":    func() { (*Memory)(nil).Reserve(-1) },
+		"try reserve":    func() { NewMemory(10).TryReserve(-1) },
+		"slice growth":   func() { GrowSlice(NewMemory(10), []byte{}, -1, nil) },
+		"bytes":          func() { MakeBytes(NewMemory(10), -1) },
+		"text growth":    func() { GrowText(NewMemory(10), &strings.Builder{}, -1, nil) },
+		"optional slice": func() { TryMakeSlice[byte](NewMemory(10), 2, 1) },
+		"table size":     func() { new(Table[int, int]).Init(NewMemory(10), -1) },
+		"cache index": func() {
+			var tables []Table[int, int]
+			TryCacheEntry(NewMemory(10), &tables, 1, 1, 1, 1)
+		},
+		"regexp split": func() { RegexpSplit(NewMemory(10), regexp.MustCompile("x"), "x", 0) },
+	} {
+		t.Run(name, func(t *testing.T) { expectProgrammerPanic(t, work) })
+	}
+}
+
+func expectProgrammerPanic(t *testing.T, work func()) {
+	t.Helper()
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		work()
+	}()
+	message, ok := recovered.(string)
+	if !ok || !strings.HasPrefix(message, "resourceguard: ") {
+		t.Fatalf("panic=%#v, want resourceguard programmer panic", recovered)
 	}
 }
 func TestRetainedStringsSurviveGrowthAndReset(t *testing.T) {
@@ -43,6 +75,16 @@ func TestRetainedStringsSurviveGrowthAndReset(t *testing.T) {
 	WriteString(m, &b, "other", nil)
 	if first != "first" {
 		t.Fatal("retained string mutated")
+	}
+}
+
+func TestLowerASCIIBytesReturnsOwnedLowercaseText(t *testing.T) {
+	memory := NewMemory(1 << 20)
+	input := []byte("DaTa-X")
+	got := LowerASCIIBytes(memory, input, nil)
+	input[0] = 'x'
+	if got != "data-x" || memory.Charged() == 0 {
+		t.Fatalf("text=%q charged=%d", got, memory.Charged())
 	}
 }
 func TestCopyCancellationDoesNotPublishReplacement(t *testing.T) {

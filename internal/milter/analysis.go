@@ -4,14 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"runtime"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
-	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 )
 
 const analysisResponseMargin = 5 * time.Second
@@ -159,56 +156,14 @@ func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Messag
 		MaxBytes:     s.ai.MaxImageBytes,
 		MaxPixels:    s.ai.MaxImagePixels,
 	}
-	var usage htmlProcessingUsage
-	continueAfterLimit := s.ai.HTMLResourceLimitAction == "fallback"
-	control := message.HTMLProcessingControl{
-		DisableURLCompaction:        !s.ai.CompactPromptURLs,
-		MemoryBytes:                 s.ai.MaxHTMLParseMemoryBytes,
-		StopOnMemoryLimit:           !continueAfterLimit,
-		MemoryLimitExceeded:         func() { usage.memoryExceeded = true; usage.primaryMemoryExceeded = true },
-		FallbackMemoryLimitExceeded: func() { usage.memoryExceeded = true; usage.fallbackMemoryExceeded = true },
-		ObserveMemoryUsage:          func(used, limit int64) { usage.primaryMemoryBytes = used },
-		ObserveFallbackMemoryUsage:  func(used, limit int64) { usage.fallbackMemoryBytes = used },
-	}
-	maximum := time.Duration(s.ai.MaxHTMLParseCPUMilliseconds) * time.Millisecond
-	if maximum > 0 {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-	}
-	var budget resourceguard.CPUBudget
-	checkCancellation := func() {
-		if ctx.Err() != nil {
-			termination.Fail(termination.Failure{Code: termination.Cancelled})
-		}
-	}
-	check := checkCancellation
-	if maximum > 0 {
-		budget.Reset(maximum)
-		check = func() {
-			checkCancellation()
-			budget.Check()
-		}
-	}
-	control.CheckPrimary = check
-	control.CheckFallback = check
-	control.CPULimitExceeded = func(fallback bool) {
-		if fallback {
-			usage.fallbackCPUExceeded = true
-		} else {
-			usage.primaryCPUExceeded = true
-		}
-	}
-	control.BeginFallback = func() bool {
-		if ctx.Err() != nil || (usage.primaryCPUExceeded || usage.primaryMemoryExceeded) && !continueAfterLimit {
-			return false
-		}
-		if maximum > 0 {
-			budget.Reset(maximum)
-		}
-		return true
-	}
-	prepared := msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control)
-	return prepared, usage
+	return runWithHTMLProcessingLimits(ctx, htmlProcessingOptions{
+		action:               s.ai.HTMLResourceLimitAction,
+		memoryBytes:          s.ai.MaxHTMLParseMemoryBytes,
+		maxCPUMilliseconds:   s.ai.MaxHTMLParseCPUMilliseconds,
+		disableURLCompaction: !s.ai.CompactPromptURLs,
+	}, func(control message.HTMLProcessingControl) message.Analysis {
+		return msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control)
+	})
 }
 
 func tokenCost(usage ai.Usage, cfg config.AIConfig) float64 {

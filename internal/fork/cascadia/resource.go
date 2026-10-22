@@ -75,7 +75,7 @@ func matchResource(m Matcher, n *html.Node, guard *MatchControl) bool {
 		return matcher.matchResource(n, guard)
 	}
 
-	return m.Match(n)
+	return m.matchNode(n)
 }
 
 // MatchWithStop matches n while periodically invoking shouldStop from inside

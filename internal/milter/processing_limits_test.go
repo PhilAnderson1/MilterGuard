@@ -142,7 +142,7 @@ func TestFallbackMemoryExhaustionPolicy(t *testing.T) {
 			msg.AddHeader("Content-Type", "multipart/mixed; boundary=x")
 			msg.AddBody([]byte("--x\r\nContent-Type: text/html\r\n\r\n" + strings.Repeat("<div>", 700) + "evidence\r\n--x\r\nContent-Type: text/plain\r\n\r\n" + strings.Repeat("x", 128<<10) + "\r\n--x--\r\n"))
 			result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
-			if result.htmlPrimaryMemoryExceeded || !result.htmlFallbackMemoryExceeded || !result.htmlMemoryExceeded || result.htmlCPUExceeded || result.htmlFallbackMemoryBytes != 256<<10 {
+			if result.htmlPrimaryMemoryExceeded || !result.htmlFallbackMemoryExceeded || !result.htmlMemoryExceeded || result.htmlCPUExceeded || result.htmlFallbackMemoryBytes <= 0 || result.htmlFallbackMemoryBytes >= 256<<10 {
 				t.Fatalf("result=%+v", result)
 			}
 			if action == "fallback" {

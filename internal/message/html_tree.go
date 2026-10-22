@@ -251,9 +251,6 @@ func htmlToTextWithBudget(source string, budget *extractionBudget) extractedCont
 }
 
 func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget *extractionBudget) extractedContent {
-	if budget.stageStop == nil {
-		budget.stageStop = resourceguard.BindCheckpoint(budget.allocationMemory(), budget, (*extractionBudget).checkStage)
-	}
 	var inspection htmlextract.Document
 	var err error
 
@@ -1315,7 +1312,7 @@ func (collector *linkCollector) AddDestination(candidate string) string {
 }
 
 func analyzeControlledHTML(source string, limits htmlextract.Limits, budget *extractionBudget) (htmlextract.Document, error) {
-	var usage htmlextract.ResourceUsage
+	var usage htmlextract.AnalysisUsage
 	defer func() { budget.consumeHTML(usage) }()
 	return htmlextract.AnalyzeControlledString(source, limits, budget.stageStop, &usage)
 }

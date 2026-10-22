@@ -7,9 +7,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/cascadia"
 	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
+
+func selectorMatchesForTest(matcher cascadia.Matcher, node *html.Node) bool {
+	return cascadia.NewMatchControl(func() {}).Match(matcher, node)
+}
 
 func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 	sequence := 0
@@ -28,10 +33,10 @@ func TestOverComplexSelectorRetainsSafeFinalAncestorScope(t *testing.T) {
 	container := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "rio-asin-container-image"}}}
 	product := &html.Node{Type: html.ElementNode, Data: "img", Parent: container}
 	container.FirstChild = product
-	if plan.scope.Match(ordinary) {
+	if selectorMatchesForTest(plan.scope, ordinary) {
 		t.Fatal("conservative selector scope matched an unrelated image")
 	}
-	if !plan.scope.Match(product) {
+	if !selectorMatchesForTest(plan.scope, product) {
 		t.Fatal("conservative selector scope did not retain the necessary ancestor")
 	}
 }
@@ -76,13 +81,13 @@ func TestUncertainSelectorScopePreservesFinalSiblingCombinator(t *testing.T) {
 	plan.makeUncertain(nil)
 
 	img := &html.Node{Type: html.ElementNode, Data: "img"}
-	if plan.scope.Match(img) {
+	if selectorMatchesForTest(plan.scope, img) {
 		t.Fatal("unrelated image matched sibling scope")
 	}
 	parent := &html.Node{Type: html.ElementNode, Data: "div"}
 	parent.AppendChild(&html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "product"}}})
 	parent.AppendChild(img)
-	if !plan.scope.Match(img) {
+	if !selectorMatchesForTest(plan.scope, img) {
 		t.Fatal("possible sibling match was lost")
 	}
 }
@@ -90,12 +95,12 @@ func TestUncertainSelectorScopePreservesFinalSiblingCombinator(t *testing.T) {
 func TestConservativeSelectorScopeAlwaysHasSafeFallback(t *testing.T) {
 	node := &html.Node{Type: html.ElementNode, Data: "p"}
 	for _, prefix := range []string{"", "*", "["} {
-		if matcher := compileConservativeScope(prefix, nil); matcher == nil || !matcher.Match(node) {
+		if matcher := compileConservativeScope(prefix, nil); matcher == nil || !selectorMatchesForTest(matcher, node) {
 			t.Fatalf("scope %q did not use a universal fallback", prefix)
 		}
 	}
 	matcher := compileConservativeScope("div", nil)
-	if matcher == nil || matcher.Match(node) {
+	if matcher == nil || selectorMatchesForTest(matcher, node) {
 		t.Fatal("valid conservative scope lost its tag constraint")
 	}
 }
@@ -219,7 +224,7 @@ func TestMixedCaseSVGTypeSelectorIsIndexed(t *testing.T) {
 		t.Fatalf("mixed-case SVG candidates = %+v, want one", refs)
 	}
 	plan := s.rules[refs[0].rule].plans[refs[0].branch]
-	if !plan.foreignCaseType || !plan.uncertain || !plan.scope.Match(node) {
+	if !plan.foreignCaseType || !plan.uncertain || !selectorMatchesForTest(plan.scope, node) {
 		t.Fatalf("mixed-case SVG plan = %+v", plan)
 	}
 
@@ -231,7 +236,7 @@ func TestMixedCaseSVGTypeSelectorIsIndexed(t *testing.T) {
 		t.Fatalf("lowercase SVG candidates = %+v, want one candidate for authoritative matching", refs)
 	}
 	plan = s.rules[refs[0].rule].plans[refs[0].branch]
-	if plan.foreignCaseType || plan.uncertain || plan.matcher.Match(node) {
+	if plan.foreignCaseType || plan.uncertain || selectorMatchesForTest(plan.matcher, node) {
 		t.Fatalf("wrong-case SVG selector matched canonical node: %+v", plan)
 	}
 }
@@ -346,7 +351,7 @@ func TestOversizedFallbackKeepsUncertainty(t *testing.T) {
 		selector := strings.Repeat("A", 17000) + suffix
 		sequence := 0
 		plans, _, exceeded := planSelectorList(selector, &sequence, resourceguard.NewMemory(1<<20), maxSelectorBranches)
-		if exceeded || len(plans) != 1 || !plans[0].uncertain || plans[0].matcher != nil || !plans[0].scope.Match(&html.Node{Type: html.ElementNode, Data: "p"}) {
+		if exceeded || len(plans) != 1 || !plans[0].uncertain || plans[0].matcher != nil || !selectorMatchesForTest(plans[0].scope, &html.Node{Type: html.ElementNode, Data: "p"}) {
 			t.Fatalf("unexpected fallback: %+v", plans)
 		}
 		// Opacity remains relevant even for generated content: it may overlay text.

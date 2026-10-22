@@ -15,7 +15,13 @@ func MustParseHTML(doc string) *html.Node {
 	return dom
 }
 
-var selector = MustCompile(`div.matched`)
+var selector = func() Matcher {
+	selector, err := ParseGroup(`div.matched`)
+	if err != nil {
+		panic(err)
+	}
+	return selector
+}()
 var doc = `<!DOCTYPE html>
 <html>
 <body>
@@ -47,7 +53,7 @@ var dom = MustParseHTML(doc)
 func BenchmarkMatchAll(b *testing.B) {
 	var matches []*html.Node
 	for i := 0; i < b.N; i++ {
-		matches = selector.MatchAll(dom)
+		matches = matchingNodesForTest(dom, selector)
 	}
 	_ = matches
 }

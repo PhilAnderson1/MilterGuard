@@ -67,7 +67,7 @@ func TestDeferredUsagePreservesTermination(t *testing.T) {
 			func() {
 				defer termination.Recover(&got)
 				if html {
-					defer b.consumeHTML(htmlextract.ResourceUsage{MemoryBytes: 10})
+					defer b.consumeHTML(htmlextract.AnalysisUsage{ResourceUsage: htmlextract.ResourceUsage{MemoryBytes: 10}})
 				} else {
 					defer b.consumeMemory(child)
 				}

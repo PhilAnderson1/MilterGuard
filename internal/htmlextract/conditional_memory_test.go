@@ -12,9 +12,9 @@ import (
 func TestConditionalStylesShareDocumentMemory(t *testing.T) {
 	input := []byte(strings.Repeat("<!--[if mso]><style></style><![endif]-->", 30000) + "<p>hello</p>")
 	limits := DefaultLimits()
-	var usage ResourceUsage
+	var usage AnalysisUsage
 	expectTermination(t, termination.MemoryExceeded, func() { AnalyzeControlled(input, limits, nil, &usage) })
-	if usage.MemoryBytes != limits.MemoryBytes {
+	if !usage.MemoryLimitExceeded || usage.MemoryBytes > limits.MemoryBytes {
 		t.Fatalf("usage=%+v", usage)
 	}
 }

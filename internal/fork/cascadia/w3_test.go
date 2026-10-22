@@ -86,7 +86,7 @@ func TestValidSelectors(t *testing.T) {
 			if sel.PseudoElement() != "" {
 				continue // pseudo element doesn't count as a match in this test since they are not part of the document
 			}
-			for _, node := range Selector(sel.Match).MatchAll(doc) {
+			for _, node := range matchingNodesForTest(doc, sel) {
 				matchingNodes[node] = true
 			}
 		}

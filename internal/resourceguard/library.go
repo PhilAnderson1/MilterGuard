@@ -17,7 +17,7 @@ import (
 func ParseURL(m *Memory, text string) (*url.URL, error) {
 	size, ok := storageBytes(len(text), 8)
 	if !ok || size > int64(^uint64(0)>>1)-1024 {
-		m.reject()
+		panic("resourceguard: URL allowance overflow")
 	}
 
 	m.Reserve(size + 1024)
@@ -28,7 +28,7 @@ func ParseURL(m *Memory, text string) (*url.URL, error) {
 func ParseFloat(m *Memory, text string, bits int) (float64, error) {
 	size := int64(len(text))
 	if size > (int64(^uint64(0)>>1)-128)/2 {
-		m.reject()
+		panic("resourceguard: float allowance overflow")
 	}
 
 	m.Reserve(size + size/4 + 64 + int64(unsafe.Sizeof(strconv.NumError{})) + 16)
@@ -38,7 +38,7 @@ func ParseFloat(m *Memory, text string, bits int) (float64, error) {
 func ParseMediaType(m *Memory, text string) (string, map[string]string, error) {
 	size, ok := storageBytes(len(text), 32)
 	if !ok || size > int64(^uint64(0)>>1)-256 {
-		m.reject()
+		panic("resourceguard: media-type allowance overflow")
 	}
 
 	m.Reserve(256 + size)
@@ -49,13 +49,11 @@ func RegexpSplit(m *Memory, re *regexp.Regexp, text string, limit int) []string 
 	// Extraction uses a bounded positive result limit. Unbounded library calls
 	// are deliberately not admitted through this adapter.
 	if limit <= 0 {
-		m.reject()
-		return nil
+		panic("resourceguard: non-positive regexp split limit")
 	}
 	size, ok := storageBytes(limit, 256)
 	if !ok {
-		m.reject()
-		return nil
+		panic("resourceguard: regexp split allowance overflow")
 	}
 
 	m.Reserve(size)
@@ -65,8 +63,7 @@ func RegexpSplit(m *Memory, re *regexp.Regexp, text string, limit int) []string 
 func RegexpSubmatch(m *Memory, re *regexp.Regexp, text string) []string {
 	size, ok := storageBytes(re.NumSubexp()+1, 64)
 	if !ok {
-		m.reject()
-		return nil
+		panic("resourceguard: regexp submatch allowance overflow")
 	}
 
 	m.Reserve(size)

@@ -117,7 +117,7 @@ func (b *extractionBudget) noteMemoryLimit() {
 // The child limit is the primary remainder; primary charges wait for this transfer.
 func (b *extractionBudget) consumeMemory(memory *resourceguard.Memory) {
 	if memory != b.primaryMemory {
-		b.primaryMemory.RecordUsage(memory.Used())
+		b.primaryMemory.RecordUsage(memory.Charged())
 	}
 	if memory.Exhausted() {
 		b.noteMemoryLimit()
@@ -152,7 +152,7 @@ func (b *extractionBudget) htmlLimits(bytes int) (htmlextract.Limits, bool) {
 
 // consumeHTML publishes usage bounded by htmlLimits, including during unwind.
 // No primary charges may intervene between admitting those limits and this call.
-func (b *extractionBudget) consumeHTML(usage htmlextract.ResourceUsage) {
+func (b *extractionBudget) consumeHTML(usage htmlextract.AnalysisUsage) {
 	if usage.MemoryLimitExceeded {
 		b.noteMemoryLimit()
 	}

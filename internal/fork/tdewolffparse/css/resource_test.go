@@ -12,6 +12,12 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
+func TestErrorTokenRemainsZeroForUnwindSafety(t *testing.T) {
+	if ErrorToken != 0 {
+		t.Fatalf("ErrorToken=%d, want zero so lexer defers skip work during panic unwinding", ErrorToken)
+	}
+}
+
 func TestSharedMemoryBudgetStopsCSSParser(t *testing.T) {
 	memory := resourceguard.NewMemory(512)
 	expectTermination(t, termination.MemoryExceeded, func() {

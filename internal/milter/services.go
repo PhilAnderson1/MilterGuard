@@ -83,6 +83,7 @@ type emailCommandService struct {
 	maxMessageSize          int64
 	maxHTMLParseMemoryBytes int64
 	maxHTMLParseCPUMillis   int
+	htmlResourceLimitAction string
 }
 
 type connectionDNSService struct {

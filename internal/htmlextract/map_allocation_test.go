@@ -92,7 +92,7 @@ func TestGrowingStorageStaysWithinAllocationBudget(t *testing.T) {
 			runtime.ReadMemStats(&before)
 			_, usage, err, failure := captureAnalysis(input, limits)
 			runtime.ReadMemStats(&after)
-			if err != nil || failure.Code != termination.MemoryExceeded || usage.MemoryBytes != tc.limit {
+			if err != nil || failure.Code != termination.MemoryExceeded || !usage.MemoryLimitExceeded || usage.MemoryBytes > tc.limit {
 				t.Fatalf("expected memory cutoff: charged=%d err=%v", usage.MemoryBytes, err)
 			}
 

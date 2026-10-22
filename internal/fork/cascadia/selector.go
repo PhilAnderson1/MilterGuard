@@ -5,10 +5,10 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
-// Matcher is the interface for basic selector functionality.
-// Match returns whether a selector matches n.
+// Matcher is an opaque compiled predicate. Callers execute it through
+// MatchControl so selector work cannot bypass resource checkpoints.
 type Matcher interface {
-	Match(n *html.Node) bool
+	matchNode(n *html.Node) bool
 }
 
 // Sel is the interface for all the functionality provided by selectors.
@@ -21,6 +21,30 @@ type Sel interface {
 
 	// Returns a pseudo-element, or an empty string.
 	PseudoElement() string
+}
+
+// MatcherFunc adapts a bounded single-node predicate for use through
+// MatchControl. Tree traversal remains the caller's guarded responsibility.
+type MatcherFunc func(*html.Node) bool
+
+func (m MatcherFunc) matchNode(n *html.Node) bool { return m(n) }
+
+type namespaceTypeMatcher struct{ foreignName, htmlName string }
+
+func (m namespaceTypeMatcher) matchNode(n *html.Node) bool {
+	if n.Type != html.ElementNode {
+		return false
+	}
+	if n.Namespace == "" {
+		return n.Data == m.htmlName
+	}
+	return n.Data == m.foreignName
+}
+
+// NewNamespaceTypeMatcherWithMemory creates a bounded single-node matcher for
+// a case-sensitive foreign type and its normalized HTML spelling.
+func NewNamespaceTypeMatcherWithMemory(foreignName, htmlName string, memory *resourceguard.Memory) Matcher {
+	return resourceguard.New(memory, namespaceTypeMatcher{foreignName: foreignName, htmlName: htmlName})
 }
 
 // Parse parses a selector. Use `ParseWithPseudoElement`
@@ -113,12 +137,6 @@ func ParseGroupWithPseudoElements(sel string) (SelectorGroup, error) {
 	return ParseGroupWithPseudoElementsAndMemory(sel, nil)
 }
 
-// A Selector is a function which tells whether a node matches or not.
-//
-// This type is maintained for compatibility; I recommend using the newer and
-// more idiomatic interfaces Sel and Matcher.
-type Selector func(*html.Node) bool
-
 // CombinePositiveMatchers combines already compiled positive compounds for a
 // conservative descendant, child, or sibling scope.
 func CombinePositiveMatchers(left, right Matcher, combinator byte) Matcher {
@@ -136,123 +154,13 @@ func CombinePositiveMatchersWithMemory(left, right Matcher, combinator byte, mem
 	return value.(Matcher)
 }
 
-// Compile parses a selector and returns, if successful, a Selector object
-// that can be used to match against html.Node objects.
-func Compile(sel string) (Selector, error) {
-	compiled, err := ParseGroup(sel)
-	if err != nil {
-		return nil, err
-	}
-
-	return Selector(compiled.Match), nil
-}
-
-// MustCompile is like Compile, but panics instead of returning an error.
-func MustCompile(sel string) Selector {
-	compiled, err := Compile(sel)
-	if err != nil {
-		panic(err)
-	}
-	return compiled
-}
-
-// MatchAll returns a slice of the nodes that match the selector,
-// from n and its children.
-func (s Selector) MatchAll(n *html.Node) []*html.Node {
-	return s.matchAllInto(n, nil)
-}
-
-func (s Selector) matchAllInto(n *html.Node, storage []*html.Node) []*html.Node {
-	if s(n) {
-		storage = append(storage, n)
-	}
-
-	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		storage = s.matchAllInto(child, storage)
-	}
-
-	return storage
-}
-
-func queryInto(n *html.Node, m Matcher, storage []*html.Node) []*html.Node {
-	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		if m.Match(child) {
-			storage = append(storage, child)
-		}
-		storage = queryInto(child, m, storage)
-	}
-
-	return storage
-}
-
-// QueryAll returns a slice of all the nodes that match m, from the descendants
-// of n.
-func QueryAll(n *html.Node, m Matcher) []*html.Node {
-	return queryInto(n, m, nil)
-}
-
-// Match returns true if the node matches the selector.
-func (s Selector) Match(n *html.Node) bool {
-	return s(n)
-}
-
-// MatchFirst returns the first node that matches s, from n and its children.
-func (s Selector) MatchFirst(n *html.Node) *html.Node {
-	if s.Match(n) {
-		return n
-	}
-
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		m := s.MatchFirst(c)
-		if m != nil {
-			return m
-		}
-	}
-	return nil
-}
-
-// Query returns the first node that matches m, from the descendants of n.
-// If none matches, it returns nil.
-func Query(n *html.Node, m Matcher) *html.Node {
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if m.Match(c) {
-			return c
-		}
-		if matched := Query(c, m); matched != nil {
-			return matched
-		}
-	}
-
-	return nil
-}
-
-// Filter returns the nodes in nodes that match the selector.
-func (s Selector) Filter(nodes []*html.Node) (result []*html.Node) {
-	for _, n := range nodes {
-		if s(n) {
-			result = append(result, n)
-		}
-	}
-	return result
-}
-
-// Filter returns the nodes that match m.
-func Filter(nodes []*html.Node, m Matcher) (result []*html.Node) {
-	for _, n := range nodes {
-		if m.Match(n) {
-			result = append(result, n)
-		}
-	}
-	return result
-}
-
 type tagSelector struct {
 	tag      string
 	original string
 }
 
 // Matches elements with a given tag name.
-func (t tagSelector) Match(n *html.Node) bool {
+func (t tagSelector) matchNode(n *html.Node) bool {
 	return n.Type == html.ElementNode && n.Data == t.tag
 }
 
@@ -269,7 +177,7 @@ type classSelector struct {
 }
 
 // Matches elements by class attribute.
-func (t classSelector) Match(n *html.Node) bool {
+func (t classSelector) matchNode(n *html.Node) bool {
 	return t.matchResource(n, nil)
 }
 
@@ -292,7 +200,7 @@ type idSelector struct {
 }
 
 // Matches elements by id attribute.
-func (t idSelector) Match(n *html.Node) bool {
+func (t idSelector) matchNode(n *html.Node) bool {
 	return t.matchResource(n, nil)
 }
 
@@ -317,7 +225,7 @@ type attrSelector struct {
 }
 
 // Matches elements by attribute value.
-func (t attrSelector) Match(n *html.Node) bool {
+func (t attrSelector) matchNode(n *html.Node) bool {
 	return t.matchResource(n, nil)
 }
 
@@ -396,7 +304,7 @@ type neverMatchSelector struct {
 	value string
 }
 
-func (s neverMatchSelector) Match(n *html.Node) bool {
+func (s neverMatchSelector) matchNode(n *html.Node) bool {
 	return false
 }
 
@@ -414,7 +322,7 @@ type compoundSelector struct {
 }
 
 // Matches elements if each sub-selectors matches.
-func (t compoundSelector) Match(n *html.Node) bool {
+func (t compoundSelector) matchNode(n *html.Node) bool {
 	return t.matchResource(n, nil)
 }
 
@@ -453,7 +361,7 @@ type combinedSelector struct {
 	second     Sel
 }
 
-func (t combinedSelector) Match(n *html.Node) bool {
+func (t combinedSelector) matchNode(n *html.Node) bool {
 	return t.matchResource(n, nil)
 }
 
@@ -561,8 +469,7 @@ func (c combinedSelector) PseudoElement() string {
 // individual selectors matches.
 type SelectorGroup []Sel
 
-// Match returns true if the node matches one of the single selectors.
-func (s SelectorGroup) Match(n *html.Node) bool {
+func (s SelectorGroup) matchNode(n *html.Node) bool {
 	return s.matchResource(n, nil)
 }
 

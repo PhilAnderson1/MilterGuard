@@ -114,8 +114,3 @@ func (g *resourceGuard) makeBytes(size int) []byte {
 
 	return b
 }
-func (g *resourceGuard) copyBytes(data []byte) []byte {
-	b := resourceguard.CloneBytes(g.memory(), data, g.checkpoint)
-
-	return b
-}

@@ -101,7 +101,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 		cfg: cfg.EmailCommands, processor: commands, recipient: mailaddr.Normalize(cfg.EmailCommands.Recipient),
 		internalToken: internalToken, replySlots: make(chan struct{}, 4), log: log,
 		maxMessageSize: cfg.Milter.MaxMessageSize, maxHTMLParseMemoryBytes: cfg.AI.MaxHTMLParseMemoryBytes,
-		maxHTMLParseCPUMillis: cfg.AI.MaxHTMLParseCPUMilliseconds,
+		maxHTMLParseCPUMillis: cfg.AI.MaxHTMLParseCPUMilliseconds, htmlResourceLimitAction: cfg.AI.HTMLResourceLimitAction,
 		sender: smtpreply.New(smtpreply.Options{
 			Address: cfg.EmailCommands.SMTPHost, TLSMode: cfg.EmailCommands.SMTPTLS, Timeout: commandReplySMTPTimeout,
 		}),

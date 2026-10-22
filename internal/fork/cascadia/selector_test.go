@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -666,8 +665,8 @@ func TestRegularExpressionSelectorsAreDisabled(t *testing.T) {
 	}
 }
 
-func setup(selector, testHTML string) (Selector, *html.Node, error) {
-	s, err := Compile(selector)
+func setup(selector, testHTML string) (Matcher, *html.Node, error) {
+	s, err := ParseGroup(selector)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error compiling %q: %s", selector, err)
 	}
@@ -687,7 +686,7 @@ func TestSelectors(t *testing.T) {
 			continue
 		}
 
-		matches := s.MatchAll(doc)
+		matches := matchingNodesForTest(doc, s)
 		if len(matches) != len(test.results) {
 			t.Errorf("selector %s wanted %d elements, got %d instead", test.selector, len(test.results), len(matches))
 			continue
@@ -700,7 +699,10 @@ func TestSelectors(t *testing.T) {
 			}
 		}
 
-		firstMatch := s.MatchFirst(doc)
+		var firstMatch *html.Node
+		if len(matches) > 0 {
+			firstMatch = matches[0]
+		}
 		if len(test.results) == 0 {
 			if firstMatch != nil {
 				t.Errorf("MatchFirst: selector %s want nil, got %s", test.selector, nodeString(firstMatch))
@@ -710,58 +712,6 @@ func TestSelectors(t *testing.T) {
 			if got != test.results[0] {
 				t.Errorf("MatchFirst: selector %s want %s, got %s", test.selector, test.results[0], got)
 			}
-		}
-	}
-}
-
-func setupMatcher(selector, testHTML string) (Matcher, *html.Node, error) {
-	s, err := ParseGroup(selector)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error compiling %q: %s", selector, err)
-	}
-
-	doc, err := html.Parse(strings.NewReader(testHTML))
-	if err != nil {
-		return nil, nil, fmt.Errorf("error parsing %q: %s", testHTML, err)
-	}
-	return s, doc, nil
-}
-
-func TestMatchers(t *testing.T) {
-	for _, test := range selectorTests {
-		s, doc, err := setupMatcher(test.selector, test.HTML)
-		if err != nil {
-			t.Error(err)
-			continue
-		}
-
-		matches := QueryAll(doc, s)
-		if len(matches) != len(test.results) {
-			t.Errorf("selector %s wanted %d elements, got %d instead", test.selector, len(test.results), len(matches))
-			continue
-		}
-
-		for i, m := range matches {
-			got := nodeString(m)
-			if got != test.results[i] {
-				t.Errorf("selector %s wanted %s, got %s instead", test.selector, test.results[i], got)
-			}
-		}
-
-		firstMatch := Query(doc, s)
-		if len(test.results) == 0 {
-			if firstMatch != nil {
-				t.Errorf("Query: selector %s want nil, got %s", test.selector, nodeString(firstMatch))
-			}
-		} else {
-			got := nodeString(firstMatch)
-			if got != test.results[0] {
-				t.Errorf("Query: selector %s want %s, got %s", test.selector, test.results[0], got)
-			}
-		}
-
-		if !reflect.DeepEqual(matches, Selector(s.Match).Filter(matches)) {
-			t.Fatalf("inconsistent Filter result")
 		}
 	}
 }
@@ -823,7 +773,7 @@ func TestPseudoElement(t *testing.T) {
 
 		body := doc.FirstChild.LastChild
 		testNode := body.FirstChild.FirstChild.LastChild
-		if !s.Match(testNode) {
+		if !NewMatchControl(func() {}).Match(s, testNode) {
 			t.Errorf("%s didn't match (html tree : \n %s) \n", test.selector, nodeString(doc))
 			continue
 		}
@@ -857,7 +807,7 @@ func TestShakespeare(t *testing.T) {
 		if err != nil {
 			t.Errorf("invalid selector %s", selector)
 		}
-		if l := len(Selector(sel.Match).MatchAll(body)); l != expected {
+		if l := len(matchingNodesForTest(body, sel)); l != expected {
 			t.Errorf("%s -> expected %d, got %d", selector, expected, l)
 		}
 	}

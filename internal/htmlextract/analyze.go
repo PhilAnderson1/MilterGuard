@@ -8,7 +8,7 @@ import (
 )
 
 type processor struct {
-	usage            *ResourceUsage
+	usage            *AnalysisUsage
 	Limits           Limits
 	retainInspection bool // tests only; production results retain compact decisions
 	shouldStop       func()
@@ -38,7 +38,7 @@ func AnalyzeWithStop(input []byte, limits Limits, shouldStop func()) (Document, 
 // AnalyzeControlled participates in the caller's extraction-stage boundary.
 // Required allocation failures and the supplied checkpoint unwind to that
 // boundary. Usage is published even when analysis does not return.
-func AnalyzeControlled(input []byte, limits Limits, check func(), usage *ResourceUsage) (Document, error) {
+func AnalyzeControlled(input []byte, limits Limits, check func(), usage *AnalysisUsage) (Document, error) {
 	p := processor{Limits: limits, shouldStop: check, memory: resourceguard.NewMemory(limits.MemoryBytes), usage: usage}
 	return p.process(input)
 }
@@ -46,7 +46,7 @@ func AnalyzeControlled(input []byte, limits Limits, check func(), usage *Resourc
 // AnalyzeControlledString is AnalyzeControlled for a string whose byte view
 // must be owned by the analyser. The conversion is charged to the same child
 // ledger as parsing, including when conversion itself exhausts that ledger.
-func AnalyzeControlledString(input string, limits Limits, check func(), usage *ResourceUsage) (Document, error) {
+func AnalyzeControlledString(input string, limits Limits, check func(), usage *AnalysisUsage) (Document, error) {
 	if err := limits.validate(); err != nil {
 		return Document{}, err
 	}
@@ -58,9 +58,11 @@ func AnalyzeControlledString(input string, limits Limits, check func(), usage *R
 	if usage != nil {
 		defer func() {
 			if !converted {
-				*usage = ResourceUsage{
-					InputBytes:          len(input),
-					MemoryBytes:         memory.Used(),
+				*usage = AnalysisUsage{
+					ResourceUsage: ResourceUsage{
+						InputBytes:  len(input),
+						MemoryBytes: memory.Charged(),
+					},
 					MemoryLimitExceeded: memory.Exhausted(),
 				}
 			}
@@ -492,16 +494,16 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 
 	parseReturned := false
 	if p.usage != nil {
-		*p.usage = ResourceUsage{}
+		*p.usage = AnalysisUsage{}
 		defer func() {
 			// parseDocument publishes its CSS state directly if it unwinds.
 			// Once it returns, result.Usage is authoritative and is refreshed
 			// by the later analysis-phase defer.
 			if parseReturned {
-				*p.usage = result.Usage
+				p.usage.ResourceUsage = result.Usage
 			}
 			p.usage.InputBytes = len(input)
-			p.usage.MemoryBytes = p.memory.Used()
+			p.usage.MemoryBytes = p.memory.Charged()
 			p.usage.MemoryLimitExceeded = p.memory.Exhausted()
 		}()
 	}
@@ -631,7 +633,7 @@ func memoryUsed(memory *resourceguard.Memory) int64 {
 	if memory == nil {
 		return 0
 	}
-	return memory.Used()
+	return memory.Charged()
 }
 
 func mergeViewingCaseLabel(labels []visibilityLabel, index int, bit visibilityLabel) bool {

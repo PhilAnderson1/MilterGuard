@@ -180,8 +180,9 @@ func TestPlainCountingCallbackIsSharedAcrossStages(t *testing.T) {
 			termination.Fail(termination.Failure{Code: termination.CPUExceeded})
 		}
 	}})
-	if b.confidentCharacters("text") != 4 {
-		t.Fatal("initial count")
+	count, failure := attemptExtraction(b, func() int { return b.confidentCharacters("text") })
+	if count != 4 || failure.Code != termination.None {
+		t.Fatalf("initial count=%d failure=%+v", count, failure)
 	}
 	remaining := b.remainingMemory()
 	if remaining == 4096 || b.countingStop == nil {
@@ -210,7 +211,10 @@ func TestSharedCallbackAdmissionFailure(t *testing.T) {
 	e := htmlExtraction{memory: resourceguard.NewMemory(1)}
 	expectTermination(t, termination.MemoryExceeded, func() { e.textStopCallback() })
 	b := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 1})
-	expectTermination(t, termination.MemoryExceeded, func() { b.confidentCharacters("text") })
+	_, failure := attemptExtraction(b, func() int { return b.confidentCharacters("text") })
+	if failure.Code != termination.MemoryExceeded {
+		t.Fatalf("failure=%+v, want memory exhaustion", failure)
+	}
 	if !e.memory.Exhausted() || !b.primaryMemory.Exhausted() {
 		t.Fatal("lost exhaustion")
 	}

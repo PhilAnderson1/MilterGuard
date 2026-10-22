@@ -86,9 +86,9 @@ func TestRepeatedVariableExpansionExhaustsMemory(t *testing.T) {
 	input := []byte("<style>p{--x:" + strings.Repeat("a", 1000) + ";--y:" + strings.Repeat("var(--x)", 10000) + ";display:var(--y)}</style><p>hello</p>")
 	limits := DefaultLimits()
 	limits.MemoryBytes = 32 << 20
-	var usage ResourceUsage
+	var usage AnalysisUsage
 	expectTermination(t, termination.MemoryExceeded, func() { AnalyzeControlled(input, limits, nil, &usage) })
-	if usage.MemoryBytes != limits.MemoryBytes {
+	if !usage.MemoryLimitExceeded || usage.MemoryBytes > limits.MemoryBytes {
 		t.Fatalf("memory=%d", usage.MemoryBytes)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"mime"
-	"runtime"
 	"strings"
 	"time"
 
@@ -13,9 +12,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
-	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
-	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 )
 
 const internalMessageHeader = "X-MilterGuard-Internal"
@@ -75,7 +72,8 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	}
 
 	lines, err := commandMessageLinesWithResourceLimits(ctx, ss.message, cfg.MaxMessageBytes,
-		ss.deps.commands.maxHTMLParseMemoryBytes, ss.deps.commands.maxHTMLParseCPUMillis)
+		ss.deps.commands.maxHTMLParseMemoryBytes, ss.deps.commands.maxHTMLParseCPUMillis,
+		ss.deps.commands.htmlResourceLimitAction)
 	if err != nil {
 		var processingErr *commandBodyProcessingError
 		if errors.As(err, &processingErr) {
@@ -151,6 +149,9 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	return true, ss.discardEmailCommand(ctx, identity, strings.Join(canonicals, "; "), fmt.Sprintf("processed %d commands", len(commands)), "", "", queued)
 }
 
+// commandMessageLines is a test-only convenience wrapper. Production command
+// handling must use commandMessageLinesWithResourceLimits so extraction has an
+// explicit resource policy.
 func commandMessageLines(m *message.Message, maxBytes int64) ([]string, error) {
 	return commandMessageLinesWithHTMLControl(m, maxBytes, message.HTMLProcessingControl{})
 }
@@ -192,49 +193,42 @@ func commandMessageLinesWithHTMLControl(m *message.Message, maxBytes int64, cont
 	return lines, nil
 }
 
-// commandMessageLinesWithResourceLimits applies the same pinned-thread CPU
-// measurement used by ordinary analysis. Normal and fallback extraction share
-// one deadline, and no commands are returned after an interrupted extraction.
+// commandMessageLinesWithResourceLimits applies the ordinary analysis resource
+// policy. dos-reject is intentionally plain reject for authenticated commands.
 type commandBodyProcessingError struct{ reason string }
 
 func (e *commandBodyProcessingError) Error() string { return e.reason }
 
-func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Message, maxBytes, memoryBytes int64, maxCPUMilliseconds int) ([]string, error) {
-	control := message.HTMLProcessingControl{MemoryBytes: memoryBytes}
-	var cpu resourceguard.CPUBudget
-	cpuExceeded := false
-	memoryExceeded := false
-	checkCancellation := func() {
-		if ctx.Err() != nil {
-			termination.Fail(termination.Failure{Code: termination.Cancelled})
-		}
+func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Message, maxBytes, memoryBytes int64, maxCPUMilliseconds int, action string) ([]string, error) {
+	if action != "fallback" {
+		action = "reject"
 	}
-	check := checkCancellation
-	if maxCPUMilliseconds > 0 {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		cpu.Reset(time.Duration(maxCPUMilliseconds) * time.Millisecond)
-		check = func() {
-			checkCancellation()
-			cpu.Check()
-		}
+	type result struct {
+		lines []string
+		err   error
 	}
-	control.CheckPrimary = check
-	control.CheckFallback = check
-	control.CPULimitExceeded = func(bool) { cpuExceeded = true }
-	control.MemoryLimitExceeded = func() { memoryExceeded = true }
-	control.FallbackMemoryLimitExceeded = func() { memoryExceeded = true }
-	lines, err := commandMessageLinesWithHTMLControl(m, maxBytes, control)
+	extracted, usage := runWithHTMLProcessingLimits(ctx, htmlProcessingOptions{
+		action: action, memoryBytes: memoryBytes, maxCPUMilliseconds: maxCPUMilliseconds,
+	}, func(control message.HTMLProcessingControl) result {
+		lines, err := commandMessageLinesWithHTMLControl(m, maxBytes, control)
+		return result{lines: lines, err: err}
+	})
 	if ctx.Err() != nil {
 		return nil, &commandBodyProcessingError{reason: "command body processing was interrupted"}
 	}
-	if cpuExceeded {
+	cpuFailed := usage.cpuExceeded()
+	memoryFailed := usage.memoryExceeded
+	if action == "fallback" {
+		cpuFailed = usage.fallbackCPUExceeded
+		memoryFailed = usage.fallbackMemoryExceeded
+	}
+	if cpuFailed {
 		return nil, &commandBodyProcessingError{reason: "command body processing exceeded the configured CPU limit"}
 	}
-	if memoryExceeded {
+	if memoryFailed {
 		return nil, &commandBodyProcessingError{reason: "command body processing exceeded the configured memory limit"}
 	}
-	return lines, err
+	return extracted.lines, extracted.err
 }
 
 func (ss *session) completeInvalidEmailCommand(ctx context.Context, identity, replyTo, reason string) bool {

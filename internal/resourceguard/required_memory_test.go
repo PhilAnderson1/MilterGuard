@@ -12,9 +12,6 @@ func TestRequiredMemoryUnwinds(t *testing.T) {
 		"reserve": func(m *Memory) { m.Reserve(1024) },
 		"object":  func(m *Memory) { New(m, [1024]byte{}) },
 		"slice":   func(m *Memory) { MakeSlice[byte](m, 0, 1024) },
-		"overflow": func(m *Memory) {
-			MakeSlice[uint64](m, 0, int(^uint(0)>>1))
-		},
 		"later slice growth": func(m *Memory) {
 			s := MakeSlice[byte](m, 1, 1)
 			GrowSlice(m, s, 1024, nil)

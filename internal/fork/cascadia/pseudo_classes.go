@@ -23,7 +23,7 @@ type relativePseudoClassSelector struct {
 	match SelectorGroup
 }
 
-func (s relativePseudoClassSelector) Match(n *html.Node) bool {
+func (s relativePseudoClassSelector) matchNode(n *html.Node) bool {
 	return s.matchResource(n, nil)
 }
 
@@ -105,7 +105,7 @@ type nthPseudoClassSelector struct {
 	last, ofType bool
 }
 
-func (s nthPseudoClassSelector) Match(n *html.Node) bool {
+func (s nthPseudoClassSelector) matchNode(n *html.Node) bool {
 	return s.matchResource(n, nil)
 }
 
@@ -246,7 +246,7 @@ type onlyChildPseudoClassSelector struct {
 
 // Match implements :only-child.
 // If `ofType` is true, it implements :only-of-type instead.
-func (s onlyChildPseudoClassSelector) Match(n *html.Node) bool {
+func (s onlyChildPseudoClassSelector) matchNode(n *html.Node) bool {
 	return s.matchResource(n, nil)
 }
 
@@ -281,7 +281,7 @@ type inputPseudoClassSelector struct {
 }
 
 // Matches input, select, textarea and button elements.
-func (s inputPseudoClassSelector) Match(n *html.Node) bool {
+func (s inputPseudoClassSelector) matchNode(n *html.Node) bool {
 	return n.Type == html.ElementNode && (n.Data == "input" || n.Data == "select" || n.Data == "textarea" || n.Data == "button")
 }
 
@@ -290,7 +290,7 @@ type emptyElementPseudoClassSelector struct {
 }
 
 // Matches empty elements.
-func (s emptyElementPseudoClassSelector) Match(n *html.Node) bool {
+func (s emptyElementPseudoClassSelector) matchNode(n *html.Node) bool {
 	return s.matchResource(n, nil)
 }
 
@@ -322,7 +322,7 @@ type rootPseudoClassSelector struct {
 }
 
 // Match implements :root
-func (s rootPseudoClassSelector) Match(n *html.Node) bool {
+func (s rootPseudoClassSelector) matchNode(n *html.Node) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
@@ -345,7 +345,7 @@ type linkPseudoClassSelector struct {
 }
 
 // Match implements :link
-func (s linkPseudoClassSelector) Match(n *html.Node) bool {
+func (s linkPseudoClassSelector) matchNode(n *html.Node) bool {
 	return s.matchResource(n, nil)
 }
 
@@ -358,7 +358,7 @@ type langPseudoClassSelector struct {
 	lang string
 }
 
-func (s langPseudoClassSelector) Match(n *html.Node) bool {
+func (s langPseudoClassSelector) matchNode(n *html.Node) bool {
 	return s.matchResource(n, nil)
 }
 
@@ -381,7 +381,7 @@ type enabledPseudoClassSelector struct {
 	abstractPseudoClass
 }
 
-func (s enabledPseudoClassSelector) Match(n *html.Node) bool {
+func (s enabledPseudoClassSelector) matchNode(n *html.Node) bool {
 	return s.matchResource(n, nil)
 }
 
@@ -404,7 +404,7 @@ type disabledPseudoClassSelector struct {
 	abstractPseudoClass
 }
 
-func (s disabledPseudoClassSelector) Match(n *html.Node) bool {
+func (s disabledPseudoClassSelector) matchNode(n *html.Node) bool {
 	return s.matchResource(n, nil)
 }
 
@@ -457,7 +457,7 @@ type checkedPseudoClassSelector struct {
 	abstractPseudoClass
 }
 
-func (s checkedPseudoClassSelector) Match(n *html.Node) bool {
+func (s checkedPseudoClassSelector) matchNode(n *html.Node) bool {
 	return s.matchResource(n, nil)
 }
 

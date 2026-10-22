@@ -66,7 +66,10 @@ Local changes:
 Structural compilation limits and rejected extensions apply to all compilation
 entry points. Memory accounting is opt-in through the memory-aware APIs, and
 matching cancellation is opt-in through `MatchControl` / `MatchWithStop`.
-Legacy `Match`, query and filter APIs do not acquire a resource guard implicitly.
+The legacy `Selector`, `Compile`, `MustCompile`, tree-query, and filter APIs were
+removed so extraction code cannot accidentally traverse a document without a
+`MatchControl`. `MatcherFunc` supports bounded single-node predicates; callers
+still own guarded tree traversal.
 `MatchControl` propagates termination immediately, including through negation;
 it has no stopped latch or cancellation return value. The caller still owns accounting for any
 result collections outside the guarded matching API.

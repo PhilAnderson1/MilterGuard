@@ -26,11 +26,12 @@ func (m *Memory) unavailable() {
 	}
 
 	termination.Fail(termination.Failure{Code: termination.MemoryExceeded, Limit: m.limit})
-
-	return
 }
 
 func (m *Memory) Reserve(bytes int64) {
+	if bytes < 0 {
+		panic("resourceguard: negative reservation")
+	}
 	if m == nil {
 		return
 	}
@@ -42,10 +43,9 @@ func (m *Memory) Reserve(bytes int64) {
 	}
 	if m.limit <= 0 || m.used > m.limit || bytes > m.limit-m.used {
 		m.reject()
-		return
+		panic("resourceguard: termination returned")
 	}
 	m.used += bytes
-	return
 }
 
 func (m *Memory) Exhausted() bool { return m != nil && m.exhausted }
@@ -56,6 +56,16 @@ func (m *Memory) Used() int64 {
 	}
 	if m.exhausted {
 		return m.limit
+	}
+	return m.used
+}
+
+// Charged reports storage successfully admitted by this ledger. Unlike Used,
+// it does not inflate an exhausted ledger to its limit, so it is suitable for
+// parent-ledger transfers and telemetry.
+func (m *Memory) Charged() int64 {
+	if m == nil {
+		return 0
 	}
 	return m.used
 }
@@ -72,6 +82,9 @@ func (m *Memory) Limit() int64 {
 // ledger terminates the operation. Like Reserve, it is owned by one operation,
 // not concurrent.
 func (m *Memory) TryReserve(bytes int64) bool {
+	if bytes < 0 {
+		panic("resourceguard: negative reservation")
+	}
 	if m == nil {
 		return true
 	}

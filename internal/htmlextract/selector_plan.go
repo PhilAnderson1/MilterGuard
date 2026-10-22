@@ -167,7 +167,7 @@ func (p *selectorPlan) makeForeignCaseUncertain(memory *resourceguard.Memory) {
 	if name != "" {
 		lower := resourceguard.LowerASCII(memory, name, nil)
 
-		matcher := resourceguard.New(memory, foreignTypeMatcher{name: name, lower: lower})
+		matcher := cascadia.NewNamespaceTypeMatcherWithMemory(name, lower, memory)
 
 		p.scope = matcher
 		return
@@ -453,7 +453,7 @@ func ancestorSelectorKey(key selectorKey) selectorKey {
 	return key
 }
 
-var universalScopeMatcher cascadia.Matcher = cascadia.Selector(func(*html.Node) bool { return true })
+var universalScopeMatcher cascadia.Matcher = cascadia.MatcherFunc(func(*html.Node) bool { return true })
 
 func compileConservativeScope(prefix string, memory *resourceguard.Memory) cascadia.Matcher {
 	if prefix == "" || prefix == "*" {
@@ -464,16 +464,4 @@ func compileConservativeScope(prefix string, memory *resourceguard.Memory) casca
 		return universalScopeMatcher
 	}
 	return group[0]
-}
-
-type foreignTypeMatcher struct{ name, lower string }
-
-func (m *foreignTypeMatcher) Match(n *html.Node) bool {
-	if n.Type != html.ElementNode {
-		return false
-	}
-	if n.Namespace == "" {
-		return n.Data == m.lower
-	}
-	return n.Data == m.name
 }

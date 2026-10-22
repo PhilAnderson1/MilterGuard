@@ -2,9 +2,10 @@ package resourceguard
 
 import (
 	"bytes"
-	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 	"strings"
 	"unsafe"
+
+	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 )
 
 // WorkChunk bounds scans and copies between cooperative cancellation checks.
@@ -19,7 +20,6 @@ func (m *Memory) reject() {
 		m.exhausted = true
 	}
 	termination.Fail(termination.Failure{Code: termination.MemoryExceeded, Limit: m.Limit()})
-	return
 }
 
 // storageBytes validates arithmetic even for unguarded callers. It accounts for
@@ -46,8 +46,7 @@ func MakeSlice[T any](m *Memory, length, capacity int) []T {
 	var value T
 	size, ok := storageBytes(capacity, unsafe.Sizeof(value))
 	if !ok || length < 0 || length > capacity {
-		m.reject()
-		return nil
+		panic("resourceguard: invalid slice dimensions")
 	}
 
 	m.Reserve(size)
@@ -65,8 +64,7 @@ func GrowSlice[T any](m *Memory, s []T, additional int, stop Stop) []T {
 // GrowSliceFrom sets the modest initial capacity for a collection's workload.
 func GrowSliceFrom[T any](m *Memory, s []T, additional, initial int, stop Stop) []T {
 	if additional < 0 || additional > int(^uint(0)>>1)-len(s) {
-		m.reject()
-		return s
+		panic("resourceguard: invalid slice growth")
 	}
 
 	m.unavailable()
@@ -127,8 +125,7 @@ func Append[T any](m *Memory, s []T, stop Stop, values ...T) []T {
 // terminates the operation and discards the storage. It is not a hard process-memory cap.
 func MakeBytes(m *Memory, size int) []byte {
 	if size < 0 {
-		m.reject()
-		return nil
+		panic("resourceguard: negative byte-slice size")
 	}
 
 	m.Reserve(int64(size))
@@ -148,8 +145,7 @@ func MakeBytes(m *Memory, size int) []byte {
 // extraction stage that owns them and discard them if that stage unwinds.
 func GrowText(m *Memory, b *strings.Builder, additional int, stop Stop) {
 	if additional < 0 || additional > int(^uint(0)>>1)-b.Len() {
-		m.reject()
-		return
+		panic("resourceguard: invalid text growth")
 	}
 
 	m.unavailable()
@@ -247,8 +243,7 @@ func Concat(m *Memory, left, right string, stop Stop) string {
 	}
 	var b strings.Builder
 	if len(right) > int(^uint(0)>>1)-len(left) {
-		m.reject()
-		return ""
+		panic("resourceguard: concatenated string length overflow")
 	}
 
 	GrowText(m, &b, len(left)+len(right), stop)
@@ -293,8 +288,7 @@ func StringBytes(m *Memory, s string, nul bool, stop Stop) []byte {
 	size := len(s)
 	if nul {
 		if size == int(^uint(0)>>1) {
-			m.reject()
-			return nil
+			panic("resourceguard: NUL-terminated string length overflow")
 		}
 		size++
 	}
@@ -366,14 +360,34 @@ func LowerASCII(m *Memory, s string, stop Stop) string {
 	return b.String()
 }
 
+// LowerASCIIBytes makes one owned lowercase string copy of borrowed bytes.
+// Unlike composing CloneBytes and CopyString, it admits only the retained copy.
+func LowerASCIIBytes(m *Memory, data []byte, stop Stop) string {
+	var b strings.Builder
+	GrowText(m, &b, len(data), stop)
+	for i, c := range data {
+		if i > 0 && i%WorkChunk == 0 && stop != nil {
+			stop()
+		}
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
 // TryMakeSlice is optional-cache admission: rejection does not poison required
 // work. Like all storage entry points, it terminates when reusing an exhausted
-// ledger. Invalid dimensions are rejected first, without inspecting or changing
-// the budget.
+// ledger. Invalid dimensions panic as programmer errors before inspecting or
+// changing the budget.
 func TryMakeSlice[T any](m *Memory, length, capacity int) ([]T, bool) {
 	var value T
 	size, ok := storageBytes(capacity, unsafe.Sizeof(value))
-	if !ok || length < 0 || length > capacity || !m.TryReserve(size) {
+	if !ok || length < 0 || length > capacity {
+		panic("resourceguard: invalid slice dimensions")
+	}
+	if !m.TryReserve(size) {
 		return nil, false
 	}
 	return make([]T, length, capacity), true

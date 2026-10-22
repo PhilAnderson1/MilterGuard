@@ -23,7 +23,7 @@ func TestMemoryIsMonotonicAndFailsClosed(t *testing.T) {
 		t.Fatalf("first reservation: used=%d", memory.Used())
 	}
 	failure := expectTermination(t, termination.MemoryExceeded, func() { memory.Reserve(7) })
-	if !memory.Exhausted() || memory.Used() != 10 || failure.Limit != 10 {
+	if !memory.Exhausted() || memory.Used() != 10 || memory.Charged() != 4 || failure.Limit != 10 {
 		t.Fatalf("failure=%+v memory=%+v", failure, memory)
 	}
 	expectTermination(t, termination.MemoryExceeded, func() { memory.Reserve(1) })

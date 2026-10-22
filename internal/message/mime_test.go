@@ -464,7 +464,7 @@ func TestMultipartAlternativeAppliesLimitAfterSelection(t *testing.T) {
 func TestHTMLMemoryBudgetIsSharedAcrossParts(t *testing.T) {
 	budget := newExtractionBudget()
 	initial := budget.remainingMemory()
-	budget.consumeHTML(htmlextract.ResourceUsage{MemoryBytes: initial / 3})
+	budget.consumeHTML(htmlextract.AnalysisUsage{ResourceUsage: htmlextract.ResourceUsage{MemoryBytes: initial / 3}})
 	limits, ok := budget.htmlLimits(1)
 	if !ok {
 		t.Fatal("remaining shared memory budget rejected")
@@ -472,7 +472,7 @@ func TestHTMLMemoryBudgetIsSharedAcrossParts(t *testing.T) {
 	if limits.MemoryBytes != initial-initial/3 {
 		t.Fatalf("remaining memory=%d want=%d", limits.MemoryBytes, initial-initial/3)
 	}
-	budget.consumeHTML(htmlextract.ResourceUsage{MemoryBytes: limits.MemoryBytes})
+	budget.consumeHTML(htmlextract.AnalysisUsage{ResourceUsage: htmlextract.ResourceUsage{MemoryBytes: limits.MemoryBytes}})
 	expectTermination(t, termination.MemoryExceeded, func() { budget.htmlLimits(1) })
 }
 

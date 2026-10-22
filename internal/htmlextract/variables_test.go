@@ -221,7 +221,7 @@ func TestVariableExpansionUsesSharedMemoryBudget(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MemoryBytes = 1 << 20
 	_, usage, err, failure := captureAnalysis([]byte(b.String()), limits)
-	if err != nil || failure.Code != termination.MemoryExceeded || usage.MemoryBytes != limits.MemoryBytes {
+	if err != nil || failure.Code != termination.MemoryExceeded || !usage.MemoryLimitExceeded || usage.MemoryBytes > limits.MemoryBytes {
 		t.Fatalf("failure=%+v usage=%+v err=%v", failure, usage, err)
 	}
 }
@@ -271,7 +271,7 @@ func TestVariableExpandedShorthandLexingCannotEscapeMemoryBudget(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MemoryBytes = 4 << 20
 	_, usage, err, failure := captureAnalysis(input, limits)
-	if err != nil || failure.Code != termination.MemoryExceeded || usage.MemoryBytes != limits.MemoryBytes {
+	if err != nil || failure.Code != termination.MemoryExceeded || !usage.MemoryLimitExceeded || usage.MemoryBytes > limits.MemoryBytes {
 		t.Fatalf("failure=%+v usage=%+v err=%v", failure, usage, err)
 	}
 }

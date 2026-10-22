@@ -8,8 +8,8 @@
 // Try operations may decline optional storage that does not fit without
 // poisoning required work. They are not recovery operations: a valid storage
 // request against an already-exhausted ledger terminates the stage. APIs that
-// validate dimensions or indexes before consulting the ledger may reject an
-// invalid request first.
+// validate dimensions or indexes panic on invalid arguments before consulting
+// the ledger, keeping programmer errors distinct from document exhaustion.
 //
 // Typed arrays charge requested payload; fixed objects round to 16 bytes. Byte
 // buffers and builders reconcile exposed capacity before publication. Native

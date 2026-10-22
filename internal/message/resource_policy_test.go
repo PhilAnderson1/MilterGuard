@@ -40,7 +40,7 @@ func TestMemoryLimitFlagRequiresFailedAllocation(t *testing.T) {
 	calls := 0
 	b := newExtractionBudgetWithControl(HTMLProcessingControl{MemoryBytes: 256, StopOnMemoryLimit: true, MemoryLimitExceeded: func() { calls++ }})
 	runExtraction(b, func() struct{} { return struct{}{} })
-	b.consumeHTML(htmlextract.ResourceUsage{MemoryBytes: b.remainingMemory()})
+	b.consumeHTML(htmlextract.AnalysisUsage{ResourceUsage: htmlextract.ResourceUsage{MemoryBytes: b.remainingMemory()}})
 	if b.memoryLimitExceeded || calls != 0 {
 		t.Fatal("exact use is not a violation")
 	}

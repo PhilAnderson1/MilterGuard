@@ -8,7 +8,7 @@ import (
 func TestControlledAnalysisUnwindsAndPublishesUsage(t *testing.T) {
 	for _, code := range []termination.Code{termination.MemoryExceeded, termination.CPUExceeded, termination.Cancelled} {
 		var failure termination.Failure
-		var usage ResourceUsage
+		var usage AnalysisUsage
 		limits := DefaultLimits()
 		if code == termination.MemoryExceeded {
 			limits.MemoryBytes = 1
@@ -25,8 +25,11 @@ func TestControlledAnalysisUnwindsAndPublishesUsage(t *testing.T) {
 			}, &usage)
 			t.Fatal("controlled analysis returned after termination")
 		}()
-		if failure.Code != code || usage.MemoryBytes == 0 {
+		if failure.Code != code {
 			t.Fatalf("code=%v failure=%+v usage=%+v", code, failure, usage)
+		}
+		if code == termination.MemoryExceeded && usage.MemoryBytes > limits.MemoryBytes {
+			t.Fatalf("refused memory was reported as charged: %+v", usage)
 		}
 		if (code == termination.MemoryExceeded) != usage.MemoryLimitExceeded {
 			t.Fatalf("incorrect memory classification: %+v", usage)
@@ -39,13 +42,13 @@ func TestControlledStringChargesOwnedInput(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MemoryBytes = int64(len(input) - 1)
 	var failure termination.Failure
-	var usage ResourceUsage
+	var usage AnalysisUsage
 	func() {
 		defer termination.Recover(&failure)
 		AnalyzeControlledString(input, limits, nil, &usage)
 		t.Fatal("controlled string analysis returned after input allocation refusal")
 	}()
-	if failure.Code != termination.MemoryExceeded || usage.MemoryBytes != limits.MemoryBytes || !usage.MemoryLimitExceeded {
+	if failure.Code != termination.MemoryExceeded || usage.MemoryBytes != 0 || !usage.MemoryLimitExceeded {
 		t.Fatalf("failure=%+v usage=%+v", failure, usage)
 	}
 }
@@ -60,7 +63,7 @@ func expectTermination(t *testing.T, code termination.Code, work func()) termina
 	return failure
 }
 
-func captureAnalysis(input []byte, limits Limits) (document Document, usage ResourceUsage, err error, failure termination.Failure) {
+func captureAnalysis(input []byte, limits Limits) (document Document, usage AnalysisUsage, err error, failure termination.Failure) {
 	defer termination.Recover(&failure)
 	document, err = AnalyzeControlled(input, limits, nil, &usage)
 	return

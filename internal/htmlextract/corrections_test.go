@@ -24,10 +24,10 @@ func TestForeignAncestorScopeKeepsTarget(t *testing.T) {
 			t.Fatalf("%s: missing candidate", selector)
 		}
 		plan := s.rules[refs[0].rule].plans[refs[0].branch]
-		if !plan.uncertain || !plan.scope.Match(node) {
+		if !plan.uncertain || !selectorMatchesForTest(plan.scope, node) {
 			t.Fatalf("%s: target excluded", selector)
 		}
-		if plan.scope.Match(&html.Node{Type: html.ElementNode, Data: "span"}) {
+		if selectorMatchesForTest(plan.scope, &html.Node{Type: html.ElementNode, Data: "span"}) {
 			t.Fatalf("%s: lost ordinary target constraint", selector)
 		}
 	}

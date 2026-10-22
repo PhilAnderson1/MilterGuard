@@ -330,9 +330,10 @@ func (m *Message) decodedHeaderValues(name string) []string {
 // processing completes.
 func (m *Message) BodyBytes() []byte { return m.body.Bytes() }
 
-// CommandText returns decoded visible MIME text from a bounded prefix of an
-// authenticated command message. Callers separately constrain the accepted
-// top-level MIME types.
+// CommandText is a test-only convenience wrapper. It does not enforce a
+// production resource policy and may retry extraction with a fresh default
+// memory allowance. Production code must use CommandTextWithHTMLControl with
+// explicit resource controls and fallback policy.
 func (m *Message) CommandText(maxBytes int64) string {
 	return m.CommandTextWithHTMLControl(maxBytes, HTMLProcessingControl{})
 }
@@ -359,5 +360,9 @@ func (m *Message) CommandTextResult(maxBytes int64, control HTMLProcessingContro
 	}
 	budget.setDecodedTextByteLimit(textLimit)
 	content := extractMIMEWithBudget(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", body, 0, budget)
-	return stripInvisibleFormatting(content.VisibleText), !content.incomplete() && !m.MIMEHeadersTruncated
+	text = content.VisibleText
+	if content.HTMLFallbackUsed {
+		text = content.Text
+	}
+	return stripInvisibleFormatting(text), !content.incomplete() && !m.MIMEHeadersTruncated
 }

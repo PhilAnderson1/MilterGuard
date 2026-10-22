@@ -30,19 +30,22 @@ func (l Limits) validate() error {
 	return nil
 }
 
-// ResourceUsage records bounded resources consumed while analysing one HTML
-// document. Callers carry the remaining byte and allocation budgets across
-// all HTML parts of one message; limits are still enforced inside Analyze.
-// CSSLimitExceeded means the shared stylesheet cascade was abandoned after a
-// CSS resource limit or parser-recovery failure. MemoryLimitExceeded records
-// a failed allocation reservation, not merely using exactly the allowance.
-// A malformed inline style can instead remain locally unresolved without
-// setting that document-wide flag.
+// ResourceUsage records bounded resources consumed by a returned HTML
+// document. CSSLimitExceeded means the shared stylesheet cascade was abandoned
+// after a CSS resource limit or parser-recovery failure. A malformed inline
+// style can instead remain locally unresolved without setting that flag.
 type ResourceUsage struct {
 	InputBytes                 int
 	CSSBytes                   int
 	MemoryBytes                int64
 	CSSLimitExceeded           bool
-	MemoryLimitExceeded        bool
 	UnsupportedColourFunctions int
+}
+
+// AnalysisUsage is published by controlled analysis even when resource
+// termination means there is no Document to return. MemoryLimitExceeded records
+// a failed allocation reservation, not merely using exactly the allowance.
+type AnalysisUsage struct {
+	ResourceUsage
+	MemoryLimitExceeded bool
 }

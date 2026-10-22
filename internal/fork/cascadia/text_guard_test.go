@@ -18,7 +18,6 @@ func TestTextPseudoClassesAreRejected(t *testing.T) {
 			_, e := ParseGroupWithPseudoElementsAndMemory(s, resourceguard.NewMemory(1<<20))
 			return e
 		},
-		func(s string) error { _, e := Compile(s); return e },
 	}
 	for _, s := range []string{`:contains("x")`, `.target:containsOwn(x)`, `div:has(:contains(x))`, `:not(:containsown(x))`} {
 		for i, parse := range parsers {
@@ -49,11 +48,12 @@ func TestEmptyPseudoClassInterruptsLongWhitespace(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("calls=%d", calls)
 	}
-	if !s.Match(n) {
+	control := NewMatchControl(func() {})
+	if !control.Match(s, n) {
 		t.Fatal("Unicode whitespace semantics changed")
 	}
 	n.FirstChild.Data += "x"
-	if s.Match(n) {
+	if control.Match(s, n) {
 		t.Fatal("nonblank text matched empty")
 	}
 }

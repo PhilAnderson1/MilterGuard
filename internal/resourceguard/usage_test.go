@@ -21,7 +21,7 @@ func TestRecordUsageDoesNotRaiseOrRefund(t *testing.T) {
 	m.RecordUsage(1)
 	m.RecordUsage(1<<63 - 1)
 	m.RecordUsage(0)
-	if m.Used() != 10 || !m.Exhausted() {
+	if m.Used() != 10 || m.Charged() != 10 || !m.Exhausted() {
 		t.Fatal("overflow must exhaust ledger")
 	}
 	expectTermination(t, termination.MemoryExceeded, func() { m.Reserve(1) })

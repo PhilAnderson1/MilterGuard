@@ -167,7 +167,7 @@ func TestCaseInsensitiveAttributeMatchingUsesASCIIFolding(t *testing.T) {
 			t.Fatalf("parse %q: %v", test.selector, err)
 		}
 		n := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "data-value", Val: test.value}}}
-		if got := selector.Match(n); got != test.want {
+		if got := NewMatchControl(func() {}).Match(selector, n); got != test.want {
 			t.Errorf("selector %q value %q: got %v, want %v", test.selector, test.value, got, test.want)
 		}
 	}

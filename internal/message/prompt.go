@@ -29,8 +29,10 @@ var promptHeaders = map[string]bool{
 	"reply-to": true, "return-path": true, "subject": true,
 }
 
-// BuildAnalysis produces the bounded text and optional decoded inline images
-// supplied to the AI client after MIME and HTML processing.
+// BuildAnalysis is a test-only convenience wrapper. It does not enforce a
+// production resource policy and may retry extraction with a fresh default
+// memory allowance. Production code must use BuildAnalysisWithHTMLControl with
+// explicit resource controls and fallback policy.
 func (m *Message) BuildAnalysis(context AnalysisContext, maxChars int, vision VisionOptions) Analysis {
 	return m.BuildAnalysisWithHTMLControl(context, maxChars, vision, HTMLProcessingControl{})
 }
@@ -139,9 +141,10 @@ func writeHTMLCommentSummary(b *strings.Builder, comments htmlCommentStats, body
 	b.WriteString(".\n")
 }
 
-// ProcessedBody returns the decoded, normalized, annotation-aware body
-// representation used for classification evidence, bounded at UTF-8 rune
-// boundaries.
+// ProcessedBody is a test-only convenience wrapper. It does not enforce a
+// production resource policy and may retry extraction with a fresh default
+// memory allowance. Production code must use an explicitly controlled
+// extraction path.
 func (m *Message) ProcessedBody(maxChars int) string {
 	if maxChars < 1 {
 		return ""
@@ -150,9 +153,10 @@ func (m *Message) ProcessedBody(maxChars int) string {
 	return body
 }
 
-// VisibleBody returns the extractor's recipient-visible text estimate without
-// LLM-facing visibility annotations or concealed content. It is intended for
-// human-readable views; the original message remains the authoritative record.
+// VisibleBody is a test-only convenience wrapper. It does not enforce a
+// production resource policy and may retry extraction with a fresh default
+// memory allowance. Production code must use VisibleBodyWithHTMLControl with
+// explicit resource controls and fallback policy.
 func (m *Message) VisibleBody(maxChars int) string {
 	return m.VisibleBodyWithHTMLControl(maxChars, HTMLProcessingControl{})
 }
@@ -195,10 +199,10 @@ func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl)
 	}
 	budget.observeFallback()
 	if control.ObserveMemoryUsage != nil {
-		control.ObserveMemoryUsage(budget.memoryBytesLimit-budget.remainingMemory(), budget.memoryBytesLimit)
+		control.ObserveMemoryUsage(budget.primaryMemory.Charged(), budget.memoryBytesLimit)
 	}
 	if control.ObserveFallbackMemoryUsage != nil && budget.fallback != nil {
-		control.ObserveFallbackMemoryUsage(budget.fallback.memory.Used(), budget.fallback.memory.Limit())
+		control.ObserveFallbackMemoryUsage(budget.fallback.memory.Charged(), budget.fallback.memory.Limit())
 	}
 	content.HTMLCPULimitExceeded = content.HTMLCPULimitExceeded || budget.cpuLimitExceeded
 	content.HTMLPrimaryMemoryLimitExceeded = budget.memoryLimitExceeded

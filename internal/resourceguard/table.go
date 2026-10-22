@@ -76,8 +76,7 @@ func (t *Table[K, V]) Release() { t.data = nil; t.highWater = 0 }
 func (t *Table[K, V]) Init(m *Memory, count int) {
 	size, ok := storageBytes(count, uintptr(tableEntryBytes[K, V]()))
 	if !ok || size > int64(^uint64(0)>>1)-tableBaseBytes[K, V]() {
-		m.reject()
-		return
+		panic("resourceguard: invalid table size")
 	}
 
 	m.Reserve(size + tableBaseBytes[K, V]())
@@ -100,18 +99,24 @@ func MakeMap[K comparable, V any](m *Memory, count int) map[K]V {
 
 // TryCacheEntry admits the initial index and first map entry atomically. A
 // declined optional cache allocates nothing and consumes no required budget.
-// An invalid index is rejected before the ledger is inspected; valid requests
-// terminate rather than resume when the ledger is already exhausted.
+// An invalid index panics as a programmer error before the ledger is inspected;
+// valid requests terminate rather than resume when the ledger is exhausted.
 func TryCacheEntry[K comparable, V any](m *Memory, tables *[]Table[K, V], count, index int, key K, value V) bool {
 	if index < 0 || index >= count {
-		return false
+		panic("resourceguard: invalid cache index")
 	}
 	if *tables != nil {
+		if len(*tables) != count {
+			panic("resourceguard: cache table count mismatch")
+		}
 		return (*tables)[index].TrySet(m, key, value)
 	}
 	size, ok := storageBytes(count, unsafe.Sizeof(Table[K, V]{}))
 	first := tableBaseBytes[K, V]() + tableEntryBytes[K, V]()
-	if !ok || size > int64(^uint64(0)>>1)-first || !m.TryReserve(size+first) {
+	if !ok || size > int64(^uint64(0)>>1)-first {
+		panic("resourceguard: invalid cache table size")
+	}
+	if !m.TryReserve(size + first) {
 		return false
 	}
 	owned := MakeSlice[Table[K, V]](nil, count, count)

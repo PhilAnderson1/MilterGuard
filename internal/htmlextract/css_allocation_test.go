@@ -42,7 +42,7 @@ func TestCSSFixedAllocationBudget(t *testing.T) {
 			runtime.ReadMemStats(&before)
 			_, usage, err, failure := captureAnalysis(input, limits)
 			runtime.ReadMemStats(&after)
-			if err != nil || failure.Code == termination.None && !tc.allowComplete || failure.Code != termination.None && (failure.Code != termination.MemoryExceeded || usage.MemoryBytes != tc.limit) {
+			if err != nil || failure.Code == termination.None && !tc.allowComplete || failure.Code != termination.None && (failure.Code != termination.MemoryExceeded || !usage.MemoryLimitExceeded || usage.MemoryBytes > tc.limit) {
 				t.Fatalf("expected memory cutoff: charged=%d err=%v", usage.MemoryBytes, err)
 			}
 			allocated := after.TotalAlloc - before.TotalAlloc
@@ -115,7 +115,7 @@ func TestInlineCSSMemoryBoundaryUnwinds(t *testing.T) {
 		limits := DefaultLimits()
 		limits.MemoryBytes = limit
 		_, usage, err, failure := captureAnalysis(input, limits)
-		if err != nil || failure.Code != termination.None && (failure.Code != termination.MemoryExceeded || usage.MemoryBytes != limit) {
+		if err != nil || failure.Code != termination.None && (failure.Code != termination.MemoryExceeded || !usage.MemoryLimitExceeded || usage.MemoryBytes > limit) {
 			t.Fatalf("limit=%d charged=%d err=%v", limit, usage.MemoryBytes, err)
 		}
 	}

@@ -551,7 +551,7 @@ func TestCommandMessageCPUExhaustionReturnsExecutionFailure(t *testing.T) {
 	msg := message.New(1 << 20)
 	msg.AddHeader("Content-Type", "text/html; charset=UTF-8")
 	msg.AddBody([]byte("<p>WHITELIST ADD news@example.net</p>" + strings.Repeat("<div>padding</div>", 30000)))
-	lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 1<<20, 8<<20, 1)
+	lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 1<<20, 8<<20, 1, "reject")
 	if len(lines) != 0 {
 		t.Fatalf("partial commands returned after CPU exhaustion: %q", lines)
 	}
@@ -565,13 +565,41 @@ func TestCommandMessageMemoryExhaustionReturnsExecutionFailure(t *testing.T) {
 	msg := message.New(4096)
 	msg.AddHeader("Content-Type", "text/html; charset=UTF-8")
 	msg.AddBody([]byte("<p>HELP</p>"))
-	lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 4096, 8192, 250)
+	lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 4096, 8192, 250, "reject")
 	if len(lines) != 0 {
 		t.Fatalf("fallback commands returned after memory exhaustion: %q", lines)
 	}
 	var processingErr *commandBodyProcessingError
 	if !errors.As(err, &processingErr) || !strings.Contains(err.Error(), "memory limit") {
 		t.Fatalf("error=%v, want command execution failure", err)
+	}
+}
+
+func TestCommandMessageMemoryLimitUsesConfiguredResourceAction(t *testing.T) {
+	for _, tc := range []struct {
+		action      string
+		wantCommand bool
+	}{
+		{action: "fallback", wantCommand: true},
+		{action: "reject"},
+		{action: "dos-reject"},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			msg := message.New(1 << 20)
+			msg.AddHeader("Content-Type", "text/html; charset=UTF-8")
+			msg.AddBody([]byte(strings.Repeat("<i></i>", 5000) + "<p>HELP</p>"))
+			lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 1<<20, 256<<10, 250, tc.action)
+			if tc.wantCommand {
+				if err != nil || len(lines) != 1 || lines[0] != "HELP" {
+					t.Fatalf("fallback lines=%q error=%v", lines, err)
+				}
+				return
+			}
+			var processingErr *commandBodyProcessingError
+			if len(lines) != 0 || !errors.As(err, &processingErr) || !strings.Contains(err.Error(), "memory limit") {
+				t.Fatalf("lines=%q error=%v, want memory-limit rejection", lines, err)
+			}
+		})
 	}
 }
 
@@ -656,7 +684,7 @@ func TestCommandIncompleteExtractionReturnsProcessingFailure(t *testing.T) {
 			msg.AddHeader("Content-Type", tc.ctype)
 			msg.AddHeader("Content-Transfer-Encoding", tc.encoding)
 			msg.AddBody([]byte(tc.body))
-			lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 65536, 8<<20, 250)
+			lines, err := commandMessageLinesWithResourceLimits(context.Background(), msg, 65536, 8<<20, 250, "reject")
 			var processingErr *commandBodyProcessingError
 			if len(lines) != 0 || !errors.As(err, &processingErr) {
 				t.Fatalf("lines=%q error=%v", lines, err)
@@ -673,7 +701,7 @@ func TestCommandBodyCancellationStopsWithAndWithoutCPUClock(t *testing.T) {
 			msg := message.New(4096)
 			msg.AddHeader("Content-Type", "text/html")
 			msg.AddBody([]byte("<p>help</p>"))
-			lines, err := commandMessageLinesWithResourceLimits(ctx, msg, 4096, 8<<20, cpu)
+			lines, err := commandMessageLinesWithResourceLimits(ctx, msg, 4096, 8<<20, cpu, "reject")
 			if len(lines) != 0 || err == nil || !strings.Contains(err.Error(), "interrupted") {
 				t.Fatalf("lines=%v err=%v", lines, err)
 			}
