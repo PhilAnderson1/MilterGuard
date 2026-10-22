@@ -33,18 +33,20 @@ type extractionBudget struct {
 	terminal         termination.Failure
 	memoryBytesLimit int64
 
-	onCPULimit             func(fallback bool)
-	cpuLimitExceeded       bool
-	fallback               *fallbackResources
-	allowFallback          func() bool
-	fallbackMemoryExceeded bool
-	onFallbackMemoryLimit  func()
-	memoryLimitExceeded    bool
-	onMemoryLimit          func()
-	stopOnMemoryLimit      bool
-	compactURLs            bool
-	countingStop           func()
-	countingSampler        resourceguard.StopSampler
+	onCPULimit              func(fallback bool)
+	cpuLimitExceeded        bool
+	fallback                *fallbackResources
+	allowFallback           func() bool
+	fallbackMemoryExceeded  bool
+	onFallbackMemoryLimit   func()
+	onHTMLParserPanic       func()
+	htmlParserPanicReported bool
+	memoryLimitExceeded     bool
+	onMemoryLimit           func()
+	stopOnMemoryLimit       bool
+	compactURLs             bool
+	countingStop            func()
+	countingSampler         resourceguard.StopSampler
 }
 
 // extractionProgress contains the traversal allowances that must rewind when
@@ -72,17 +74,28 @@ func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBu
 			decodedTextBytesRemaining: int64(limits.InputBytes),
 			cssBytesRemaining:         limits.CSSBytes,
 		},
-		primaryMemory:    resourceguard.NewMemory(limits.MemoryBytes),
-		checkPrimary:     control.CheckPrimary,
-		onCPULimit:       control.CPULimitExceeded,
-		checkFallback:    control.CheckFallback,
-		memoryBytesLimit: limits.MemoryBytes,
+		primaryMemory:     resourceguard.NewMemory(limits.MemoryBytes),
+		checkPrimary:      control.CheckPrimary,
+		onCPULimit:        control.CPULimitExceeded,
+		onHTMLParserPanic: control.HTMLParserPanic,
+		checkFallback:     control.CheckFallback,
+		memoryBytesLimit:  limits.MemoryBytes,
 
 		compactURLs:           !control.DisableURLCompaction,
 		onMemoryLimit:         control.MemoryLimitExceeded,
 		allowFallback:         control.BeginFallback,
 		onFallbackMemoryLimit: control.FallbackMemoryLimitExceeded,
 		stopOnMemoryLimit:     control.StopOnMemoryLimit,
+	}
+}
+
+func (b *extractionBudget) noteHTMLParserPanic() {
+	if b.htmlParserPanicReported {
+		return
+	}
+	b.htmlParserPanicReported = true
+	if b.onHTMLParserPanic != nil {
+		b.onHTMLParserPanic()
 	}
 }
 
@@ -304,6 +317,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 				if !hasExtractedContent(content) {
 					content = retainedMIMEPart(parts)
 				}
+				retainMIMEPartFlags(&content, parts)
 				content.ExtractionIncomplete = true
 				content.MIMEIncomplete = true
 				return content
@@ -345,6 +359,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 		}
 		if budget.terminal.Code != termination.None {
 			content := retainedMIMEPart(parts)
+			retainMIMEPartFlags(&content, parts)
 			content.ExtractionIncomplete = true
 			content.MIMEIncomplete = true
 			return content

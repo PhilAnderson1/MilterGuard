@@ -135,7 +135,9 @@ type HTMLProcessingControl struct {
 	CheckFallback func()
 
 	// CPULimitExceeded reports a recovered CPU termination before fallback policy runs.
+	// HTMLParserPanic reports an unexpected tree-parser panic before lexical fallback.
 	CPULimitExceeded            func(fallback bool)
+	HTMLParserPanic             func()
 	BeginFallback               func() bool
 	MemoryLimitExceeded         func()
 	FallbackMemoryLimitExceeded func()

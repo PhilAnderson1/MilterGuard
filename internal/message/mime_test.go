@@ -13,6 +13,18 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 )
 
+func TestRetainedMIMEPartPreservesSiblingDegradationFlags(t *testing.T) {
+	parts := []extractedContent{
+		{Text: "earlier", HTMLFallbackUsed: true, CSSIncomplete: true, HasConcealedContent: true},
+		{Text: "retained"},
+	}
+	content := retainedMIMEPart(parts)
+	retainMIMEPartFlags(&content, parts)
+	if content.Text != "retained" || !content.HTMLFallbackUsed || !content.CSSIncomplete || !content.HasConcealedContent {
+		t.Fatalf("retained content lost sibling flags: %+v", content)
+	}
+}
+
 func TestPromptDecodesMultipart(t *testing.T) {
 	m := New(10000)
 	m.AddHeader("Subject", "Test")

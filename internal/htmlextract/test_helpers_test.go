@@ -5,6 +5,20 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
+func number(s string) (float64, bool) { return numberWithBudget(s, nil) }
+
+func tokenText(ts []valueToken) string { return tokenTextWithBudget(ts, nil) }
+
+func asciiLower(s string) string { return asciiLowerWithBudget(s, nil) }
+
+func normalizeCSSKeyword(s string) string {
+	return asciiLower(trimCSSWhitespace(s))
+}
+
+func readColour(s string) (RGBA, valueStatus) { return readColourWithBudget(s, nil) }
+
+func colourString(c RGBA) string { return colourStringWithBudget(c, nil) }
+
 func parseColor(s string) (string, valueStatus) {
 	c, status := readColour(s)
 	if status != valueResolved {
@@ -36,7 +50,20 @@ func labelBit(label string) visibilityLabel {
 }
 
 func (s *sheet) candidates(n *html.Node) []selectorRef {
+	active := &s.runtime.activeAncestors
+	active.reset(s.index.count, nil)
+	active.enabled = s.hasAncestorSelectorIndex()
+	var ancestors []*html.Node
+	for ancestor := n.Parent; ancestor != nil; ancestor = ancestor.Parent {
+		if ancestor.Type == html.ElementNode {
+			ancestors = append(ancestors, ancestor)
+		}
+	}
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		s.activateAncestorBuckets(ancestors[i], nil)
+	}
 	refs := s.collectCandidates(n, nil)
+	active.enabled = false
 	return refs
 }
 

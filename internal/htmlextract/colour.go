@@ -182,9 +182,6 @@ func isColourFunction(name string) bool {
 	return false
 }
 
-func countUnsupportedColourFunctions(tokens []valueToken) int {
-	return countUnsupportedColourFunctionsWithBudget(tokens, nil)
-}
 func countUnsupportedColourFunctionsWithBudget(tokens []valueToken, budget *cpuGuard) int {
 	count := 0
 	for _, token := range tokens {
@@ -197,9 +194,6 @@ func countUnsupportedColourFunctionsWithBudget(tokens []valueToken, budget *cpuG
 	return count
 }
 
-func isUnsupportedColourFunction(raw string) bool {
-	return isUnsupportedColourFunctionWithBudget(raw, nil)
-}
 func isUnsupportedColourFunctionWithBudget(raw string, budget *cpuGuard) bool {
 	name := asciiLowerWithBudget(cssUnescapeWithBudget(strings.TrimSuffix(raw, "("), budget), budget)
 	switch name {
@@ -209,12 +203,10 @@ func isUnsupportedColourFunctionWithBudget(raw string, budget *cpuGuard) bool {
 	return false
 }
 
-func backgroundImageSyntax(value string) bool { return backgroundImageSyntaxWithBudget(value, nil) }
 func backgroundImageSyntaxWithBudget(value string, budget *cpuGuard) bool {
 	return containsASCIIFoldWithBudget(value, "url(", budget) || containsASCIIFoldWithBudget(value, "gradient(", budget) || containsASCIIFoldWithBudget(value, "image-set(", budget) || containsASCIIFoldWithBudget(value, "cross-fade(", budget)
 }
 
-func legacyDimension(value string) (string, bool) { return legacyDimensionWithBudget(value, nil) }
 func legacyDimensionWithBudget(value string, budget *cpuGuard) (string, bool) {
 	value = strings.TrimSpace(value)
 	percentage := strings.HasSuffix(value, "%")
@@ -242,7 +234,6 @@ func legacyDimensionWithBudget(value string, budget *cpuGuard) (string, bool) {
 // Presentational hints precede all author rules, with specificity zero. Full
 // HTML legacy colour-error recovery is deliberately not guessed: unfamiliar
 // legacy spellings are unresolved, and cannot prove colour concealment.
-func legacyDeclarations(n *html.Node) []declaration { return legacyDeclarationsWithBudget(n, nil) }
 func legacyDeclarationsWithBudget(n *html.Node, budget *cpuGuard) []declaration {
 	return legacyDeclarationsWithBody(n, nil, budget)
 }

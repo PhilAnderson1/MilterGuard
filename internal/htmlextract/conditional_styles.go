@@ -125,9 +125,6 @@ func retainConditionalStyleAttribute(style *html.Node, key, value []byte, memory
 	return
 }
 
-func msoConditionalFragment(data string) (string, bool) {
-	return msoConditionalFragmentWithBudget(data, nil)
-}
 func msoConditionalFragmentWithBudget(data string, budget *cpuGuard) (string, bool) {
 	trimmed := strings.TrimSpace(data)
 	if len(trimmed) < len("[if ]>") || !hasASCIIFoldPrefix(trimmed, "[if ") {
@@ -399,9 +396,6 @@ func hasASCIIFoldPrefix(value, prefix string) bool {
 	return len(value) >= len(prefix) && equalASCIIFold(value[:len(prefix)], prefix)
 }
 
-func containsASCIIFold(value, target string) bool {
-	return containsASCIIFoldWithBudget(value, target, nil)
-}
 func containsASCIIFoldWithBudget(value, target string, budget *cpuGuard) bool {
 	for start := 0; start+len(target) <= len(value); start++ {
 		if start%stringWorkChunk == 0 && len(value) > stringWorkChunk {
@@ -415,9 +409,6 @@ func containsASCIIFoldWithBudget(value, target string, budget *cpuGuard) bool {
 	return false
 }
 
-func lastASCIIFoldIndex(value, target string) int {
-	return lastASCIIFoldIndexWithBudget(value, target, nil)
-}
 func lastASCIIFoldIndexWithBudget(value, target string, budget *cpuGuard) int {
 	for start := len(value) - len(target); start >= 0; start-- {
 		if start%stringWorkChunk == 0 && len(value) > stringWorkChunk {

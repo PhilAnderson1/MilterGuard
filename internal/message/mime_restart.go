@@ -54,6 +54,16 @@ func retainedMIMEPart(parts []extractedContent) extractedContent {
 	return extractedContent{}
 }
 
+// Preserve evidence-quality signals from completed siblings even when a
+// terminal resource failure permits retaining only one part's content.
+func retainMIMEPartFlags(content *extractedContent, parts []extractedContent) {
+	for i := range parts {
+		content.HTMLFallbackUsed = content.HTMLFallbackUsed || parts[i].HTMLFallbackUsed
+		content.CSSIncomplete = content.CSSIncomplete || parts[i].CSSIncomplete
+		content.HasConcealedContent = content.HasConcealedContent || parts[i].HasConcealedContent
+	}
+}
+
 // Retaining a completed part is a separate restartable allocation operation.
 // If primary admission fails here, fallback grows the collection without
 // decoding or extracting any completed part again.

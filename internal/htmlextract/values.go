@@ -49,8 +49,6 @@ func inherits(p int) bool {
 // number parses the decimal syntax accepted by CSS <number>. strconv.ParseFloat
 // alone is too permissive here: it also accepts Go spellings such as hexadecimal
 // floats and underscore separators that a browser does not treat as CSS numbers.
-func number(s string) (float64, bool) { return numberWithBudget(s, nil) }
-
 func clamp(v, hi float64) float64 { return math.Min(hi, math.Max(0, v)) }
 
 type valueStatus uint8

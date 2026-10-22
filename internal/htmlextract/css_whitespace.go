@@ -21,15 +21,9 @@ func trimCSSWhitespace(s string) string {
 // asciiLower applies the case folding used by CSS and HTML keyword grammars.
 // Unicode case folding is deliberately inappropriate here: for example, the
 // Kelvin sign must not be accepted as an ASCII "k" in a CSS identifier.
-func asciiLower(s string) string { return asciiLowerWithBudget(s, nil) }
-
 func asciiLowerWithBudget(s string, budget *cpuGuard) string {
 	value := lowerASCIIWithBudget(s, budget)
 	return value
-}
-
-func normalizeCSSKeyword(s string) string {
-	return asciiLower(trimCSSWhitespace(s))
 }
 
 // Expanded variables can be much larger than the stylesheet that defines them.

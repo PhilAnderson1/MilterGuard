@@ -7,6 +7,15 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
+// ErrParserPanic reports that the HTML tree builder encountered an unexpected
+// internal panic. Resource and cancellation terminations are rethrown before
+// this error is produced.
+var ErrParserPanic = parserPanicError{}
+
+type parserPanicError struct{}
+
+func (parserPanicError) Error() string { return "html: parsing failed" }
+
 // ResourceLimits stops parsing when the shared allocation budget or external
 // CPU guard is exhausted.
 type ResourceLimits struct {

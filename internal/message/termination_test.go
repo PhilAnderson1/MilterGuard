@@ -76,6 +76,18 @@ func TestCancellationDoesNotAdmitFallback(t *testing.T) {
 	}
 }
 
+func TestHTMLParserPanicIsReportedOncePerMessage(t *testing.T) {
+	reports := 0
+	b := newExtractionBudgetWithControl(HTMLProcessingControl{
+		HTMLParserPanic: func() { reports++ },
+	})
+	b.noteHTMLParserPanic()
+	b.noteHTMLParserPanic()
+	if reports != 1 {
+		t.Fatalf("reports=%d, want 1", reports)
+	}
+}
+
 func TestControlledMultipartRetainsCompletedPartsOnPrimaryRestart(t *testing.T) {
 	raw := []byte("--x\r\nContent-Type: text/plain\r\n\r\nfirst unique\r\n--x\r\nContent-Type: text/plain\r\n\r\n" + strings.Repeat("second text ", 8000) + "\r\n--x--\r\n")
 	baselineBudget := newExtractionBudgetWithControl(HTMLProcessingControl{})

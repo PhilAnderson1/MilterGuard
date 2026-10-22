@@ -1,6 +1,7 @@
 package html
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -58,29 +59,34 @@ type panickingReader struct{ value any }
 
 func (r panickingReader) Read([]byte) (int, error) { panic(r.value) }
 
-func TestUnexpectedParserPanicsRemainVisible(t *testing.T) {
+func TestUnexpectedParserPanicsBecomeParseFailures(t *testing.T) {
 	marker := &struct{ message string }{"unexpected failure"}
-	for name, work := range map[string]func(){
-		"reader":          func() { Parse(panickingReader{marker}) },
-		"fragment reader": func() { ParseFragment(panickingReader{marker}, nil) },
-		"checkpoint": func() {
+	for name, work := range map[string]func() error{
+		"reader":          func() error { _, err := Parse(panickingReader{marker}); return err },
+		"fragment reader": func() error { _, err := ParseFragment(panickingReader{marker}, nil); return err },
+		"checkpoint": func() error {
 			calls := 0
-			ParseWithOptions(strings.NewReader(strings.Repeat("<p>text</p>", 300)), ParseOptionResourceLimits(ResourceLimits{ShouldStop: func() {
+			_, err := ParseWithOptions(strings.NewReader(strings.Repeat("<p>text</p>", 300)), ParseOptionResourceLimits(ResourceLimits{ShouldStop: func() {
 				calls++
 				if calls == 2 {
 					panic(marker)
 				}
 			}}))
+			return err
+		},
+		"option": func() error {
+			_, err := ParseWithOptions(strings.NewReader("<p>text</p>"), func(*parseConfig) { panic(marker) })
+			return err
+		},
+		"fragment option": func() error {
+			_, err := ParseFragmentWithOptions(strings.NewReader("text"), nil, func(*parseConfig) { panic(marker) })
+			return err
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			defer func() {
-				if got := recover(); got != marker {
-					t.Fatalf("panic=%v, want original marker", got)
-				}
-			}()
-			work()
-			t.Fatal("unexpected panic was converted to a parse error")
+			if err := work(); !errors.Is(err, ErrParserPanic) {
+				t.Fatalf("error=%v, want ErrParserPanic", err)
+			}
 		})
 	}
 }

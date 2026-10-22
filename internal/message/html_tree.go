@@ -1,6 +1,7 @@
 package message
 
 import (
+	"errors"
 	"net/url"
 	"strconv"
 	"strings"
@@ -257,6 +258,9 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 	inspection, err = analyzeControlledHTML(source, limits, budget)
 	budget.checkStage()
 	if err != nil {
+		if errors.Is(err, xhtml.ErrParserPanic) {
+			budget.noteHTMLParserPanic()
+		}
 		// A bounded lexical fallback retains evidence when tree/style processing
 		// cannot complete. It is explicitly reported as incomplete extraction.
 		content := budget.extractFallback(source)

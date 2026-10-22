@@ -35,7 +35,6 @@ func oversizedCSSMediaTypeMayApply(value string) bool {
 	return end == len(value) || value[end] == ';' || htmlSpace(value[end])
 }
 
-func cssTypeAttributeApplies(n *html.Node) bool { return cssTypeAttributeAppliesWithBudget(n, nil) }
 func cssTypeAttributeAppliesWithBudget(n *html.Node, budget *cpuGuard) bool {
 	typ := attr(n, "type")
 	// mime.ParseMediaType builds a map for every parameter. Avoid allowing one
@@ -178,9 +177,6 @@ type cssImportReference struct {
 	unsupported bool
 }
 
-func importReference(values []css.Token) cssImportReference {
-	return importReferenceWithBudget(values, nil)
-}
 func importReferenceWithBudget(values []css.Token, budget *cpuGuard) cssImportReference {
 	start := 0
 	for start < len(values) && (values[start].TokenType == css.WhitespaceToken || values[start].TokenType == css.CommentToken) {
@@ -209,7 +205,6 @@ func importReferenceWithBudget(values []css.Token, budget *cpuGuard) cssImportRe
 	return cssImportReference{href: href, valid: true}
 }
 
-func cssURL(token css.Token) (string, bool) { return cssURLWithBudget(token, nil) }
 func cssURLWithBudget(token css.Token, budget *cpuGuard) (string, bool) {
 	raw := trimCSSWhitespace(ownedString(token.Data, budget))
 	switch token.TokenType {
@@ -230,7 +225,6 @@ func cssURLWithBudget(token css.Token, budget *cpuGuard) (string, bool) {
 	}
 }
 
-func unquoteCSSURL(value string) (string, bool) { return unquoteCSSURLWithBudget(value, nil) }
 func unquoteCSSURLWithBudget(value string, budget *cpuGuard) (string, bool) {
 	if len(value) >= 1 && (value[0] == '\'' || value[0] == '"') {
 		quote := value[0]
@@ -243,9 +237,6 @@ func unquoteCSSURLWithBudget(value string, budget *cpuGuard) (string, bool) {
 	return value, value != ""
 }
 
-func decodeCSSDataURL(reference string, maxBytes int) ([]byte, bool, bool) {
-	return decodeCSSDataURLWithBudget(reference, maxBytes, nil)
-}
 func decodeCSSDataURLWithBudget(reference string, maxBytes int, budget *cpuGuard) ([]byte, bool, bool) {
 	if !hasASCIIFoldPrefix(reference, "data:") {
 		return nil, false, false

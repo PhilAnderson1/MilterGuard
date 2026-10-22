@@ -432,25 +432,7 @@ func (s *sheet) collectCandidates(n *html.Node, budget *cpuGuard) []selectorRef 
 			appendBucket(bucket)
 		}
 	} else if s.hasAncestorSelectorIndex() {
-		for ancestor := n.Parent; ancestor != nil; ancestor = ancestor.Parent {
-			if ancestor.Type != html.ElementNode {
-				continue
-			}
-			ancestorTag := ancestor.Data
-			if ancestor.Namespace != "" {
-				ancestorTag = asciiLowerWithBudget(ancestorTag, budget)
-			}
-
-			appendBucket(s.index.ancestorTags[ancestorTag])
-
-			if len(s.index.ancestorIDs) != 0 || len(s.index.ancestorClasses) != 0 {
-				attributes := s.attributeCandidateBuckets(ancestor, budget)
-
-				for _, bucket := range attributes.ancestor {
-					appendBucket(bucket)
-				}
-			}
-		}
+		panic("htmlextract: ancestor selector index not activated")
 	}
 
 	// No sort is required: candidate.beats compares declaration importance,

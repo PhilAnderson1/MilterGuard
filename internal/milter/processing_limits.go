@@ -28,6 +28,7 @@ type htmlProcessingOptions struct {
 	memoryBytes          int64
 	maxCPUMilliseconds   int
 	disableURLCompaction bool
+	onHTMLParserPanic    func()
 }
 
 // runWithHTMLProcessingLimits supplies the common cancellation, CPU, memory,
@@ -41,6 +42,7 @@ func runWithHTMLProcessingLimits[T any](ctx context.Context, options htmlProcess
 		StopOnMemoryLimit:           !continueAfterLimit,
 		MemoryLimitExceeded:         func() { usage.memoryExceeded = true; usage.primaryMemoryExceeded = true },
 		FallbackMemoryLimitExceeded: func() { usage.memoryExceeded = true; usage.fallbackMemoryExceeded = true },
+		HTMLParserPanic:             options.onHTMLParserPanic,
 		ObserveMemoryUsage:          func(used, _ int64) { usage.primaryMemoryBytes = used },
 		ObserveFallbackMemoryUsage:  func(used, _ int64) { usage.fallbackMemoryBytes = used },
 	}

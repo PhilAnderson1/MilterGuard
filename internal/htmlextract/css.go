@@ -269,12 +269,14 @@ type sheet struct {
 
 // admitCSS applies the cumulative source and work bounds. Per-construct and
 // stack limits are enforced where the local CSS parser grows those resources.
-func (s *sheet) admitCSS(text string) bool {
+func (s *sheet) admitCSS(text string, mode cssParseMode) bool {
 	if s.cascadeIncomplete {
 		return false
 	}
 	if len(text) > s.limits.CSSBytes || s.cssBytes > s.limits.CSSBytes-len(text) {
-		s.abandonCascade()
+		if mode == stylesheetCSS {
+			s.abandonCascade()
+		}
 		return false
 	}
 
@@ -379,13 +381,10 @@ func (s *sheet) invalidateMediaCache() {
 	s.runtime.mediaGroups = nil
 }
 
-func tokenString(v []css.Token) string { return tokenStringWithBudget(v, nil) }
 func tokenStringWithBudget(v []css.Token, budget *cpuGuard) string {
 	value := trimCSSWhitespaceWithBudget(rawTokenStringWithBudget(v, budget), budget)
 	return value
 }
-
-func rawTokenString(v []css.Token) string { return rawTokenStringWithBudget(v, nil) }
 
 func rawTokenStringWithBudget(v []css.Token, budget *cpuGuard) string {
 	var b strings.Builder
@@ -419,8 +418,6 @@ func defaultNamespaceRule(values []css.Token) bool {
 	}
 	return false
 }
-
-func cssUnescape(value string) string { return cssUnescapeWithBudget(value, nil) }
 
 // Decoding owns one admitted buffer. A two-byte escape can become a three-byte
 // replacement rune, so 3/2 of the input length bounds the decoded UTF-8 size.

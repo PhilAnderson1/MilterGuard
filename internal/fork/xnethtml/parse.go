@@ -2277,7 +2277,7 @@ func (p *parser) parse() (err error) {
 			if abort, ok := panicErr.(resourceAbort); ok {
 				err = abort.err
 			} else {
-				panic(panicErr)
+				err = ErrParserPanic
 			}
 		}
 	}()
@@ -2369,7 +2369,7 @@ func ParseWithOptions(r io.Reader, opts ...ParseOption) (node *Node, err error) 
 				return
 			}
 
-			panic(panicErr)
+			node, err = nil, ErrParserPanic
 		}
 
 	}()
@@ -2397,7 +2397,7 @@ func ParseFragmentWithOptions(r io.Reader, context *Node, opts ...ParseOption) (
 				return
 			}
 
-			panic(panicErr)
+			nodes, err = nil, ErrParserPanic
 		}
 
 	}()

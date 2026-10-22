@@ -178,7 +178,6 @@ var unsupportedColourNames = map[string]struct{}{
 	"visitedtext":      {},
 }
 
-func readColour(s string) (RGBA, valueStatus) { return readColourWithBudget(s, nil) }
 func readColourWithBudget(s string, budget *cpuGuard) (RGBA, valueStatus) {
 	if s == "transparent" {
 		return RGBA{}, valueResolved
@@ -548,5 +547,3 @@ func parseHWBFunctionWithBudget(body string, budget *cpuGuard) (RGBA, valueStatu
 	factor := 1 - w - bk
 	return RGBA{r*factor + w, g*factor + w, b*factor + w, a}, valueResolved
 }
-
-func colourString(c RGBA) string { return colourStringWithBudget(c, nil) }

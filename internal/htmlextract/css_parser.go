@@ -41,8 +41,9 @@ func newCSSParseSession(s *sheet, text string, mode cssParseMode) cssParseSessio
 	if !inline {
 		s.invalidateMediaCache()
 	}
-	if !s.admitCSS(text) {
+	if !s.admitCSS(text, mode) {
 		session.finished = true
+		session.incomplete = inline
 		return session
 	}
 	session.parser = css.NewParserWithLimits(parse.NewInputStringWithMemory(text, s.memory, s.shouldStop), inline, css.ResourceLimits{

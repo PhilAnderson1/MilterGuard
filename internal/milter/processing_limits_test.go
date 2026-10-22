@@ -63,6 +63,24 @@ func TestNonCPUFailureGetsFreshFallbackAllowance(t *testing.T) {
 	}
 }
 
+func TestHTMLParserPanicReportingIsIndependentOfResourceAction(t *testing.T) {
+	for _, action := range []string{"dos-reject", "reject", "fallback", ""} {
+		t.Run(action, func(t *testing.T) {
+			reports := 0
+			_, usage := runWithHTMLProcessingLimits(context.Background(), htmlProcessingOptions{
+				action:            action,
+				onHTMLParserPanic: func() { reports++ },
+			}, func(control message.HTMLProcessingControl) bool {
+				control.HTMLParserPanic()
+				return true
+			})
+			if reports != 1 || usage.cpuExceeded() || usage.memoryExceeded {
+				t.Fatalf("reports=%d usage=%+v", reports, usage)
+			}
+		})
+	}
+}
+
 func TestCPUExhaustionPolicyWithRealClock(t *testing.T) {
 	requireThreadCPU(t)
 	for _, action := range []string{"dos-reject", "reject", "fallback", ""} {

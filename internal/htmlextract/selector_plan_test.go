@@ -296,14 +296,47 @@ func TestActiveAncestorCandidatesMatchParentWalk(t *testing.T) {
 		}
 		return set
 	}
+	walkedCandidates := func(node *html.Node) []selectorRef {
+		var refs []selectorRef
+		seen := make(map[int]bool)
+		appendBucket := func(bucket []selectorRef) {
+			for _, ref := range bucket {
+				if !seen[ref.sequence] {
+					seen[ref.sequence] = true
+					refs = append(refs, ref)
+				}
+			}
+		}
+		appendBucket(s.index.universal)
+		tag := node.Data
+		if node.Namespace != "" {
+			tag = asciiLowerWithBudget(tag, nil)
+		}
+		appendBucket(s.index.tags[tag])
+		attributes := s.attributeCandidateBuckets(node, nil)
+		for _, bucket := range attributes.direct {
+			appendBucket(bucket)
+		}
+		for ancestor := node.Parent; ancestor != nil; ancestor = ancestor.Parent {
+			if ancestor.Type != html.ElementNode {
+				continue
+			}
+			ancestorTag := ancestor.Data
+			if ancestor.Namespace != "" {
+				ancestorTag = asciiLowerWithBudget(ancestorTag, nil)
+			}
+			appendBucket(s.index.ancestorTags[ancestorTag])
+			attributes = s.attributeCandidateBuckets(ancestor, nil)
+			for _, bucket := range attributes.ancestor {
+				appendBucket(bucket)
+			}
+		}
+		return refs
+	}
 	var walk func(*html.Node)
 	walk = func(node *html.Node) {
 		if node.Type == html.ElementNode {
-			active.enabled = false
-			walked := s.collectCandidates(node, nil)
-			walked = append([]selectorRef(nil), walked...)
-			active.enabled = true
-
+			walked := walkedCandidates(node)
 			indexed := s.collectCandidates(node, nil)
 			indexed = append([]selectorRef(nil), indexed...)
 			if !reflect.DeepEqual(refSet(indexed), refSet(walked)) {

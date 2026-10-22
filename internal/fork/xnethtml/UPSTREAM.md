@@ -31,7 +31,8 @@ Local changes:
 - Guarded standalone tokenizer accessors propagate the shared termination
   signal, including cancellation during decoding. Callers establish the
   extraction-stage recovery boundary; `Err()` and `ErrorToken` report ordinary
-  I/O/tokenizer outcomes. Unexpected panics remain visible. Tree-builder NUL replacement, frameset
+  I/O/tokenizer outcomes. Unexpected parser panics become `ErrParserPanic`
+  after shared termination signals are rethrown. Tree-builder NUL replacement, frameset
   filtering and doctype lowercasing sample their scans and admit output storage.
 - Tag and attribute access replaces NUL bytes only when they are present,
   avoiding upstream's unconditional copies for ordinary tokens.
@@ -68,10 +69,9 @@ arrays remain charged even after their predecessors become unreachable. Charges
 are allocation allowances, not an exact Go heap/RSS ceiling.
 
 Structural-limit errors preserve their typed identity through setup and parsing.
-Parser recovery converts only fork-local structural aborts at the outer boundary
-and rethrows shared termination signals. Unknown panics, including invariant
-and injected-checkpoint failures, are re-raised unchanged; they are not ordinary malformed-input errors. Standalone
-tokenizers have no resource recovery boundary.
+Parser recovery converts fork-local structural aborts and unexpected parser
+panics to ordinary errors at the outer boundary, and rethrows shared termination
+signals. Standalone tokenizers have no resource recovery boundary.
 
 Fragment parsing samples cancellation while walking context ancestors and
 collecting result nodes. Result-slice growth is admitted to the shared memory
@@ -89,7 +89,8 @@ so larger loop steps cannot skip checkpoints. Shared operation counters retain
 exact-multiple sampling because they increment by one per operation.
 
 Unused parser/context and rendering diagnostics use shared errors, without
-formatting source or node details. Unexpected parser panics remain visible.
+formatting source or node details. Unexpected parser panics return the constant
+`ErrParserPanic` value.
 Internal panic messages are constant. Resource errors retain their type and fields but return constant text.
 Underlying I/O errors and resource-abort handling are preserved. Charset-label
 diagnostics remain: attachment filename decoding wraps and reports that text.

@@ -73,7 +73,9 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 
 	lines, err := commandMessageLinesWithResourceLimits(ctx, ss.message, cfg.MaxMessageBytes,
 		ss.deps.commands.maxHTMLParseMemoryBytes, ss.deps.commands.maxHTMLParseCPUMillis,
-		ss.deps.commands.htmlResourceLimitAction)
+		ss.deps.commands.htmlResourceLimitAction, func() {
+			ss.deps.log.ErrorContext(ctx, "HTML parser panic; using fallback extraction", "message_id", ss.message.Header("Message-ID"), "email_command", true)
+		})
 	if err != nil {
 		var processingErr *commandBodyProcessingError
 		if errors.As(err, &processingErr) {
@@ -199,7 +201,7 @@ type commandBodyProcessingError struct{ reason string }
 
 func (e *commandBodyProcessingError) Error() string { return e.reason }
 
-func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Message, maxBytes, memoryBytes int64, maxCPUMilliseconds int, action string) ([]string, error) {
+func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Message, maxBytes, memoryBytes int64, maxCPUMilliseconds int, action string, onHTMLParserPanic func()) ([]string, error) {
 	if action != "fallback" {
 		action = "reject"
 	}
@@ -209,6 +211,7 @@ func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Messa
 	}
 	extracted, usage := runWithHTMLProcessingLimits(ctx, htmlProcessingOptions{
 		action: action, memoryBytes: memoryBytes, maxCPUMilliseconds: maxCPUMilliseconds,
+		onHTMLParserPanic: onHTMLParserPanic,
 	}, func(control message.HTMLProcessingControl) result {
 		lines, err := commandMessageLinesWithHTMLControl(m, maxBytes, control)
 		return result{lines: lines, err: err}

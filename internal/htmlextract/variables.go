@@ -45,7 +45,6 @@ func lexValue(s string, budget *cpuGuard) ([]valueToken, valueStatus) {
 	}
 	return ts, valueResolved
 }
-func hasVariables(s string) bool { return hasVariablesWithBudget(s, nil) }
 func hasVariablesWithBudget(s string, budget *cpuGuard) bool {
 	return containsASCIIFoldWithBudget(s, "var(", budget) || indexByteWithBudget(s, '\\', budget) >= 0
 }
@@ -58,8 +57,6 @@ func tokensHaveVariables(tokens []valueToken) bool {
 	}
 	return false
 }
-
-func tokenText(ts []valueToken) string { return tokenTextWithBudget(ts, nil) }
 
 func tokenTextWithBudget(ts []valueToken, budget *cpuGuard) string {
 	var b strings.Builder

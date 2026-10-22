@@ -26,7 +26,7 @@ func (p *Processor) rejectionDetail(entry stores.Rejection) Response {
 			processedBody = "Saved message is attached, but its body could not be processed."
 			archived, parseErr := message.ParseArchived(archivedMessage.Contents, p.maxMessageSize)
 			if parseErr == nil {
-				processedBody = p.archivedVisibleBody(archived)
+				processedBody = p.archivedVisibleBody(archived, entry.ID)
 				if strings.TrimSpace(processedBody) == "" {
 					processedBody = "No readable message text was found."
 				}
@@ -46,10 +46,16 @@ func (p *Processor) rejectionDetail(entry stores.Rejection) Response {
 	return Response{Text: formatRejectionDetail(entry, processedBody), Attachments: attachments}
 }
 
-func (p *Processor) archivedVisibleBody(archived *message.Message) string {
+func (p *Processor) archivedVisibleBody(archived *message.Message, rejectionID uint64) string {
+	parserPanic := func() {
+		if p.log != nil {
+			p.log.Error("HTML parser panic; using fallback extraction", "rejection_id", rejectionID)
+		}
+	}
 	if p.maxHTMLParseCPUMilliseconds <= 0 {
 		return archived.VisibleBodyWithHTMLControl(MaxRejectionBodyRunes, message.HTMLProcessingControl{
-			MemoryBytes: p.maxHTMLParseMemoryBytes,
+			MemoryBytes:     p.maxHTMLParseMemoryBytes,
+			HTMLParserPanic: parserPanic,
 		})
 	}
 	runtime.LockOSThread()
@@ -65,6 +71,7 @@ func (p *Processor) archivedVisibleBody(archived *message.Message) string {
 			fallback.Reset(maximum)
 			return true
 		},
-		MemoryBytes: p.maxHTMLParseMemoryBytes,
+		HTMLParserPanic: parserPanic,
+		MemoryBytes:     p.maxHTMLParseMemoryBytes,
 	})
 }

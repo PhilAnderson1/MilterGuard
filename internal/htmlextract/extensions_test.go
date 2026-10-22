@@ -319,6 +319,24 @@ func TestMalformedInlineDelimiterUncertaintyRemainsLocal(t *testing.T) {
 	}
 }
 
+func TestOversizedInlineStyleUncertaintyRemainsLocal(t *testing.T) {
+	limits := DefaultLimits()
+	limits.CSSBytes = 32
+	document, err := Analyze([]byte(`<style>b{display:none}</style><p style="`+strings.Repeat("color:red;", 8)+`">T</p><b>U</b>`), limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findText(t, document, "T").Label; got != "unknown" {
+		t.Fatalf("oversized inline element label = %q, want unknown", got)
+	}
+	if got := findText(t, document, "U").Label; got != "concealed" {
+		t.Fatalf("stylesheet rule was lost: label = %q, want concealed", got)
+	}
+	if document.Usage.CSSLimitExceeded {
+		t.Fatal("oversized inline style abandoned the shared stylesheet cascade")
+	}
+}
+
 func TestCSSParserAcceptsBalancedComponents(t *testing.T) {
 	limits := DefaultLimits()
 	for _, source := range []string{

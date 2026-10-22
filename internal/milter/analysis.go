@@ -161,6 +161,11 @@ func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Messag
 		memoryBytes:          s.ai.MaxHTMLParseMemoryBytes,
 		maxCPUMilliseconds:   s.ai.MaxHTMLParseCPUMilliseconds,
 		disableURLCompaction: !s.ai.CompactPromptURLs,
+		onHTMLParserPanic: func() {
+			if s.log != nil {
+				s.log.ErrorContext(ctx, "HTML parser panic; using fallback extraction", "message_id", msg.Header("Message-ID"))
+			}
+		},
 	}, func(control message.HTMLProcessingControl) message.Analysis {
 		return msg.BuildAnalysisWithHTMLControl(analysisContext, s.ai.MaxBodyChars, vision, control)
 	})
