@@ -503,7 +503,6 @@ func joinExtractedText(parts []string, separator string, budget *extractionBudge
 	for _, part := range parts {
 		if int64(len(part)) > maxInt64-total {
 			budget.reserveOutputMemory(maxInt64)
-			termination.Fail(termination.Failure{Code: termination.MemoryExceeded, Limit: budget.allocationMemory().Limit()})
 		}
 		total += int64(len(part))
 	}

@@ -937,12 +937,14 @@ func (z *Tokenizer) readTag(saveAttr bool) {
 			break
 		}
 		// Save pendingAttr if saveAttr and that attribute has a non-empty key, and the key hasn't been seen before.
-		keyBytes := z.buf[z.pendingAttr[0].start:z.pendingAttr[0].end]
-		key := z.guard.ownedString(lowerWithGuard(z.guard.copyBytes(keyBytes), z.guard))
-		if saveAttr && z.pendingAttr[0].start != z.pendingAttr[0].end && !z.attrNames.View()[key] {
-			z.attrNames.Set(z.guard.memory(), key, true)
+		if saveAttr && z.pendingAttr[0].start != z.pendingAttr[0].end {
+			keyBytes := z.buf[z.pendingAttr[0].start:z.pendingAttr[0].end]
+			key := z.guard.ownedString(lowerWithGuard(z.guard.copyBytes(keyBytes), z.guard))
+			if !z.attrNames.View()[key] {
+				z.attrNames.Set(z.guard.memory(), key, true)
 
-			z.attr = append(growResourceSlice(z.attr, 1, z.guard), z.pendingAttr)
+				z.attr = append(growResourceSlice(z.attr, 1, z.guard), z.pendingAttr)
+			}
 		}
 
 		z.skipWhiteSpace()
@@ -1199,10 +1201,6 @@ loop:
 func (z *Tokenizer) Raw() []byte {
 	return z.buf[z.raw.start:z.raw.end]
 }
-
-// convertNewlines converts "\r" and "\r\n" in s to "\n".
-// The conversion happens in place, but the resulting slice may be shorter.
-func convertNewlines(s []byte) []byte { return convertNewlinesWithGuard(s, nil) }
 
 func convertNewlinesWithGuard(s []byte, guard *resourceGuard) []byte {
 	nextCheck := 1024

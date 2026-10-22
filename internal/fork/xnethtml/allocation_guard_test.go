@@ -70,6 +70,20 @@ func TestTokenizerReusesNameMapAllowance(t *testing.T) {
 		t.Fatalf("reused storage charged %d bytes", delta)
 	}
 }
+
+func TestEndTagAttributesDoNotConsumeRetainedAttributeMemory(t *testing.T) {
+	used := func(source string) int64 {
+		memory := resourceguard.NewMemory(1 << 20)
+		z := NewTokenizerWithLimits(strings.NewReader(source), ResourceLimits{Memory: memory})
+		if token := z.Next(); token != EndTagToken {
+			t.Fatalf("token=%v err=%v", token, z.Err())
+		}
+		return memory.Used()
+	}
+	if plain, attributed := used(`</div>`), used(`</div discarded=value>`); attributed != plain {
+		t.Fatalf("end-tag attributes charged retained memory: plain=%d attributed=%d", plain, attributed)
+	}
+}
 func TestHTMLStackGrowthChargesCompleteReplacement(t *testing.T) {
 	memory := resourceguard.NewMemory(1 << 20)
 	g := &resourceGuard{limits: ResourceLimits{Memory: memory}}

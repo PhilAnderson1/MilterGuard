@@ -43,6 +43,35 @@ func AnalyzeControlled(input []byte, limits Limits, check func(), usage *Resourc
 	return p.process(input)
 }
 
+// AnalyzeControlledString is AnalyzeControlled for a string whose byte view
+// must be owned by the analyser. The conversion is charged to the same child
+// ledger as parsing, including when conversion itself exhausts that ledger.
+func AnalyzeControlledString(input string, limits Limits, check func(), usage *ResourceUsage) (Document, error) {
+	if err := limits.validate(); err != nil {
+		return Document{}, err
+	}
+	if len(input) > limits.InputBytes {
+		return Document{}, fmt.Errorf("limit: input bytes > %d", limits.InputBytes)
+	}
+	memory := resourceguard.NewMemory(limits.MemoryBytes)
+	converted := false
+	if usage != nil {
+		defer func() {
+			if !converted {
+				*usage = ResourceUsage{
+					InputBytes:          len(input),
+					MemoryBytes:         memory.Used(),
+					MemoryLimitExceeded: memory.Exhausted(),
+				}
+			}
+		}()
+	}
+	owned := resourceguard.StringBytes(memory, input, false, check)
+	converted = true
+	p := processor{Limits: limits, shouldStop: check, memory: memory, usage: usage}
+	return p.process(owned)
+}
+
 func (p processor) checkpoint() {
 	if p.shouldStop != nil {
 		p.shouldStop()

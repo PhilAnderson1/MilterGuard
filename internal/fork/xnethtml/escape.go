@@ -248,9 +248,6 @@ func unescapeWithGuard(b []byte, attribute bool, guard *resourceGuard) []byte {
 	return out
 }
 
-// lower lower-cases the A-Z bytes in b in-place, so that "aBc" becomes "abc".
-func lower(b []byte) []byte { return lowerWithGuard(b, nil) }
-
 func lowerWithGuard(b []byte, guard *resourceGuard) []byte {
 	nextCheck := 1024
 	for i, c := range b {

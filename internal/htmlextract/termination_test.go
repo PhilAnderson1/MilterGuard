@@ -34,6 +34,22 @@ func TestControlledAnalysisUnwindsAndPublishesUsage(t *testing.T) {
 	}
 }
 
+func TestControlledStringChargesOwnedInput(t *testing.T) {
+	input := `<p>text</p>`
+	limits := DefaultLimits()
+	limits.MemoryBytes = int64(len(input) - 1)
+	var failure termination.Failure
+	var usage ResourceUsage
+	func() {
+		defer termination.Recover(&failure)
+		AnalyzeControlledString(input, limits, nil, &usage)
+		t.Fatal("controlled string analysis returned after input allocation refusal")
+	}()
+	if failure.Code != termination.MemoryExceeded || usage.MemoryBytes != limits.MemoryBytes || !usage.MemoryLimitExceeded {
+		t.Fatalf("failure=%+v usage=%+v", failure, usage)
+	}
+}
+
 func expectTermination(t *testing.T, code termination.Code, work func()) termination.Failure {
 	t.Helper()
 	var failure termination.Failure

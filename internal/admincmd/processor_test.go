@@ -189,9 +189,9 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	for _, want := range []string{
 		"MilterGuard is running in accept mode", "This period also contains rejections recorded in enforce mode",
 		"Activity: past week", "Retention: 365 days",
-		"Service uptime: 1 hour", "Total rejected: 29", "  AI classification: 20", "  Content processing CPU limit: 4", "  Content processing DoS protection: 3", "  IP reputation: 2",
+		"Service uptime: 1 hour", "Total rejected: 29", "  AI classification: 20", "  Content processing resource limit: 4", "  Content processing DoS protection: 3", "  IP reputation: 2",
 		"  Attachment policy: 0", "  Protected sender-domain policy: 0",
-		"Total accepted: 14", "  AI classification: 10", "  Content processing CPU limit (accept mode): 1", "  Content processing DoS protection (accept mode): 2", "  Correspondent whitelist: 1", "  Trusted sender domain: 0",
+		"Total accepted: 14", "  AI classification: 10", "  Content processing resource limit (accept mode): 1", "  Content processing DoS protection (accept mode): 2", "  Correspondent whitelist: 1", "  Trusted sender domain: 0",
 		"Total AI scans: 30", "AI evaluations failed: 1",
 		"Token costs are estimates based on endpoint-reported usage and configured prices.",
 		"Total token cost: USD 0.0197", "Average cost per message scanned: USD 0.000657",

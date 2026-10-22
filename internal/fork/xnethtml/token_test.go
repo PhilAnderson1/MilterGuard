@@ -818,7 +818,7 @@ func TestConvertNewlines(t *testing.T) {
 		"xyz":                   "xyz",
 	}
 	for in, want := range testCases {
-		if got := string(convertNewlines([]byte(in))); got != want {
+		if got := string(convertNewlinesWithGuard([]byte(in), nil)); got != want {
 			t.Errorf("input %q: got %q, want %q", in, got, want)
 		}
 	}

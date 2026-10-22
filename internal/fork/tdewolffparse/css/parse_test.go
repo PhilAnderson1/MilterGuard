@@ -1,6 +1,7 @@
 package css
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"strings"
@@ -130,7 +131,7 @@ func TestParse(t *testing.T) {
 			p := NewParser(parse.NewInputString(tt.css), tt.inline)
 			for {
 				grammar, _, data := p.Next()
-				data = parse.Copy(data)
+				data = bytes.Clone(data)
 				if grammar == ErrorGrammar {
 					if err := p.Err(); err != io.EOF {
 						data = []byte(fmt.Sprintf("ERROR(%v)", err))

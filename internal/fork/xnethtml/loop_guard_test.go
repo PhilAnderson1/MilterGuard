@@ -45,7 +45,7 @@ func TestNewlineConversionCannotSkipCheckpoints(t *testing.T) {
 		t.Run(fmt.Sprint(len(prefix)), func(t *testing.T) {
 			source := prefix + strings.Repeat("\r\n", 4096)
 			want := prefix + strings.Repeat("\n", 4096)
-			if got := string(convertNewlines([]byte(source))); got != want {
+			if got := string(convertNewlinesWithGuard([]byte(source), nil)); got != want {
 				t.Fatal("incorrect newline conversion")
 			}
 			g := &resourceGuard{limits: ResourceLimits{ShouldStop: func() {

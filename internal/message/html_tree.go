@@ -1317,5 +1317,5 @@ func (collector *linkCollector) AddDestination(candidate string) string {
 func analyzeControlledHTML(source string, limits htmlextract.Limits, budget *extractionBudget) (htmlextract.Document, error) {
 	var usage htmlextract.ResourceUsage
 	defer func() { budget.consumeHTML(usage) }()
-	return htmlextract.AnalyzeControlled([]byte(source), limits, budget.stageStop, &usage)
+	return htmlextract.AnalyzeControlledString(source, limits, budget.stageStop, &usage)
 }

@@ -4,14 +4,15 @@ This directory is a source fork of `github.com/tdewolff/parse/v2` from tag
 `v2.8.18`, commit `74435e5c57a215fd698e07400f3f4f335ec944de`.
 
 It originally copied the complete root package, buffer package, and CSS
-lexer/parser package with their upstream tests; unused diagnostic helpers
-were subsequently removed as documented below. Imports were rewritten to the
-MilterGuard-local package paths. These are the packages required by the HTML
-extractor; the unrelated HTML, JavaScript, JSON, XML, and numeric-conversion
-subpackages were not copied.
+lexer/parser package with their upstream tests. Unused diagnostic helpers,
+binary readers and writers, data-URI decoding, indentation helpers, and the
+unreferenced buffer package were subsequently removed. Imports were rewritten
+to the MilterGuard-local package paths. The unrelated HTML, JavaScript, JSON,
+XML, and numeric-conversion subpackages were not copied.
 
 The only upstream source change from v2.8.17 to v2.8.18 was in the uncopied
-JavaScript AST package. The copied root, buffer, and CSS packages are unchanged.
+JavaScript AST package. The upstream root, buffer, and CSS packages were
+unchanged between those tags.
 
 Local compatibility changes:
 
@@ -91,10 +92,9 @@ uses the corresponding decreasing threshold. Shared operation counters retain
 exact-multiple sampling because they increment by one per operation.
 
 Unused `Error`, `NewError`, `NewErrorLexer`, and `Position` diagnostic helpers
-and their diagnostic-only tests were removed. Binary/mmap helpers return a
-shared failure value instead of formatting unused range/file diagnostics. CSS
-internal errors use shared values; resource errors retain their type and fields
-but return constant text. Underlying I/O errors still pass through unchanged.
+and their diagnostic-only tests were removed. CSS internal errors use shared
+values; resource errors retain their type and fields but return constant text.
+Underlying I/O errors still pass through unchanged.
 
 Unused identifier/URL lexer probes live only in upstream tests; production
 callers use resource-aware lexer/parser entrypoints.
