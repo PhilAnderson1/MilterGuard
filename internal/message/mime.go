@@ -267,7 +267,12 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 		if boundary == "" {
 			return extractedContent{Text: "[multipart message has no boundary]", MIMEIncomplete: true, TransferIncomplete: transferIncomplete}
 		}
-		reader := multipart.NewReader(newDecodeReader(bytes.NewReader(decoded), budget.stageStop), boundary)
+		// mime/multipart uses a small buffered line reader while skipping the
+		// preamble. An unusually long preamble line therefore produces
+		// ErrBufferFull before it reaches the first boundary. Locate that boundary
+		// with our bounded scanner and retain only the MIME-significant suffix.
+		multipartSource := multipartBodyFromFirstBoundary(decoded, boundary, budget.stageStop)
+		reader := multipart.NewReader(newDecodeReader(bytes.NewReader(multipartSource), budget.stageStop), boundary)
 
 		partIndex := 0
 		var parts []extractedContent
@@ -283,7 +288,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 			var body []byte
 			var readErr error
 			{
-				read, complete := readRestartableMIMEPart(&reader, decoded, boundary, partIndex, budget)
+				read, complete := readRestartableMIMEPart(&reader, multipartSource, boundary, partIndex, budget)
 				if !complete {
 					mimeIncomplete = true
 					processingStopped = true

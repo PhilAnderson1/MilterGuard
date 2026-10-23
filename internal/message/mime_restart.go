@@ -7,6 +7,47 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
+// multipartBodyFromFirstBoundary removes an irrelevant MIME preamble before
+// handing the body to mime/multipart. The standard reader rejects a preamble
+// line longer than its internal buffer before it can find the boundary.
+// Returning a suffix of source is allocation-free.
+func multipartBodyFromFirstBoundary(source []byte, boundary string, check func()) []byte {
+	lineStart := true
+	for offset := 0; offset < len(source); offset++ {
+		if offset%resourceguard.WorkChunk == 0 && check != nil {
+			check()
+		}
+		if lineStart && multipartBoundaryLine(source[offset:], boundary) {
+			return source[offset:]
+		}
+		lineStart = source[offset] == '\n'
+	}
+	return source
+}
+
+func multipartBoundaryLine(line []byte, boundary string) bool {
+	if len(line) < len(boundary)+2 || line[0] != '-' || line[1] != '-' {
+		return false
+	}
+	for i := range len(boundary) {
+		if line[i+2] != boundary[i] {
+			return false
+		}
+	}
+	offset := len(boundary) + 2
+	final := len(line)-offset >= 2 && line[offset] == '-' && line[offset+1] == '-'
+	if final {
+		offset += 2
+	}
+	for offset < len(line) && (line[offset] == ' ' || line[offset] == '\t') {
+		offset++
+	}
+	if offset == len(line) {
+		return final
+	}
+	return line[offset] == '\n' || line[offset] == '\r' && offset+1 < len(line) && line[offset+1] == '\n'
+}
+
 type mimePartRead struct {
 	part *multipart.Part
 	body []byte
