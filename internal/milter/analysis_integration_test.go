@@ -106,7 +106,7 @@ func TestHTMLCPULimitRejectStopsLexicalFallback(t *testing.T) {
 
 	prepared, usage := service.buildAnalysis(context.Background(), msg, message.AnalysisContext{})
 	exceeded := usage.CPUExceeded()
-	if !exceeded || !prepared.BodyExtractionIncomplete || !prepared.HTMLCPULimitExceeded {
+	if !exceeded || !prepared.BodyExtractionIncomplete {
 		t.Fatalf("prepared=%+v exceeded=%t", prepared, exceeded)
 	}
 	if strings.Contains(prepared.Prompt, "ordinary message") {
@@ -120,7 +120,7 @@ func TestHTMLCPULimitFallbackRetainsCompletedMultipartAnalysis(t *testing.T) {
 	msg.AddHeader("Content-Type", `multipart/mixed; boundary="late-limit"`)
 	msg.AddBody([]byte("--late-limit\r\nContent-Type: text/plain\r\n\r\nplain evidence\r\n--late-limit\r\nContent-Type: text/html\r\n\r\n<p>HTML evidence</p>\r\n--late-limit--\r\n"))
 	prepared, usage := service.buildAnalysis(context.Background(), msg, message.AnalysisContext{})
-	if usage.CPUExceeded() || prepared.BodyExtractionIncomplete || !prepared.HasHTML || !strings.Contains(prepared.Prompt, "plain evidence") || !strings.Contains(prepared.Prompt, "HTML evidence") {
+	if usage.CPUExceeded() || prepared.BodyExtractionIncomplete || !strings.Contains(prepared.Prompt, "plain evidence") || !strings.Contains(prepared.Prompt, "HTML evidence") {
 		t.Fatalf("completed output lost: %+v usage=%+v", prepared, usage)
 	}
 }
@@ -216,7 +216,7 @@ func TestContentPreparationObservesCancellationWithCPUProtectionDisabled(t *test
 	if exceeded {
 		t.Fatalf("CPU exceeded=%t, want context cancellation only", exceeded)
 	}
-	if prepared.HTMLCPULimitExceeded || !prepared.BodyExtractionIncomplete {
+	if !prepared.BodyExtractionIncomplete {
 		t.Fatal("cancellation must end extraction without claiming CPU exhaustion")
 	}
 }

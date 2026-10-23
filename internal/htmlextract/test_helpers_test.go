@@ -83,3 +83,32 @@ func testCPUGuard(value cpuGuard) *cpuGuard {
 	g.sampler = resourceguard.NewStopSampler(1, g.checkpoint)
 	return g
 }
+
+func legacyDeclarationsWithBudget(n *html.Node, budget *cpuGuard) []declaration {
+	return legacyDeclarationsWithBody(n, nil, budget)
+}
+
+func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget *cpuGuard, depth int) variableValue {
+	return substituteIndexedTokens(ts, nil, lookup, budget, depth)
+}
+
+func planSelectorList(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int) ([]selectorPlan, int, bool) {
+	plans, branches, exceeded := planSelectorListWithStop(source, nextSequence, memory, remainingBranches, nil)
+	return plans, branches, exceeded
+}
+
+func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
+	return resolveLayoutPropertyWithBudget(property, value, nil)
+}
+
+func marginShorthandValues(value string) ([4]string, bool, bool) {
+	return marginShorthandValuesWithBudget(value, nil)
+}
+
+func relevantDeclarationProperty(prop string) bool {
+	return relevantNormalizedDeclarationProperty(normalizeDeclarationProperty(prop))
+}
+
+func normalizeDeclarationProperty(prop string) string {
+	return normalizeDeclarationPropertyWithBudget(prop, nil)
+}

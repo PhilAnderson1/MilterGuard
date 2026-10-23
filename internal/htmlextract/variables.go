@@ -641,9 +641,6 @@ func indexValueBlocks(ts []valueToken, budget *cpuGuard) []valueBlock {
 	return blocks
 }
 
-func substituteTokens(ts []valueToken, lookup func(string) variableValue, budget *cpuGuard, depth int) variableValue {
-	return substituteIndexedTokens(ts, nil, lookup, budget, depth)
-}
 func substituteIndexedTokens(ts []valueToken, blocks []valueBlock, lookup func(string) variableValue, budget *cpuGuard, depth int) variableValue {
 	if depth >= maxCSSValueDepth {
 		return variableValue{status: valueUnsupported}

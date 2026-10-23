@@ -63,10 +63,6 @@ type extractionProgress struct {
 	cssBytesRemaining         int
 }
 
-func newExtractionBudget() *extractionBudget {
-	return newExtractionBudgetWithControl(HTMLProcessingControl{})
-}
-
 func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBudget {
 	limits := htmlextract.DefaultLimits()
 	if control.MemoryBytes > 0 {

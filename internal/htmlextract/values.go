@@ -281,9 +281,6 @@ func resolveWithBudget(p int, s string, parent, root *Style, budget *cpuGuard) (
 	return Value{Text: s}, valueUnsupported
 }
 
-func resolveLayoutProperty(property int, value string) (Value, valueStatus) {
-	return resolveLayoutPropertyWithBudget(property, value, nil)
-}
 func resolveLayoutPropertyWithBudget(property int, value string, budget *cpuGuard) (Value, valueStatus) {
 	switch property {
 	case overflowInline, overflowBlock:

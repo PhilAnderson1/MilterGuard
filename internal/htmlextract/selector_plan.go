@@ -281,11 +281,6 @@ type selectorIndex struct {
 	ancestorCount   int
 }
 
-func planSelectorList(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int) ([]selectorPlan, int, bool) {
-	plans, branches, exceeded := planSelectorListWithStop(source, nextSequence, memory, remainingBranches, nil)
-	return plans, branches, exceeded
-}
-
 func planSelectorListWithStop(source string, nextSequence *int, memory *resourceguard.Memory, remainingBranches int, shouldStop func()) (plans []selectorPlan, branches int, exceeded bool) {
 	iterator := cascadia.NewSelectorListIteratorWithStop(source, shouldStop)
 	for {

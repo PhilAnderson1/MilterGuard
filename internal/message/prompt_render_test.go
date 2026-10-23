@@ -563,7 +563,7 @@ func TestPromptTreatsBodyLengthLimitedDKIMAsNoResult(t *testing.T) {
 	m.AddHeader("From", "sender@example.com")
 	context := AnalysisContext{Authentication: mailauth.Evidence{Results: []mailauth.Result{{
 		Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy, Domain: "example.com",
-		BodyLengthLimited: true, BodyLength: 12,
+		BodyLengthLimited: true,
 	}}}}
 	prompt := promptWithContext(m, context, 100)
 	if !strings.Contains(prompt, "DKIM: no trusted local result") {
@@ -578,7 +578,7 @@ func TestPromptOmitsBodyLengthLimitedDKIMAlongsideUsableResult(t *testing.T) {
 	m := New(1000)
 	m.AddHeader("From", "sender@example.com")
 	context := AnalysisContext{Authentication: mailauth.NewEvidence([]mailauth.Result{
-		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy, Domain: "limited.example.com", BodyLengthLimited: true, BodyLength: 12},
+		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy, Domain: "limited.example.com", BodyLengthLimited: true},
 		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePass, Domain: "example.com"},
 	}, "example.com")}
 	prompt := promptWithContext(m, context, 100)

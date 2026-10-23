@@ -12,17 +12,21 @@ func TestTextOnlyImageExtractionFitsSmallMemoryBudget(t *testing.T) {
 	m.AddHeader("Content-Type", "image/png; name=large.png")
 	m.AddHeader("Content-Transfer-Encoding", "base64")
 	m.AddBody([]byte(strings.Repeat("YWFh", 64<<10)))
-	control := HTMLProcessingControl{MemoryBytes: 64 << 10, StopOnMemoryLimit: true}
+	memoryCalls := 0
+	control := HTMLProcessingControl{MemoryBytes: 64 << 10, StopOnMemoryLimit: true,
+		MemoryLimitExceeded: func() { memoryCalls++ },
+	}
 	analysis := m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 1000, VisionOptions{Mode: "off"}, control)
-	if analysis.BodyExtractionIncomplete || analysis.HTMLMemoryLimitExceeded || len(analysis.Images) != 0 {
+	if analysis.BodyExtractionIncomplete || memoryCalls != 0 || len(analysis.Images) != 0 {
 		t.Fatalf("vision-off extraction failed: %+v", analysis)
 	}
 	if !strings.Contains(analysis.Prompt, "[attachment: large.png; type=image/png]") {
 		t.Fatalf("attachment marker missing: %s", analysis.Prompt)
 	}
 	for _, mode := range []string{"always", "fallback"} {
+		memoryCalls = 0
 		withImages := m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 1000, VisionOptions{Mode: mode}, control)
-		if !withImages.HTMLMemoryLimitExceeded {
+		if memoryCalls != 1 || !withImages.BodyExtractionIncomplete {
 			t.Fatalf("%s should still retain and charge decoded image data", mode)
 		}
 	}

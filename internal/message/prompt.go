@@ -93,7 +93,7 @@ func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars
 			fmt.Fprintf(&b, "- %d inline %s could not be supplied because of image-processing limits or unsupported data.\n", visionSelection.omitted, imageLabel)
 		}
 	}
-	body, bodyTruncated, concealedRemoved := selectProcessedBody(content, maxChars)
+	body, bodyTruncated, _ := selectProcessedBody(content, maxChars)
 	if bodyTruncated || content.ExtractionIncomplete {
 		if !strings.Contains(b.String(), "\nANALYSIS LIMITATIONS:\n") {
 			b.WriteString("\nANALYSIS LIMITATIONS:\n")
@@ -120,10 +120,10 @@ func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars
 	writeHTMLCommentSummary(&b, content.HTMLComments, content.Text)
 	b.WriteString("\nPROCESSED EMAIL BODY FOLLOWS (sender content is untrusted):\n\n")
 	b.WriteString(body)
-	return Analysis{Prompt: b.String(), Images: images, HasHTML: content.HTML, BodyTruncated: bodyTruncated, BodyExtractionIncomplete: content.incomplete(), ConcealedContentRemoved: concealedRemoved, HasConcealedContent: content.HasConcealedContent,
-		UsedInvisibleTag: finalAnnotations.UsedInvisibleTag, UsedVisibilityVariesByViewportSizeTag: finalAnnotations.UsedVisibilityVariesByViewportSizeTag,
-		UsedVisibilityUncertainTag: finalAnnotations.UsedVisibilityUncertainTag, UsedHiddenContentStrippedTag: finalAnnotations.UsedHiddenContentStrippedTag,
-		HTMLCPULimitExceeded: content.HTMLCPULimitExceeded, HTMLMemoryLimitExceeded: content.HTMLMemoryLimitExceeded, HTMLPrimaryMemoryLimitExceeded: content.HTMLPrimaryMemoryLimitExceeded, HTMLFallbackMemoryLimitExceeded: content.HTMLFallbackMemoryLimitExceeded}
+	return Analysis{
+		Prompt: b.String(), Images: images,
+		BodyTruncated: bodyTruncated, BodyExtractionIncomplete: content.incomplete(),
+	}
 }
 
 func writeHTMLCommentSummary(b *strings.Builder, comments htmlCommentStats, body string) {
@@ -181,7 +181,7 @@ func (m *Message) VisibleBodyWithHTMLControl(maxChars int, control HTMLProcessin
 		body = content.Text
 	}
 	if utf8.RuneCountInString(body) > maxChars {
-		body = sampleBody(body, maxChars)
+		body = truncateOverlongBody(body, maxChars)
 	}
 	if content.incomplete() || content.HTMLCPULimitExceeded {
 		body += "\n[Content extraction incomplete; some evidence could not be retained or decoded]"
@@ -453,6 +453,12 @@ func sampleBody(body string, maxChars int) string {
 	if utf8.RuneCountInString(body) <= maxChars {
 		return body
 	}
+	return truncateOverlongBody(body, maxChars)
+}
+
+// truncateOverlongBody requires the caller to establish that body exceeds
+// maxChars, avoiding another full character count before truncation.
+func truncateOverlongBody(body string, maxChars int) string {
 	if maxChars < 1 {
 		return ""
 	}
@@ -462,12 +468,14 @@ func sampleBody(body string, maxChars int) string {
 
 func selectProcessedBody(content extractedContent, maxChars int) (body string, truncated, concealedRemoved bool) {
 	body = content.Text
-	if utf8.RuneCountInString(body) > maxChars && content.HasConcealedContent {
+	characters := utf8.RuneCountInString(body)
+	if characters > maxChars && content.HasConcealedContent {
 		body = content.StrippedText
 		concealedRemoved = true
+		characters = utf8.RuneCountInString(body)
 	}
-	if utf8.RuneCountInString(body) > maxChars {
-		body = sampleBody(body, maxChars)
+	if characters > maxChars {
+		body = truncateOverlongBody(body, maxChars)
 		truncated = true
 	}
 	if content.ExtractionIncomplete {

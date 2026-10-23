@@ -213,10 +213,6 @@ func legacyDimensionWithBudget(value string, budget *cpuGuard) (string, bool) {
 // Presentational hints precede all author rules, with specificity zero. Full
 // HTML legacy colour-error recovery is deliberately not guessed: unfamiliar
 // legacy spellings are unresolved, and cannot prove colour concealment.
-func legacyDeclarationsWithBudget(n *html.Node, budget *cpuGuard) []declaration {
-	return legacyDeclarationsWithBody(n, nil, budget)
-}
-
 func legacyDeclarationsWithBody(n, body *html.Node, budget *cpuGuard) []declaration {
 	if n.Namespace != "" {
 		return nil

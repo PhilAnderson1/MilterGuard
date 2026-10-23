@@ -50,6 +50,8 @@ Only tests read the resulting statistic. Production extraction reads other usage
 
 **Priority:** Medium
 
+**Status:** Fixed. Removed the unused DKIM signature details, SPF identity, DMARC policy details, and DNS-authenticity fields from `mailauth.Result`, together with their translation work and the obsolete canonicalization helper. Authentication verification calls are unchanged. Retained `BodyLengthLimited`, `SPFMechanism`, outcomes, domains, error information, and alignment evidence. Tests now assert retained outcomes and evidence while still exercising canonicalization, RSA/Ed25519 signatures, HELO-based SPF, body-length policy, and strict/relaxed DMARC alignment. Tests passed for `internal/mailauth/...`, `internal/message`, `internal/milter`, and `tools/authcorpus`. The description below records the original finding.
+
 **Locations:** [internal/mailauth/evidence.go:50](internal/mailauth/evidence.go#L50), [internal/mailauth/moxverify/translate.go:20](internal/mailauth/moxverify/translate.go#L20), [internal/mailauth/moxverify/translate.go:36](internal/mailauth/moxverify/translate.go#L36), [internal/mailauth/moxverify/verifier.go:190](internal/mailauth/moxverify/verifier.go#L190), [internal/mailauth/moxverify/verifier.go:234](internal/mailauth/moxverify/verifier.go#L234)
 
 Authentication translation populates fields with test consumers but no application readers:
@@ -65,17 +67,19 @@ Some of this work includes string formatting, normalization, splitting, bounding
 
 ## 5. Hidden-content-stripped output is generated before it is needed
 
-**Priority:** Medium
+**Status:** Deferred; unproven optimization opportunity, not a confirmed defect. Producing both representations during extraction allows each HTML tree and resolved styles to be discarded before multipart assembly and final body-size selection. Stripped rendering is already skipped when no concealed content exists. A combined render might save traversal work, but deferred rendering could increase retained memory or require reparsing. Leave the implementation unchanged unless benchmarks justify a redesign.
 
 **Locations:** [internal/message/html_tree.go:306](internal/message/html_tree.go#L306), [internal/message/prompt.go:174](internal/message/prompt.go#L174), [internal/message/prompt.go:461](internal/message/prompt.go#L461)
 
 HTML extraction performs a second rendering with `StripHidden` whenever concealed content exists. `selectProcessedBody` uses that output only when the tagged body exceeds the character limit. Messages whose tagged body fits therefore pay for an unused traversal and output allocation. Archived visible-body rendering does not consume the stripped output either.
 
-**Recommendation:** Defer or selectively enable stripped rendering according to the caller's requirements. This is more involved than removing a field: multipart body selection depends on the combined body size, and any deferred design must preserve that behavior along with resource accounting and fallback semantics.
+**Recommendation:** Retain the current design. Any investigation of combining rendering passes must account for multipart selection, distinct output semantics, resource accounting, and fallback behavior; the presence of an unused alternative in some messages does not itself establish a worthwhile optimization.
 
 ## 6. Body selection repeatedly counts the same string's runes
 
 **Priority:** Low
+
+**Status:** Fixed. Body selection reuses its character count and recalculates only when switching to stripped text. Both body selection and visible-body rendering call a truncation helper that does not repeat the count once an overlong body has been established. Regression tests cover Unicode boundaries, exact fits, stripped-body selection, non-positive limits, and incomplete-extraction markers. Tests passed for `internal/message` and `internal/admincmd`. The description below records the original finding.
 
 **Locations:** [internal/message/prompt.go:450](internal/message/prompt.go#L450), [internal/message/prompt.go:461](internal/message/prompt.go#L461)
 
@@ -86,6 +90,8 @@ HTML extraction performs a second rendering with `StripHidden` whenever conceale
 ## 7. Analysis exports redundant runtime result fields
 
 **Priority:** Low
+
+**Status:** Fixed. `message.Analysis` now contains only `Prompt`, `Images`, `BodyTruncated`, and `BodyExtractionIncomplete`. Removed the unused copies of HTML presence, concealment, annotation usage, and resource-limit flags. Underlying extraction state and prompt annotation checks remain intact. Tests assert rendered concealment behavior and obtain resource outcomes through `ProcessingUsage` or existing callbacks. Tests passed for `internal/message`, `internal/milter`, and `internal/admincmd`. The description below records the original finding.
 
 **Locations:** [internal/message/message.go:102](internal/message/message.go#L102), [internal/message/prompt.go:123](internal/message/prompt.go#L123), [internal/milter/analysis.go:59](internal/milter/analysis.go#L59)
 
@@ -98,6 +104,8 @@ Redundant exports include `HasHTML`, `ConcealedContentRemoved`, `HasConcealedCon
 ## 8. Test-only helpers reside in production files
 
 **Priority:** Low
+
+**Status:** Fixed. Moved all eight wrappers, with their bodies unchanged, into `internal/htmlextract/test_helpers_test.go` and `internal/message/extraction_test_helpers_test.go`. No production references remain. Removed the seven relocated HTML-helper entries from the allocation manifest; the underlying production functions and allocation behavior are unchanged. Production build and tests passed for `./cmd/... ./internal/... ./tools/...`, including the allocation audit. The locations below record the original finding.
 
 The following helpers have no production callers, but do have test callers, directly or through a test-only wrapper chain:
 

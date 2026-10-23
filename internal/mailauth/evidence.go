@@ -54,31 +54,16 @@ type Result struct {
 	Aligned       bool
 	Reason        string
 	ErrorCategory ErrorCategory
-	DNSAuthentic  bool
 
-	// DKIM details. There is one Result for every signature, including failures.
-	Selector               string
-	Identity               string
-	Algorithm              string
-	HeaderCanonicalization string
-	BodyCanonicalization   string
-	BodyLengthLimited      bool
-	BodyLength             int64
+	// DKIM signatures with a body-length limit need special prompt handling.
+	BodyLengthLimited bool
 
-	// SPF details.
-	SPFIdentity  string // "mailfrom" or "helo"
+	// Retained for authentication corpus comparisons.
 	SPFMechanism string
 
-	// DMARC policy details.
-	PolicyDomain      string
-	PolicyDisposition string
-	SubdomainPolicy   string
-	DKIMAlignmentMode string
-	SPFAlignmentMode  string
-	PolicyPercentage  int
-	PolicyApplied     bool
-	AlignedSPFPass    bool
-	AlignedDKIMPass   bool
+	// Internal DMARC verification supplies the underlying alignment evidence.
+	AlignedSPFPass  bool
+	AlignedDKIMPass bool
 }
 
 // Evidence is the provider-neutral authentication conclusion for one message.

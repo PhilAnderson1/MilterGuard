@@ -12,16 +12,17 @@ import (
 
 func TestMemoryPolicyStopsBeforeLexicalFallback(t *testing.T) {
 	for _, stop := range []bool{false, true} {
-		fallbackCalls, memoryCalls := 0, 0
+		fallbackCalls, memoryCalls, cpuCalls := 0, 0, 0
 		msg := New(4096)
 		msg.AddHeader("Content-Type", "text/html")
 		msg.AddBody([]byte("<p>retained evidence</p>"))
 		got := msg.BuildAnalysisWithHTMLControl(AnalysisContext{}, 4096, VisionOptions{Mode: "off"}, HTMLProcessingControl{
 			MemoryBytes: 8192, StopOnMemoryLimit: stop,
 			MemoryLimitExceeded: func() { memoryCalls++ },
+			CPULimitExceeded:    func(bool) { cpuCalls++ },
 			CheckFallback:       func() { fallbackCalls++; return },
 		})
-		if !got.HTMLMemoryLimitExceeded || got.HTMLCPULimitExceeded || memoryCalls != 1 {
+		if cpuCalls != 0 || memoryCalls != 1 {
 			t.Fatalf("stop=%v memory callbacks=%d analysis=%+v", stop, memoryCalls, got)
 		}
 		if stop {
@@ -58,8 +59,10 @@ func TestMultipartOutputMemoryExhaustionIsReported(t *testing.T) {
 	m := New(4096)
 	m.AddHeader("Content-Type", `multipart/mixed; boundary="small"`)
 	m.AddBody([]byte("--small\r\nContent-Type: text/plain\r\n\r\nfirst\r\n--small\r\nContent-Type: text/plain\r\n\r\nsecond\r\n--small--\r\n"))
-	a := m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 4096, VisionOptions{Mode: "off"}, HTMLProcessingControl{MemoryBytes: 1, StopOnMemoryLimit: true})
-	if !a.HTMLMemoryLimitExceeded || a.HTMLCPULimitExceeded || !a.BodyExtractionIncomplete {
+	a, usage := WithProcessingLimits(t.Context(), ProcessingLimits{MemoryBytes: 1}, func(control HTMLProcessingControl) Analysis {
+		return m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 4096, VisionOptions{Mode: "off"}, control)
+	})
+	if !usage.MemoryExceeded || usage.CPUExceeded() || !a.BodyExtractionIncomplete {
 		t.Fatalf("analysis=%+v", a)
 	}
 }
@@ -68,13 +71,15 @@ func TestUncontrolledFallbackPreservesLaterMIMEParts(t *testing.T) {
 	m := New(32 << 10)
 	m.AddHeader("Content-Type", `multipart/mixed; boundary="continue"`)
 	m.AddBody([]byte("--continue\r\nContent-Type: text/html\r\n\r\n" + strings.Repeat("<div>", 700) + "first evidence\r\n--continue\r\nContent-Type: text/plain\r\n\r\nsecond evidence\r\n--continue\r\nContent-Type: text/html\r\n\r\n<p>third evidence</p>\r\n--continue--\r\n"))
-	a := m.BuildAnalysis(AnalysisContext{}, 4096, VisionOptions{Mode: "off"})
+	a, usage := WithProcessingLimits(t.Context(), ProcessingLimits{AllowFallbackAfterLimit: true}, func(control HTMLProcessingControl) Analysis {
+		return m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 4096, VisionOptions{Mode: "off"}, control)
+	})
 	for _, want := range []string{"first evidence", "second evidence", "third evidence"} {
 		if !strings.Contains(a.Prompt, want) {
 			t.Fatalf("missing %q", want)
 		}
 	}
-	if a.HTMLCPULimitExceeded || a.HTMLMemoryLimitExceeded {
+	if usage.CPUExceeded() || usage.MemoryExceeded {
 		t.Fatal("structural failure reported as budget exhaustion")
 	}
 }
@@ -105,9 +110,9 @@ func TestCSSExpansionMemoryExhaustionStopsRecovery(t *testing.T) {
 	m := New(4096)
 	m.AddHeader("Content-Type", "text/html")
 	m.AddBody([]byte(source.String()))
-	fallbackCalls := 0
-	a := m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 4096, VisionOptions{Mode: "off"}, HTMLProcessingControl{MemoryBytes: 8 << 20, StopOnMemoryLimit: true, CheckFallback: func() { fallbackCalls++; return }})
-	if !a.HTMLMemoryLimitExceeded || a.HTMLCPULimitExceeded || fallbackCalls != 0 {
+	fallbackCalls, memoryCalls, cpuCalls := 0, 0, 0
+	a := m.BuildAnalysisWithHTMLControl(AnalysisContext{}, 4096, VisionOptions{Mode: "off"}, HTMLProcessingControl{MemoryBytes: 8 << 20, StopOnMemoryLimit: true, MemoryLimitExceeded: func() { memoryCalls++ }, CPULimitExceeded: func(bool) { cpuCalls++ }, CheckFallback: func() { fallbackCalls++; return }})
+	if memoryCalls != 1 || cpuCalls != 0 || fallbackCalls != 0 {
 		t.Fatalf("analysis=%+v fallback calls=%d", a, fallbackCalls)
 	}
 }

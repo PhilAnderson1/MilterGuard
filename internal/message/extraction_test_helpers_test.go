@@ -47,3 +47,7 @@ func decodeTransferRecovering(encoding string, data []byte) ([]byte, bool) {
 func decodeTransferRecoveringWithStop(encoding string, data []byte, stop func()) ([]byte, bool) {
 	return decodeTransferRecoveringWithResources(encoding, data, stop, nil)
 }
+
+func newExtractionBudget() *extractionBudget {
+	return newExtractionBudgetWithControl(HTMLProcessingControl{})
+}

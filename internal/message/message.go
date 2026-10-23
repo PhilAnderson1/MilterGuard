@@ -100,21 +100,10 @@ type Image struct {
 }
 
 type Analysis struct {
-	Prompt                                string
-	Images                                []Image
-	HasHTML                               bool
-	BodyTruncated                         bool
-	BodyExtractionIncomplete              bool
-	ConcealedContentRemoved               bool
-	HasConcealedContent                   bool
-	UsedInvisibleTag                      bool
-	UsedVisibilityVariesByViewportSizeTag bool
-	UsedVisibilityUncertainTag            bool
-	UsedHiddenContentStrippedTag          bool
-	HTMLCPULimitExceeded                  bool
-	HTMLMemoryLimitExceeded               bool
-	HTMLPrimaryMemoryLimitExceeded        bool
-	HTMLFallbackMemoryLimitExceeded       bool
+	Prompt                   string
+	Images                   []Image
+	BodyTruncated            bool
+	BodyExtractionIncomplete bool
 }
 
 // HTMLProcessingControl supplies cooperative CPU checks and a per-stage memory

@@ -14,20 +14,10 @@ import (
 func translateDKIM(source dkim.Result) mailauth.Result {
 	result := mailauth.Result{
 		Method: mailauth.MethodDKIM, Outcome: outcome(string(source.Status)),
-		DNSAuthentic: source.RecordAuthentic,
 	}
 	if source.Sig != nil {
 		result.Domain = mailauth.NormalizeDomain(source.Sig.Domain.ASCII)
-		result.Selector = bounded(source.Sig.Selector.ASCII, 253)
-		if source.Sig.Identity != nil {
-			result.Identity = bounded(source.Sig.Identity.String(), 320)
-		}
-		result.Algorithm = bounded(strings.ToLower(source.Sig.Algorithm()), 64)
-		result.HeaderCanonicalization, result.BodyCanonicalization = canonicalizations(source.Sig.Canonicalization)
 		result.BodyLengthLimited = source.Sig.Length >= 0
-		if result.BodyLengthLimited {
-			result.BodyLength = source.Sig.Length
-		}
 	}
 	result.ErrorCategory, result.Reason = classifyDKIM(source.Status, source.Err)
 	return result
@@ -36,19 +26,11 @@ func translateDKIM(source dkim.Result) mailauth.Result {
 func translateDMARC(source dmarc.Result, visibleDomain string) mailauth.Result {
 	result := mailauth.Result{
 		Method: mailauth.MethodDMARC, Outcome: outcome(string(source.Status)),
-		Domain: mailauth.NormalizeDomain(source.Domain.ASCII), PolicyDomain: mailauth.NormalizeDomain(source.Domain.ASCII),
-		DNSAuthentic: source.RecordAuthentic, AlignedSPFPass: source.AlignedSPFPass,
+		Domain: mailauth.NormalizeDomain(source.Domain.ASCII), AlignedSPFPass: source.AlignedSPFPass,
 		AlignedDKIMPass: source.AlignedDKIMPass,
 	}
 	if result.Domain == "" {
 		result.Domain = mailauth.NormalizeDomain(visibleDomain)
-	}
-	if source.Record != nil {
-		result.PolicyDisposition = bounded(string(source.Record.Policy), 16)
-		result.SubdomainPolicy = bounded(string(source.Record.SubdomainPolicy), 16)
-		result.DKIMAlignmentMode = bounded(string(source.Record.ADKIM), 1)
-		result.SPFAlignmentMode = bounded(string(source.Record.ASPF), 1)
-		result.PolicyPercentage = source.Record.Percentage
 	}
 	result.ErrorCategory, result.Reason = classifyDMARC(source.Status, source.Err)
 	return result
@@ -63,16 +45,6 @@ func outcome(value string) mailauth.Outcome {
 	default:
 		return mailauth.OutcomePermerror
 	}
-}
-
-func canonicalizations(value string) (string, string) {
-	parts := strings.SplitN(strings.ToLower(value), "/", 2)
-	header := parts[0]
-	body := "simple"
-	if len(parts) == 2 {
-		body = parts[1]
-	}
-	return bounded(header, 16), bounded(body, 16)
 }
 
 func classifySPF(status spf.Status, err error) (mailauth.ErrorCategory, string) {

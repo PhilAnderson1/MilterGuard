@@ -118,7 +118,7 @@ func TestDKIMCanonicalizationAndBodyFixtureMatrix(t *testing.T) {
 		want := [][2]string{{"simple", "simple"}, {"simple", "relaxed"}, {"relaxed", "simple"}, {"relaxed", "relaxed"}}
 		for index, canonicalization := range want {
 			result := resultFor(t, evidence, mailauth.MethodDKIM, index)
-			if result.Outcome != mailauth.OutcomePass || result.HeaderCanonicalization != canonicalization[0] || result.BodyCanonicalization != canonicalization[1] {
+			if result.Outcome != mailauth.OutcomePass || !result.Aligned {
 				t.Fatalf("DKIM result %d = %#v, want %v", index, result, canonicalization)
 			}
 		}
@@ -198,7 +198,7 @@ func TestDKIMEd25519(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := resultFor(t, evidence, mailauth.MethodDKIM, 0)
-	if result.Outcome != mailauth.OutcomePass || result.Algorithm != "ed25519-sha256" || !strings.HasPrefix(result.Identity, "δοκιμή@") {
+	if result.Outcome != mailauth.OutcomePass || result.Domain != "example.test" || !result.Aligned {
 		t.Fatalf("Ed25519 DKIM result = %#v", result)
 	}
 }
@@ -278,14 +278,12 @@ func TestDKIMErrorMatrix(t *testing.T) {
 func TestDMARCPolicyLookupAndErrorMatrix(t *testing.T) {
 	message := []byte("From: Alice <alice@sub.example.com>\r\nSubject: test\r\n\r\n")
 	tests := []struct {
-		name             string
-		resolver         dns.MockResolver
-		visibleDomain    string
-		wantOutcome      mailauth.Outcome
-		wantCategory     mailauth.ErrorCategory
-		wantPolicyDomain string
-		wantPolicy       string
-		wantSubpolicy    string
+		name          string
+		resolver      dns.MockResolver
+		visibleDomain string
+		wantOutcome   mailauth.Outcome
+		wantCategory  mailauth.ErrorCategory
+		wantDomain    string
 	}{
 		{
 			name: "organizational fallback and subdomain policy",
@@ -293,12 +291,12 @@ func TestDMARCPolicyLookupAndErrorMatrix(t *testing.T) {
 				"example.com.":        {"v=spf1 ip4:192.0.2.1 -all"},
 				"_dmarc.example.com.": {"v=DMARC1; p=reject; sp=none"},
 			}}, visibleDomain: "sub.example.com", wantOutcome: mailauth.OutcomePass,
-			wantPolicyDomain: "example.com", wantPolicy: "reject", wantSubpolicy: "none",
+			wantDomain: "example.com",
 		},
-		{name: "no policy", resolver: dns.MockResolver{}, visibleDomain: "sub.example.com", wantOutcome: mailauth.OutcomeNone, wantPolicyDomain: "example.com"},
-		{name: "temporary policy lookup", resolver: dns.MockResolver{Fail: []string{"txt _dmarc.sub.example.com."}}, visibleDomain: "sub.example.com", wantOutcome: mailauth.OutcomeTemperror, wantCategory: mailauth.ErrorDNS, wantPolicyDomain: "sub.example.com"},
-		{name: "malformed policy", resolver: dns.MockResolver{TXT: map[string][]string{"_dmarc.sub.example.com.": {"v=DMARC1; p=reject; bogus"}}}, visibleDomain: "sub.example.com", wantOutcome: mailauth.OutcomePermerror, wantCategory: mailauth.ErrorSyntax, wantPolicyDomain: "sub.example.com"},
-		{name: "multiple policies", resolver: dns.MockResolver{TXT: map[string][]string{"_dmarc.example.com.": {"v=DMARC1; p=none", "v=DMARC1; p=reject"}}}, visibleDomain: "example.com", wantOutcome: mailauth.OutcomeNone, wantCategory: mailauth.ErrorSyntax, wantPolicyDomain: "example.com"},
+		{name: "no policy", resolver: dns.MockResolver{}, visibleDomain: "sub.example.com", wantOutcome: mailauth.OutcomeNone, wantDomain: "example.com"},
+		{name: "temporary policy lookup", resolver: dns.MockResolver{Fail: []string{"txt _dmarc.sub.example.com."}}, visibleDomain: "sub.example.com", wantOutcome: mailauth.OutcomeTemperror, wantCategory: mailauth.ErrorDNS, wantDomain: "sub.example.com"},
+		{name: "malformed policy", resolver: dns.MockResolver{TXT: map[string][]string{"_dmarc.sub.example.com.": {"v=DMARC1; p=reject; bogus"}}}, visibleDomain: "sub.example.com", wantOutcome: mailauth.OutcomePermerror, wantCategory: mailauth.ErrorSyntax, wantDomain: "sub.example.com"},
+		{name: "multiple policies", resolver: dns.MockResolver{TXT: map[string][]string{"_dmarc.example.com.": {"v=DMARC1; p=none", "v=DMARC1; p=reject"}}}, visibleDomain: "example.com", wantOutcome: mailauth.OutcomeNone, wantCategory: mailauth.ErrorSyntax, wantDomain: "example.com"},
 		{name: "ambiguous From identity", resolver: dns.MockResolver{}, visibleDomain: "", wantOutcome: mailauth.OutcomeNone},
 	}
 	for _, test := range tests {
@@ -313,7 +311,7 @@ func TestDMARCPolicyLookupAndErrorMatrix(t *testing.T) {
 			}
 			result := resultFor(t, evidence, mailauth.MethodDMARC, 0)
 			if result.Outcome != test.wantOutcome || result.ErrorCategory != test.wantCategory ||
-				result.PolicyDomain != test.wantPolicyDomain || result.PolicyDisposition != test.wantPolicy || result.SubdomainPolicy != test.wantSubpolicy {
+				result.Domain != test.wantDomain {
 				t.Fatalf("DMARC result = %#v", result)
 			}
 		})
@@ -345,7 +343,7 @@ func TestDMARCDKIMAlignmentModes(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := resultFor(t, evidence, mailauth.MethodDMARC, 0)
-			if result.Outcome != test.wantOutcome || result.DKIMAlignmentMode != test.alignment {
+			if result.Outcome != test.wantOutcome || result.AlignedDKIMPass != (test.wantOutcome == mailauth.OutcomePass) {
 				t.Fatalf("DMARC result = %#v", result)
 			}
 		})

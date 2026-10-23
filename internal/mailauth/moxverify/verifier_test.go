@@ -14,14 +14,12 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/mailauth"
 	"github.com/mjl-/adns"
 	"github.com/mjl-/mox/dkim"
 	"github.com/mjl-/mox/dmarc"
 	"github.com/mjl-/mox/dns"
-	"github.com/mjl-/mox/smtp"
 )
 
 func TestNewOwnsDedicatedStrictResolver(t *testing.T) {
@@ -70,7 +68,7 @@ func TestVerifySPFDKIMNoneAndDMARCPass(t *testing.T) {
 		t.Fatal(err)
 	}
 	spfResult := resultFor(t, evidence, mailauth.MethodSPF, 0)
-	if spfResult.Outcome != mailauth.OutcomePass || spfResult.Domain != "example.test" || spfResult.SPFIdentity != "mailfrom" || !spfResult.DNSAuthentic {
+	if spfResult.Outcome != mailauth.OutcomePass || spfResult.Domain != "example.test" {
 		t.Fatalf("SPF result = %#v", spfResult)
 	}
 	dkimResult := resultFor(t, evidence, mailauth.MethodDKIM, 0)
@@ -79,8 +77,7 @@ func TestVerifySPFDKIMNoneAndDMARCPass(t *testing.T) {
 	}
 	dmarcResult := resultFor(t, evidence, mailauth.MethodDMARC, 0)
 	if dmarcResult.Outcome != mailauth.OutcomePass || !dmarcResult.AlignedSPFPass || dmarcResult.AlignedDKIMPass ||
-		dmarcResult.PolicyDomain != "example.test" || dmarcResult.PolicyDisposition != "reject" ||
-		dmarcResult.PolicyPercentage != 100 || !dmarcResult.PolicyApplied || !dmarcResult.DNSAuthentic {
+		dmarcResult.Domain != "example.test" {
 		t.Fatalf("DMARC result = %#v", dmarcResult)
 	}
 	if !evidence.DMARCAligned {
@@ -137,8 +134,8 @@ func TestVerifyExactDKIMFixture(t *testing.T) {
 	}
 	for index := 0; index < 4; index++ {
 		result := resultFor(t, evidence, mailauth.MethodDKIM, index)
-		if result.Outcome != mailauth.OutcomePass || result.Domain != "example.test" || result.Selector != "probe" ||
-			result.Algorithm != "rsa-sha256" || result.BodyLengthLimited || result.ErrorCategory != mailauth.ErrorNone {
+		if result.Outcome != mailauth.OutcomePass || result.Domain != "example.test" ||
+			result.BodyLengthLimited || result.ErrorCategory != mailauth.ErrorNone {
 			t.Fatalf("DKIM result %d = %#v", index, result)
 		}
 	}
@@ -156,7 +153,7 @@ func TestVerifyBodyLengthSignatureIsPolicyResult(t *testing.T) {
 	}
 	result := resultFor(t, evidence, mailauth.MethodDKIM, 0)
 	if result.Outcome != mailauth.OutcomePolicy || result.ErrorCategory != mailauth.ErrorPolicy ||
-		!result.BodyLengthLimited || result.BodyLength != 12 || result.Aligned {
+		!result.BodyLengthLimited || result.Aligned {
 		t.Fatalf("body-length DKIM result = %#v", result)
 	}
 	if evidence.DKIMAligned {
@@ -252,9 +249,6 @@ func TestVerifyNullReversePathUsesHELOIdentity(t *testing.T) {
 			if result.Outcome != test.outcome || result.Domain != test.domain {
 				t.Fatalf("SPF result = %#v", result)
 			}
-			if test.domain != "" && result.SPFIdentity != "helo" {
-				t.Fatalf("SPF identity = %q, want helo", result.SPFIdentity)
-			}
 		})
 	}
 }
@@ -280,10 +274,9 @@ func TestVerifyDMARCAlignmentModesAndPercentage(t *testing.T) {
 		name        string
 		policy      string
 		wantOutcome mailauth.Outcome
-		wantApplied bool
 	}{
 		{name: "relaxed alignment sampled out", policy: "v=DMARC1; p=reject; aspf=r; pct=0", wantOutcome: mailauth.OutcomePass},
-		{name: "strict alignment fails", policy: "v=DMARC1; p=reject; aspf=s; pct=100", wantOutcome: mailauth.OutcomeFail, wantApplied: true},
+		{name: "strict alignment fails", policy: "v=DMARC1; p=reject; aspf=s; pct=100", wantOutcome: mailauth.OutcomeFail},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			resolver := dns.MockResolver{TXT: map[string][]string{
@@ -298,7 +291,7 @@ func TestVerifyDMARCAlignmentModesAndPercentage(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := resultFor(t, evidence, mailauth.MethodDMARC, 0)
-			if result.Outcome != test.wantOutcome || result.PolicyApplied != test.wantApplied {
+			if result.Outcome != test.wantOutcome || result.AlignedSPFPass != (test.wantOutcome == mailauth.OutcomePass) {
 				t.Fatalf("DMARC result = %#v", result)
 			}
 		})
@@ -472,25 +465,20 @@ func TestUnavailableResolverLoadRemainsBounded(t *testing.T) {
 	}
 }
 
-func TestTranslateDKIMPreservesBoundedSignatureMetadata(t *testing.T) {
-	localpart := smtp.Localpart(strings.Repeat("é", 200))
+func TestTranslateDKIMPreservesPolicyEvidence(t *testing.T) {
 	source := dkim.Result{
 		Status: dkim.StatusPolicy,
-		Sig: &dkim.Sig{
-			Domain: dns.Domain{ASCII: "mail.example.test"}, Selector: dns.Domain{ASCII: "selector"},
-			Identity:      &dkim.Identity{Localpart: &localpart, Domain: dns.Domain{ASCII: "example.test"}},
-			AlgorithmSign: "RSA", AlgorithmHash: "SHA256", Canonicalization: "Relaxed/Simple", Length: 0,
-		},
-		Err: dkim.ErrPolicy,
+		Sig:    &dkim.Sig{Domain: dns.Domain{ASCII: "mail.example.test"}, Length: 0},
+		Err:    dkim.ErrPolicy,
 	}
 	result := translateDKIM(source)
-	if result.Domain != "mail.example.test" || result.Selector != "selector" || result.Algorithm != "rsa-sha256" ||
-		result.HeaderCanonicalization != "relaxed" || result.BodyCanonicalization != "simple" ||
-		!result.BodyLengthLimited || result.BodyLength != 0 || result.ErrorCategory != mailauth.ErrorPolicy {
-		t.Fatalf("translated DKIM result = %#v", result)
+	want := mailauth.Result{
+		Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy,
+		Domain: "mail.example.test", BodyLengthLimited: true,
+		ErrorCategory: mailauth.ErrorPolicy, Reason: "signature rejected by DKIM policy",
 	}
-	if len(result.Identity) > 320 || !utf8.ValidString(result.Identity) {
-		t.Fatalf("identity was not safely bounded: %q", result.Identity)
+	if result != want {
+		t.Fatalf("translated DKIM result = %#v, want %#v", result, want)
 	}
 }
 
@@ -501,18 +489,22 @@ func TestClassifyDKIMDistinguishesExpiredSignature(t *testing.T) {
 	}
 }
 
-func TestTranslateDMARCPreservesPolicy(t *testing.T) {
-	source := dmarc.Result{
-		Status: dmarc.StatusFail, Domain: dns.Domain{ASCII: "example.test"}, RecordAuthentic: true,
-		AlignedSPFPass: false, AlignedDKIMPass: false,
-		Record: &dmarc.Record{Policy: dmarc.PolicyReject, SubdomainPolicy: dmarc.PolicyQuarantine,
-			ADKIM: dmarc.AlignStrict, ASPF: dmarc.AlignRelaxed, Percentage: 25},
-	}
-	result := translateDMARC(source, "mail.example.test")
-	if result.Domain != "example.test" || result.PolicyDomain != "example.test" || result.PolicyDisposition != "reject" ||
-		result.SubdomainPolicy != "quarantine" || result.DKIMAlignmentMode != "s" || result.SPFAlignmentMode != "r" ||
-		result.PolicyPercentage != 25 || !result.DNSAuthentic {
-		t.Fatalf("translated DMARC result = %#v", result)
+func TestTranslateDMARCPreservesAlignmentEvidence(t *testing.T) {
+	for _, alignedSPF := range []bool{false, true} {
+		for _, alignedDKIM := range []bool{false, true} {
+			source := dmarc.Result{
+				Status: dmarc.StatusPass, Domain: dns.Domain{ASCII: "example.test"},
+				AlignedSPFPass: alignedSPF, AlignedDKIMPass: alignedDKIM,
+			}
+			result := translateDMARC(source, "mail.example.test")
+			want := mailauth.Result{
+				Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomePass, Domain: "example.test",
+				AlignedSPFPass: alignedSPF, AlignedDKIMPass: alignedDKIM,
+			}
+			if result != want {
+				t.Fatalf("translated DMARC result = %#v, want %#v", result, want)
+			}
+		}
 	}
 }
 

@@ -379,11 +379,12 @@ func TestPromptStripsConcealedContentBeforePrefixTruncation(t *testing.T) {
 	m.AddHeader("Content-Type", "text/html")
 	m.AddBody([]byte(`<p>keep</p><p style="display:none">` + strings.Repeat("padding ", 100) + `</p><p>end</p>`))
 	analysis := m.BuildAnalysis(AnalysisContext{}, 80, VisionOptions{Mode: "off"})
-	if analysis.BodyTruncated || !analysis.ConcealedContentRemoved {
+	if analysis.BodyTruncated {
 		t.Fatalf("fallback flags = %+v", analysis)
 	}
-	if !analysis.HasConcealedContent || !analysis.UsedHiddenContentStrippedTag || analysis.UsedInvisibleTag {
-		t.Fatalf("annotation metadata = %+v", analysis)
+	if strings.Contains(analysis.Prompt, "padding") || strings.Contains(analysis.Prompt, "<invisible ") ||
+		!strings.Contains(analysis.Prompt, "keep") || !strings.Contains(analysis.Prompt, "end") {
+		t.Fatalf("stripped prompt lost visible content or retained concealed text: %s", analysis.Prompt)
 	}
 	if !strings.Contains(analysis.Prompt, "<hidden-content-stripped/>") || !strings.Contains(analysis.Prompt, "HTML-TO-TEXT EXTRACTOR ANNOTATIONS") {
 		t.Fatalf("prompt = %s", analysis.Prompt)

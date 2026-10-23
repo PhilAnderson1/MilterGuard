@@ -184,10 +184,9 @@ func (v *Verifier) verifyTransaction(ctx context.Context, transaction mailauth.T
 	if !spfDomain.IsZero() {
 		spfIdentity = &spfDomain
 	}
-	useResult, dmarcResult := dmarc.Verify(ctx, slog.New(slog.DiscardHandler), v.resolver,
+	_, dmarcResult := dmarc.Verify(ctx, slog.New(slog.DiscardHandler), v.resolver,
 		fromDomain, dkimResults, spfStatus, spfIdentity, true)
 	translatedDMARC := translateDMARC(dmarcResult, transaction.VisibleFromDomain)
-	translatedDMARC.PolicyApplied = useResult
 	results = append(results, translatedDMARC)
 	return mailauth.NewEvidence(results, transaction.VisibleFromDomain), nil
 }
@@ -227,11 +226,11 @@ func (v *Verifier) verifySPF(ctx context.Context, transaction mailauth.Transacti
 		args.MailFromDomain = address.Domain
 	}
 
-	received, domain, _, authentic, verifyErr := spf.Verify(ctx, slog.New(slog.DiscardHandler), v.resolver, args)
+	received, domain, _, _, verifyErr := spf.Verify(ctx, slog.New(slog.DiscardHandler), v.resolver, args)
 	result := mailauth.Result{
 		Method: mailauth.MethodSPF, Outcome: outcome(string(received.Result)),
-		Domain: mailauth.NormalizeDomain(domain.ASCII), DNSAuthentic: authentic,
-		SPFIdentity: bounded(string(received.Identity), 16), SPFMechanism: bounded(received.Mechanism, 256),
+		Domain:       mailauth.NormalizeDomain(domain.ASCII),
+		SPFMechanism: bounded(received.Mechanism, 256),
 	}
 	result.ErrorCategory, result.Reason = classifySPF(received.Result, verifyErr)
 	return result, received.Result, domain

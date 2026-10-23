@@ -685,9 +685,6 @@ func ownedValueTokens(values []css.Token, raw string, budget *cpuGuard) ([]value
 	return tokens, valueResolved
 }
 
-func normalizeDeclarationProperty(prop string) string {
-	return normalizeDeclarationPropertyWithBudget(prop, nil)
-}
 func normalizeDeclarationPropertyWithBudget(prop string, budget *cpuGuard) string {
 	prop = cssUnescapeWithBudget(prop, budget)
 	if !strings.HasPrefix(prop, "--") {
@@ -716,10 +713,6 @@ func normalizeDeclarationPropertyWithBudget(prop string, budget *cpuGuard) strin
 	default:
 		return prop
 	}
-}
-
-func relevantDeclarationProperty(prop string) bool {
-	return relevantNormalizedDeclarationProperty(normalizeDeclarationProperty(prop))
 }
 
 func relevantNormalizedDeclarationProperty(prop string) bool {
@@ -913,9 +906,6 @@ func overflowShorthandValues(value string) ([2]string, bool, bool) {
 	return out, true, false
 }
 
-func marginShorthandValues(value string) ([4]string, bool, bool) {
-	return marginShorthandValuesWithBudget(value, nil)
-}
 func marginShorthandValuesWithBudget(value string, budget *cpuGuard) ([4]string, bool, bool) {
 	var out [4]string
 	value = trimCSSWhitespace(value)
