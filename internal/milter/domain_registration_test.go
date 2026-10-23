@@ -288,32 +288,133 @@ func TestDomainRegistrationLookupPanicIsRecovered(t *testing.T) {
 	}
 }
 
-func TestDomainRegistrationSuppressesConcurrentDuplicateLookup(t *testing.T) {
-	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
-	lookup := &blockingDomainRegistrationLookup{
-		registered: now.Add(-24 * time.Hour), expires: now.Add(364 * 24 * time.Hour),
-		started: make(chan struct{}), release: make(chan struct{}),
-	}
-	store := newTestDomainRegistrationStore(t, now, lookup)
-	results := make(chan error, 2)
-	for range 2 {
-		go func() {
-			info, err := store.evidence(context.Background(), "mail.example.com")
-			if err == nil && !info.Available {
-				err = errors.New("domain evidence unavailable")
+// Observe evaluation of the waiter's select without timing assumptions. The
+// scripted repository never inspects this context before the in-flight wait.
+type observedDomainWaitContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *observedDomainWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
+type scriptedDomainReadRepository struct {
+	stores.DomainRegistrationRepository
+	read func(context.Context, string) (stores.DomainRegistration, bool, error)
+}
+
+func (r *scriptedDomainReadRepository) DomainRegistration(ctx context.Context, domain string) (stores.DomainRegistration, bool, error) {
+	return r.read(ctx, domain)
+}
+
+func TestDomainRegistrationReleasesConcurrentWaiters(t *testing.T) {
+	for _, scenario := range []string{"lookup", "cache populated before recheck", "recheck fails"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+			lookup := &blockingDomainRegistrationLookup{
+				registered: now.Add(-24 * time.Hour), expires: now.Add(364 * 24 * time.Hour),
+				started: make(chan struct{}), release: make(chan struct{}),
 			}
-			results <- err
-		}()
-	}
-	<-lookup.started
-	close(lookup.release)
-	for range 2 {
-		if err := <-results; err != nil {
-			t.Fatal(err)
-		}
-	}
-	if lookup.calls.Load() != 1 {
-		t.Fatalf("concurrent RDAP calls = %d, want 1", lookup.calls.Load())
+			store := newTestDomainRegistrationStore(t, now, lookup)
+			store.timeout = 5 * time.Second
+			base := store.repository
+			recheckStarted, releaseRecheck := make(chan struct{}), make(chan struct{})
+			readErr := errors.New("injected cache recheck failure")
+			var reads atomic.Int32
+			store.repository = &scriptedDomainReadRepository{DomainRegistrationRepository: base, read: func(ctx context.Context, domain string) (stores.DomainRegistration, bool, error) {
+				switch reads.Add(1) {
+				case 1, 3:
+					// Owner's initial miss, then waiter's initial miss.
+					return stores.DomainRegistration{}, false, nil
+				case 2:
+					if scenario != "lookup" {
+						close(recheckStarted)
+						select {
+						case <-releaseRecheck:
+						case <-ctx.Done():
+							return stores.DomainRegistration{}, false, ctx.Err()
+						}
+						if scenario == "recheck fails" {
+							return stores.DomainRegistration{}, false, readErr
+						}
+					}
+				}
+				return base.DomainRegistration(ctx, domain)
+			}}
+			type result struct {
+				available bool
+				err       error
+			}
+			owner, waiter := make(chan result, 1), make(chan result, 1)
+			go func() { info, err := store.evidence(ctx, "mail.example.com"); owner <- result{info.Available, err} }()
+			started := recheckStarted
+			if scenario == "lookup" {
+				started = lookup.started
+			}
+			select {
+			case <-started:
+			case <-ctx.Done():
+				t.Fatal("owner did not reach blocking operation")
+			}
+			waitCtx := &observedDomainWaitContext{Context: ctx, waiting: make(chan struct{})}
+			go func() {
+				info, err := store.evidence(waitCtx, "other.example.com")
+				waiter <- result{info.Available, err}
+			}()
+			select {
+			case <-waitCtx.waiting:
+			case <-ctx.Done():
+				t.Fatal("second caller did not join in-flight lookup")
+			}
+			if scenario == "cache populated before recheck" {
+				if err := base.PutDomainRegistration(ctx, stores.DomainRegistration{Domain: "example.com", RegisteredAt: lookup.registered, ExpiresAt: lookup.expires}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			close(releaseRecheck)
+			close(lookup.release)
+			select {
+			case got := <-owner:
+				if scenario == "recheck fails" {
+					if !errors.Is(got.err, readErr) || got.available {
+						t.Fatalf("owner = %+v", got)
+					}
+				} else if got.err != nil || !got.available {
+					t.Fatalf("owner = %+v", got)
+				}
+			case <-ctx.Done():
+				t.Fatal("owner did not finish")
+			}
+			select {
+			case got := <-waiter:
+				if got.err != nil || got.available != (scenario != "recheck fails") {
+					t.Fatalf("waiter = %+v", got)
+				}
+			case <-ctx.Done():
+				t.Fatal("in-flight waiter was not released")
+			}
+			wantCalls := int32(0)
+			if scenario == "lookup" {
+				wantCalls = 1
+			}
+			if got := lookup.calls.Load(); got != wantCalls {
+				t.Fatalf("RDAP calls = %d, want %d", got, wantCalls)
+			}
+			if info, err := store.evidence(ctx, "example.com"); err != nil || !info.Available {
+				t.Fatalf("subsequent request = %+v, %v", info, err)
+			}
+			if scenario == "recheck fails" {
+				wantCalls = 1
+			}
+			if got := lookup.calls.Load(); got != wantCalls {
+				t.Fatalf("RDAP calls after retry = %d, want %d", got, wantCalls)
+			}
+		})
 	}
 }
 

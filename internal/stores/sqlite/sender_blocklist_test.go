@@ -3,7 +3,9 @@ package sqlite
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -216,5 +218,57 @@ func TestDomainSenderBlockPreservesExactCorrespondents(t *testing.T) {
 	}
 	if records := correspondentSnapshot(t, correspondents); len(records) != 1 {
 		t.Fatalf("domain block removed exact correspondent: %+v", records)
+	}
+}
+
+func TestManualSenderConflictChangesRollBackOnInsertFailure(t *testing.T) {
+	for _, operation := range []string{"allow", "recipient block", "server-wide block"} {
+		t.Run(operation, func(t *testing.T) {
+			ctx := context.Background()
+			database := testCorrespondentDatabase(t, filepath.Join(t.TempDir(), "milterguard.db"))
+			correspondents := newCorrespondentRepository(CorrespondentOptions{UseAllowlist: true, MaxEntries: 10}, database, nil)
+			blocks := NewSenderBlocklist(database, SenderBlocklistOptions{Expiry: 24 * time.Hour, MaxEntries: 10})
+			const sender = "sender@example.net"
+			const recipient = "owner@example.com"
+			table := "sender_blocklist"
+			if operation == "allow" {
+				addSenderBlock(t, blocks, recipient, stores.SenderBlockExactMailbox, sender)
+				table = "correspondents"
+			} else {
+				for _, address := range []string{recipient, "other@example.com"} {
+					if _, err := correspondents.AddManual(ctx, sender, address); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			before := correspondentSnapshot(t, correspondents)
+			query := stores.SenderBlockListQuery{Recipients: stores.RecipientScope{All: true}, Limit: 10}
+			beforeBlocks, err := blocks.ListSenderBlocks(ctx, query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Exec(ctx, "CREATE TRIGGER fail_conflict_insert BEFORE INSERT ON "+table+" BEGIN SELECT RAISE(ABORT, 'injected conflict failure'); END"); err != nil {
+				t.Fatal(err)
+			}
+			if operation == "allow" {
+				_, err = correspondents.AddManual(ctx, sender, recipient)
+			} else {
+				scope := recipient
+				if operation == "server-wide block" {
+					scope = "*"
+				}
+				_, _, err = blocks.AddSenderBlock(ctx, stores.SenderBlockEntry{Recipient: scope, SenderKind: stores.SenderBlockExactMailbox, SenderValue: sender})
+			}
+			if err == nil || !strings.Contains(err.Error(), "injected conflict failure") {
+				t.Fatalf("insert error = %v", err)
+			}
+			if after := correspondentSnapshot(t, correspondents); !reflect.DeepEqual(before, after) {
+				t.Fatalf("failed change altered correspondents: before=%+v after=%+v", before, after)
+			}
+			afterBlocks, err := blocks.ListSenderBlocks(ctx, query)
+			if err != nil || !reflect.DeepEqual(beforeBlocks, afterBlocks) {
+				t.Fatalf("failed change altered blocks: before=%+v after=%+v err=%v", beforeBlocks, afterBlocks, err)
+			}
+		})
 	}
 }

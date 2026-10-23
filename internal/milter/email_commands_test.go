@@ -11,6 +11,7 @@ import (
 	"net/mail"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/smtpreply"
+	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 type fakeReplySender struct {
@@ -739,6 +741,78 @@ func TestCommandBodyCancellationStopsWithAndWithoutCPUClock(t *testing.T) {
 			lines, err := commandMessageLinesWithResourceLimits(ctx, msg, 4096, 8<<20, cpu, "reject", nil)
 			if len(lines) != 0 || err == nil || !strings.Contains(err.Error(), "interrupted") {
 				t.Fatalf("lines=%v err=%v", lines, err)
+			}
+		})
+	}
+}
+
+func TestInvalidEmailCommandDiscardsWithoutMutationAndResetsSession(t *testing.T) {
+	for _, tc := range []struct{ name, contentType, body, reason string }{
+		{"invalid first command", "text/plain", "WHITELIST BOGUS ignored@example.net\nWHITELIST ADD news@example.net", "operation must be ADD or DELETE"},
+		{"empty body", "text/plain", " \r\n", "command body is empty"},
+		{"disallowed MIME", "application/octet-stream", "WHITELIST ADD news@example.net", "command email must contain plain text or HTML without attachments"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, analyzer, conn, done := commandTestServer(t, true, nil)
+			defer func() { _ = conn.Close(); <-done; _ = server.Close() }()
+			if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			sender := &fakeReplySender{messages: make(chan smtpreply.Message, 2)}
+			server.sessions.commands.cfg.SendReplies = true
+			server.sessions.commands.sender = sender
+			repository := server.sessions.policy.correspondents.(stores.CorrespondentAdminRepository)
+			ctx := context.Background()
+			if _, err := repository.AddManual(ctx, "existing@example.net", "phil@example.com"); err != nil {
+				t.Fatal(err)
+			}
+			query := stores.CorrespondentListQuery{Recipients: stores.RecipientScope{All: true}, Limit: 100}
+			before, err := repository.ListCorrespondents(ctx, query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			negotiate(t, conn)
+			sendContinueFrames(t, conn, connectFrame('4', "192.0.2.10"))
+			transact := func(contentType, body string) {
+				t.Helper()
+				if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip")); err != nil {
+					t.Fatal(err)
+				}
+				sendContinueFrames(t, conn, envelopeFrame(commandMail, "phil@example.com"), envelopeFrame(commandRecipient, "milterguard@example.com"), headerFrame("Content-Type", contentType), []byte{commandEndHeaders}, append([]byte{commandBody}, []byte(body)...))
+				if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+					t.Fatal(err)
+				}
+				expectFrame(t, conn, string([]byte{responseDiscard}))
+			}
+			transact(tc.contentType, tc.body)
+			select {
+			case reply := <-sender.messages:
+				if reply.To != "phil@example.com" || reply.Subject != "MilterGuard command rejected" || !strings.Contains(reply.Text, tc.reason) {
+					t.Fatalf("invalid-command reply = %+v", reply)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("missing rejection reply")
+			}
+			after, err := repository.ListCorrespondents(ctx, query)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("invalid command mutated correspondents: before=%+v after=%+v err=%v", before, after, err)
+			}
+			// Reuse the negotiated connection: stale body, MIME, recipient or
+			// protocol state must not interfere with the next valid command.
+			transact("text/plain", "WHITELIST ADD news@example.net")
+			select {
+			case reply := <-sender.messages:
+				if reply.Subject != "MilterGuard command results" {
+					t.Fatalf("next-command reply = %+v", reply)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("missing next-command reply")
+			}
+			if !testCorrespondentMatch(t, server.sessions.policy.correspondents, ctx, "news@example.net", []string{"phil@example.com"}).Known {
+				t.Fatal("next valid command was not executed")
+			}
+			if analyzer.calls.Load() != 0 {
+				t.Fatal("command was sent to AI")
 			}
 		})
 	}

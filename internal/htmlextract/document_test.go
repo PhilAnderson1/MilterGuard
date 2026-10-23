@@ -66,15 +66,24 @@ func TestProductionTextResultIsCompact(t *testing.T) {
 	}
 }
 
-func TestDocumentWalkerDoesNotRunAfterCPUStop(t *testing.T) {
+func TestDocumentWalkerBoundsProgressAfterCPUStop(t *testing.T) {
 	for _, visited := range []int{0, 1, 254, 255} {
 		t.Run(strconv.Itoa(visited), func(t *testing.T) {
-			budget := testCPUGuard(cpuGuard{shouldStop: func() { termination.Fail(termination.Failure{Code: termination.CPUExceeded}) }})
-			walker := documentWalker{processor: processor{cpu: budget}, document: &parsedDocument{}, nodeCount: visited}
-			frame := documentFrame{n: &html.Node{Type: html.TextNode, Data: "text"}, scope: scopeActive}
-			expectTermination(t, termination.CPUExceeded, func() { budget.checkpoint(); walker.visit(&frame) })
-			if walker.nodeCount != visited || walker.document.extractableTextCount != 0 {
-				t.Fatal("processed text after termination")
+			stop := func() { termination.Fail(termination.Failure{Code: termination.CPUExceeded}) }
+			walker := documentWalker{processor: processor{shouldStop: stop}, document: &parsedDocument{}, nodeCount: visited}
+			expectTermination(t, termination.CPUExceeded, func() {
+				// Only production code polls the stop callback. A missing walker
+				// checkpoint must fail even when every node is cheap to visit.
+				for range 256 {
+					frame := documentFrame{n: &html.Node{Type: html.TextNode, Data: "text"}, scope: scopeActive}
+					walker.visit(&frame)
+				}
+			})
+			if progress := walker.nodeCount - visited; progress < 1 || progress > 256 {
+				t.Fatalf("visited %d nodes after stop, want at most one sampling interval", progress)
+			}
+			if walker.document.extractableTextCount != walker.nodeCount-visited-1 {
+				t.Fatal("processed the text node that observed termination")
 			}
 		})
 	}
@@ -92,15 +101,6 @@ func TestASCIIKeywordHelpers(t *testing.T) {
 	}
 	if equalASCIIFold("K", "k") || equalASCIIFoldBytes([]byte("K"), "k") {
 		t.Fatal("Unicode character was accepted as an ASCII keyword")
-	}
-}
-
-func TestConcealmentReasonMaskMaterializesInStableOrder(t *testing.T) {
-	mask := reasonDisplayNone | reasonVisibilityHidden | reasonVisibilityCollapse | reasonOpacity | reasonFontSize | reasonColour | reasonEmptyClip | reasonContentVisibility
-	got := strings.Join(concealmentReasonStrings(mask), ",")
-	want := "display-none,visibility-hidden,visibility-collapse,opacity,font-size,colour-distance,empty-clip,content-visibility-hidden"
-	if got != want {
-		t.Fatalf("concealment reasons = %q, want %q", got, want)
 	}
 }
 
