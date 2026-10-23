@@ -419,6 +419,30 @@ func TestValidateFilteringScores(t *testing.T) {
 	}
 }
 
+func TestValidateYAMLNonFiniteThresholds(t *testing.T) {
+	for _, field := range []struct {
+		section string
+		name    string
+	}{
+		{"filtering", "reject_score"},
+		{"filtering", "legitimate_low_confidence_score"},
+		{"correspondents", "legitimate_sender_min_score"},
+	} {
+		for _, value := range []string{".nan", ".inf", "-.inf"} {
+			t.Run(field.section+"."+field.name+"/"+value, func(t *testing.T) {
+				cfg := validConfig()
+				input := field.section + ":\n  " + field.name + ": " + value + "\n"
+				if err := yaml.Unmarshal([]byte(input), &cfg); err != nil {
+					t.Fatal(err)
+				}
+				if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), field.section+"."+field.name) {
+					t.Fatalf("invalid threshold %s error = %v", value, err)
+				}
+			})
+		}
+	}
+}
+
 func validConfig() Config {
 	cfg := defaults()
 	cfg.AI.APIKey = "test-key"

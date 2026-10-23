@@ -182,27 +182,6 @@ func isColourFunction(name string) bool {
 	return false
 }
 
-func countUnsupportedColourFunctionsWithBudget(tokens []valueToken, budget *cpuGuard) int {
-	count := 0
-	for _, token := range tokens {
-		budget.check()
-
-		if token.kind == css.FunctionToken && isUnsupportedColourFunctionWithBudget(token.raw, budget) {
-			count++
-		}
-	}
-	return count
-}
-
-func isUnsupportedColourFunctionWithBudget(raw string, budget *cpuGuard) bool {
-	name := asciiLowerWithBudget(cssUnescapeWithBudget(strings.TrimSuffix(raw, "("), budget), budget)
-	switch name {
-	case "lab", "lch", "oklab", "oklch", "color", "color-mix", "device-cmyk", "light-dark":
-		return true
-	}
-	return false
-}
-
 func backgroundImageSyntaxWithBudget(value string, budget *cpuGuard) bool {
 	return containsASCIIFoldWithBudget(value, "url(", budget) || containsASCIIFoldWithBudget(value, "gradient(", budget) || containsASCIIFoldWithBudget(value, "image-set(", budget) || containsASCIIFoldWithBudget(value, "cross-fade(", budget)
 }

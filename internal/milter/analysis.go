@@ -68,15 +68,15 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 	}
 
 	prepared, usage := s.buildAnalysis(ctx, msg, analysisContext)
-	htmlCPUExceeded := usage.cpuExceeded()
+	htmlCPUExceeded := usage.CPUExceeded()
 	defer func() {
-		result.htmlPrimaryCPUExceeded = usage.primaryCPUExceeded
-		result.htmlFallbackCPUExceeded = usage.fallbackCPUExceeded
-		result.htmlMemoryExceeded = usage.memoryExceeded
-		result.htmlPrimaryMemoryExceeded = usage.primaryMemoryExceeded
-		result.htmlFallbackMemoryExceeded = usage.fallbackMemoryExceeded
-		result.htmlPrimaryMemoryBytes = usage.primaryMemoryBytes
-		result.htmlFallbackMemoryBytes = usage.fallbackMemoryBytes
+		result.htmlPrimaryCPUExceeded = usage.PrimaryCPUExceeded
+		result.htmlFallbackCPUExceeded = usage.FallbackCPUExceeded
+		result.htmlMemoryExceeded = usage.MemoryExceeded
+		result.htmlPrimaryMemoryExceeded = usage.PrimaryMemoryExceeded
+		result.htmlFallbackMemoryExceeded = usage.FallbackMemoryExceeded
+		result.htmlPrimaryMemoryBytes = usage.PrimaryMemoryBytes
+		result.htmlFallbackMemoryBytes = usage.FallbackMemoryBytes
 		result.htmlCPUExceeded = htmlCPUExceeded
 		result.htmlCPUAction = s.ai.HTMLResourceLimitAction
 		if result.htmlCPUAction == "" {
@@ -91,7 +91,7 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		// Match the configured default for programmatic configurations too.
 		actionOnHTMLLimit = "reject"
 	}
-	if (htmlCPUExceeded || usage.memoryExceeded) && actionOnHTMLLimit != "fallback" {
+	if (htmlCPUExceeded || usage.MemoryExceeded) && actionOnHTMLLimit != "fallback" {
 		proposed := actionReject
 		rejectMessage := s.ai.HTMLResourceRejectMessage
 		classification := ai.Classification("")
@@ -101,7 +101,7 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 			score = 1
 		}
 		reason := "Message content processing exceeded the configured CPU-time limit"
-		if usage.memoryExceeded {
+		if usage.MemoryExceeded {
 			reason = "Message content processing exceeded the configured memory limit"
 		}
 		return evaluationResult{
@@ -148,7 +148,7 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 	}
 }
 
-func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Message, analysisContext message.AnalysisContext) (message.Analysis, htmlProcessingUsage) {
+func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Message, analysisContext message.AnalysisContext) (message.Analysis, message.ProcessingUsage) {
 	vision := message.VisionOptions{
 		Mode:         s.ai.VisionMode,
 		MinTextChars: s.ai.VisionMinTextChars,
@@ -156,12 +156,12 @@ func (s *analysisService) buildAnalysis(ctx context.Context, msg *message.Messag
 		MaxBytes:     s.ai.MaxImageBytes,
 		MaxPixels:    s.ai.MaxImagePixels,
 	}
-	return runWithHTMLProcessingLimits(ctx, htmlProcessingOptions{
-		action:               s.ai.HTMLResourceLimitAction,
-		memoryBytes:          s.ai.MaxHTMLParseMemoryBytes,
-		maxCPUMilliseconds:   s.ai.MaxHTMLParseCPUMilliseconds,
-		disableURLCompaction: !s.ai.CompactPromptURLs,
-		onHTMLParserPanic: func() {
+	return message.WithProcessingLimits(ctx, message.ProcessingLimits{
+		AllowFallbackAfterLimit: s.ai.HTMLResourceLimitAction == "fallback",
+		MemoryBytes:             s.ai.MaxHTMLParseMemoryBytes,
+		MaxCPUMilliseconds:      s.ai.MaxHTMLParseCPUMilliseconds,
+		DisableURLCompaction:    !s.ai.CompactPromptURLs,
+		OnHTMLParserPanic: func() {
 			if s.log != nil {
 				s.log.ErrorContext(ctx, "HTML parser panic; using fallback extraction", "message_id", msg.Header("Message-ID"))
 			}

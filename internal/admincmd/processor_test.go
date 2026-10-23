@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
@@ -220,14 +222,23 @@ func TestRejectionArchiveReadIsDeferred(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deferred, err := p.Execute(context.Background(), command, Actor{DefaultRecipient: "user@example.com"})
+	commandCtx, cancelCommand := context.WithCancel(context.Background())
+	defer cancelCommand()
+	deferred, err := p.Execute(commandCtx, command, Actor{DefaultRecipient: "user@example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if source.reads != 0 {
 		t.Fatal("archive was read on command execution hot path")
 	}
-	response := deferred()
+	cancelCommand()
+	renderCtx, cancelRender := context.WithCancel(context.Background())
+	cancelRender()
+	interrupted := deferred(renderCtx)
+	if source.reads != 0 || !strings.Contains(interrupted.Text, "rendering was interrupted") {
+		t.Fatalf("cancelled rendering read the archive: response=%#v reads=%d", interrupted, source.reads)
+	}
+	response := deferred(context.Background())
 	if source.reads != 1 || !strings.Contains(response.Text, "Body text") || len(response.Attachments) != 1 || response.Attachments[0].SourcePath != "/archive/2026/09/20/7.eml" {
 		t.Fatalf("response=%#v reads=%d", response, source.reads)
 	}
@@ -273,6 +284,35 @@ func TestRejectionDetailUsesBoundedHTMLFallback(t *testing.T) {
 	}
 	if !strings.Contains(response.Text, "Content extraction incomplete") {
 		t.Fatalf("bounded fallback limitation missing: %q", response.Text)
+	}
+}
+
+func TestArchivedVisibleBodyHonorsCancellation(t *testing.T) {
+	for _, cpuMillis := range []int{0, 250} {
+		p := New(Dependencies{MaxHTMLParseCPUMilliseconds: cpuMillis})
+		archived := message.New(1 << 20)
+		archived.AddHeader("Content-Type", "text/html")
+		archived.AddBody([]byte(strings.Repeat("<p>should not be extracted</p>", 1000)))
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		body := p.archivedVisibleBody(ctx, archived, 7)
+		if strings.Contains(body, "should not be extracted") || !strings.Contains(body, "Content extraction incomplete") {
+			t.Fatalf("CPU allowance %d: cancelled extraction returned %q", cpuMillis, body)
+		}
+	}
+}
+
+func TestArchivedVisibleBodyHonorsCPULimit(t *testing.T) {
+	if !resourceguard.ThreadCPUAvailable() {
+		t.Skip("thread CPU clock unavailable")
+	}
+	p := New(Dependencies{MaxHTMLParseCPUMilliseconds: 1, MaxHTMLParseMemoryBytes: 64 << 20})
+	archived := message.New(4 << 20)
+	archived.AddHeader("Content-Type", "text/html")
+	archived.AddBody([]byte(strings.Repeat(`<p style="color:#123456">ordinary message</p>`, 60000)))
+	body := p.archivedVisibleBody(context.Background(), archived, 7)
+	if !strings.Contains(body, "Content extraction incomplete") {
+		t.Fatal("CPU-limited archive rendering did not report incomplete extraction")
 	}
 }
 

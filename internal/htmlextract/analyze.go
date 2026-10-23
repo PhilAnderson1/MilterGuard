@@ -620,10 +620,9 @@ func (p processor) process(input []byte) (result Document, resultErr error) {
 func parsedResourceUsage(inputBytes int, document *parsedDocument) ResourceUsage {
 	s := &document.styles
 	return ResourceUsage{
-		InputBytes:                 inputBytes,
-		CSSBytes:                   s.cssBytes,
-		MemoryBytes:                memoryUsed(document.memory),
-		UnsupportedColourFunctions: s.unsupportedColours,
+		InputBytes:  inputBytes,
+		CSSBytes:    s.cssBytes,
+		MemoryBytes: memoryUsed(document.memory),
 
 		CSSLimitExceeded: s.cascadeIncomplete,
 	}

@@ -35,11 +35,10 @@ func (l Limits) validate() error {
 // after a CSS resource limit or parser-recovery failure. A malformed inline
 // style can instead remain locally unresolved without setting that flag.
 type ResourceUsage struct {
-	InputBytes                 int
-	CSSBytes                   int
-	MemoryBytes                int64
-	CSSLimitExceeded           bool
-	UnsupportedColourFunctions int
+	InputBytes       int
+	CSSBytes         int
+	MemoryBytes      int64
+	CSSLimitExceeded bool
 }
 
 // AnalysisUsage is published by controlled analysis even when resource

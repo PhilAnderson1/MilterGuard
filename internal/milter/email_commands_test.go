@@ -413,12 +413,18 @@ func TestEmailCommandReplyRenderingIsDeferredToWorker(t *testing.T) {
 		log: slog.New(slog.NewTextHandler(io.Discard, nil)), maxMessageSize: 4096,
 	}
 	release := make(chan struct{})
-	queued := service.queueReplyContentFunc("recipient@example.com", "Results", func() commandReplyContent {
+	renderContexts := make(chan context.Context, 1)
+	queued := service.queueReplyContentFunc("recipient@example.com", "Results", func(ctx context.Context) commandReplyContent {
+		renderContexts <- ctx
 		<-release
 		return commandReplyContent{Text: "deferred result"}
 	})
 	if !queued {
 		t.Fatal("reply was not queued")
+	}
+	renderCtx := <-renderContexts
+	if deadline, ok := renderCtx.Deadline(); !ok || !deadline.After(time.Now()) || renderCtx.Err() != nil {
+		t.Errorf("rendering context must have an active deadline: %v", renderCtx)
 	}
 	select {
 	case <-sender.messages:

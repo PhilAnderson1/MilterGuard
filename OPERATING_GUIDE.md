@@ -89,38 +89,50 @@ for the analysis prompt, including MIME, plain-text, HTML and CSS processing.
 The option retains its historical HTML-specific name for configuration
 compatibility. The default is 250 milliseconds and the configured value must
 be positive. CPU time excludes time spent descheduled, so unrelated server load
-does not by itself consume the allowance. `ai.html_parse_cpu_limit_action`
-controls what happens at the limit: `fallback` uses bounded or partial
-extraction and continues AI analysis, `reject` rejects without changing IP
-reputation, and `dos-reject` (the default) treats the event as a suspected
-attack, rejects it, and applies the usual sending-IP reputation block and
-repeat-offender escalation. IP and reverse-DNS allowlists still apply.
-`ai.html_dos_reject_message` sets the dedicated SMTP text for `dos-reject`.
+does not by itself consume the allowance. `ai.html_resource_limit_action`
+controls what happens at either the CPU or memory limit: `fallback` uses
+bounded or partial extraction and continues toward AI analysis, `reject`
+(the default) rejects without an IP-reputation penalty, and `dos-reject`
+treats the event as a suspected attack, rejects it, and applies the usual
+sending-IP reputation block and repeat-offender escalation. Authenticated
+submissions and configured IP or reverse-DNS exclusions remain protected from
+IP penalties. `ai.html_resource_reject_message` sets the SMTP rejection text
+for both `reject` and `dos-reject`. The old names
+`ai.html_parse_cpu_limit_action` and `ai.html_dos_reject_message` remain accepted
+as deprecated aliases; the corresponding new setting takes precedence when
+both are supplied.
 MilterGuard refuses to start if its operating environment does not provide the
 per-thread CPU clock required to enforce this limit.
 
 Lexical HTML fallback has a separate allowance of the same duration. When the
-primary CPU allowance expires, only the `fallback` action permits that second
-window; `reject` and `dos-reject` stop extraction. A non-CPU parser failure,
-such as malformed input or a structural or memory limit, may use the fallback
-allowance under any action so bounded message text remains available. A
-message that fails late for a non-CPU reason can therefore consume nearly two
-configured allowances.
+primary CPU or memory allowance is exhausted, only the `fallback` action
+permits a fallback attempt; `reject` and `dos-reject` stop extraction. An
+ordinary parser failure or structural limit, without CPU or memory exhaustion,
+may use fallback under any action so bounded message text remains available.
+A message that reaches fallback late can therefore consume nearly two
+configured CPU allowances.
 
-`ai.max_html_parse_memory_bytes` sets the cumulative per-message accounting
-budget used by HTML/CSS parsing, guarded extraction buffers, and MIME output
-combination. The default is 67108864 bytes (64 MiB), and the accepted range is
-8-512 MiB. The budget is shared across every HTML part in a message; raising it
-increases the memory available to both legitimate and hostile mail. It is not
-a ceiling on the Go heap or process RSS: bounded input and decoding buffers,
-temporary allocations, runtime overhead, and garbage awaiting collection also
-consume memory. When sizing a host, allow for those costs in addition to as
-many as `ai.max_concurrent` simultaneous accounting budgets. Use an operating
-system or container memory limit when a hard process-wide ceiling is required.
-Exhaustion stops extraction and marks the body incomplete;
-`ai.incomplete_body_action` then determines whether retained content is scanned
-or the message is rejected. Memory exhaustion does not add an IP-reputation
-strike.
+`ai.max_html_parse_memory_bytes` sets the allocation accounting allowance used
+by HTML/CSS parsing, guarded extraction buffers, and MIME processing. The
+default is 67108864 bytes (64 MiB), and the accepted range is 8-512 MiB.
+Primary extraction and fallback each receive a separate allowance of this
+size, shared across their respective MIME parts. Raising it increases the
+memory available to both legitimate and hostile mail. It is not a ceiling on
+the Go heap or process RSS: allocations outside the accounting, runtime
+overhead, and garbage awaiting collection also consume memory.
+
+When sizing a host, allow for primary and fallback allocations from up to
+`ai.max_concurrent` ordinary analyses. Email-command extraction has a separate
+set of slots, and archived-message rendering can also run in reply workers;
+the AI concurrency setting is not a process-wide extraction limit. Use an
+operating system or container memory limit when a hard process-wide ceiling
+is required.
+
+Memory exhaustion is handled first by `ai.html_resource_limit_action`, just
+like CPU exhaustion. `dos-reject` can apply IP-reputation penalties for either
+resource limit; `reject` does not. If the `fallback` policy allows processing
+to continue, `ai.incomplete_body_action` subsequently determines whether an
+incomplete retained body may be scanned or must be rejected.
 
 Set `ai.incomplete_body_action` to `scan` (the default) to classify the retained
 body with an explicit limitation notice. Set it to `reject` to record a
@@ -550,9 +562,12 @@ domain exclusions also remain protected.
 
 The `rejection_history` configuration records the sender address, envelope
 recipients, rejection time, subject, and reason for messages rejected by AI,
-attachment or MIME inspection, or the authenticated-only sender-domain policy
-in enforce mode. It can also save the corresponding original message as an
-`.eml` file when `save_messages` is enabled. Copies are organized beneath
+attachment or MIME inspection, the authenticated-only sender-domain policy,
+the sender blocklist, or content-processing limits in enforce mode. It also
+records selective sender-blocklist recipient removals when the message is
+accepted for the remaining recipients. These records identify the recipients
+whose deliveries were removed. It can save the corresponding original message
+as an `.eml` file when `save_messages` is enabled. Copies are organized beneath
 `message_directory` as `YYYY/MM/DD`, with the rejection ID as the filename.
 Cached IP rejections happen before the email is received and therefore cannot
 be recorded or saved.
@@ -703,8 +718,11 @@ EXIT
 - `ACTIVITY` reports filtering activity, failed AI evaluations, estimated AI
   cost, and service uptime. Full sender-blocklist rejections are counted as
   rejected messages; selective matches are counted as removed recipient
-  deliveries. HTML/CSS CPU-limit decisions have their own protection category
-  and are not counted as AI scans. It is restricted to administrators.
+  deliveries. CPU- or memory-limit decisions during content processing,
+  including MIME and plain text, have separate resource-limit (`reject`) and
+  DoS-protection (`dos-reject`) categories and are not counted as AI scans.
+  Processing under the `fallback` action remains in the scan category.
+  `ACTIVITY` is restricted to administrators.
 - `WHITELIST ADD`, `WHITELIST DELETE`, and `WHITELIST LIST` manage trusted
   correspondent addresses. Adding an address removes an exact-address block
   for the same recipient. It does not override a domain or server-wide block.
@@ -732,16 +750,18 @@ EXIT
 - `HELP` displays the command summary. `EXIT`, `QUIT`, or Ctrl-D closes the
   session.
 
-Listing and activity commands default to the previous week. Recipient-scoped
-administrator listings default to all local recipients.
+Listing and activity commands that support a date period default to the
+previous week. `BLOCKLIST LIST` has no date filter and lists unexpired entries
+regardless of when they were added. Recipient-scoped administrator listings
+default to all local recipients.
 `day`, `week`, `month`, and `year` select activity since the corresponding
 point in the past; `all` removes that additional date filter while retaining
 configured expiry rules. Correspondent and active-IP listings use last activity;
 rejection history uses rejection time. Interactive lists are printed from
 oldest to newest so the latest entries appear immediately above the prompt.
 Each listing returns at most 1,000 matching records and reports when that limit
-has been reached; use a shorter date period or a recipient filter to narrow a
-large result.
+has been reached; use a shorter date period where supported or a recipient
+filter to narrow a large result.
 
 Sender-blocklist entries are recipient scoped and expire after
 `sender_blocklist.expiry`; adding the same entry again refreshes its expiry.
@@ -844,13 +864,20 @@ sudo postfix reload
 Send the command email to the configured address as its sole recipient, with
 one command on each line. Commands run in order, and one reply contains all
 results. Processing stops at the first unrecognized line, allowing quoted text
-or a signature to follow. Listing results are newest-first and default to the
-previous week.
+or a signature to follow. Listing results are newest-first. Listings that
+support a date period default to the previous week; `BLOCKLIST LIST` lists
+unexpired entries without a date filter.
 
 `REJECTION <id>` is restricted to messages addressed to the requesting user;
 administrators may retrieve any record. Its reply contains the rejection reason
 and processed body and, when available, attaches the original message as
 `rejection-<id>.eml`.
+
+Archived-body rendering uses the same CPU and memory guards as live extraction,
+with bounded fallback enabled and a notice when extraction is incomplete.
+Email reply rendering has a separate one-minute deadline, independent of the
+completed command transaction. If it expires, remaining results are omitted
+with a notice; commands already executed are not undone.
 
 Replies are submitted through `email_commands.smtp_host`, which defaults to
 `127.0.0.1:25`. `email_commands.smtp_tls` controls transport encryption:
@@ -888,17 +915,20 @@ file.
 If the trusted-domain file is missing, empty, or unreadable, MilterGuard logs a
 warning and continues with trusted-domain bypass disabled.
 
-Keep `logging.include_ai_input` disabled during normal operation. Enabling it
-writes the complete textual AI input - including message content, links, and
-personal data - to the system journal. Use it only temporarily for diagnostics;
-inline image bytes are not logged.
+Keep `logging.include_ai_input` disabled during normal operation. To log AI
+input, set it to `true` and set `logging.level: debug`; the flag alone produces
+no AI-input logs at the default `info` level. This writes the complete textual
+AI input - including message content, links, and personal data - to the system
+journal. Use it only temporarily for diagnostics; inline image bytes are not
+logged.
 
 Successful decision logs include the email subject when
 `logging.include_subject` is `true`, as it is in the supplied configuration.
 Subjects may contain personal or sensitive information; set this option to
 `false` if they should not be written to the system journal. Set
 `logging.include_connections` to `true` only when connection-open and
-connection-close debug messages are useful for troubleshooting.
+connection-close debug messages are useful for troubleshooting. These messages
+also require `logging.level: debug`.
 
 ### Data storage and maintenance
 

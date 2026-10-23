@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/fork/xnethtml"
+	"github.com/PhilAnderson1/MilterGuard/internal/htmlextract"
 	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 )
 
@@ -57,6 +59,7 @@ func TestConfidentCharactersPreserveNormalization(t *testing.T) {
 		want  int
 	}{
 		{"  a\t b\n\n\nc \n", 6},
+		{" \t\r\n", 0},
 		{"<invisible>hello</invisible>", 5},
 		{"a<normal>b", 10},
 		{"é😀", 2},
@@ -69,6 +72,29 @@ func TestConfidentCharactersPreserveNormalization(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%q: count=%d, want %d", tc.input, got, tc.want)
 		}
+		e := htmlExtraction{memory: resourceguard.NewMemory(1 << 20)}
+		got = e.confidentVisibleCharacters([]htmlextract.Text{{
+			Label: "visible", Node: &html.Node{Type: html.TextNode, Data: tc.input},
+		}})
+		if got != tc.want {
+			t.Errorf("%q: HTML count=%d, want %d", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestPreparedTextCountingCancellation(t *testing.T) {
+	input := strings.Repeat("a", 100000)
+	checks := 0
+	expectTermination(t, termination.CPUExceeded, func() {
+		confidentPreparedTextCharacters(input, func() {
+			checks++
+			if checks == 2 {
+				termination.Fail(termination.Failure{Code: termination.CPUExceeded})
+			}
+		})
+	})
+	if checks != 2 {
+		t.Fatalf("counting checkpoints=%d, want 2", checks)
 	}
 }
 

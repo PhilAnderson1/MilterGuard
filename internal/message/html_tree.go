@@ -309,7 +309,9 @@ func extractTreeHTMLWithLimits(source string, limits htmlextract.Limits, budget 
 	}
 	confidentChars := 0
 
-	confidentChars = e.confidentVisibleCharacters(inspection.Text)
+	if budget.countConfidentText {
+		confidentChars = e.confidentVisibleCharacters(inspection.Text)
+	}
 
 	budget.checkStage()
 	cssIncomplete := inspection.UnresolvedStylesheet || inspection.Usage.CSSLimitExceeded
@@ -375,7 +377,7 @@ func (e *htmlExtraction) confidentVisibleCharacters(states []htmlextract.Text) i
 		if value == "" || annotationWhitespaceOnly(value, stop) {
 			continue
 		}
-		characters := confidentTextCharactersWithResources(value, e.memory, stop)
+		characters := confidentPreparedTextCharacters(value, stop)
 
 		count += characters
 	}

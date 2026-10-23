@@ -1,21 +1,22 @@
 package admincmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
-	"runtime"
 	"strings"
-	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
-	"github.com/PhilAnderson1/MilterGuard/internal/resourceguard"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
 )
 
 // rejectionDetail retrieves and attaches the archived original on demand while
 // attempting to regenerate its cleaned body with the current message parser.
-func (p *Processor) rejectionDetail(entry stores.Rejection) Response {
+func (p *Processor) rejectionDetail(ctx context.Context, entry stores.Rejection) Response {
+	if ctx.Err() != nil {
+		return Response{Text: formatRejectionDetail(entry, "Saved message rendering was interrupted.")}
+	}
 	processedBody := "Saved message is not available."
 	var attachments []Attachment
 	if p.messageSource != nil {
@@ -26,7 +27,7 @@ func (p *Processor) rejectionDetail(entry stores.Rejection) Response {
 			processedBody = "Saved message is attached, but its body could not be processed."
 			archived, parseErr := message.ParseArchived(archivedMessage.Contents, p.maxMessageSize)
 			if parseErr == nil {
-				processedBody = p.archivedVisibleBody(archived, entry.ID)
+				processedBody = p.archivedVisibleBody(ctx, archived, entry.ID)
 				if strings.TrimSpace(processedBody) == "" {
 					processedBody = "No readable message text was found."
 				}
@@ -46,32 +47,19 @@ func (p *Processor) rejectionDetail(entry stores.Rejection) Response {
 	return Response{Text: formatRejectionDetail(entry, processedBody), Attachments: attachments}
 }
 
-func (p *Processor) archivedVisibleBody(archived *message.Message, rejectionID uint64) string {
+func (p *Processor) archivedVisibleBody(ctx context.Context, archived *message.Message, rejectionID uint64) string {
 	parserPanic := func() {
 		if p.log != nil {
 			p.log.Error("HTML parser panic; using fallback extraction", "rejection_id", rejectionID)
 		}
 	}
-	if p.maxHTMLParseCPUMilliseconds <= 0 {
-		return archived.VisibleBodyWithHTMLControl(MaxRejectionBodyRunes, message.HTMLProcessingControl{
-			MemoryBytes:     p.maxHTMLParseMemoryBytes,
-			HTMLParserPanic: parserPanic,
-		})
-	}
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	maximum := time.Duration(p.maxHTMLParseCPUMilliseconds) * time.Millisecond
-	var primary, fallback resourceguard.CPUBudget
-	primary.Reset(maximum)
-
-	return archived.VisibleBodyWithHTMLControl(MaxRejectionBodyRunes, message.HTMLProcessingControl{
-		CheckPrimary:  primary.Check,
-		CheckFallback: fallback.Check,
-		BeginFallback: func() bool {
-			fallback.Reset(maximum)
-			return true
-		},
-		HTMLParserPanic: parserPanic,
-		MemoryBytes:     p.maxHTMLParseMemoryBytes,
+	body, _ := message.WithProcessingLimits(ctx, message.ProcessingLimits{
+		AllowFallbackAfterLimit: true,
+		MemoryBytes:             p.maxHTMLParseMemoryBytes,
+		MaxCPUMilliseconds:      p.maxHTMLParseCPUMilliseconds,
+		OnHTMLParserPanic:       parserPanic,
+	}, func(control message.HTMLProcessingControl) string {
+		return archived.VisibleBodyWithHTMLControl(MaxRejectionBodyRunes, control)
 	})
+	return body
 }

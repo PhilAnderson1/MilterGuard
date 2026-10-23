@@ -45,8 +45,12 @@ type extractionBudget struct {
 	onMemoryLimit           func()
 	stopOnMemoryLimit       bool
 	compactURLs             bool
-	countingStop            func()
-	countingSampler         resourceguard.StopSampler
+	// Text-only callers validate image encodings without retaining decoded data.
+	discardImages bool
+	// Only fallback vision needs the confidently visible character count.
+	countConfidentText bool
+	countingStop       func()
+	countingSampler    resourceguard.StopSampler
 }
 
 // extractionProgress contains the traversal allowances that must rewind when
@@ -82,6 +86,7 @@ func newExtractionBudgetWithControl(control HTMLProcessingControl) *extractionBu
 		memoryBytesLimit:  limits.MemoryBytes,
 
 		compactURLs:           !control.DisableURLCompaction,
+		countConfidentText:    true,
 		onMemoryLimit:         control.MemoryLimitExceeded,
 		allowFallback:         control.BeginFallback,
 		onFallbackMemoryLimit: control.FallbackMemoryLimitExceeded,
@@ -257,7 +262,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 	mediaType = strings.ToLower(mediaType)
 	// Opaque attachments contribute only a marker. Validate their encoding
 	// without allocating a decoded body that no consumer will use.
-	if mediaType != "text/plain" && mediaType != "text/html" && mediaType != "message/rfc822" && !strings.HasPrefix(mediaType, "multipart/") && !strings.HasPrefix(mediaType, "image/") {
+	if mediaType != "text/plain" && mediaType != "text/html" && mediaType != "message/rfc822" && !strings.HasPrefix(mediaType, "multipart/") && (budget.discardImages || !strings.HasPrefix(mediaType, "image/")) {
 		incomplete := validateOpaqueTransfer(encoding, data, budget.outputShouldStop)
 		return extractedContent{Text: attachmentMarker(mediaType, params["name"]), TransferIncomplete: incomplete, HTMLCPULimitExceeded: budget.cpuLimitExceeded}
 	}
@@ -489,7 +494,10 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 
 	links := linkCollector{compactURLs: budget.compactURLs, memory: budget.allocationMemory(), shouldStop: budget.outputShouldStop}
 	promptText := rewritePlainTextURLs(text, budget.compactURLs, &links, budget.allocationMemory(), budget.outputShouldStop)
-	confidentChars := budget.confidentCharacters(text)
+	confidentChars := 0
+	if budget.countConfidentText {
+		confidentChars = budget.confidentCharacters(text)
+	}
 	return extractedContent{
 		Text: promptText, VisibleText: text,
 		ConfidentVisibleChars: confidentChars,

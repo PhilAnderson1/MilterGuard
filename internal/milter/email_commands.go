@@ -19,6 +19,9 @@ const internalMessageHeader = "X-MilterGuard-Internal"
 
 const maxCommandsPerMessage = 100
 
+// Bound deferred rendering independently of the completed SMTP command session.
+const commandReplyRenderTimeout = time.Minute
+
 type commandReplyContent struct {
 	Text        string
 	Attachments []smtpreply.Attachment
@@ -110,23 +113,27 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 		canonicals = append(canonicals, command.Canonical())
 		if operationErr != nil {
 			ss.deps.log.ErrorContext(ctx, "email command operation failed", "authenticated_identity", identity, "command", command.Canonical(), "error", operationErr)
-			parts = append(parts, func() admincmd.Response {
+			parts = append(parts, func(context.Context) admincmd.Response {
 				return admincmd.Response{Text: "The command could not be completed. Check the server log.\n"}
 			})
 			continue
 		}
 		parts = append(parts, body)
 	}
-	queued := ss.deps.commands.queueReplyContentFunc(replyTo, "MilterGuard command results", func() commandReplyContent {
+	queued := ss.deps.commands.queueReplyContentFunc(replyTo, "MilterGuard command results", func(renderCtx context.Context) commandReplyContent {
 		var body strings.Builder
 		var attachments []smtpreply.Attachment
 		attached := make(map[string]bool)
 		for i, command := range commands {
+			if renderCtx.Err() != nil {
+				admincmd.AppendBoundedResponse(&body, "Reply rendering timed out; remaining command results were omitted.\n")
+				break
+			}
 			prefix := command.Canonical() + "\n\n"
 			if !admincmd.AppendBoundedResponse(&body, prefix) {
 				break
 			}
-			result := parts[i]()
+			result := parts[i](renderCtx)
 			text := result.Text
 			if !strings.HasSuffix(result.Text, "\n") {
 				text += "\n"
@@ -220,9 +227,9 @@ func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Messa
 		lines []string
 		err   error
 	}
-	extracted, usage := runWithHTMLProcessingLimits(ctx, htmlProcessingOptions{
-		action: action, memoryBytes: memoryBytes, maxCPUMilliseconds: maxCPUMilliseconds,
-		onHTMLParserPanic: onHTMLParserPanic,
+	extracted, usage := message.WithProcessingLimits(ctx, message.ProcessingLimits{
+		AllowFallbackAfterLimit: action == "fallback", MemoryBytes: memoryBytes, MaxCPUMilliseconds: maxCPUMilliseconds,
+		OnHTMLParserPanic: onHTMLParserPanic,
 	}, func(control message.HTMLProcessingControl) result {
 		lines, err := commandMessageLinesWithHTMLControl(m, maxBytes, control)
 		return result{lines: lines, err: err}
@@ -230,11 +237,11 @@ func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Messa
 	if ctx.Err() != nil {
 		return nil, &commandBodyProcessingError{reason: "command body processing was interrupted"}
 	}
-	cpuFailed := usage.cpuExceeded()
-	memoryFailed := usage.memoryExceeded
+	cpuFailed := usage.CPUExceeded()
+	memoryFailed := usage.MemoryExceeded
 	if action == "fallback" {
-		cpuFailed = usage.fallbackCPUExceeded
-		memoryFailed = usage.fallbackMemoryExceeded
+		cpuFailed = usage.FallbackCPUExceeded
+		memoryFailed = usage.FallbackMemoryExceeded
 	}
 	if cpuFailed {
 		return nil, &commandBodyProcessingError{reason: "command body processing exceeded the configured CPU limit"}
@@ -291,14 +298,14 @@ func (ss *session) discardEmailCommand(ctx context.Context, identity, command, r
 }
 
 func (s *emailCommandService) queueReply(recipient, subject, body string) bool {
-	return s.queueReplyContentFunc(recipient, subject, func() commandReplyContent {
+	return s.queueReplyContentFunc(recipient, subject, func(context.Context) commandReplyContent {
 		return commandReplyContent{Text: body}
 	})
 }
 
 // queueReplyContentFunc reserves a bounded reply slot and defers expensive
 // response rendering and SMTP submission to a panic-contained worker.
-func (s *emailCommandService) queueReplyContentFunc(recipient, subject string, content func() commandReplyContent) bool {
+func (s *emailCommandService) queueReplyContentFunc(recipient, subject string, content func(context.Context) commandReplyContent) bool {
 	if !s.cfg.SendReplies {
 		return false
 	}
@@ -320,7 +327,10 @@ func (s *emailCommandService) queueReplyContentFunc(recipient, subject string, c
 		}()
 		from := mailaddr.Normalize(cfg.Recipient)
 		date := time.Now().UTC().Format(time.RFC1123Z)
-		reply := content()
+		renderCtx, cancelRender := context.WithTimeout(context.Background(), commandReplyRenderTimeout)
+		defer cancelRender()
+		reply := content(renderCtx)
+		cancelRender()
 		message, err := buildBoundedCommandReplyMessage(from, recipient, subject, date, token, reply, s.maxMessageSize)
 		if err == nil {
 			err = s.sender.Send(context.Background(), message)

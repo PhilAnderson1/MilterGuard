@@ -109,6 +109,12 @@ references, and prepares inline images for vision analysis. The same
 archived-message parser is used by `REJECTION <id>` so command output reflects
 the current message-processing implementation.
 
+`message.WithProcessingLimits` coordinates thread-CPU deadlines, allocation
+allowances, cancellation, and fallback admission for live analysis, command
+body extraction, and archived-body rendering. Callers select whether resource
+exhaustion permits fallback; archived-body display always permits it and reports
+incomplete extraction. Live filtering retains its configured limit action.
+
 `internal/mailauth` owns the authentication provider boundary and the bounded
 evidence types shared by policy and prompt generation. The default `internal`
 provider uses `internal/mailauth/moxverify` to calculate SPF, DKIM, and DMARC
@@ -395,15 +401,19 @@ rendering. It is used by:
 - Interactive or piped command mode in `cmd/milterguard`.
 - Authenticated email commands handled by the Milter session.
 
-HTML command bodies use the configured HTML memory and pinned-thread CPU
-limits. Normal and lexical-fallback extraction share one CPU window; exhaustion
-returns a command-failed reply and cannot execute a partially extracted command.
+HTML command bodies use the configured memory and pinned-thread CPU limits.
+Primary and fallback extraction have separate allowances, with fallback after
+resource exhaustion admitted only by the configured fallback policy. Incomplete
+extraction returns a command-failed reply and cannot execute partial commands.
 
 `REJECTION <id>` defers archive reading and MIME processing until the response
 is rendered. For email commands this keeps archive parsing off the Milter
-end-of-message path. `internal/smtpreply` subsequently formats and submits the
-reply; the Milter command service owns reply concurrency, logging, and panic
-recovery.
+end-of-message path. Deferred renderers receive a context at invocation, rather
+than capturing the completed database operation's context. Terminal rendering
+uses the command context; email reply workers use an independent one-minute
+rendering deadline. `internal/smtpreply` subsequently formats and submits the
+reply with its own timeout; the Milter command service owns reply concurrency,
+logging, and panic recovery.
 
 ## Concurrency and lifecycle ownership
 

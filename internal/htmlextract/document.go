@@ -297,7 +297,6 @@ func (p processor) parseDocument(input []byte) (*parsedDocument, error) {
 		defer func() {
 			p.usage.CSSBytes = document.styles.cssBytes
 			p.usage.CSSLimitExceeded = document.styles.cascadeIncomplete
-			p.usage.UnsupportedColourFunctions = document.styles.unsupportedColours
 		}()
 	}
 

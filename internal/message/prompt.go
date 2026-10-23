@@ -66,7 +66,7 @@ func (m *Message) BuildAnalysisWithHTMLControl(context AnalysisContext, maxChars
 			fmt.Fprintf(&b, "%s: %s\n", canonicalHeaderName(key), promptHeaderValue(value))
 		}
 	}
-	content := m.processedContentWithHTMLControl(control)
+	content := m.processedContentWithHTMLControl(control, vision.Mode == "always" || vision.Mode == "fallback", vision.Mode == "fallback")
 	visionSelection := selectVisionImages(content, vision)
 	if m.BodyTruncated || content.MIMEIncomplete || content.TransferIncomplete || content.HTMLFallbackUsed || content.CSSIncomplete || visionSelection.omitted > 0 {
 		b.WriteString("\nANALYSIS LIMITATIONS:\n")
@@ -157,7 +157,7 @@ func (m *Message) ProcessedBody(maxChars int) string {
 	if maxChars < 1 {
 		return ""
 	}
-	body, _, _ := selectProcessedBody(m.processedContent(), maxChars)
+	body, _, _ := selectProcessedBody(m.processedContentWithHTMLControl(HTMLProcessingControl{}, false, false), maxChars)
 	return body
 }
 
@@ -175,7 +175,7 @@ func (m *Message) VisibleBodyWithHTMLControl(maxChars int, control HTMLProcessin
 	if maxChars < 1 {
 		return ""
 	}
-	content := m.processedContentWithHTMLControl(control)
+	content := m.processedContentWithHTMLControl(control, false, false)
 	body := content.VisibleText
 	if content.HTMLFallbackUsed {
 		body = content.Text
@@ -190,11 +190,13 @@ func (m *Message) VisibleBodyWithHTMLControl(maxChars int, control HTMLProcessin
 }
 
 func (m *Message) processedContent() extractedContent {
-	return m.processedContentWithHTMLControl(HTMLProcessingControl{})
+	return m.processedContentWithHTMLControl(HTMLProcessingControl{}, true, true)
 }
 
-func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl) extractedContent {
+func (m *Message) processedContentWithHTMLControl(control HTMLProcessingControl, retainImages, countConfidentText bool) extractedContent {
 	budget := newExtractionBudgetWithControl(control)
+	budget.discardImages = !retainImages
+	budget.countConfidentText = countConfidentText
 	budget.setDecodedTextByteLimit(m.maxBytes)
 	content := extractMIMEWithBudget(m.FirstHeader("Content-Type"), m.FirstHeader("Content-Transfer-Encoding"), "", m.BodyBytes(), 0, budget)
 	content.MIMEIncomplete = content.MIMEIncomplete || m.MIMEHeadersTruncated

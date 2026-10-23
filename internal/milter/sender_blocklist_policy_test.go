@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PhilAnderson1/MilterGuard/internal/ai"
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
 	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"github.com/PhilAnderson1/MilterGuard/internal/stores"
@@ -196,6 +197,47 @@ func TestLaterWholeMessageRejectionSupersedesPartialSenderBlock(t *testing.T) {
 		if event.EventType == stores.ActivityEventSenderBlocklist {
 			t.Fatalf("partial sender block was counted despite later rejection: %+v", activity.events)
 		}
+	}
+}
+
+func TestAIRejectionSupersedesPartialSenderBlock(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := config.Config{
+		Mode:      "enforce",
+		Milter:    config.MilterConfig{Timeout: config.Duration(time.Second)},
+		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
+		Filtering: config.FilteringConfig{RejectScore: .5, RejectMessage: "blocked"},
+	}
+	server := NewServer(cfg, fixedAnalyzer{decision: ai.Decision{
+		Classification: ai.ClassificationUnwanted, Score: 1, Reasons: []string{"unwanted message"},
+	}}, log)
+	defer server.Close()
+	history := &recordingRejectionHistory{}
+	activity := &recordingActivity{}
+	ss := blocklistTestSession(serverConn, "enforce", stores.SenderBlockMatch{}, history, activity)
+	ss.deps = server.sessions
+	ss.phase = phaseBody
+	ss.negotiatedActions = actionDeleteRecipient
+	ss.deps.policy.rejectionHistory = history
+	ss.deps.policy.senderBlocklist = fixedSenderBlocklist{match: stores.SenderBlockMatch{
+		BlockedRecipients: []string{"alice@local.example"}, MatchedSender: "sender@example.com", MatchedKind: stores.SenderBlockExactMailbox,
+	}}
+	ss.deps.activity.repository = activity
+	done := make(chan bool, 1)
+	go func() { done <- ss.finishMessage(context.Background()) }()
+	expectFrame(t, clientConn, "y550 5.7.1 blocked\x00")
+	if !<-done {
+		t.Fatal("AI rejection failed")
+	}
+	if len(history.inputs) != 1 || !slices.Equal(history.inputs[0].Recipients, []string{"<alice@local.example>", "<bob@local.example>"}) ||
+		!slices.Equal(history.inputs[0].Reasons, []string{"unwanted message"}) {
+		t.Fatalf("whole-message rejection history = %+v", history.inputs)
+	}
+	if len(activity.events) != 1 || activity.events[0].EventType != stores.ActivityEventScan || activity.events[0].Outcome != stores.ActivityOutcomeRejected {
+		t.Fatalf("expected only AI rejection activity, got %+v", activity.events)
 	}
 }
 

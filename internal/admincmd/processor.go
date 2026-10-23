@@ -10,7 +10,7 @@ import (
 )
 
 func textResponse(render func() string) DeferredResponse {
-	return func() Response { return Response{Text: render()} }
+	return func(context.Context) Response { return Response{Text: render()} }
 }
 
 // Execute performs the database portion of a parsed command and returns a
@@ -80,8 +80,8 @@ func (p *Processor) Execute(parent context.Context, command Command, actor Actor
 		if !found {
 			return textResponse(func() string { return "Rejection record not found.\n" }), nil
 		}
-		return func() Response {
-			return p.rejectionDetail(entry)
+		return func(renderCtx context.Context) Response {
+			return p.rejectionDetail(renderCtx, entry)
 		}, nil
 	case commandAllowlistList:
 		page, err := p.correspondents.ListCorrespondents(ctx, stores.CorrespondentListQuery{Recipients: recipientScope(command.recipient), ActiveSince: cutoff, Limit: MaxListRows})
@@ -205,7 +205,8 @@ func (p *Processor) ExecuteLine(ctx context.Context, line string, actor Actor) (
 		return Response{}, ctx.Err()
 	default:
 	}
-	return deferred(), nil
+	response := deferred(ctx)
+	return response, ctx.Err()
 }
 
 // LoadCommandHistory returns the oldest-to-newest interactive command history.

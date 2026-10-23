@@ -356,6 +356,8 @@ func (m *Message) CommandTextResult(maxBytes int64, control HTMLProcessingContro
 		body = body[:maxBytes]
 	}
 	budget := newExtractionBudgetWithControl(control)
+	budget.discardImages = true
+	budget.countConfidentText = false
 	textLimit := m.maxBytes
 	if maxBytes >= 0 && maxBytes < textLimit {
 		textLimit = maxBytes

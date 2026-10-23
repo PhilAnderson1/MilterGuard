@@ -33,7 +33,9 @@ type Response struct {
 	Attachments []Attachment
 }
 
-type DeferredResponse func() Response
+// DeferredResponse renders using the caller's rendering context, independently
+// of the completed database operation.
+type DeferredResponse func(context.Context) Response
 
 type ArchivedMessage struct {
 	Contents []byte

@@ -144,7 +144,9 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	ss.completeSenderBlocklistRemoval(ctx)
+	if result.selected == actionAccept {
+		ss.completeSenderBlocklistRemoval(ctx)
+	}
 	ss.applyPostDecisionUpdates(ctx, result, inbound)
 	ss.resetMessage(phaseConnection)
 	return true

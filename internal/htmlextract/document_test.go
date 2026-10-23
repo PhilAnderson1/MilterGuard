@@ -1208,25 +1208,21 @@ func TestRelevantDeclarationPropertyClassification(t *testing.T) {
 	}
 }
 
-func TestAnalyzeReportsUnsupportedColourFunctions(t *testing.T) {
+func TestUnsupportedColourFunctionsRemainUnknown(t *testing.T) {
 	tests := []struct {
 		name  string
 		style string
-		want  int
 	}{
-		{name: "static fast path", style: `color:lab(50% 0 0)`, want: 1},
-		{name: "retained variable path", style: `--ink:lab(50% 0 0);color:var(--ink)`, want: 1},
-		{name: "escaped retained path", style: `color:l\61 b(50% 0 0)`, want: 1},
-		{name: "shorthand counted once", style: `background:color-mix(in srgb,red,blue)`, want: 1},
+		{name: "static fast path", style: `color:lab(50% 0 0)`},
+		{name: "retained variable path", style: `--ink:lab(50% 0 0);color:var(--ink)`},
+		{name: "escaped retained path", style: `color:l\61 b(50% 0 0)`},
+		{name: "background shorthand", style: `background:color-mix(in srgb,red,blue)`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			document, err := Analyze([]byte(`<p style="`+test.style+`">T</p>`), DefaultLimits())
 			if err != nil {
 				t.Fatal(err)
-			}
-			if got := document.Usage.UnsupportedColourFunctions; got != test.want {
-				t.Fatalf("unsupported colour functions = %d, want %d", got, test.want)
 			}
 			if label := findText(t, document, "T").Label; label != "unknown" {
 				t.Fatalf("label = %q, want unknown", label)

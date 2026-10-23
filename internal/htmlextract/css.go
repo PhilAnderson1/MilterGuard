@@ -110,15 +110,6 @@ func (d *declaration) setValidity(status valueStatus) {
 	d.validityReady = true
 }
 
-func (d *declaration) discardTransientState() {
-	d.valueTokens = nil
-	d.mathLiterals = nil
-	d.tokensReady = false
-	d.variableDependencies = nil
-	d.variableBlocks = nil
-	d.dependenciesReady = false
-}
-
 // contextualDeclaration reports whether computing the value requires an
 // element's inherited/root style. Variables and shorthands are handled by the
 // caller because their substituted value may change this answer.
@@ -259,7 +250,6 @@ type sheet struct {
 	keyframeNames        resourceguard.Table[string, struct{}]
 	unresolvedStylesheet bool
 	unsupportedNesting   bool
-	unsupportedColours   int
 	runtime              sheetRuntime
 	shouldStop           func()
 	selectorControl      *cascadia.MatchControl
@@ -487,7 +477,6 @@ type parsedDeclarationValue struct {
 	important             bool
 	unsafeIdentifier      bool
 	unsafeWithoutFunction bool
-	unsupportedColours    int
 }
 
 // cssTokensNeedRetention reports whether later declaration processing needs a
@@ -554,12 +543,6 @@ func parseUnretainedCSSTokensWithBudget(ts []css.Token, fallback string, budget 
 			}
 		}
 	}
-	unsupportedColours := 0
-	for _, token := range ts[start:end] {
-		if token.TokenType == css.FunctionToken && isUnsupportedColourFunctionWithBudget(ownedString(token.Data, budget), budget) {
-			unsupportedColours++
-		}
-	}
 
 	startByte := 0
 	for i := 0; i < start; i++ {
@@ -591,7 +574,7 @@ func parseUnretainedCSSTokensWithBudget(ts []css.Token, fallback string, budget 
 		}
 		text = out.String()
 	}
-	return parsedDeclarationValue{text: text, status: valueResolved, important: important, unsupportedColours: unsupportedColours}
+	return parsedDeclarationValue{text: text, status: valueResolved, important: important}
 }
 
 // parseDeclarationTokens preserves CSS token boundaries while decoding the
@@ -601,7 +584,7 @@ func parseUnretainedCSSTokensWithBudget(ts []css.Token, fallback string, budget 
 // string trimming.
 func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string, budget *cpuGuard) parsedDeclarationValue {
 	if status != valueResolved {
-		return parsedDeclarationValue{text: trimCSSWhitespace(fallback), tokens: ts, status: status, unsupportedColours: countUnsupportedColourFunctionsWithBudget(ts, budget)}
+		return parsedDeclarationValue{text: trimCSSWhitespace(fallback), tokens: ts, status: status}
 	}
 	start, end := 0, len(ts)
 	for start < end && (ts[start].kind == css.WhitespaceToken || ts[start].kind == css.CommentToken) {
@@ -671,7 +654,6 @@ func parseDeclarationTokens(ts []valueToken, status valueStatus, fallback string
 		important:             important,
 		unsafeIdentifier:      unsafe,
 		unsafeWithoutFunction: unsafe && !hasFunction,
-		unsupportedColours:    countUnsupportedColourFunctionsWithBudget(preparedTokens, budget),
 	}
 }
 
@@ -767,7 +749,6 @@ func (s *sheet) declarationsFromParsed(prop string, parsed parsedDeclarationValu
 	value := parsed.text
 	imp := parsed.important
 	custom := strings.HasPrefix(prop, "--")
-	s.unsupportedColours += parsed.unsupportedColours
 	if custom && (parsed.status == valueInvalid || parsed.status == valueResolved && !validVariableFunctions(parsed.tokens, s.cpu)) {
 		return nil
 	}

@@ -288,10 +288,10 @@ func validateRejectionHistory(c RejectionHistoryConfig) error {
 }
 
 func validateFiltering(c FilteringConfig) error {
-	if c.RejectScore < 0.5 || c.RejectScore > 1 {
+	if math.IsNaN(c.RejectScore) || c.RejectScore < 0.5 || c.RejectScore > 1 {
 		return fmt.Errorf("filtering.reject_score must be between 0.5 and 1")
 	}
-	if c.LegitimateLowConfidenceScore < 0.5 || c.LegitimateLowConfidenceScore > 1 {
+	if math.IsNaN(c.LegitimateLowConfidenceScore) || c.LegitimateLowConfidenceScore < 0.5 || c.LegitimateLowConfidenceScore > 1 {
 		return fmt.Errorf("filtering.legitimate_low_confidence_score must be between 0.5 and 1")
 	}
 	if strings.TrimSpace(c.RejectMessage) == "" {
@@ -367,7 +367,7 @@ func validateCorrespondents(c CorrespondentsConfig) error {
 	if c.LegitimateSenderMinMessages < 1 {
 		return fmt.Errorf("correspondents.legitimate_sender_min_messages must be positive")
 	}
-	if c.LegitimateSenderMinScore < 0 || c.LegitimateSenderMinScore > 1 {
+	if math.IsNaN(c.LegitimateSenderMinScore) || c.LegitimateSenderMinScore < 0 || c.LegitimateSenderMinScore > 1 {
 		return fmt.Errorf("correspondents.legitimate_sender_min_score must be between 0 and 1")
 	}
 	if c.StaleAfter.Value() < 0 {

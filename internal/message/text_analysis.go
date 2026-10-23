@@ -21,7 +21,12 @@ func prepareVisibleText(value string, memory *resourceguard.Memory, stop func())
 
 func confidentTextCharactersWithResources(value string, memory *resourceguard.Memory, stop func()) int {
 	value = prepareVisibleText(value, memory, stop)
+	return confidentPreparedTextCharacters(value, stop)
+}
 
+// confidentPreparedTextCharacters counts text already processed by
+// prepareVisibleText, without repeating sanitization or padding compaction.
+func confidentPreparedTextCharacters(value string, stop func()) int {
 	// Count normalized text directly: constructing a normalized copy solely to
 	// count it wastes both memory and processing time.
 	count, trimmed, meaningful := 0, 0, false
