@@ -89,13 +89,13 @@ func TestVisionPrefersReferencedImageOverStandaloneAttachment(t *testing.T) {
 		},
 	}
 	content.Images[1].Data[len(content.Images[1].Data)-1] ^= 1
-	images := selectVisionImages(content, VisionOptions{
+	selection := selectVisionImages(content, VisionOptions{
 		Mode: "always", MaxImages: 1, MaxBytes: 1 << 20, MaxPixels: 100,
 	})
-	if len(images) != 1 {
-		t.Fatalf("selected images = %d, want 1", len(images))
+	if len(selection.images) != 1 || selection.omitted != 1 {
+		t.Fatalf("selection = %+v, want one selected and one omitted", selection)
 	}
-	if !bytes.Equal(images[0].Data, content.Images[1].Data) {
+	if !bytes.Equal(selection.images[0].Data, content.Images[1].Data) {
 		t.Fatal("standalone attachment displaced referenced image")
 	}
 }
@@ -105,11 +105,11 @@ func TestVisionUnknownModeSelectsNoImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	images := selectVisionImages(extractedContent{Images: []extractedImage{{Data: decoded}}}, VisionOptions{
+	selection := selectVisionImages(extractedContent{Images: []extractedImage{{Data: decoded}}}, VisionOptions{
 		Mode: "unknown", MaxImages: 1, MaxBytes: 1 << 20, MaxPixels: 100,
 	})
-	if len(images) != 0 {
-		t.Fatalf("unknown vision mode selected %d images", len(images))
+	if len(selection.images) != 0 || selection.omitted != 0 {
+		t.Fatalf("unknown vision mode produced %+v", selection)
 	}
 }
 
@@ -249,12 +249,12 @@ func TestVisionFallbackUsesOnlyConfidentVisibleCharacterCount(t *testing.T) {
 		Mode: "fallback", MinTextChars: 20, MaxImages: 1,
 		MaxBytes: 1 << 20, MaxPixels: 100,
 	}
-	if images := selectVisionImages(content, options); len(images) != 1 {
-		t.Fatalf("uncertain visible-text estimate suppressed image analysis: selected %d images", len(images))
+	if selection := selectVisionImages(content, options); len(selection.images) != 1 || selection.omitted != 0 {
+		t.Fatalf("uncertain visible-text estimate suppressed image analysis: %+v", selection)
 	}
 	content.ConfidentVisibleChars = 200
-	if images := selectVisionImages(content, options); len(images) != 0 {
-		t.Fatalf("confident visible text did not suppress fallback image analysis: selected %d images", len(images))
+	if selection := selectVisionImages(content, options); len(selection.images) != 0 || selection.omitted != 0 {
+		t.Fatalf("confident visible text did not suppress fallback image analysis: %+v", selection)
 	}
 }
 
@@ -269,6 +269,9 @@ func TestVisionImageLimitsAreEnforced(t *testing.T) {
 	})
 	if len(analysis.Images) != 0 {
 		t.Fatal("selected an image exceeding the byte limit")
+	}
+	if !strings.Contains(analysis.Prompt, "- 1 inline image could not be supplied because of image-processing limits or unsupported data.") {
+		t.Fatalf("omitted-image limitation missing: %s", analysis.Prompt)
 	}
 }
 

@@ -73,6 +73,25 @@ func (collector *imageRefCollector) AddAll(candidates []string) {
 
 func markdownURL(value string) string { return markdownURLReplacer.Replace(value) }
 
+func fallbackHeadElement(name string) bool {
+	switch name {
+	case "html", "head", "base", "basefont", "bgsound", "link", "meta", "noframes", "noscript", "script", "style", "template", "title":
+		return true
+	}
+	return false
+}
+
+func fallbackHTMLWhitespaceOnly(value []byte) bool {
+	for _, c := range value {
+		switch c {
+		case ' ', '\t', '\n', '\r', '\f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // extractBoundedHTMLFallback owns no primary-stage state. Admission and
 // resource-limit policy are handled by the caller before entering this stage.
 func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fallbackResources) extractedContent {
@@ -85,7 +104,8 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 	links := linkCollector{compactURLs: compactURLs, memory: memory, shouldStop: shouldStop}
 	images := imageRefCollector{memory: memory}
 	var base *url.URL
-	baseSeen, suppressed := false, 0
+	baseSeen := false
+	var suppressed []string
 	complete := true
 	for {
 		if !(text.Len() < fallbackTextBytes) {
@@ -108,11 +128,19 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 			rawName, moreAttributes := z.TagName()
 			name := resourceguard.CopyString(memory, rawName, shouldStop)
 
+			if len(suppressed) > 0 && suppressed[len(suppressed)-1] == "head" {
+				if name == "head" {
+					continue
+				}
+				if !fallbackHeadElement(name) {
+					suppressed = suppressed[:len(suppressed)-1]
+				}
+			}
 			if omittedHTMLElement(name) {
-				suppressed++
+				suppressed = resourceguard.Append(memory, suppressed, shouldStop, name)
 				continue
 			}
-			if suppressed > 0 {
+			if len(suppressed) > 0 {
 				continue
 			}
 			var attributeName []byte
@@ -167,14 +195,17 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 			rawName, _ := z.TagName()
 			name := resourceguard.CopyString(memory, rawName, shouldStop)
 
-			if omittedHTMLElement(name) && suppressed > 0 {
-				suppressed--
+			if len(suppressed) > 0 && suppressed[len(suppressed)-1] == name {
+				suppressed = suppressed[:len(suppressed)-1]
 			}
 		case xhtml.TextToken:
-			if suppressed > 0 {
+			value := z.Text()
+			if len(suppressed) > 0 && suppressed[len(suppressed)-1] == "head" && !fallbackHTMLWhitespaceOnly(value) {
+				suppressed = suppressed[:len(suppressed)-1]
+			}
+			if len(suppressed) > 0 {
 				continue
 			}
-			value := z.Text()
 			remaining := fallbackTextBytes - text.Len()
 			if len(value) >= remaining {
 				text.Write(value[:remaining])
@@ -186,6 +217,9 @@ func extractBoundedHTMLFallback(source string, compactURLs bool, resources *fall
 		}
 	}
 	if text.Len() >= fallbackTextBytes {
+		complete = false
+	}
+	if len(suppressed) > 0 {
 		complete = false
 	}
 	value := text.String()

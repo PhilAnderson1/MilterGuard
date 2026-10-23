@@ -460,6 +460,51 @@ func TestBoundedHTMLFallbackCapsSingleTextToken(t *testing.T) {
 	}
 }
 
+func TestBoundedHTMLFallbackImplicitlyClosesHead(t *testing.T) {
+	for _, test := range []struct {
+		name, source string
+	}{
+		{
+			name:   "body tag",
+			source: `<head><meta charset="utf-8"><style>.hidden{display:none}</style><body><p>visible body</p>`,
+		},
+		{
+			name:   "body element without body tag",
+			source: `<head><title>hidden title</title><div>visible body</div>`,
+		},
+		{
+			name:   "text",
+			source: `<head><link rel="stylesheet">visible body`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := extractBoundedHTMLFallback(test.source, true, testFallbackResources(nil))
+			if !strings.Contains(got.Text, "visible body") || strings.Contains(got.Text, "hidden") || got.ExtractionIncomplete {
+				t.Fatalf("fallback content = %+v", got)
+			}
+		})
+	}
+}
+
+func TestBoundedHTMLFallbackMatchesSuppressedEndTags(t *testing.T) {
+	got := extractBoundedHTMLFallback(`<script>hidden before</style>hidden after</script><p>visible body</p>`, true, testFallbackResources(nil))
+	if got.Text != "visible body" || got.ExtractionIncomplete {
+		t.Fatalf("fallback content = %+v", got)
+	}
+}
+
+func TestBoundedHTMLFallbackReportsUnclosedSuppression(t *testing.T) {
+	for _, source := range []string{
+		`<head><meta charset="utf-8">`,
+		`<p>visible prefix</p><style>unclosed`,
+	} {
+		got := extractBoundedHTMLFallback(source, true, testFallbackResources(nil))
+		if !got.ExtractionIncomplete {
+			t.Fatalf("unclosed suppression reported complete: %+v", got)
+		}
+	}
+}
+
 func TestForeignAncestorUncertaintyDoesNotSuppressVision(t *testing.T) {
 	body := `<style>foreignObject div{display:none}</style><foreignObject><div>` + strings.Repeat("padding ", 50) + `</div></foreignObject><img src="cid:scam-image">`
 	got := htmlToText(body)
