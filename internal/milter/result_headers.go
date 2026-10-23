@@ -41,6 +41,10 @@ func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 			action = "accepted-below-threshold"
 		}
 		classification := string(result.classification)
+		if classification == "" {
+			// Resource-limit rejection can prevent classification entirely.
+			return ss.writeClassificationHeaders("unavailable", nil, action)
+		}
 		headers = [][2]string{
 			{classificationHeader, classification},
 			{scoreHeader, strconv.FormatFloat(result.score, 'f', -1, 64)},

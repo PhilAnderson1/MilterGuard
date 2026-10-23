@@ -25,6 +25,49 @@ func TestArchiveBytesRetainsAllHeadersAndBody(t *testing.T) {
 	}
 }
 
+func TestArchiveBodySizeBoundary(t *testing.T) {
+	const limit = 100
+	const header = "Subject: x\r\n"
+	const capacity = limit - len(header) - len("\r\n")
+	for _, extra := range []int{-1, 0, 1, 2} {
+		t.Run(strconv.Itoa(extra), func(t *testing.T) {
+			m := New(limit)
+			m.AddHeader("Subject", "x")
+			body := strings.Repeat("b", capacity+extra)
+			// Exercise multiple body chunks and an empty final chunk.
+			m.AddBody([]byte(body[:10]))
+			m.AddBody([]byte(body[10:]))
+			m.AddBody(nil)
+			truncated := extra > 0
+			if m.BodyTruncated != truncated || m.Truncated != truncated {
+				t.Fatalf("BodyTruncated=%v Truncated=%v, want %v", m.BodyTruncated, m.Truncated, truncated)
+			}
+			archive := m.ArchiveBytes()
+			if len(archive) > limit {
+				t.Fatalf("archive size=%d, limit=%d", len(archive), limit)
+			}
+			parsed, err := mail.ReadMessage(bytes.NewReader(archive))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if marked := parsed.Header.Get("X-MilterGuard-Archive-Truncated") == "yes"; marked != truncated {
+				t.Fatalf("archive truncation marker=%v, want %v", marked, truncated)
+			}
+			archivedBody, err := io.ReadAll(parsed.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantBody := body
+			if truncated {
+				wantBody = body[:capacity-len(archiveTruncationHeader)]
+			}
+			if string(archivedBody) != wantBody {
+				t.Fatalf("archived body=%q, want %q", archivedBody, wantBody)
+			}
+		})
+	}
+}
+
 func TestArchiveBytesFoldsEmbeddedHeaderLineBreaks(t *testing.T) {
 	m := New(4096)
 	m.AddHeader("Subject", "original\r\nX-Forged: yes\nContent-Type: text/html\rAnother: value")

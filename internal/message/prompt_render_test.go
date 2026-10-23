@@ -471,14 +471,14 @@ func TestBodyIsTruncatedToRemainingCombinedMessageBudget(t *testing.T) {
 	m.AddHeader("Subject", "test")
 	headerBytes := m.archiveHeaderBytes
 	m.AddBody([]byte(strings.Repeat("x", 64)))
-	if got, want := int64(m.body.Len()), m.maxBytes-headerBytes; got != want {
+	if got, want := int64(m.body.Len()), m.maxBytes-headerBytes-2; got != want {
 		t.Fatalf("retained body bytes = %d, want %d", got, want)
 	}
 	if !m.BodyTruncated || !m.Truncated {
 		t.Fatal("message exceeding the combined header and body budget was not marked truncated")
 	}
-	if got := retainedBytes(m); got != m.maxBytes {
-		t.Fatalf("retained bytes = %d, want %d", got, m.maxBytes)
+	if got := retainedBytes(m) + 2; got != m.maxBytes {
+		t.Fatalf("retained bytes including header/body separator = %d, want %d", got, m.maxBytes)
 	}
 	if prompt := m.Prompt(1000); !strings.Contains(prompt, "Message body exceeded the retained-byte limit") {
 		t.Fatalf("body truncation was not reported to AI: %s", prompt)

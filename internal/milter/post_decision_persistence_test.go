@@ -39,6 +39,91 @@ type failingRejectionRepository struct {
 	stores.RejectionHistoryRepository
 }
 
+type bypassPersistenceRepository struct {
+	stores.CorrespondentPolicyRepository
+	stores.IPReputationRepository
+	observe func(string, context.Context)
+}
+
+func (r *bypassPersistenceRepository) LearnAuthenticated(ctx context.Context, _ string, _ []string) error {
+	r.observe("learn", ctx)
+	return nil
+}
+
+func (r *bypassPersistenceRepository) TouchInbound(ctx context.Context, _ string, _ []string) error {
+	r.observe("touch", ctx)
+	return nil
+}
+
+func (r *bypassPersistenceRepository) RecordLegitimate(ctx context.Context, _ netip.Addr) error {
+	r.observe("credit", ctx)
+	return nil
+}
+
+func TestBypassPersistenceAfterProcessingDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name, source, mode, want                   string
+		authenticated, learn, touch, responseFails bool
+	}{
+		{name: "authenticated", source: "authenticated_connection", mode: "enforce", authenticated: true, learn: true, want: "learn"},
+		{name: "correspondent", source: "known_correspondent", mode: "enforce", touch: true, want: "credit,touch"},
+		{name: "domain", source: "sender_domain_allowlist", mode: "enforce", touch: true, want: "credit,touch"},
+		{name: "accept mode", source: "known_correspondent", mode: "accept", touch: true},
+		{name: "failed response", source: "known_correspondent", mode: "enforce", touch: true, responseFails: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log := slog.New(slog.NewTextHandler(io.Discard, nil))
+			var operations []string
+			var persistenceContext context.Context
+			repository := &bypassPersistenceRepository{observe: func(operation string, ctx context.Context) {
+				operations = append(operations, operation)
+				if err := ctx.Err(); err != nil {
+					t.Errorf("%s context error: %v", operation, err)
+				}
+				deadline, ok := ctx.Deadline()
+				if remaining := time.Until(deadline); !ok || remaining <= 0 || remaining > postDecisionUpdateTimeout {
+					t.Errorf("%s persistence deadline: %v, present: %v", operation, deadline, ok)
+				}
+				if persistenceContext != nil && persistenceContext != ctx {
+					t.Error("bypass updates do not share one persistence budget")
+				}
+				persistenceContext = ctx
+			}}
+			serverConn, clientConn := net.Pipe()
+			defer serverConn.Close()
+			defer clientConn.Close()
+			ss := newSession(&sessionDependencies{
+				mode: test.mode, log: log, protocol: protocolOptions{maxMessageSize: 1024},
+				policy: &messagePolicyService{
+					log: log, correspondents: repository,
+					ipReputation: &ipReputationStore{repository: repository, enabledFeature: true, log: log},
+				},
+			}, serverConn)
+			ss.authentication.Authenticated = test.authenticated
+			ss.peerIP = netip.MustParseAddr("192.0.2.10")
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			defer cancel()
+			if test.responseFails {
+				clientConn.Close()
+			}
+			done := make(chan bool, 1)
+			go func() { done <- ss.finishBypassedMessage(ctx, test.source, test.learn, test.touch) }()
+			if !test.responseFails {
+				expectFrame(t, clientConn, string([]byte{responseAccept}))
+			}
+			if kept := <-done; kept == test.responseFails {
+				t.Fatalf("keep connection = %v", kept)
+			}
+			if got := strings.Join(operations, ","); got != test.want {
+				t.Errorf("persistence operations = %q, want %q", got, test.want)
+			}
+			if persistenceContext != nil && persistenceContext.Err() != context.Canceled {
+				t.Error("persistence context was not cancelled after updates")
+			}
+		})
+	}
+}
+
 func (failingRejectionRepository) AddRejection(context.Context, stores.NewRejection) (uint64, error) {
 	return 0, errors.New("database unavailable")
 }

@@ -265,7 +265,11 @@ func (m *Message) FromHeaderCount() int { return m.fromHeaderCount }
 // AddBody appends as much of a body chunk as fits within the configured
 // message limit and marks the message as truncated when bytes are discarded.
 func (m *Message) AddBody(p []byte) {
-	remaining := m.maxBytes - m.archiveHeaderBytes - m.bodySize
+	if len(p) == 0 {
+		return
+	}
+	// Include the header/body separator in the serialized message budget.
+	remaining := m.maxBytes - m.archiveHeaderBytes - 2 - m.bodySize
 	if remaining <= 0 {
 		m.Truncated = true
 		m.BodyTruncated = true

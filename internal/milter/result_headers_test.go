@@ -96,6 +96,53 @@ func TestBelowThresholdUnwantedAddsTrustedResultHeaders(t *testing.T) {
 	expectFrame(t, conn, string([]byte{responseAccept}))
 }
 
+func TestAcceptModeResourceLimitHeaders(t *testing.T) {
+	for _, test := range []struct {
+		policy, classification, score, confidence, action string
+		calls                                             int32
+	}{
+		{"reject", "unavailable", "", "unavailable", acceptModeAction, 0},
+		{"dos-reject", "unwanted", "1", "high", acceptModeAction, 0},
+		{"fallback", "legitimate", "1", "high", "accepted", 1},
+	} {
+		t.Run(test.policy, func(t *testing.T) {
+			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: ai.ClassificationLegitimate, Score: 1}}
+			server, conn, done := testServer(t, analyzer)
+			setTestMode(server, "accept")
+			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
+			server.sessions.analysis.ai.HTMLResourceLimitAction = test.policy
+			// Force deterministic extraction exhaustion without relying on CPU timing.
+			server.sessions.analysis.ai.MaxHTMLParseMemoryBytes = 1
+			defer func() { _ = conn.Close(); <-done }()
+			negotiateWithActions(t, conn, resultHeaderActions)
+			sendContinueFrames(t, conn,
+				connectFrame('4', "127.0.0.1"),
+				envelopeFrame(commandMail, "sender@example.com"),
+				envelopeFrame(commandRecipient, "recipient@example.net"),
+				headerFrame("From", "sender@example.com"),
+				headerFrame("Content-Type", "text/html"),
+				headerFrame(scoreHeader, "0.99"),
+				[]byte{commandEndHeaders},
+				append([]byte{commandBody}, []byte("<p>Hello</p>")...),
+			)
+			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+				t.Fatal(err)
+			}
+			expectFrame(t, conn, string(deleteHeaderResponse(scoreHeader)))
+			expectFrame(t, conn, string(addHeaderResponse(classificationHeader, test.classification)))
+			if test.score != "" {
+				expectFrame(t, conn, string(addHeaderResponse(scoreHeader, test.score)))
+			}
+			expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, test.confidence)))
+			expectFrame(t, conn, string(addHeaderResponse(actionHeader, test.action)))
+			expectFrame(t, conn, string([]byte{responseAccept}))
+			if got := analyzer.calls.Load(); got != test.calls {
+				t.Errorf("AI calls = %d, want %d", got, test.calls)
+			}
+		})
+	}
+}
+
 func TestResultHeaderRemovalSurvivesRetentionLimit(t *testing.T) {
 	analyzer := fixedAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)

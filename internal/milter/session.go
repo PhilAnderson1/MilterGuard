@@ -374,15 +374,17 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 	}
 	ss.completeSenderBlocklistRemoval(ctx)
 	if ss.deps.mode == "enforce" {
+		persistCtx, cancel := postDecisionContext(ctx)
 		if !ss.authentication.Authenticated && (source == "known_correspondent" || source == "sender_domain_allowlist") {
-			ss.deps.policy.recordLegitimateIP(ctx, ss.peerIP)
+			ss.deps.policy.recordLegitimateIP(persistCtx, ss.peerIP)
 		}
 		if learn {
-			ss.learnAuthenticatedRecipients(ctx)
+			ss.learnAuthenticatedRecipients(persistCtx)
 		}
 		if touchInbound {
-			ss.touchInboundCorrespondent(ctx)
+			ss.touchInboundCorrespondent(persistCtx)
 		}
+		cancel()
 	}
 	if source == "internal_command_reply" {
 		ss.deps.log.DebugContext(ctx, "message bypassed AI analysis", attrs...)
