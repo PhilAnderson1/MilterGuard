@@ -262,6 +262,13 @@ func TestConditionalFragmentUsesScriptingDisabledBoundedParser(t *testing.T) {
 	}
 }
 
+func TestConditionalFragmentAcceptsFormControlsWithoutContext(t *testing.T) {
+	got := htmlToText(`<!--[if mso]><input><p>Input notice</p><select><option>Selection</option></select><![endif]-->`)
+	if got.ExtractionIncomplete || !strings.Contains(got.Text, "Input notice") || !strings.Contains(got.Text, "Selection") {
+		t.Fatalf("conditional form content was not extracted: %+v", got)
+	}
+}
+
 func TestConditionalFragmentReportsCooperativeStop(t *testing.T) {
 	fragment := `[if mso]>` + strings.Repeat(`<p>notice</p>`, 300) + `<![endif]`
 	for _, stopAt := range []int{1, 3} {

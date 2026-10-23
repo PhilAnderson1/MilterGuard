@@ -547,6 +547,35 @@ func TestCommandMessageRequiresSmallPlainTextBody(t *testing.T) {
 	}
 }
 
+func TestEmailCommandExtractionConcurrencyGate(t *testing.T) {
+	service := &emailCommandService{
+		cfg:                     config.EmailCommandsConfig{MaxMessageBytes: 4096},
+		extractionSlots:         make(chan struct{}, 1),
+		maxHTMLParseMemoryBytes: 8 << 20,
+		maxHTMLParseCPUMillis:   250,
+		htmlResourceLimitAction: "reject",
+	}
+	msg := message.New(4096)
+	msg.AddHeader("Content-Type", "text/plain; charset=UTF-8")
+	msg.AddBody([]byte("WHITELIST ADD news@example.net"))
+
+	service.extractionSlots <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := service.messageLines(ctx, msg, nil); err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("wait error = %v, want interrupted processing", err)
+	}
+	<-service.extractionSlots
+
+	lines, err := service.messageLines(context.Background(), msg, nil)
+	if err != nil || len(lines) != 1 || lines[0] != "WHITELIST ADD news@example.net" {
+		t.Fatalf("lines = %q, err = %v", lines, err)
+	}
+	if len(service.extractionSlots) != 0 {
+		t.Fatal("extraction slot was not released")
+	}
+}
+
 func TestCommandMessageCPUExhaustionReturnsExecutionFailure(t *testing.T) {
 	msg := message.New(1 << 20)
 	msg.AddHeader("Content-Type", "text/html; charset=UTF-8")

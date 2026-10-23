@@ -523,7 +523,7 @@
   "internal/fork/xnethtml/parse.go::beforeHTMLIM:1": "df8f74711263ea4eff4ccc4785158ace787ad7315576294a85454283e87d8f68",
   "internal/fork/xnethtml/parse.go::beforeHeadIM:1": "c766945da996845ef801321d514c0baac265ff4e0c015ada6138c0148a190d6a",
   "internal/fork/xnethtml/parse.go::ignoreTheRemainingTokens:1": "16b264e0acd8ab82c881e73de4ff5a7ff11944135644d7c098f0631ae0846dba",
-  "internal/fork/xnethtml/parse.go::inBodyIM:1": "0299480b1b5c390aa8db16a6c4c31bc343ebf2810793ef891a71352f5221e474",
+  "internal/fork/xnethtml/parse.go::inBodyIM:1": "c589fb81f22f0151b535ab4c8f0731357ab90987c1a7b17cd0eff7a4c5cb4f69",
   "internal/fork/xnethtml/parse.go::inCaptionIM:1": "f3eae03ba5ec7d9bd676fb90ac834e9b172551e06c0de3373ef51fb9e559b8f8",
   "internal/fork/xnethtml/parse.go::inCellIM:1": "10ea8cf0b93430a8508cb794072809d24d126ea3d871a84224f9a7f853b7b487",
   "internal/fork/xnethtml/parse.go::inColumnGroupIM:1": "ab8d5adf8f1383fa6c9efdafb7678d10a2cc636e187f11d642467a6dae0b33b9",

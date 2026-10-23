@@ -71,11 +71,9 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 		return true, ss.rejectEmailCommand(ctx, "authenticated envelope sender is invalid")
 	}
 
-	lines, err := commandMessageLinesWithResourceLimits(ctx, ss.message, cfg.MaxMessageBytes,
-		ss.deps.commands.maxHTMLParseMemoryBytes, ss.deps.commands.maxHTMLParseCPUMillis,
-		ss.deps.commands.htmlResourceLimitAction, func() {
-			ss.deps.log.ErrorContext(ctx, "HTML parser panic; using fallback extraction", "message_id", ss.message.Header("Message-ID"), "email_command", true)
-		})
+	lines, err := ss.deps.commands.messageLines(ctx, ss.message, func() {
+		ss.deps.log.ErrorContext(ctx, "HTML parser panic; using fallback extraction", "message_id", ss.message.Header("Message-ID"), "email_command", true)
+	})
 	if err != nil {
 		var processingErr *commandBodyProcessingError
 		if errors.As(err, &processingErr) {
@@ -200,6 +198,19 @@ func commandMessageLinesWithHTMLControl(m *message.Message, maxBytes int64, cont
 type commandBodyProcessingError struct{ reason string }
 
 func (e *commandBodyProcessingError) Error() string { return e.reason }
+
+func (s *emailCommandService) messageLines(ctx context.Context, m *message.Message, onHTMLParserPanic func()) ([]string, error) {
+	select {
+	case s.extractionSlots <- struct{}{}:
+		defer func() { <-s.extractionSlots }()
+	case <-ctx.Done():
+		return nil, &commandBodyProcessingError{reason: "command body processing was interrupted"}
+	}
+
+	return commandMessageLinesWithResourceLimits(ctx, m, s.cfg.MaxMessageBytes,
+		s.maxHTMLParseMemoryBytes, s.maxHTMLParseCPUMillis,
+		s.htmlResourceLimitAction, onHTMLParserPanic)
+}
 
 func commandMessageLinesWithResourceLimits(ctx context.Context, m *message.Message, maxBytes, memoryBytes int64, maxCPUMilliseconds int, action string, onHTMLParserPanic func()) ([]string, error) {
 	if action != "fallback" {

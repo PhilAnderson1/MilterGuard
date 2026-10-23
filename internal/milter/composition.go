@@ -99,7 +99,7 @@ func buildRuntime(cfg config.Config, analyzer Analyzer, log *slog.Logger) runtim
 	}
 	emailCommands := &emailCommandService{
 		cfg: cfg.EmailCommands, processor: commands, recipient: mailaddr.Normalize(cfg.EmailCommands.Recipient),
-		internalToken: internalToken, replySlots: make(chan struct{}, 4), log: log,
+		internalToken: internalToken, replySlots: make(chan struct{}, 4), extractionSlots: make(chan struct{}, cfg.AI.MaxConcurrent), log: log,
 		maxMessageSize: cfg.Milter.MaxMessageSize, maxHTMLParseMemoryBytes: cfg.AI.MaxHTMLParseMemoryBytes,
 		maxHTMLParseCPUMillis: cfg.AI.MaxHTMLParseCPUMilliseconds, htmlResourceLimitAction: cfg.AI.HTMLResourceLimitAction,
 		sender: smtpreply.New(smtpreply.Options{

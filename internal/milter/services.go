@@ -78,6 +78,7 @@ type emailCommandService struct {
 	recipient               string
 	internalToken           string
 	replySlots              chan struct{}
+	extractionSlots         chan struct{}
 	sender                  smtpreply.Sender
 	log                     *slog.Logger
 	maxMessageSize          int64

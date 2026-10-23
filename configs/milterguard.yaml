@@ -468,7 +468,7 @@ correspondents:
   # Number of legitimate emails required to allowlist an inbound sender, and the
   # minimum confidence score each email must meet.
   legitimate_sender_min_messages: 3
-  legitimate_sender_min_score: 0.95
+  legitimate_sender_min_score: 0.80
 
   # Apply authentication.trust_requirement before an inbound legitimate result
   # contributes toward automatic allowlisting.

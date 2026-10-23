@@ -57,6 +57,19 @@ func TestFragmentResultMemoryAdmission(t *testing.T) {
 	}
 }
 
+func TestNilContextFragmentFormControls(t *testing.T) {
+	for _, source := range []string{"<input>", "<select>", "Hello <select>world</select>"} {
+		nodes, err := ParseFragmentWithOptions(strings.NewReader(source), nil)
+		if err != nil {
+			t.Errorf("ParseFragmentWithOptions(%q): %v", source, err)
+			continue
+		}
+		if len(nodes) == 0 {
+			t.Errorf("ParseFragmentWithOptions(%q) returned no nodes", source)
+		}
+	}
+}
+
 func TestFragmentResultCancellation(t *testing.T) {
 	atEOF := false
 	r := fragmentEOFReader{strings.NewReader(strings.Repeat("<i></i>", 1000)), func() { atEOF = true }}

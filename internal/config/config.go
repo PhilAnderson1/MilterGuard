@@ -362,7 +362,7 @@ func defaults() Config {
 		},
 		Correspondents: CorrespondentsConfig{
 			LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true,
-			LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .95, LegitimateSenderRequireAuthentication: true,
+			LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .80, LegitimateSenderRequireAuthentication: true,
 			UseAllowlist: true,
 			Scope:        "per_sender", RecipientMatch: "all",
 			BypassAI: true, RequireAuthenticationForBypass: true,
