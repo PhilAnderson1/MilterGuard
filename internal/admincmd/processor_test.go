@@ -206,11 +206,11 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	if strings.Contains(response.Text, "Period:") {
 		t.Errorf("activity response contains redundant exact period:\n%s", response.Text)
 	}
-	if strings.Index(response.Text, "  Content processing DoS protection: 3") < strings.Index(response.Text, "  Sender blocklist: 0") {
-		t.Errorf("content-processing DoS rejection count is not last in its list:\n%s", response.Text)
+	if !strings.Contains(response.Text, "  Content processing DoS protection: 3\n  Incomplete inspection: 2\n\n") {
+		t.Errorf("rejection inspection rows are out of order:\n%s", response.Text)
 	}
-	if strings.Index(response.Text, "  Content processing DoS protection (accept mode): 2") < strings.Index(response.Text, "  Trusted sender domain: 0") {
-		t.Errorf("content-processing DoS accepted count is not last in its list:\n%s", response.Text)
+	if !strings.Contains(response.Text, "  Content processing DoS protection (accept mode): 2\n  Incomplete inspection (accept mode): 3\n\n") {
+		t.Errorf("accepted inspection rows are out of order:\n%s", response.Text)
 	}
 }
 
