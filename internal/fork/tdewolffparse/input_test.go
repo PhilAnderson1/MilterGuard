@@ -74,6 +74,28 @@ func TestInputBadRune(t *testing.T) {
 	test.T(t, r, rune(0xF0), "rune")
 }
 
+func TestInputRuneLookaheadNearEnd(t *testing.T) {
+	for _, suffix := range []string{"", "x", "æ", "†", "\U00100000", "\xc3", "\xe2", "\xe2\x80", "\xf0", "\xf0\x90", "\xf0\x90\x80"} {
+		wantRune, wantSize := NewInputString(suffix).PeekRune(0)
+		z := NewInputString("abcd" + suffix)
+		z.Move(1)
+		gotRune, gotSize := z.PeekRune(3)
+		if gotRune != wantRune || gotSize != wantSize {
+			t.Errorf("suffix %q: got (%U, %d), want (%U, %d)", suffix, gotRune, gotSize, wantRune, wantSize)
+		}
+	}
+}
+
+func TestInputRuneLookaheadOutsideBuffer(t *testing.T) {
+	z := NewInputString("abc")
+	z.Move(1)
+	for _, offset := range []int{-1, 3, 4, int(^uint(0) >> 1)} {
+		if r, n := z.PeekRune(offset); r != 0 || n != 1 {
+			t.Errorf("offset %d: got (%U, %d), want (0, 1)", offset, r, n)
+		}
+	}
+}
+
 func TestInputZeroLen(t *testing.T) {
 	z := NewInput(test.NewPlainReader(bytes.NewBufferString("")))
 	test.That(t, z.Peek(0) == 0, "first character must yield error")

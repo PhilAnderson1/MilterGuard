@@ -20,9 +20,27 @@ func (p *Processor) rejectionDetail(ctx context.Context, entry stores.Rejection)
 	processedBody := "Saved message is not available."
 	var attachments []Attachment
 	if p.messageSource != nil {
-		archivedMessage, err := p.messageSource.ReadWithRecordID(entry.ID, entry.RejectedAt, p.maxMessageSize)
+		readLimit := p.maxMessageSize
+		budget, _ := ctx.Value(replyAttachmentBudgetKey{}).(*ReplyAttachmentBudget)
+		if budget != nil {
+			if budget.included[entry.ID] {
+				return Response{Text: formatRejectionDetail(entry, "Saved message already included earlier in this reply.")}
+			}
+			readLimit = min(readLimit, budget.readLimit())
+			if readLimit <= 0 {
+				budget.omit(entry.ID)
+				return Response{Text: formatRejectionDetail(entry, "Saved message omitted because the reply attachment budget is exhausted.")}
+			}
+		}
+		archivedMessage, err := p.messageSource.ReadWithRecordID(entry.ID, entry.RejectedAt, readLimit)
+		if err == nil && int64(len(archivedMessage.Contents)) > readLimit {
+			err = ErrArchiveTooLarge
+		}
 		switch {
 		case err == nil:
+			if budget != nil {
+				budget.include(entry.ID, int64(len(archivedMessage.Contents)))
+			}
 			attachments = append(attachments, Attachment{Filename: fmt.Sprintf("rejection-%d.eml", entry.ID), MediaType: "application/octet-stream", Contents: archivedMessage.Contents, SourcePath: archivedMessage.Path})
 			processedBody = "Saved message is attached, but its body could not be processed."
 			archived, parseErr := message.ParseArchived(archivedMessage.Contents, p.maxMessageSize)
@@ -37,6 +55,9 @@ func (p *Processor) rejectionDetail(ctx context.Context, entry stores.Rejection)
 			} else if p.log != nil {
 				p.log.Warn("cannot process saved rejected message", "rejection_id", entry.ID, "error", parseErr)
 			}
+		case errors.Is(err, ErrArchiveTooLarge) && budget != nil:
+			budget.omit(entry.ID)
+			processedBody = "Saved message omitted because it is too large to attach within this reply's size limit."
 		case errors.Is(err, fs.ErrNotExist):
 		default:
 			if p.log != nil {

@@ -24,6 +24,8 @@ type Options struct {
 	MaxTotalBytes int64
 }
 
+var ErrReadLimit = errors.New("saved message exceeds read limit")
+
 type Archive struct {
 	opts Options
 	log  *slog.Logger
@@ -141,14 +143,14 @@ func (a *Archive) ReadWithRecordID(recordID uint64, rejectedAt time.Time, maxByt
 		return StoredMessage{}, fmt.Errorf("saved message is not a regular file")
 	}
 	if info.Size() > maxBytes {
-		return StoredMessage{}, fmt.Errorf("saved message exceeds read limit")
+		return StoredMessage{}, ErrReadLimit
 	}
 	contents, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		return StoredMessage{}, err
 	}
 	if int64(len(contents)) > maxBytes {
-		return StoredMessage{}, fmt.Errorf("saved message exceeds read limit")
+		return StoredMessage{}, ErrReadLimit
 	}
 	return StoredMessage{Contents: contents, Path: path}, nil
 }

@@ -340,8 +340,8 @@ func defaults() Config {
 			},
 			InspectSignatures: true, InspectArchives: true, MaxAttachmentBytes: 10 << 20,
 			MaxArchiveDepth: 2, MaxArchiveFiles: 100, MaxArchiveUncompressedBytes: 50 << 20,
-			EncryptedArchiveAction: "reject", UnscannableAction: "accept", InvalidMIMEAction: "reject",
-			RejectMessage: "Message rejected because it contains a prohibited executable attachment",
+			EncryptedArchiveAction: "reject", UnscannableAction: "reject", InvalidMIMEAction: "reject",
+			RejectMessage: "Message rejected because an attachment is prohibited or could not be safely inspected",
 		},
 		EmailCommands: EmailCommandsConfig{
 			Recipient: "milterguard@example.com", VerifySenderViaAliases: true, SendReplies: true,

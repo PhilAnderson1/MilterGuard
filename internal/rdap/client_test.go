@@ -14,6 +14,35 @@ import (
 	"time"
 )
 
+func TestNewWithReplacedDefaultTransport(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	for _, base := range []http.RoundTripper{
+		roundTripFunc(func(*http.Request) (*http.Response, error) {
+			t.Fatal("replacement transport must not handle RDAP requests")
+			return nil, errors.New("unexpected request")
+		}),
+		nil,
+		(*http.Transport)(nil),
+		&http.Transport{MaxIdleConns: 17, Proxy: http.ProxyFromEnvironment},
+	} {
+		http.DefaultTransport = base
+		client := New(time.Second)
+		transport, ok := client.http.Transport.(*http.Transport)
+		if !ok || transport == nil || transport.Proxy != nil || transport.DialContext == nil {
+			t.Fatalf("default %T: RDAP transport protections missing", base)
+		}
+		if original, ok := base.(*http.Transport); ok && original != nil {
+			if transport == original || transport.MaxIdleConns != original.MaxIdleConns || original.Proxy == nil {
+				t.Fatal("default transport was not cloned intact")
+			}
+		}
+		if _, err := transport.DialContext(context.Background(), "tcp", "127.0.0.1:80"); err == nil {
+			t.Fatal("RDAP dialer accepted an unsafe destination")
+		}
+	}
+}
+
 func TestClientReadsRegistrationAndExpirationEvents(t *testing.T) {
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/domain/example.com" {

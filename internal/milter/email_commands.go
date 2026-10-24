@@ -121,6 +121,8 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 		parts = append(parts, body)
 	}
 	queued := ss.deps.commands.queueReplyContentFunc(replyTo, "MilterGuard command results", func(renderCtx context.Context) commandReplyContent {
+		budget := admincmd.NewReplyAttachmentBudget(commandReplyAttachmentBytes(ss.deps.commands.maxMessageSize))
+		renderCtx = admincmd.WithReplyAttachmentBudget(renderCtx, budget)
 		var body strings.Builder
 		var attachments []smtpreply.Attachment
 		attached := make(map[string]bool)
@@ -151,7 +153,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 				}
 			}
 		}
-		return commandReplyContent{Text: body.String(), Attachments: attachments}
+		return commandReplyContent{Text: budget.OmissionNotice() + body.String(), Attachments: attachments}
 	})
 	return true, ss.discardEmailCommand(ctx, identity, strings.Join(canonicals, "; "), fmt.Sprintf("processed %d commands", len(commands)), "", "", queued)
 }
@@ -346,14 +348,75 @@ func (s *emailCommandService) queueReplyContentFunc(recipient, subject string, c
 
 func buildBoundedCommandReplyMessage(from, recipient, subject, date, token string, reply commandReplyContent, maxBytes int64) (smtpreply.Message, error) {
 	reply.Text = boundedCommandReplyText(reply.Text)
-	message := commandReplyMessage(from, recipient, subject, date, token, reply)
-	payload, err := smtpreply.Build(message)
-	if err != nil || len(reply.Attachments) == 0 || maxBytes <= 0 || int64(len(payload)) <= maxBytes {
-		return message, err
+	if maxBytes > 0 {
+		reply.Text = commandReplyTextWithin(reply.Text, commandReplyTextBytes(maxBytes))
 	}
-	reply.Text += "\nOne or more original saved messages were too large to attach.\n"
-	reply.Attachments = nil
-	return commandReplyMessage(from, recipient, subject, date, token, reply), nil
+	message := commandReplyMessage(from, recipient, subject, date, token, reply)
+	message.MaxBytes = maxBytes
+	var omitted []string
+	// Measure without encoding or allocating the payload. Keep the first
+	// attachments in request order, dropping the tail only if necessary.
+	for {
+		size, err := smtpreply.Size(message)
+		if err != nil {
+			return smtpreply.Message{}, err
+		}
+		if maxBytes <= 0 || size <= maxBytes {
+			return message, nil
+		}
+		if len(message.Attachments) == 0 {
+			break
+		}
+		last := len(message.Attachments) - 1
+		omitted = append([]string{message.Attachments[last].Filename}, omitted...)
+		message.Attachments = message.Attachments[:last]
+		message.Text = "Saved messages too large to attach: " + strings.Join(omitted, ", ") + ". Request these individually; if one still does not fit, retrieve it using command mode.\n\n" + reply.Text
+	}
+	// Tiny configured limits or unusually long headers may leave less room
+	// for text than the conservative reservation. Find a fitting UTF-8 prefix.
+	text := message.Text
+	low, high := 0, len(text)
+	for low < high {
+		middle := low + (high-low+1)/2
+		message.Text = truncateUTF8(text, middle)
+		size, err := smtpreply.Size(message)
+		if err != nil {
+			return smtpreply.Message{}, err
+		}
+		if size <= maxBytes {
+			low = middle
+		} else {
+			high = middle - 1
+		}
+	}
+	message.Text = truncateUTF8(text, low)
+	if size, err := smtpreply.Size(message); err != nil {
+		return smtpreply.Message{}, err
+	} else if size > maxBytes {
+		return smtpreply.Message{}, smtpreply.ErrMessageTooLarge
+	}
+	return message, nil
+}
+
+func commandReplyTextBytes(maxBytes int64) int {
+	return int(min(int64(admincmd.MaxResponseBytes), max(0, maxBytes/4)))
+}
+
+func commandReplyAttachmentBytes(maxBytes int64) int64 {
+	// Text can double when LF becomes CRLF. Reserve top-level MIME/header
+	// overhead separately; the shared budget charges each attachment's framing.
+	return max(0, maxBytes-2*int64(commandReplyTextBytes(maxBytes))-4096)
+}
+
+func commandReplyTextWithin(text string, maxBytes int) string {
+	if len(text) <= maxBytes {
+		return text
+	}
+	const notice = "\nCommand reply text was truncated to fit the reply size limit.\n"
+	if maxBytes < len(notice) {
+		return truncateUTF8(notice, maxBytes)
+	}
+	return truncateUTF8(text, maxBytes-len(notice)) + notice
 }
 
 func boundedCommandReplyText(text string) string {

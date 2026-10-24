@@ -561,6 +561,12 @@ because MilterGuard cannot inspect their contents. Attachment size, archive
 depth, file-count, and total uncompressed-size limits protect the service from
 oversized files and archive bombs.
 
+ZIP entry counts include directories and are checked against the actual
+central-directory records before the ZIP reader allocates its file list.
+All ZIPs in a message, including nested ZIPs, also share a 1 MiB metadata limit
+for directory records, names, extra fields, and comments. Exceeding either
+limit is treated as incomplete inspection under `attachments.unscannable_action`.
+
 The supplied blocklist also rejects uncommon Windows launchers and scripts,
 application installers, OneNote packages, and disk-image formats that are
 unsafe or cannot be fully inspected. Reliable signatures for Windows shell
@@ -572,8 +578,8 @@ also permits that format's signature.
 The `attachments` configuration controls what happens when an archive is
 encrypted or content cannot be completely inspected. Each condition may be
 accepted, rejected, or temporarily deferred with `tempfail`. In the supplied
-configuration, encrypted archives are rejected while other unscannable content
-is accepted and continues to AI analysis. The separate `invalid_mime_action`
+configuration, encrypted archives and other unscannable content are rejected.
+Selecting `unscannable_action: accept` continues to AI analysis instead. The separate `invalid_mime_action`
 setting controls permanently invalid or ambiguous MIME structure; it defaults
 to rejection because retrying cannot repair the message. Accept mode records
 the proposed attachment action but still accepts the message.
@@ -948,6 +954,14 @@ unexpired entries without a date filter.
 administrators may retrieve any record. Its reply contains the rejection reason
 and processed body and, when available, attaches the original message as
 `rejection-<id>.eml`.
+
+Email command replies are limited to `milter.max_message_size`, including text,
+MIME headers, and base64 encoding. Saved messages share one attachment budget
+per reply, checked before their contents are loaded. Attachments that fit are
+included in request order; duplicate requests include the original only once.
+The reply lists rejection IDs omitted for size and suggests requesting them
+individually. If an individual message still cannot fit, retrieve it using
+command mode. Long reply text may also be truncated with a notice.
 
 Archived-body rendering uses the same CPU and memory guards as live extraction,
 with bounded fallback enabled and a notice when extraction is incomplete.

@@ -68,9 +68,10 @@ type Scanner struct {
 }
 
 type scanState struct {
-	archiveFiles int
-	archiveBytes int64
-	ctx          context.Context
+	archiveFiles     int
+	archiveBytes     int64
+	zipMetadataBytes int
+	ctx              context.Context
 }
 
 // New constructs a scanner from normalized attachment policy limits.
@@ -318,8 +319,18 @@ func (s *Scanner) scanZIP(location string, data []byte, archiveDepth int, state 
 	if err := state.check(location); err != nil {
 		return nil, err
 	}
-	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	err := s.admitZIPDirectory(data, state)
+	if err != nil && !errors.Is(err, zip.ErrFormat) {
+		return nil, &ScanError{Path: cleanLocation(location), Err: err}
+	}
+	var reader *zip.Reader
+	if err == nil {
+		reader, err = zip.NewReader(zipContextReaderAt{state: state, data: bytes.NewReader(data)}, int64(len(data)))
+	}
 	if err != nil {
+		if cancelled := state.check(location); cancelled != nil {
+			return nil, cancelled
+		}
 		if finding, partialErr := s.scanPartialZIP(location, data, archiveDepth, state); finding != nil || partialErr != nil {
 			return finding, partialErr
 		}
@@ -339,7 +350,7 @@ func (s *Scanner) scanZIP(location string, data []byte, archiveDepth int, state 
 		if extension := s.blockedExtension(file.Name); extension != "" {
 			return &Finding{Path: entryLocation, Detection: "blocked extension ." + extension}, nil
 		}
-		if err := s.beginArchiveFile(file.UncompressedSize64, state); err != nil {
+		if err := s.checkArchiveFileSize(file.UncompressedSize64, state); err != nil {
 			return nil, &ScanError{Path: entryLocation, Err: err}
 		}
 		entry, err := file.Open()
@@ -510,8 +521,16 @@ func (s *Scanner) readArchiveEntry(reader io.Reader, state *scanState) ([]byte, 
 // by readArchiveEntry, so understated archive metadata cannot bypass the limit.
 func (s *Scanner) beginArchiveFile(declaredSize uint64, state *scanState) error {
 	if state.archiveFiles >= s.options.MaxArchiveFiles {
-		return errors.New("archive file-count limit exceeded")
+		return errArchiveFileCount
 	}
+	if err := s.checkArchiveFileSize(declaredSize, state); err != nil {
+		return err
+	}
+	state.archiveFiles++
+	return nil
+}
+
+func (s *Scanner) checkArchiveFileSize(declaredSize uint64, state *scanState) error {
 	if declaredSize > uint64(s.options.MaxAttachmentBytes) {
 		return errors.New("archive entry size limit exceeded")
 	}
@@ -519,7 +538,6 @@ func (s *Scanner) beginArchiveFile(declaredSize uint64, state *scanState) error 
 	if remaining < 0 || declaredSize > uint64(remaining) {
 		return errors.New("archive uncompressed-size limit exceeded")
 	}
-	state.archiveFiles++
 	return nil
 }
 

@@ -135,13 +135,17 @@ func (z *Input) Peek(pos int) byte {
 
 // PeekRune returns the rune and rune length of the ith byte relative to the end position.
 func (z *Input) PeekRune(pos int) (rune, int) {
+	if z.err != nil || pos < 0 || z.pos < 0 || z.pos >= len(z.buf) || pos >= len(z.buf)-z.pos {
+		return 0, 1
+	}
+	remaining := len(z.buf) - 1 - z.pos - pos
 	// from unicode/utf8
 	c := z.Peek(pos)
-	if c < 0xC0 || len(z.buf)-1-z.pos < 2 {
+	if c < 0xC0 || remaining < 2 {
 		return rune(c), 1
-	} else if c < 0xE0 || len(z.buf)-1-z.pos < 3 {
+	} else if c < 0xE0 || remaining < 3 {
 		return rune(c&0x1F)<<6 | rune(z.Peek(pos+1)&0x3F), 2
-	} else if c < 0xF0 || len(z.buf)-1-z.pos < 4 {
+	} else if c < 0xF0 || remaining < 4 {
 		return rune(c&0x0F)<<12 | rune(z.Peek(pos+1)&0x3F)<<6 | rune(z.Peek(pos+2)&0x3F), 3
 	}
 	return rune(c&0x07)<<18 | rune(z.Peek(pos+1)&0x3F)<<12 | rune(z.Peek(pos+2)&0x3F)<<6 | rune(z.Peek(pos+3)&0x3F), 4

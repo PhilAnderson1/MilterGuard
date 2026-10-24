@@ -288,21 +288,24 @@ attachments:
   # Safety limits for attachments and decompressed archive contents.
   max_attachment_bytes: 10485760
   archive_max_depth: 2
+  # ZIP directory entries count too; ZIP metadata is additionally capped at
+  # 1 MiB across all ZIP archives in one message before file-list allocation.
   archive_max_files: 100
   archive_max_uncompressed_bytes: 52428800
 
   # Action for encrypted archives and content that cannot be fully inspected:
   # accept, reject, or tempfail. Accept mode always accepts.
   encrypted_archive_action: reject
-  unscannable_action: accept
+  unscannable_action: reject
 
   # Action for messages with permanently invalid or ambiguous MIME structure:
   # accept or reject. Retrying cannot repair the message, so tempfail is not
   # supported. When accepted, normal AI analysis continues.
   invalid_mime_action: reject
 
-  # Text returned with SMTP status 550 5.7.1 when attachment policy rejects mail.
-  reject_message: Message rejected because it contains a prohibited executable attachment
+  # Text returned with SMTP status 550 5.7.1 for prohibited attachments and for
+  # encrypted or unscannable content when its configured action is reject.
+  reject_message: Message rejected because an attachment is prohibited or could not be safely inspected
 
 email_commands:
   # Process email commands, disabled by default. Replace

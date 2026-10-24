@@ -51,7 +51,10 @@ func New(timeout time.Duration) *Client {
 		now:          time.Now,
 		bootstrapURL: bootstrapURL,
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport := &http.Transport{}
+	if base, ok := http.DefaultTransport.(*http.Transport); ok && base != nil {
+		transport = base.Clone()
+	}
 	transport.Proxy = nil
 	transport.DialContext = client.dialContext
 	client.http = &http.Client{Timeout: timeout, Transport: transport}

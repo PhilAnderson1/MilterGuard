@@ -48,6 +48,9 @@ func (s commandArchiveSource) ReadWithRecordID(id uint64, rejectedAt time.Time, 
 		return admincmd.ArchivedMessage{}, fs.ErrNotExist
 	}
 	stored, err := s.archive.ReadWithRecordID(id, rejectedAt, maxBytes)
+	if errors.Is(err, rejectedmail.ErrReadLimit) {
+		err = admincmd.ErrArchiveTooLarge
+	}
 	return admincmd.ArchivedMessage{Contents: stored.Contents, Path: stored.Path}, err
 }
 

@@ -7,8 +7,6 @@ import (
 
 var (
 	authenticationMethodPattern = regexp.MustCompile(`(?i)^\s*(dkim|spf|dmarc)\s*=\s*([a-z][a-z0-9_-]{0,31})\b`)
-	dkimDomainPattern           = regexp.MustCompile(`(?i)\bheader\s*\.\s*d\s*=\s*([a-z0-9_.-]+)`)
-	dmarcDomainPattern          = regexp.MustCompile(`(?i)\bheader\s*\.\s*from\s*=\s*([a-z0-9_.-]+)`)
 )
 
 // Input contains untrusted message headers and the local authentication
@@ -45,16 +43,17 @@ func Parse(input Input) []Result {
 			if len(match) != 3 {
 				continue
 			}
+			properties := authenticationProperties(clause[len(match[0]):])
 			method := Method(strings.ToLower(match[1]))
 			result := Result{Method: method, Outcome: normalizeHeaderOutcome(method, match[2])}
 			switch result.Method {
 			case MethodDKIM:
-				result.Domain = matchedDomain(dkimDomainPattern, clause)
+				result.Domain = NormalizeDomain(properties["header.d"])
 			case MethodSPF:
-				result.Domain, result.SPFIdentity = authenticationResultsSPFIdentity(clause)
+				result.Domain, result.SPFIdentity = authenticationResultsSPFIdentity(properties)
 				hasAuthenticationResultsSPF = true
 			case MethodDMARC:
-				result.Domain = matchedDomain(dmarcDomainPattern, clause)
+				result.Domain = NormalizeDomain(properties["header.from"])
 			}
 			results = appendUnique(results, result)
 		}
@@ -70,86 +69,93 @@ func Parse(input Input) []Result {
 // trusted Authentication-Results SPF clause. MAIL FROM is preferred; HELO is
 // the applicable fallback for checks made against the HELO identity, including
 // messages with a null reverse path.
-func authenticationResultsSPFIdentity(clause string) (string, SPFIdentity) {
-	if identity, ok := authenticationProperty(clause, "smtp", "mailfrom"); ok {
-		if domain := DomainFromIdentity(identity); domain != "" {
-			return domain, SPFIdentityMailFrom
-		}
+func authenticationResultsSPFIdentity(properties map[string]string) (string, SPFIdentity) {
+	if domain := DomainFromIdentity(properties["smtp.mailfrom"]); domain != "" {
+		return domain, SPFIdentityMailFrom
 	}
-	if identity, ok := authenticationProperty(clause, "smtp", "helo"); ok {
+	if identity, ok := properties["smtp.helo"]; ok {
 		return DomainFromIdentity(identity), SPFIdentityHELO
 	}
 	return "", ""
 }
 
-// authenticationProperty extracts an exact ptype.property value while
-// ignoring property-like text embedded in quoted strings. Values may be an
-// Authentication-Results token, a quoted string, or the commonly emitted
-// angle-bracket form of an SMTP mailbox.
-func authenticationProperty(clause, wantType, wantProperty string) (string, bool) {
+// authenticationProperties consumes whole assignments, including unknown
+// properties and reason values. Never search within a value for another key:
+// DKIM identities can legitimately contain text such as header.d=example.com.
+// Malformed or duplicate assignments invalidate all identity evidence in the
+// clause. The caller still records its method, preventing an invalid SPF clause
+// from activating the Received-SPF fallback.
+func authenticationProperties(clause string) map[string]string {
+	properties := make(map[string]string)
 	for offset := 0; offset < len(clause); {
-		if clause[offset] == '"' {
-			if _, next, ok := readAuthenticationQuotedValue(clause, offset); ok {
-				offset = next
-				continue
-			}
-			return "", false
+		next := skipAuthenticationWhitespace(clause, offset)
+		if next == len(clause) {
+			return properties
 		}
-		if !isAuthenticationNameByte(clause[offset]) {
-			offset++
-			continue
+		if next == offset {
+			return nil
 		}
+		offset = next
 		start := offset
 		for offset < len(clause) && isAuthenticationNameByte(clause[offset]) {
 			offset++
 		}
-		if !strings.EqualFold(clause[start:offset], wantType) {
-			continue
+		if start == offset {
+			return nil
 		}
-
-		cursor := skipAuthenticationWhitespace(clause, offset)
-		if cursor >= len(clause) || clause[cursor] != '.' {
-			continue
+		key := strings.ToLower(clause[start:offset])
+		offset = skipAuthenticationWhitespace(clause, offset)
+		if offset < len(clause) && clause[offset] == '.' {
+			offset = skipAuthenticationWhitespace(clause, offset+1)
+			start = offset
+			for offset < len(clause) && isAuthenticationNameByte(clause[offset]) {
+				offset++
+			}
+			if start == offset {
+				return nil
+			}
+			key += "." + strings.ToLower(clause[start:offset])
+			offset = skipAuthenticationWhitespace(clause, offset)
 		}
-		cursor = skipAuthenticationWhitespace(clause, cursor+1)
-		propertyStart := cursor
-		for cursor < len(clause) && isAuthenticationNameByte(clause[cursor]) {
-			cursor++
+		if offset >= len(clause) || clause[offset] != '=' {
+			return nil
 		}
-		if propertyStart == cursor || !strings.EqualFold(clause[propertyStart:cursor], wantProperty) {
-			continue
+		offset = skipAuthenticationWhitespace(clause, offset+1)
+		if offset == len(clause) {
+			return nil
 		}
-		cursor = skipAuthenticationWhitespace(clause, cursor)
-		if cursor >= len(clause) || clause[cursor] != '=' {
-			continue
-		}
-		cursor = skipAuthenticationWhitespace(clause, cursor+1)
-		if cursor >= len(clause) {
-			return "", false
-		}
-
-		switch clause[cursor] {
+		var value string
+		switch clause[offset] {
 		case '"':
-			value, _, ok := readAuthenticationQuotedValue(clause, cursor)
-			return value, ok
+			var ok bool
+			value, offset, ok = readAuthenticationQuotedValue(clause, offset)
+			if !ok {
+				return nil
+			}
 		case '<':
-			end := strings.IndexByte(clause[cursor+1:], '>')
+			end := strings.IndexByte(clause[offset+1:], '>')
 			if end < 0 {
-				return "", false
+				return nil
 			}
-			return clause[cursor+1 : cursor+1+end], true
+			value = clause[offset+1 : offset+1+end]
+			offset += end + 2
 		default:
-			end := cursor
-			for end < len(clause) && clause[end] != ' ' && clause[end] != '\t' {
-				end++
+			start = offset
+			for offset < len(clause) && !isAuthenticationWhitespace(clause[offset]) {
+				// Quotes and angle brackets must delimit the entire value.
+				if strings.ContainsRune("\"<>", rune(clause[offset])) {
+					return nil
+				}
+				offset++
 			}
-			if end == cursor {
-				return "", false
-			}
-			return clause[cursor:end], true
+			value = clause[start:offset]
 		}
+		if _, duplicate := properties[key]; duplicate {
+			return nil
+		}
+		properties[key] = value
 	}
-	return "", false
+	return properties
 }
 
 func readAuthenticationQuotedValue(value string, offset int) (string, int, bool) {
@@ -175,10 +181,14 @@ func readAuthenticationQuotedValue(value string, offset int) (string, int, bool)
 }
 
 func skipAuthenticationWhitespace(value string, offset int) int {
-	for offset < len(value) && (value[offset] == ' ' || value[offset] == '\t') {
+	for offset < len(value) && isAuthenticationWhitespace(value[offset]) {
 		offset++
 	}
 	return offset
+}
+
+func isAuthenticationWhitespace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n'
 }
 
 func isAuthenticationNameByte(value byte) bool {
@@ -275,18 +285,6 @@ func splitAuthenticationClauses(value string) []string {
 		}
 	}
 	return append(clauses, value[start:])
-}
-
-func matchedDomain(pattern *regexp.Regexp, value string) string {
-	return NormalizeDomain(matchedValue(pattern, value))
-}
-
-func matchedValue(pattern *regexp.Regexp, value string) string {
-	match := pattern.FindStringSubmatch(value)
-	if len(match) != 2 {
-		return ""
-	}
-	return match[1]
 }
 
 func appendUnique(results []Result, candidate Result) []Result {

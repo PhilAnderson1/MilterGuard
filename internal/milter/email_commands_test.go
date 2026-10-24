@@ -353,6 +353,48 @@ func TestBoundedCommandReplyPayloadOmitsOversizedAttachment(t *testing.T) {
 	}
 }
 
+func TestBoundedCommandReplyKeepsAttachmentPrefix(t *testing.T) {
+	attachments := []smtpreply.Attachment{}
+	for i := 1; i <= 3; i++ {
+		attachments = append(attachments, smtpreply.Attachment{Filename: fmt.Sprintf("rejection-%d.eml", i), MediaType: "application/octet-stream", Contents: bytes.Repeat([]byte("x"), 1000)})
+	}
+	reply, err := buildBoundedCommandReplyMessage("m@example.com", "u@example.com", "Results", "date", "token",
+		commandReplyContent{Text: "Details", Attachments: attachments}, 4000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reply.Attachments) != 2 || reply.Attachments[0].Filename != "rejection-1.eml" || reply.Attachments[1].Filename != "rejection-2.eml" {
+		t.Fatalf("wrong retained prefix: %#v", reply.Attachments)
+	}
+	if !strings.Contains(reply.Text, "rejection-3.eml") || !strings.Contains(reply.Text, "individually") {
+		t.Fatalf("missing notice: %s", reply.Text)
+	}
+	payload, err := smtpreply.Build(reply)
+	if err != nil || len(payload) > 4000 || reply.MaxBytes != 4000 {
+		t.Fatalf("payload=%d err=%v limit=%d", len(payload), err, reply.MaxBytes)
+	}
+}
+
+func TestBoundedCommandReplyCapsPlainTextWireSize(t *testing.T) {
+	for _, limit := range []int64{1, 512, 4096} {
+		reply, err := buildBoundedCommandReplyMessage("m@example.com", "u@example.com", "Results", "date", "token",
+			commandReplyContent{Text: strings.Repeat("é\n", 10000)}, limit)
+		if limit == 1 {
+			if !errors.Is(err, smtpreply.ErrMessageTooLarge) {
+				t.Fatalf("impossible limit: %v", err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err := smtpreply.Build(reply)
+		if err != nil || int64(len(payload)) > limit || !utf8.Valid(payload) {
+			t.Fatalf("limit=%d payload=%d err=%v", limit, len(payload), err)
+		}
+	}
+}
+
 func TestBoundedCommandReplyPayloadLimitsPlainText(t *testing.T) {
 	reply, err := buildBoundedCommandReplyMessage(
 		"milterguard@example.com", "local@example.com", "Results", "date", "token",
