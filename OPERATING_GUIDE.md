@@ -977,6 +977,50 @@ cycle, and still runs when saved-message archiving is disabled. Token costs are
 estimates based on reported usage and configured prices. Connection timeouts or
 missing token counts may cause costs to be under-counted.
 
+### Activity report fields
+
+`ACTIVITY [day|week|month|year|all]` reports recorded events within the selected
+period and retained history. The counters survive service restarts; uptime does
+not. Counts describe MilterGuard decisions, not confirmed delivery to a mailbox.
+
+| Output field | Meaning |
+| --- | --- |
+| Activity | Selected reporting period; defaults to the past week. `all` includes all retained activity. |
+| Service uptime | Time since the last recorded service start, rounded down to whole minutes. `0 minutes` means less than one minute; `unavailable` means usable start information was not available. |
+| Retention | Configured `activity.expiry`, not the selected period or the age of the oldest event. |
+| Total rejected | Sum of the rejection categories listed below it. Temporary failures and failures to send the Milter response are excluded. |
+| Rejected — AI classification | Messages rejected through the AI evaluation path, normally because an unwanted classification met `filtering.reject_score`. |
+| Rejected — IP reputation | Messages rejected because the connecting IP had an active reputation block, without an AI evaluation. |
+| Rejected — Attachment policy | Messages rejected by attachment inspection, including prohibited attachments and inspection problems configured to cause rejection. |
+| Rejected — Protected sender-domain policy | Unauthenticated SMTP submissions claiming a visible From domain listed in `filtering.authenticated_only_sender_domains`. |
+| Rejected — Sender blocklist | Whole messages rejected because every recipient was covered by a matching sender-blocklist entry. |
+| Rejected — Content processing resource limit | CPU or memory limit decisions under `ai.html_resource_limit_action: reject`. These do not count as AI scans. |
+| Rejected — Content processing DoS protection | CPU or memory limit decisions under `ai.html_resource_limit_action: dos-reject`, which also applies the configured IP reputation response. These do not count as AI scans. |
+| Rejected — Incomplete inspection | Messages rejected under `ai.incomplete_body_action: reject` because content extraction was incomplete. No AI verdict or IP penalty is assigned; these do not count as AI scans. |
+| Total accepted | Sum of the acceptance categories listed below it. This is not a count of every message passing through the server. |
+| Accepted — AI classification | Messages accepted through the AI evaluation path: legitimate results, unwanted results below the rejection threshold, or results accepted because the service is in accept mode. Also includes evaluation failures accepted under `filtering.ai_error_action: accept`. |
+| Accepted — Correspondent whitelist | Messages accepted by the correspondent bypass policy without an AI evaluation. Merely matching a correspondent does not increment this count when bypass is disabled and the message is scanned. |
+| Accepted — Trusted sender domain | Messages accepted by the trusted sender-domain bypass policy without an AI evaluation. This is separate from the IP reputation domain exemptions. |
+| Accepted — Content processing resource limit (accept mode) | Resource-limit decisions that would reject under the `reject` action but were accepted because the service was in accept mode. No AI scan is counted. |
+| Accepted — Content processing DoS protection (accept mode) | Resource-limit decisions that would reject under the `dos-reject` action but were accepted because the service was in accept mode. No AI scan is counted. |
+| Accepted — Incomplete inspection (accept mode) | Incomplete-inspection decisions that would reject under `incomplete_body_action: reject` but were accepted because the service was in accept mode. No AI scan is counted. |
+| Recipient deliveries removed by sender blocklist | Number of individual recipients removed from transactions that could continue to other recipients. This is a recipient count, not a rejected-message count; the remaining message can also contribute to another outcome category. |
+| Total AI scans | Number of recorded AI evaluation events, including failed evaluations, temporary failures and response failures. Counts message evaluations, not individual API requests or retries. Excludes bypasses and the separate content-processing policy categories. Extraction that proceeds under `fallback` or incomplete-body `scan` remains in this category. |
+| AI evaluations failed | AI evaluation events with an analysis error, regardless of whether the configured response was acceptance or temporary failure. This is a subset of Total AI scans, not an additional message count. |
+| Total token cost | Sum of stored estimated token costs for scan events in the period, using endpoint-reported usage and the configured input/output prices at evaluation time. Missing usage can undercount costs; later price changes do not reprice stored events. |
+| Average cost per message scanned | Total token cost divided by Total AI scans, including failed evaluations in the denominator. Displays `N/A (no scans)` when that count is zero. |
+
+The token-cost notice identifies these figures as estimates rather than an
+endpoint invoice. Total cost is displayed to four decimal places and average
+cost to six; the average uses the stored total before display rounding.
+
+Accepted and rejected totals need not add up to Total AI scans: they include
+non-AI decisions, while scans also include temporary failures and response
+failures. Some paths, such as unscanned authenticated submissions, administrative
+commands, and attachment or protected-domain decisions overridden in accept
+mode, do not contribute to these totals. Historical events retain the categories
+recorded by the version running at the time; upgrades do not reclassify them.
+
 The activity report's service uptime is elapsed time since the last recorded
 server start. An unclean shutdown can leave that status stale until the next
 server start; it is not a service-liveness check. Use only one serving
