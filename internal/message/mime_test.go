@@ -316,12 +316,12 @@ func TestMIMEAttachedMessageRecursionLimit(t *testing.T) {
 	}
 
 	atLimit := extractMIME("message/rfc822", "", "", nestedMessage(8), 0)
-	if atLimit.Text != "deep nested evidence" {
+	if !strings.Contains(atLimit.Text, "deep nested evidence") || strings.Count(atLimit.Text, "<attached-email>") != 8 {
 		t.Fatalf("content at MIME nesting limit = %q, want nested evidence", atLimit.Text)
 	}
 
 	beyondLimit := extractMIME("message/rfc822", "", "", nestedMessage(9), 0)
-	if beyondLimit.Text != "[MIME nesting limit reached]" || !beyondLimit.MIMEIncomplete {
+	if !strings.Contains(beyondLimit.Text, "[MIME nesting limit reached]") || !beyondLimit.MIMEIncomplete {
 		t.Fatalf("content beyond MIME nesting limit = %#v, want incomplete limit marker", beyondLimit)
 	}
 
@@ -352,7 +352,7 @@ func TestMultipartDigestDefaultsPartsToAttachedMessages(t *testing.T) {
 
 func TestMalformedAttachedMessageProducesMarker(t *testing.T) {
 	content := extractMIME("message/rfc822", "", "", []byte("not a valid message"), 0)
-	if content.Text != "[attached message could not be parsed]" {
+	if content.Text != "<attached-email>\n\n[attached message could not be parsed]\n</attached-email>" {
 		t.Fatalf("attached-message text = %q", content.Text)
 	}
 }

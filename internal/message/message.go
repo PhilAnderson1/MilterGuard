@@ -155,6 +155,7 @@ var retainedHeaders = map[string]bool{
 	"x-milterguard-action":         true,
 	"x-milterguard-classification": true,
 	"x-milterguard-confidence":     true,
+	"x-milterguard-policy":         true,
 	"x-milterguard-score":          true,
 	"x-milterguard-internal":       true,
 	"received-spf":                 true,
@@ -176,6 +177,7 @@ var countedSecurityHeaders = map[string]bool{
 	"x-milterguard-classification": true,
 	"x-milterguard-confidence":     true,
 	"x-milterguard-internal":       true,
+	"x-milterguard-policy":         true,
 	"x-milterguard-score":          true,
 }
 
@@ -350,6 +352,7 @@ func (m *Message) CommandTextResult(maxBytes int64, control HTMLProcessingContro
 	}
 	budget := newExtractionBudgetWithControl(control)
 	budget.discardImages = true
+	budget.omitAttachmentContext = true
 	budget.countConfidentText = false
 	textLimit := m.maxBytes
 	if maxBytes >= 0 && maxBytes < textLimit {

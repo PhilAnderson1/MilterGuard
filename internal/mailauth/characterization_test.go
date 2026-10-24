@@ -36,9 +36,9 @@ func TestParseMethodAndPropertyVariations(t *testing.T) {
 		want   Result
 	}{
 		{name: "DKIM case and whitespace", clause: ` DKIM = PASS header.d=Mail.Example.COM.`, want: Result{Method: MethodDKIM, Outcome: "pass", Domain: "mail.example.com"}},
-		{name: "SPF mailbox", clause: `spf=pass smtp.mailfrom=sender@example.com`, want: Result{Method: MethodSPF, Outcome: "pass", Domain: "example.com"}},
-		{name: "SPF angle mailbox", clause: `spf=pass smtp.mailfrom=<sender@example.com>`, want: Result{Method: MethodSPF, Outcome: "pass", Domain: "example.com"}},
-		{name: "SPF bare domain", clause: `spf=pass smtp.mailfrom=example.com`, want: Result{Method: MethodSPF, Outcome: "pass", Domain: "example.com"}},
+		{name: "SPF mailbox", clause: `spf=pass smtp.mailfrom=sender@example.com`, want: Result{Method: MethodSPF, SPFIdentity: SPFIdentityMailFrom, Outcome: "pass", Domain: "example.com"}},
+		{name: "SPF angle mailbox", clause: `spf=pass smtp.mailfrom=<sender@example.com>`, want: Result{Method: MethodSPF, SPFIdentity: SPFIdentityMailFrom, Outcome: "pass", Domain: "example.com"}},
+		{name: "SPF bare domain", clause: `spf=pass smtp.mailfrom=example.com`, want: Result{Method: MethodSPF, SPFIdentity: SPFIdentityMailFrom, Outcome: "pass", Domain: "example.com"}},
 		{name: "DMARC", clause: `dmarc=quarantine header.from=example.com`, want: Result{Method: MethodDMARC, Outcome: "quarantine", Domain: "example.com"}},
 		{name: "missing property", clause: `dkim=pass`, want: Result{Method: MethodDKIM, Outcome: "pass"}},
 		{name: "malformed property", clause: `dmarc=fail header.from=-example.com`, want: Result{Method: MethodDMARC, Outcome: "fail"}},

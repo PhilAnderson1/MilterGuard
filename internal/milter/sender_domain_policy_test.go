@@ -77,7 +77,7 @@ func TestProtectedSenderDomainRejectionIsRecordedAndArchived(t *testing.T) {
 		},
 		AI: config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
 		Filtering: config.FilteringConfig{
-			RejectScore: 0.9, LegitimateLowConfidenceScore: 0.8, AIErrorAction: "accept", RejectMessage: "blocked",
+			RejectScore: 0.9, LowConfidenceScore: 0.8, AIErrorAction: "accept", RejectMessage: "blocked",
 			AuthenticatedOnlySenderDomains: []string{"invades.net"},
 		},
 		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db")},

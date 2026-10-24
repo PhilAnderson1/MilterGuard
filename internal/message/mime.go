@@ -46,7 +46,8 @@ type extractionBudget struct {
 	stopOnMemoryLimit       bool
 	compactURLs             bool
 	// Text-only callers validate image encodings without retaining decoded data.
-	discardImages bool
+	discardImages         bool
+	omitAttachmentContext bool
 	// Only fallback vision needs the confidently visible character count.
 	countConfidentText bool
 	countingStop       func()
@@ -191,6 +192,11 @@ func remainingInt(remaining, used int) int {
 }
 
 type extractedContent struct {
+	Attachment                      bool
+	TextAttachments                 []attachmentSpan
+	VisibleAttachments              []attachmentSpan
+	StrippedAttachments             []attachmentSpan
+	AttachmentLinks                 []attachmentLinkGroup
 	Text                            string
 	VisibleText                     string
 	ConfidentVisibleChars           int
@@ -222,7 +228,7 @@ type extractedImage struct {
 	Data      []byte
 }
 
-func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte, depth int, budget *extractionBudget) extractedContent {
+func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte, depth int, budget *extractionBudget, info ...mimePartInfo) extractedContent {
 	var retained extractedContent
 	// Replay restores traversal/output allowances, never allocation ledgers or
 	// terminal outcomes.
@@ -233,7 +239,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 			budget.extractionProgress = progress
 		}
 		retry = true
-		return extractMIMEOnce(contentType, encoding, contentID, data, depth, budget, &retained)
+		return extractMIMEOnce(contentType, encoding, contentID, data, depth, budget, &retained, info...)
 	})
 	if !complete {
 		retained.ExtractionIncomplete = true
@@ -247,7 +253,7 @@ func extractMIMEWithBudget(contentType, encoding, contentID string, data []byte,
 	return result
 }
 
-func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth int, budget *extractionBudget, retained *extractedContent) extractedContent {
+func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth int, budget *extractionBudget, retained *extractedContent, infos ...mimePartInfo) extractedContent {
 	if depth > 8 {
 		return extractedContent{Text: "[MIME nesting limit reached]", MIMEIncomplete: true}
 	}
@@ -256,6 +262,11 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 		mediaType = "text/plain"
 	}
 	mediaType = strings.ToLower(mediaType)
+	var info mimePartInfo
+	if len(infos) > 0 {
+		info = infos[0]
+	}
+	isFile, filename := fileAttachmentInfo(mediaType, params, info, budget)
 	// Opaque attachments contribute only a marker. Validate their encoding
 	// without allocating a decoded body that no consumer will use.
 	if mediaType != "text/plain" && mediaType != "text/html" && mediaType != "message/rfc822" && !strings.HasPrefix(mediaType, "multipart/") && (budget.discardImages || !strings.HasPrefix(mediaType, "image/")) {
@@ -280,6 +291,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 		var alternativeHTML, alternativePlain extractedContent
 		var mimeIncomplete, nestedTransferIncomplete, processingStopped bool
 		var nestedExtractionIncomplete bool
+		var hasAttachmentParts bool
 		for {
 			if budget.parts >= maxMIMEParts {
 				mimeIncomplete = true
@@ -312,7 +324,8 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 			if mediaType == "multipart/digest" && strings.TrimSpace(partContentType) == "" {
 				partContentType = "message/rfc822"
 			}
-			content := extractMIMEWithBudget(partContentType, part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-ID"), body, depth+1, budget)
+			content := extractMIMEWithBudget(partContentType, part.Header.Get("Content-Transfer-Encoding"), part.Header.Get("Content-ID"), body, depth+1, budget, mimePartInfo{Disposition: part.Header.Get("Content-Disposition"), ParentType: mediaType})
+			hasAttachmentParts = hasAttachmentParts || content.Attachment
 			mimeIncomplete = mimeIncomplete || content.MIMEIncomplete
 			nestedTransferIncomplete = nestedTransferIncomplete || content.TransferIncomplete
 			nestedExtractionIncomplete = nestedExtractionIncomplete || content.ExtractionIncomplete
@@ -350,7 +363,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 				}
 				break
 			}
-			if mediaType == "multipart/alternative" {
+			if mediaType == "multipart/alternative" && !content.Attachment {
 				partMediaType, _, _ := resourceguard.ParseMediaType(budget.allocationMemory(), partContentType)
 				switch {
 				case content.HTML:
@@ -377,8 +390,12 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 				selected = alternativeHTML
 			case hasExtractedContent(alternativePlain):
 				selected = alternativePlain
-			case len(parts) > 0:
-				selected = parts[len(parts)-1]
+			default:
+				for _, part := range parts {
+					if !part.Attachment {
+						selected = part
+					}
+				}
 			}
 			// Choosing an alternative is intentional, but failures encountered
 			// while extracting any branch remain evidence limitations.
@@ -387,7 +404,23 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 			selected.TransferIncomplete = transferIncomplete || nestedTransferIncomplete
 			selected.HTML = selected.HTML || budget.htmlParts > 0
 			selected.HTMLCPULimitExceeded = selected.HTMLCPULimitExceeded || budget.cpuLimitExceeded
-			return selected
+			if !hasAttachmentParts {
+				return selected
+			}
+			var selectedParts []extractedContent
+			added := false
+			for _, part := range parts {
+				if part.Attachment {
+					selectedParts = resourceguard.Append(budget.allocationMemory(), selectedParts, nil, part)
+				} else if !added && sameStringStorage(part.Text, selected.Text) && hasExtractedContent(selected) {
+					selectedParts = resourceguard.Append(budget.allocationMemory(), selectedParts, nil, selected)
+					added = true
+				}
+			}
+			if len(selectedParts) <= 1 && added {
+				return selected
+			}
+			parts = selectedParts
 		}
 		assemble := func() extractedContent {
 			var combined extractedContent
@@ -398,6 +431,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 			links := linkCollector{compactURLs: budget.compactURLs, memory: budget.allocationMemory(), shouldStop: budget.outputShouldStop}
 			var textParts, visibleTextParts, strippedTextParts []string
 			visibleMatchesText := true
+			textOffset, visibleOffset, strippedOffset := 0, 0, 0
 			for _, part := range parts {
 				budget.outputShouldStop()
 
@@ -413,6 +447,15 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 					continue
 				}
 				visibleMatchesText = visibleMatchesText && sameStringStorage(part.Text, part.VisibleText)
+				if len(textParts) > 0 {
+					textOffset += 2
+					visibleOffset += 2
+				}
+				combined.TextAttachments = appendAttachmentSpans(combined.TextAttachments, part.TextAttachments, textOffset, budget)
+				combined.VisibleAttachments = appendAttachmentSpans(combined.VisibleAttachments, part.VisibleAttachments, visibleOffset, budget)
+				textOffset += len(part.Text)
+				visibleOffset += len(part.VisibleText)
+				combined.AttachmentLinks = resourceguard.Append(budget.allocationMemory(), combined.AttachmentLinks, budget.outputShouldStop, part.AttachmentLinks...)
 				textParts = resourceguard.Append(budget.allocationMemory(), textParts, nil, part.Text)
 
 				visibleTextParts = resourceguard.Append(budget.allocationMemory(), visibleTextParts, nil, part.VisibleText)
@@ -422,6 +465,15 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 					stripped = part.Text
 				}
 				if stripped != "" {
+					if len(strippedTextParts) > 0 {
+						strippedOffset += 2
+					}
+					spans := part.StrippedAttachments
+					if !part.HasConcealedContent {
+						spans = part.TextAttachments
+					}
+					combined.StrippedAttachments = appendAttachmentSpans(combined.StrippedAttachments, spans, strippedOffset, budget)
+					strippedOffset += len(stripped)
 					strippedTextParts = resourceguard.Append(budget.allocationMemory(), strippedTextParts, nil, stripped)
 				}
 				for _, destination := range part.Links {
@@ -438,6 +490,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 			if len(textParts) > 0 || !processingStopped {
 				if !combined.HasConcealedContent {
 					combined.StrippedText = combined.Text
+					combined.StrippedAttachments = combined.TextAttachments
 				} else {
 					combined.StrippedText = joinExtractedText(strippedTextParts, "\n\n", budget)
 				}
@@ -465,7 +518,7 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 		return combined
 	}
 	if mediaType == "message/rfc822" {
-		content := extractAttachedMessage(decoded, depth, budget)
+		content := extractAttachedMessage(decoded, depth, budget, filename)
 		content.TransferIncomplete = content.TransferIncomplete || transferIncomplete
 		return content
 	}
@@ -481,6 +534,9 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 		content := htmlToTextWithBudget(text, budget)
 		content.HTML = true
 		content.TransferIncomplete = transferIncomplete
+		if isFile {
+			content = wrapAttachment(content, "attached-file", filename, mediaType, "", budget)
+		}
 		return content
 	}
 	text, complete := decodeCharsetWithResources(params["charset"], decoded, budget.decodedTextBytesRemaining, budget.decodingShouldStop, budget.allocationMemory)
@@ -494,13 +550,17 @@ func extractMIMEOnce(contentType, encoding, contentID string, data []byte, depth
 	if budget.countConfidentText {
 		confidentChars = budget.confidentCharacters(text)
 	}
-	return extractedContent{
+	content := extractedContent{
 		Text: promptText, VisibleText: text,
 		ConfidentVisibleChars: confidentChars,
 		Links:                 links.links, TransferIncomplete: transferIncomplete, ExtractionIncomplete: !complete,
 		HTMLMemoryLimitExceeded: budget.memoryLimitExceeded || budget.fallbackMemoryExceeded,
 		HTMLCPULimitExceeded:    budget.cpuLimitExceeded,
 	}
+	if isFile {
+		content = wrapAttachment(content, "attached-file", filename, mediaType, "", budget)
+	}
+	return content
 }
 
 // sameStringStorage proves equality without scanning or maintaining duplicate

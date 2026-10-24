@@ -138,20 +138,15 @@ ai:
   # fallback: continue analysis with bounded or partial extraction.
   # reject: reject without an IP-reputation penalty (default).
   # dos-reject: reject and apply DoS IP-reputation penalties.
-  # Deprecated alias: html_parse_cpu_limit_action. The new name takes precedence.
   html_resource_limit_action: reject
-
-  # Shared SMTP 550 5.7.1 text for reject and dos-reject resource-limit actions.
-  # Deprecated alias: html_dos_reject_message. If both are set, the new name
-  # takes precedence. Keep this on one line; NUL and newlines are removed.
-  html_resource_reject_message: Message rejected because content processing exceeded server resource limits
 
   # Handling when retained-body/final truncation, MIME/header limits, malformed
   # MIME, transfer decoding, or extraction limits leave evidence incomplete.
   # Failures in unselected MIME alternatives remain limitations. Choosing
   # complete alternatives or visibility uncertainty alone is not a failure.
   # scan submits the retained prefix with a limitation notice; reject records a
-  # rejection decision (enforced only while mode is enforce).
+  # inspection-policy rejection (enforced only while mode is enforce), without
+  # an AI verdict, IP-reputation strike, or correspondent-learning update.
   incomplete_body_action: scan
 
   # Image analysis detects scams concealed in images to evade text-based filtering.
@@ -177,11 +172,11 @@ filtering:
   # classification; increasing it makes rejection still more conservative.
   reject_score: 0.5
 
-  # Mark legitimate classifications below this score as low confidence (0.5-1).
-  legitimate_low_confidence_score: 0.8
+  # Mark either classification below this score as low confidence (0.5-1).
+  # This affects result headers only, not rejection decisions.
+  low_confidence_score: 0.8
 
   # Add classification, confidence, score, and action headers to accepted email.
-  # Unwanted and legitimate classifications use their respective thresholds.
   add_email_headers: true
 
   # Scan email sent by authenticated users. Set to true to enable attachment
@@ -436,12 +431,14 @@ ip_reputation:
     - yahoo.net
     - me.com
     - icloud.com
-    - messagingengine.com
     - protonmail.ch
     - zoho.com
+    - zoho.eu
     - zohomail.com
     - gmx.net
     - web.de
+    - mail.com
+    - yandex.net
 
 domain_registration:
   # Supply the AI with the age of authenticated sender domains. Registration
@@ -471,7 +468,8 @@ correspondents:
   legitimate_sender_min_score: 0.80
 
   # Apply authentication.trust_requirement before an inbound legitimate result
-  # contributes toward automatic allowlisting.
+  # contributes toward automatic allowlisting. Unwanted results must always
+  # satisfy authentication.trust_requirement before removing inbound-learned entries.
   legitimate_sender_require_authentication: true
 
   # Boolean: use saved relationships when assessing inbound mail. When false,

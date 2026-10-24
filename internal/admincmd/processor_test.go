@@ -177,6 +177,7 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 			ScanTotal: 30, ScanRejections: 20, ScanAccepted: 10, AIEvaluationsFailed: 1,
 			IPRejections: 2, CorrespondentAccepts: 1, HTMLLimitRejections: 4, HTMLLimitAccepted: 1,
 			HTMLDoSRejections: 3, HTMLDoSAccepted: 2, TokenCost: .0197,
+			IncompleteInspectionRejections: 2, IncompleteInspectionAccepted: 3,
 		},
 		status: stores.ServiceStatus{StartedAt: now.Add(-time.Hour), Mode: stores.ServiceModeAccept}, found: true,
 	}
@@ -191,9 +192,9 @@ func TestActivityCommandUsesDefaultPeriodAndFormatsReport(t *testing.T) {
 	for _, want := range []string{
 		"MilterGuard is running in accept mode", "This period also contains rejections recorded in enforce mode",
 		"Activity: past week", "Retention: 365 days",
-		"Service uptime: 1 hour", "Total rejected: 29", "  AI classification: 20", "  Content processing resource limit: 4", "  Content processing DoS protection: 3", "  IP reputation: 2",
+		"Service uptime: 1 hour", "Total rejected: 31", "  Incomplete inspection: 2", "  AI classification: 20", "  Content processing resource limit: 4", "  Content processing DoS protection: 3", "  IP reputation: 2",
 		"  Attachment policy: 0", "  Protected sender-domain policy: 0",
-		"Total accepted: 14", "  AI classification: 10", "  Content processing resource limit (accept mode): 1", "  Content processing DoS protection (accept mode): 2", "  Correspondent whitelist: 1", "  Trusted sender domain: 0",
+		"Total accepted: 17", "  Incomplete inspection (accept mode): 3", "  AI classification: 10", "  Content processing resource limit (accept mode): 1", "  Content processing DoS protection (accept mode): 2", "  Correspondent whitelist: 1", "  Trusted sender domain: 0",
 		"Total AI scans: 30", "AI evaluations failed: 1",
 		"Token costs are estimates based on endpoint-reported usage and configured prices.",
 		"Total token cost: USD 0.0197", "Average cost per message scanned: USD 0.000657",
@@ -490,5 +491,23 @@ func TestExecuteMutationErrorsAreReturned(t *testing.T) {
 				t.Fatalf("error=%v, want %v", err, wantErr)
 			}
 		})
+	}
+}
+
+func TestRejectionDetailPreservesAttachedEmailBoundary(t *testing.T) {
+	entry := stores.Rejection{ID: 7, Sender: "sender@example.net", Recipients: []string{"user@example.com"}, RejectedAt: time.Now()}
+	raw := []byte("Content-Type: message/rfc822\r\n\r\nFrom: original@example.org\r\nSubject: Attached sample\r\nContent-Type: text/html\r\n\r\n<p>Inspect this request</p>")
+	p := New(Dependencies{Rejections: &rejectionRepositoryStub{entry: entry}, MessageSource: &messageSourceStub{contents: raw}, MaxMessageSize: 1 << 20})
+	response, err := p.ExecuteLine(context.Background(), "REJECTION 7", Actor{DefaultRecipient: "user@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"<attached-email>", "From: original@example.org", "Subject: Attached sample", "Inspect this request", "</attached-email>"} {
+		if !strings.Contains(response.Text, want) {
+			t.Errorf("missing %q in %s", want, response.Text)
+		}
+	}
+	if len(response.Attachments) != 1 || !bytes.Equal(response.Attachments[0].Contents, raw) {
+		t.Fatal("original attachment changed")
 	}
 }

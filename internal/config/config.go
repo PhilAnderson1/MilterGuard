@@ -149,24 +149,25 @@ type AIConfig struct {
 	MaxHTMLParseCPUMilliseconds int      `yaml:"max_html_parse_cpu_ms"`
 	MaxHTMLParseMemoryBytes     int64    `yaml:"max_html_parse_memory_bytes"`
 	HTMLResourceLimitAction     string   `yaml:"html_resource_limit_action"`
-	HTMLResourceRejectMessage   string   `yaml:"html_resource_reject_message"`
-	// Deprecated YAML aliases, resolved and cleared by Load.
-	LegacyHTMLParseCPULimitAction *string `yaml:"html_parse_cpu_limit_action,omitempty"`
-	LegacyHTMLDoSRejectMessage    *string `yaml:"html_dos_reject_message,omitempty"`
-	IncompleteBodyAction          string  `yaml:"incomplete_body_action"`
-	VisionMode                    string  `yaml:"vision_mode"`
-	VisionMinTextChars            int     `yaml:"vision_min_text_chars"`
-	MaxImages                     int     `yaml:"max_images"`
-	MaxImageBytes                 int64   `yaml:"max_image_bytes"`
-	MaxImagePixels                int64   `yaml:"max_image_pixels"`
-	SiteURL                       string  `yaml:"site_url"`
-	AppName                       string  `yaml:"app_name"`
-	InputCostPerMillionTokens     float64 `yaml:"input_cost_per_million_tokens"`
-	OutputCostPerMillionTokens    float64 `yaml:"output_cost_per_million_tokens"`
+	// Deprecated YAML settings, resolved or ignored and cleared by Load.
+	LegacyHTMLResourceRejectMessage *string `yaml:"html_resource_reject_message,omitempty"`
+	LegacyHTMLParseCPULimitAction   *string `yaml:"html_parse_cpu_limit_action,omitempty"`
+	LegacyHTMLDoSRejectMessage      *string `yaml:"html_dos_reject_message,omitempty"`
+	IncompleteBodyAction            string  `yaml:"incomplete_body_action"`
+	VisionMode                      string  `yaml:"vision_mode"`
+	VisionMinTextChars              int     `yaml:"vision_min_text_chars"`
+	MaxImages                       int     `yaml:"max_images"`
+	MaxImageBytes                   int64   `yaml:"max_image_bytes"`
+	MaxImagePixels                  int64   `yaml:"max_image_pixels"`
+	SiteURL                         string  `yaml:"site_url"`
+	AppName                         string  `yaml:"app_name"`
+	InputCostPerMillionTokens       float64 `yaml:"input_cost_per_million_tokens"`
+	OutputCostPerMillionTokens      float64 `yaml:"output_cost_per_million_tokens"`
 }
 type FilteringConfig struct {
+	LegacyLegitimateLowConfidenceScore         *float64 `yaml:"legitimate_low_confidence_score,omitempty"`
 	RejectScore                                float64  `yaml:"reject_score"`
-	LegitimateLowConfidenceScore               float64  `yaml:"legitimate_low_confidence_score"`
+	LowConfidenceScore                         float64  `yaml:"low_confidence_score"`
 	AddEmailHeaders                            bool     `yaml:"add_email_headers"`
 	AIErrorAction                              string   `yaml:"ai_error_action"`
 	RejectMessage                              string   `yaml:"reject_message"`
@@ -233,25 +234,40 @@ func Load(path string) (Config, error) {
 	} else if !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("invalid trailing YAML content: %w", err)
 	}
-	if c.AI.LegacyHTMLDoSRejectMessage != nil || c.AI.LegacyHTMLParseCPULimitAction != nil {
+	if c.Filtering.LegacyLegitimateLowConfidenceScore != nil {
+		var supplied struct {
+			Filtering struct {
+				Score *float64 `yaml:"low_confidence_score"`
+			} `yaml:"filtering"`
+		}
+		if err := yaml.Unmarshal(b, &supplied); err != nil {
+			return Config{}, err
+		}
+		if supplied.Filtering.Score == nil {
+			c.Filtering.LowConfidenceScore = *c.Filtering.LegacyLegitimateLowConfidenceScore
+		}
+		c.Filtering.LegacyLegitimateLowConfidenceScore = nil
+		c.Warnings = append(c.Warnings, "filtering.legitimate_low_confidence_score is deprecated; use filtering.low_confidence_score (the new setting takes precedence when both are supplied)")
+	}
+	if c.AI.LegacyHTMLResourceRejectMessage != nil {
+		c.AI.LegacyHTMLResourceRejectMessage = nil
+		c.Warnings = append(c.Warnings, "ai.html_resource_reject_message is deprecated and ignored; remove this setting (the resource-limit rejection message is fixed)")
+	}
+	if c.AI.LegacyHTMLDoSRejectMessage != nil {
+		c.AI.LegacyHTMLDoSRejectMessage = nil
+		c.Warnings = append(c.Warnings, "ai.html_dos_reject_message is deprecated and ignored; remove this setting (the resource-limit rejection message is fixed)")
+	}
+	if c.AI.LegacyHTMLParseCPULimitAction != nil {
 		// Presence matters: an explicitly empty new value must be validated, not
 		// silently replaced by the alias or by the default. The strict decode above
 		// has already validated all field names and types.
 		var supplied struct {
 			AI struct {
-				Message *string `yaml:"html_resource_reject_message"`
-				Action  *string `yaml:"html_resource_limit_action"`
+				Action *string `yaml:"html_resource_limit_action"`
 			} `yaml:"ai"`
 		}
 		if err := yaml.Unmarshal(b, &supplied); err != nil {
 			return Config{}, err
-		}
-		if c.AI.LegacyHTMLDoSRejectMessage != nil {
-			if supplied.AI.Message == nil {
-				c.AI.HTMLResourceRejectMessage = *c.AI.LegacyHTMLDoSRejectMessage
-			}
-			c.AI.LegacyHTMLDoSRejectMessage = nil
-			c.Warnings = append(c.Warnings, "ai.html_dos_reject_message is deprecated; use ai.html_resource_reject_message (the new setting takes precedence when both are supplied)")
 		}
 		if c.AI.LegacyHTMLParseCPULimitAction != nil {
 			if supplied.AI.Action == nil {
@@ -303,9 +319,9 @@ func defaults() Config {
 			PromptFile:      "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
 			Retries: 2, MaxConcurrent: 8, MaxBodyChars: 50000, CompactPromptURLs: true,
 			MaxHTMLParseCPUMilliseconds: 250, MaxHTMLParseMemoryBytes: 64 << 20,
-			HTMLResourceLimitAction:   "reject",
-			HTMLResourceRejectMessage: "Message rejected because content processing exceeded server resource limits", IncompleteBodyAction: "scan",
-			VisionMode: "fallback", VisionMinTextChars: 500,
+			HTMLResourceLimitAction: "reject",
+			IncompleteBodyAction:    "scan",
+			VisionMode:              "fallback", VisionMinTextChars: 500,
 			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000,
 			SiteURL: "https://github.com/PhilAnderson1/MilterGuard", AppName: "MilterGuard",
 		},
@@ -340,7 +356,7 @@ func defaults() Config {
 			MessageDirectory: "/var/lib/milterguard/rejected-mail", MessageMaxTotalBytes: 1 << 30,
 		},
 		Filtering: FilteringConfig{
-			RejectScore: .5, LegitimateLowConfidenceScore: .8, AddEmailHeaders: true,
+			RejectScore: .5, LowConfidenceScore: .8, AddEmailHeaders: true,
 			AIErrorAction: "accept", RejectMessage: "Message rejected as suspected spam or fraud",
 			AuthenticatedOnlySenderDomains:             []string{},
 			SenderDomainAllowlistFile:                  "/etc/milterguard/trusted-sender-domains.txt",
@@ -354,7 +370,7 @@ func defaults() Config {
 			IPAllowlist: []string{"127.0.0.0/8", "::1/128"},
 			DomainAllowlist: []string{
 				"google.com", "outlook.com", "yahoo.com", "yahoo.net", "me.com", "icloud.com",
-				"messagingengine.com", "protonmail.ch", "zoho.com", "zohomail.com", "gmx.net", "web.de",
+				"protonmail.ch", "zoho.com", "zoho.eu", "zohomail.com", "gmx.net", "web.de", "mail.com", "yandex.net",
 			},
 		},
 		DomainRegistration: DomainRegistrationConfig{

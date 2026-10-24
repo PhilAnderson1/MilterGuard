@@ -141,9 +141,10 @@ func TestAttachmentsAcceptModeAddsHeadersWhenEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectAttachmentProgress(t, conn)
-	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
+	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "not-scanned")))
 	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "unavailable")))
 	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-accept-mode")))
+	expectFrame(t, conn, string(addHeaderResponse(policyHeader, "prohibited-attachment")))
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)
@@ -327,5 +328,68 @@ func TestAuthenticatedBypassSkipsAttachmentInspection(t *testing.T) {
 	expectFrame(t, conn, string([]byte{responseAccept}))
 	if got := analyzer.calls.Load(); got != 0 {
 		t.Fatalf("AI analysis calls = %d, want 0", got)
+	}
+}
+
+func TestNestedExecutablePolicyHeadersAndEnforcement(t *testing.T) {
+	for _, mode := range []string{"accept", "enforce"} {
+		t.Run(mode, func(t *testing.T) {
+			analyzer := &countingAnalyzer{}
+			server, conn, done := testServer(t, analyzer)
+			enableTestAttachments(server)
+			setTestMode(server, mode)
+			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
+			defer func() { _ = conn.Close(); <-done }()
+			negotiateWithActions(t, conn, resultHeaderActions)
+			sendContinueFrames(t, conn,
+				connectFrame('4', "127.0.0.1"), []byte{commandMail},
+				headerFrame("Content-Type", "message/rfc822"),
+				headerFrame(policyHeader, "forged"), headerFrame(policyHeader, "forged again"), headerFrame(scoreHeader, "1"),
+				[]byte{commandEndHeaders},
+				append([]byte{commandBody}, []byte("From: original@example.net\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=sample.exe\r\n\r\npayload")...),
+			)
+			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+				t.Fatal(err)
+			}
+			expectAttachmentProgress(t, conn)
+			if mode == "enforce" {
+				expectFrame(t, conn, "y550 5.7.1 executable attachment blocked\x00")
+			} else {
+				expectFrame(t, conn, string(deleteHeaderResponse(scoreHeader)))
+				expectFrame(t, conn, string(deleteHeaderResponse(policyHeader)))
+				expectFrame(t, conn, string(deleteHeaderResponse(policyHeader)))
+				expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "not-scanned")))
+				expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "unavailable")))
+				expectFrame(t, conn, string(addHeaderResponse(actionHeader, acceptModeAction)))
+				expectFrame(t, conn, string(addHeaderResponse(policyHeader, "prohibited-attachment")))
+				expectFrame(t, conn, string([]byte{responseAccept}))
+			}
+			if analyzer.calls.Load() != 0 {
+				t.Fatal("prohibited attachment reached AI")
+			}
+		})
+	}
+}
+
+func TestAttachmentInspectionErrorDoesNotClaimProhibitedFile(t *testing.T) {
+	analyzer := &countingAnalyzer{}
+	server, conn, done := testServer(t, analyzer)
+	enableTestAttachments(server)
+	setTestMode(server, "accept")
+	setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
+	defer func() { _ = conn.Close(); <-done }()
+	negotiateWithActions(t, conn, resultHeaderActions)
+	sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"), []byte{commandMail}, headerFrame("Content-Type", "multipart/mixed"), headerFrame(policyHeader, "prohibited-attachment"), []byte{commandEndHeaders}, append([]byte{commandBody}, []byte("missing boundary")...))
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectAttachmentProgress(t, conn)
+	expectFrame(t, conn, string(deleteHeaderResponse(policyHeader)))
+	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unavailable")))
+	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "unavailable")))
+	expectFrame(t, conn, string(addHeaderResponse(actionHeader, acceptModeAction)))
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if analyzer.calls.Load() != 0 {
+		t.Fatal("AI called after deterministic MIME rejection")
 	}
 }

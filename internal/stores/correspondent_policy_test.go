@@ -42,13 +42,25 @@ func TestDecideInboundLearning(t *testing.T) {
 		{
 			name:   "unwanted result at threshold removes candidate",
 			policy: policy,
-			input:  InboundClassification{Verdict: InboundVerdictUnwanted, Score: 0.8, UnwantedMinScore: 0.8},
+			input:  InboundClassification{Verdict: InboundVerdictUnwanted, Score: 0.8, UnwantedMinScore: 0.8, AuthenticationSatisfied: true},
 			want:   InboundLearningRemove,
 		},
 		{
 			name:   "unwanted result below threshold is ignored",
 			policy: policy,
-			input:  InboundClassification{Verdict: InboundVerdictUnwanted, Score: 0.79, UnwantedMinScore: 0.8},
+			input:  InboundClassification{Verdict: InboundVerdictUnwanted, Score: 0.79, UnwantedMinScore: 0.8, AuthenticationSatisfied: true},
+			want:   InboundLearningIgnore,
+		},
+		{
+			name:   "unauthenticated unwanted result is ignored",
+			policy: policy,
+			input:  InboundClassification{Verdict: InboundVerdictUnwanted, Score: 1, UnwantedMinScore: 0.8},
+			want:   InboundLearningIgnore,
+		},
+		{
+			name:   "unauthenticated unwanted result is ignored with optional learning authentication",
+			policy: InboundLearningPolicy{LearnLegitimateSenders: true, RequireAuthentication: false},
+			input:  InboundClassification{Verdict: InboundVerdictUnwanted, Score: 1, UnwantedMinScore: 0.8},
 			want:   InboundLearningIgnore,
 		},
 		{

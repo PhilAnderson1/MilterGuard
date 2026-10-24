@@ -161,9 +161,6 @@ func validateAI(c AIConfig) error {
 	if c.HTMLResourceLimitAction != "fallback" && c.HTMLResourceLimitAction != "reject" && c.HTMLResourceLimitAction != "dos-reject" {
 		return fmt.Errorf("ai.html_resource_limit_action must be fallback, reject, or dos-reject")
 	}
-	if c.HTMLResourceLimitAction != "fallback" && strings.TrimSpace(c.HTMLResourceRejectMessage) == "" {
-		return fmt.Errorf("ai.html_resource_reject_message must not be empty")
-	}
 	if c.IncompleteBodyAction != "scan" && c.IncompleteBodyAction != "reject" {
 		return fmt.Errorf("ai incomplete_body_action must be scan or reject")
 	}
@@ -291,8 +288,8 @@ func validateFiltering(c FilteringConfig) error {
 	if math.IsNaN(c.RejectScore) || c.RejectScore < 0.5 || c.RejectScore > 1 {
 		return fmt.Errorf("filtering.reject_score must be between 0.5 and 1")
 	}
-	if math.IsNaN(c.LegitimateLowConfidenceScore) || c.LegitimateLowConfidenceScore < 0.5 || c.LegitimateLowConfidenceScore > 1 {
-		return fmt.Errorf("filtering.legitimate_low_confidence_score must be between 0.5 and 1")
+	if math.IsNaN(c.LowConfidenceScore) || c.LowConfidenceScore < 0.5 || c.LowConfidenceScore > 1 {
+		return fmt.Errorf("filtering.low_confidence_score must be between 0.5 and 1")
 	}
 	if strings.TrimSpace(c.RejectMessage) == "" {
 		return fmt.Errorf("filtering.reject_message must not be empty")

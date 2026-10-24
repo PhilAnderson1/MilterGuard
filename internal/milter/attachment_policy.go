@@ -110,11 +110,16 @@ func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action
 	var err error
 	if selected == actionAccept {
 		if proposed != actionAccept && ss.deps.filtering.AddEmailHeaders {
-			classification := "unwanted"
 			if scanErr != nil {
-				classification = "unavailable"
+				err = ss.writeClassificationHeaders("unavailable", nil, acceptModeAction)
+			} else {
+				err = ss.replaceResultHeaders([][2]string{
+					{classificationHeader, "not-scanned"},
+					{confidenceHeader, "unavailable"},
+					{actionHeader, acceptModeAction},
+					{policyHeader, "prohibited-attachment"},
+				})
 			}
-			err = ss.writeClassificationHeaders(classification, nil, acceptModeAction)
 		} else {
 			err = ss.writeAcceptedResultHeaders(nil)
 		}

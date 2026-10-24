@@ -38,7 +38,7 @@ ai:
   max_html_parse_memory_bytes: 33554432
 filtering:
   reject_score: 0.8
-  legitimate_low_confidence_score: 0.7
+  low_confidence_score: 0.7
   add_email_headers: true
   authenticated_only_sender_domains:
     - example.com
@@ -69,7 +69,7 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Authentication.Mode != AuthenticationModeInternal || cfg.Authentication.Timeout.Value() != 7*time.Second || cfg.Authentication.MaxConcurrent != 3 || cfg.Authentication.MessageStorage != "file" || cfg.Authentication.MemoryMessageLimit != 5 || cfg.AI.MaxConcurrent != 3 || cfg.AI.CompactPromptURLs || cfg.AI.MaxHTMLParseMemoryBytes != 33554432 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LegitimateLowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || !reflect.DeepEqual(cfg.Filtering.AuthenticatedOnlySenderDomains, []string{"example.com"}) || cfg.Attachments.BlockExecutables || !cfg.Attachments.AddIPReputationStrike || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
+	if cfg.Authentication.Mode != AuthenticationModeInternal || cfg.Authentication.Timeout.Value() != 7*time.Second || cfg.Authentication.MaxConcurrent != 3 || cfg.Authentication.MessageStorage != "file" || cfg.Authentication.MemoryMessageLimit != 5 || cfg.AI.MaxConcurrent != 3 || cfg.AI.CompactPromptURLs || cfg.AI.MaxHTMLParseMemoryBytes != 33554432 || cfg.Filtering.RejectScore != 0.8 || cfg.Filtering.LowConfidenceScore != 0.7 || !cfg.Filtering.AddEmailHeaders || !reflect.DeepEqual(cfg.Filtering.AuthenticatedOnlySenderDomains, []string{"example.com"}) || cfg.Attachments.BlockExecutables || !cfg.Attachments.AddIPReputationStrike || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.DatabaseFile != "/tmp/milterguard.db" || cfg.Persistence.CleanupInterval.Value() != 2*time.Minute || !cfg.DomainRegistration.Enabled || cfg.DomainRegistration.MaxEntries != 123 || cfg.RejectionHistory.Expiry.Value() != 48*time.Hour || cfg.RejectionHistory.MaxEntries != 321 || !cfg.RejectionHistory.SaveMessages || cfg.RejectionHistory.MessageDirectory != "/tmp/rejected-mail" || cfg.RejectionHistory.MessageMaxTotalBytes != 52428800 {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
@@ -386,7 +386,7 @@ func TestValidateFilteringScores(t *testing.T) {
 	if got := defaults().Filtering.RejectScore; got != 0.5 {
 		t.Fatalf("default rejection score = %v", got)
 	}
-	if got := defaults().Filtering.LegitimateLowConfidenceScore; got != 0.8 {
+	if got := defaults().Filtering.LowConfidenceScore; got != 0.8 {
 		t.Fatalf("default legitimate low-confidence score = %v", got)
 	}
 	for _, field := range []struct {
@@ -394,7 +394,7 @@ func TestValidateFilteringScores(t *testing.T) {
 		set  func(*Config, float64)
 	}{
 		{"filtering.reject_score", func(cfg *Config, score float64) { cfg.Filtering.RejectScore = score }},
-		{"filtering.legitimate_low_confidence_score", func(cfg *Config, score float64) { cfg.Filtering.LegitimateLowConfidenceScore = score }},
+		{"filtering.low_confidence_score", func(cfg *Config, score float64) { cfg.Filtering.LowConfidenceScore = score }},
 	} {
 		for _, score := range []float64{0, 0.49, 1.01} {
 			cfg := validConfig()
@@ -413,7 +413,7 @@ func TestValidateFilteringScores(t *testing.T) {
 	}
 	cfg := validConfig()
 	cfg.Filtering.RejectScore = 0.5
-	cfg.Filtering.LegitimateLowConfidenceScore = 1
+	cfg.Filtering.LowConfidenceScore = 1
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("independent threshold ordering rejected: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestValidateYAMLNonFiniteThresholds(t *testing.T) {
 		name    string
 	}{
 		{"filtering", "reject_score"},
-		{"filtering", "legitimate_low_confidence_score"},
+		{"filtering", "low_confidence_score"},
 		{"correspondents", "legitimate_sender_min_score"},
 	} {
 		for _, value := range []string{".nan", ".inf", "-.inf"} {
@@ -514,23 +514,6 @@ func TestValidateMaximumHTMLParseCPU(t *testing.T) {
 		cfg.AI.MaxHTMLParseCPUMilliseconds = milliseconds
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_html_parse_cpu_ms") {
 			t.Fatalf("invalid max_html_parse_cpu_ms %d error = %v", milliseconds, err)
-		}
-	}
-	const wantRejectMessage = "Message rejected because content processing exceeded server resource limits"
-	if got := defaults().AI.HTMLResourceRejectMessage; got != wantRejectMessage {
-		t.Fatalf("HTML DoS rejection message default = %q, want %q", got, wantRejectMessage)
-	}
-	for _, action := range []string{"dos-reject", "reject", "fallback"} {
-		cfg := validConfig()
-		cfg.AI.HTMLResourceLimitAction = action
-		cfg.AI.HTMLResourceRejectMessage = " "
-		err := cfg.Validate()
-		if action == "fallback" {
-			if err != nil {
-				t.Fatalf("unused blank message rejected: %v", err)
-			}
-		} else if err == nil || !strings.Contains(err.Error(), "html_resource_reject_message") {
-			t.Fatalf("blank resource rejection message for %s: %v", action, err)
 		}
 	}
 
@@ -1190,21 +1173,22 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 	}
 }
 
-func TestLoadResourceRejectMessageAlias(t *testing.T) {
+func TestLoadDeprecatedResourceRejectMessages(t *testing.T) {
 	for _, tc := range []struct {
-		name, settings, want string
-		warning, invalid     bool
+		name, settings string
+		warnings       int
+		invalid        bool
 	}{
-		{name: "default", want: defaults().AI.HTMLResourceRejectMessage},
-		{name: "new", settings: "  html_resource_reject_message: new message\n", want: "new message"},
-		{name: "legacy", settings: "  html_dos_reject_message: old message\n", want: "old message", warning: true},
-		{name: "both", settings: "  html_dos_reject_message: old message\n  html_resource_reject_message: new message\n", want: "new message", warning: true},
-		{name: "reverse order", settings: "  html_resource_reject_message: new message\n  html_dos_reject_message: old message\n", want: "new message", warning: true},
-		{name: "explicit default wins", settings: "  html_resource_reject_message: " + defaults().AI.HTMLResourceRejectMessage + "\n  html_dos_reject_message: old message\n", want: defaults().AI.HTMLResourceRejectMessage, warning: true},
-		{name: "empty new wins", settings: "  html_resource_reject_message: ''\n  html_dos_reject_message: old message\n", invalid: true},
-		{name: "empty legacy", settings: "  html_dos_reject_message: ''\n", invalid: true},
+		{name: "absent"},
+		{name: "resource", settings: "  html_resource_reject_message: custom message\n", warnings: 1},
+		{name: "legacy", settings: "  html_dos_reject_message: old message\n", warnings: 1},
+		{name: "both", settings: "  html_dos_reject_message: old message\n  html_resource_reject_message: new message\n", warnings: 2},
+		{name: "reverse order", settings: "  html_resource_reject_message: new message\n  html_dos_reject_message: old message\n", warnings: 2},
+		{name: "empty resource", settings: "  html_resource_reject_message: ''\n", warnings: 1},
+		{name: "empty legacy", settings: "  html_dos_reject_message: ''\n", warnings: 1},
 		{name: "unknown field", settings: "  html_resource_reject_messsage: typo\n", invalid: true},
 		{name: "duplicate legacy", settings: "  html_dos_reject_message: one\n  html_dos_reject_message: two\n", invalid: true},
+		{name: "duplicate resource", settings: "  html_resource_reject_message: one\n  html_resource_reject_message: two\n", invalid: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
@@ -1222,12 +1206,16 @@ func TestLoadResourceRejectMessageAlias(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.AI.HTMLResourceRejectMessage != tc.want || cfg.AI.LegacyHTMLDoSRejectMessage != nil {
-				t.Fatalf("message=%q legacy=%v", cfg.AI.HTMLResourceRejectMessage, cfg.AI.LegacyHTMLDoSRejectMessage)
+			if cfg.AI.LegacyHTMLResourceRejectMessage != nil || cfg.AI.LegacyHTMLDoSRejectMessage != nil {
+				t.Fatal("deprecated message retained")
 			}
-			warned := strings.Contains(strings.Join(cfg.Warnings, "\n"), "html_dos_reject_message is deprecated")
-			if warned != tc.warning {
+			if len(cfg.Warnings) != tc.warnings {
 				t.Fatalf("warnings=%v", cfg.Warnings)
+			}
+			for _, warning := range cfg.Warnings {
+				if !strings.Contains(warning, "deprecated and ignored") {
+					t.Fatalf("warning=%q", warning)
+				}
 			}
 		})
 	}
@@ -1271,8 +1259,50 @@ func TestLoadResourceLimitActionAlias(t *testing.T) {
 			if warned != tc.warning {
 				t.Fatalf("warnings=%v", cfg.Warnings)
 			}
-			if tc.name == "both legacy aliases" && (cfg.AI.HTMLResourceRejectMessage != "old message" || len(cfg.Warnings) != 2) {
+			if tc.name == "both legacy aliases" && (cfg.AI.LegacyHTMLDoSRejectMessage != nil || len(cfg.Warnings) != 2) {
 				t.Fatalf("combined aliases: %+v", cfg.AI)
+			}
+		})
+	}
+}
+
+func TestLoadLowConfidenceScoreAlias(t *testing.T) {
+	for _, tc := range []struct {
+		name, settings string
+		want           float64
+		wantErr        bool
+	}{
+		{"default", "", .8, false},
+		{"new", "  low_confidence_score: 0.7\n", .7, false},
+		{"alias", "  legitimate_low_confidence_score: 0.6\n", .6, false},
+		{"new wins", "  legitimate_low_confidence_score: 0.6\n  low_confidence_score: 0.8\n", .8, false},
+		{"new wins reverse order", "  low_confidence_score: 0.7\n  legitimate_low_confidence_score: 0.6\n", .7, false},
+		{"invalid alias", "  legitimate_low_confidence_score: 0.4\n", 0, true},
+		{"invalid new not masked", "  low_confidence_score: 0\n  legitimate_low_confidence_score: 0.8\n", 0, true},
+		{"nonfinite alias", "  legitimate_low_confidence_score: .nan\n", 0, true},
+		{"duplicate alias", "  legitimate_low_confidence_score: 0.6\n  legitimate_low_confidence_score: 0.7\n", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			source := "ai:\n  api_key: test-key\n  model: test-model\nfiltering:\n  sender_domain_allowlist: ''\n" + tc.settings
+			if err := os.WriteFile(path, []byte(source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected invalid configuration")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Filtering.LowConfidenceScore != tc.want {
+				t.Fatalf("confidence score = %v, want %v", cfg.Filtering.LowConfidenceScore, tc.want)
+			}
+			if cfg.Filtering.LegacyLegitimateLowConfidenceScore != nil {
+				t.Fatal("alias not cleared")
 			}
 		})
 	}

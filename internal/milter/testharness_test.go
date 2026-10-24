@@ -63,7 +63,7 @@ func testServer(t *testing.T, analyzer Analyzer) (*Server, net.Conn, <-chan stru
 		Mode:      "enforce",
 		Milter:    config.MilterConfig{Timeout: config.Duration(200 * time.Millisecond), MaxMessageSize: 1024},
 		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
-		Filtering: config.FilteringConfig{RejectScore: 0.9, LegitimateLowConfidenceScore: 0.8, AIErrorAction: "accept", RejectMessage: "blocked"},
+		Filtering: config.FilteringConfig{RejectScore: 0.9, LowConfidenceScore: 0.8, AIErrorAction: "accept", RejectMessage: "blocked"},
 	}
 	return testServerWithConfig(t, cfg, analyzer)
 }

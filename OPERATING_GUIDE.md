@@ -96,10 +96,13 @@ bounded or partial extraction and continues toward AI analysis, `reject`
 treats the event as a suspected attack, rejects it, and applies the usual
 sending-IP reputation block and repeat-offender escalation. Authenticated
 submissions and configured IP or reverse-DNS exclusions remain protected from
-IP penalties. `ai.html_resource_reject_message` sets the SMTP rejection text
-for both `reject` and `dos-reject`. The old names
-`ai.html_parse_cpu_limit_action` and `ai.html_dos_reject_message` remain accepted
-as deprecated aliases; the corresponding new setting takes precedence when
+IP penalties. Both `reject` and `dos-reject` use the fixed SMTP 550 5.7.1
+message: "Message rejected because content processing exceeded server resource
+limits". The settings `ai.html_resource_reject_message` and
+`ai.html_dos_reject_message` are accepted for compatibility but ignored with a
+deprecation warning; remove them from existing configurations.
+`ai.html_parse_cpu_limit_action` remains a deprecated alias for
+`ai.html_resource_limit_action`; the new action setting takes precedence when
 both are supplied.
 MilterGuard refuses to start if its operating environment does not provide the
 per-thread CPU clock required to enforce this limit.
@@ -143,6 +146,15 @@ alternative also remain limitations; choosing between complete alternatives is
 not a failure. Visibility uncertainty alone does not trigger this policy. As
 with every rejection decision, accept mode records the decision but still
 accepts the message.
+
+Incomplete-inspection rejection is a policy decision, not an AI verdict. It
+adds no IP-reputation strikes and makes no correspondent-learning updates. The
+SMTP rejection explains that the content could not be fully inspected. In
+accept mode, generated result headers report `not-scanned`, confidence
+`unavailable`, action `accepted-accept-mode`, and policy
+`incomplete-inspection`, with no score. Logs and activity reports distinguish
+these decisions from AI classifications. Existing historical records are not
+reclassified.
 
 Image analysis detects scams that conceal their message inside images. Set
 `vision_mode` to `off`, `fallback` to inspect images when insufficient text is
@@ -233,7 +245,7 @@ these rules to `/etc/postfix/header_checks`:
 ```text
 /^Authentication-Results:/ IGNORE
 /^Received-SPF:/ IGNORE
-/^X-MilterGuard-(Classification|Score|Confidence|Action):/ IGNORE
+/^X-MilterGuard-(Classification|Score|Confidence|Action|Policy):/ IGNORE
 ```
 
 Enable the table in `/etc/postfix/main.cf`, merging it with any existing
@@ -465,6 +477,17 @@ The supplied configuration enables `filtering.add_email_headers`, so accepted
 mail includes MilterGuard's classification, score, confidence, and action where
 applicable. These headers are available in both `accept` and `enforce` modes.
 
+When attachment policy positively identifies a prohibited file in `accept`
+mode, AI analysis is skipped. The message receives
+`X-MilterGuard-Classification: not-scanned`,
+`X-MilterGuard-Confidence: unavailable`,
+`X-MilterGuard-Action: accepted-accept-mode`, and
+`X-MilterGuard-Policy: prohibited-attachment`, with no score. This is a file
+policy finding, not a judgment that the communication is spam or fraud.
+Inspection errors do not receive this policy label. In `enforce` mode,
+prohibited attachments still cause SMTP rejection before AI analysis, including
+when nested inside an attached email.
+
 ### Deliver classified mail to the Junk folder
 
 MilterGuard's result headers can be used by a server-side delivery filter or
@@ -497,8 +520,12 @@ if allof (
 ```
 
 In `enforce` mode, unwanted messages at or above `reject_score` are rejected;
-the rule above handles unwanted messages accepted because their score is below
-that threshold. To review low-confidence legitimate classifications as well,
+the rule above handles accepted unwanted messages only when their score is also
+below `filtering.low_confidence_score`. That setting labels either classification
+as low confidence below its value and high confidence at or above it, independently
+of rejection policy. Its default is `0.8`. The former setting
+`legitimate_low_confidence_score` remains an alias; the new name takes precedence
+when both are supplied. To review low-confidence legitimate classifications as well,
 use a corresponding rule:
 
 ```sieve

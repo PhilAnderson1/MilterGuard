@@ -735,6 +735,7 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	if matchCorrespondent(t, store, context.Background(), "news@example.net", []string{"owner@example.com"}).Known {
 		t.Fatal("unqualified first candidate was matched by the production qualification query")
 	}
+	record("unwanted", 1, false)
 	record("legitimate", .9, true)
 	record("unwanted", .89, true)
 	if correspondentSnapshot(t, store)[key].LegitimateEmailCount != 1 {
@@ -744,6 +745,10 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	record("legitimate", 1, true)
 	if !matchCorrespondent(t, store, context.Background(), "news@example.net", []string{"owner@example.com"}).Known {
 		t.Fatal("qualified inbound sender is not known")
+	}
+	record("unwanted", 1, false)
+	if !matchCorrespondent(t, store, context.Background(), "news@example.net", []string{"owner@example.com"}).Known {
+		t.Fatal("unauthenticated unwanted classification removed qualified sender")
 	}
 	record("unwanted", .9, true)
 	if _, exists := correspondentSnapshot(t, store)[key]; exists {
@@ -774,6 +779,12 @@ func TestUnwantedClassificationRemovesOnlyRecipientScopedLearnedCorrespondent(t 
 	}
 
 	if err := recordInboundClassification(store, context.Background(), "sender@example.net", []string{"first@example.com", "third@example.com"}, true, "unwanted", .9, .9, false); err != nil {
+		t.Fatal(err)
+	}
+	if records := correspondentSnapshot(t, store); len(records) != 3 {
+		t.Fatalf("unauthenticated unwanted classification changed relationships: %#v", records)
+	}
+	if err := recordInboundClassification(store, context.Background(), "sender@example.net", []string{"first@example.com", "third@example.com"}, true, "unwanted", .9, .9, true); err != nil {
 		t.Fatal(err)
 	}
 	records := correspondentSnapshot(t, store)

@@ -40,6 +40,8 @@ func TestActivityRepositoryAggregatesAndAppliesRetention(t *testing.T) {
 		{OccurredAt: now.Add(-12 * time.Hour), EventType: stores.ActivityEventHTMLDoS, Outcome: stores.ActivityOutcomeAccepted},
 		{OccurredAt: now.Add(-13 * time.Hour), EventType: stores.ActivityEventHTMLLimit, Outcome: stores.ActivityOutcomeRejected},
 		{OccurredAt: now.Add(-14 * time.Hour), EventType: stores.ActivityEventHTMLLimit, Outcome: stores.ActivityOutcomeAccepted},
+		{OccurredAt: now.Add(-15 * time.Hour), EventType: stores.ActivityEventIncompleteInspection, Outcome: stores.ActivityOutcomeRejected},
+		{OccurredAt: now.Add(-16 * time.Hour), EventType: stores.ActivityEventIncompleteInspection, Outcome: stores.ActivityOutcomeAccepted},
 		{OccurredAt: now.Add(-8 * 24 * time.Hour), EventType: stores.ActivityEventScan, Outcome: stores.ActivityOutcomeAccepted, TokenCost: 99},
 	}
 	for _, event := range events {
@@ -55,7 +57,7 @@ func TestActivityRepositoryAggregatesAndAppliesRetention(t *testing.T) {
 		summary.IPRejections != 1 || summary.CorrespondentAccepts != 1 || summary.TrustedDomainAccepts != 1 ||
 		summary.AttachmentRejections != 1 || summary.ProtectedSenderDomainRejections != 1 || summary.SenderBlocklistRejections != 1 ||
 		summary.SenderBlocklistRecipientRemovals != 3 || summary.HTMLDoSRejections != 1 || summary.HTMLDoSAccepted != 1 ||
-		summary.HTMLLimitRejections != 1 || summary.HTMLLimitAccepted != 1 || summary.TokenCost != .6 {
+		summary.HTMLLimitRejections != 1 || summary.HTMLLimitAccepted != 1 || summary.IncompleteInspectionRejections != 1 || summary.IncompleteInspectionAccepted != 1 || summary.TokenCost != .6 {
 		t.Fatalf("summary = %+v", summary)
 	}
 }

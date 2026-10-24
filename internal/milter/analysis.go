@@ -12,12 +12,16 @@ import (
 )
 
 const analysisResponseMargin = 5 * time.Second
+const resourceLimitRejectMessage = "Message rejected because content processing exceeded server resource limits"
+const incompleteInspectionPolicy = "incomplete-inspection"
+const incompleteInspectionRejectMessage = "Message rejected because its content could not be fully inspected"
 
 type Analyzer interface {
 	Analyze(context.Context, ai.Input) (ai.Analysis, error)
 }
 
 type evaluationResult struct {
+	incompleteInspection       bool
 	proposed                   action
 	selected                   action
 	classification             ai.Classification
@@ -93,7 +97,7 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 	}
 	if (htmlCPUExceeded || usage.MemoryExceeded) && actionOnHTMLLimit != "fallback" {
 		proposed := actionReject
-		rejectMessage := s.ai.HTMLResourceRejectMessage
+		rejectMessage := resourceLimitRejectMessage
 		classification := ai.Classification("")
 		score := float64(0)
 		if actionOnHTMLLimit == "dos-reject" {
@@ -116,8 +120,9 @@ func (s *analysisService) evaluate(parent context.Context, msg *message.Message,
 		proposed := actionReject
 		return evaluationResult{
 			proposed: proposed, selected: selectActionForMode(proposed, mode),
-			classification: ai.ClassificationUnwanted, score: 1,
-			reasons: []string{"message body extraction was incomplete"}, latency: time.Since(started),
+			incompleteInspection: true,
+			rejectMessage:        incompleteInspectionRejectMessage,
+			reasons:              []string{"message body extraction was incomplete"}, latency: time.Since(started),
 		}
 	}
 	input := ai.Input{Text: prepared.Prompt, Images: make([]ai.Image, 0, len(prepared.Images))}
@@ -248,9 +253,8 @@ func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, 
 
 	attrs := []any{
 		"message_id", msg.Header("Message-ID"), "mode", mode,
-		"classification", result.classification, "score", result.score,
 		"reasons", result.reasons, "proposed_action", result.proposed.String(),
-		"actual_action", result.selected.String(), "model", s.ai.Model,
+		"actual_action", result.selected.String(),
 		"latency_ms", result.latency.Milliseconds(), "truncated", msg.Truncated,
 		"response_sent", sent, "vision_images", result.visionImages,
 		"html_primary_cpu_limit_exceeded", result.htmlPrimaryCPUExceeded,
@@ -262,6 +266,13 @@ func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, 
 		"html_fallback_memory_bytes", result.htmlFallbackMemoryBytes,
 		"html_cpu_limit_exceeded", result.htmlCPUExceeded,
 	}
+	logMessage := "message classified"
+	if result.incompleteInspection {
+		logMessage = "message inspection policy decision"
+		attrs = append(attrs, "policy", incompleteInspectionPolicy)
+	} else {
+		attrs = append(attrs, "classification", result.classification, "score", result.score, "model", s.ai.Model)
+	}
 	if includeSubject {
 		attrs = append(attrs, "subject", msg.DecodedHeader("Subject"))
 	}
@@ -272,5 +283,5 @@ func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, 
 	if responseErr != nil {
 		level = slog.LevelError
 	}
-	s.log.Log(ctx, level, "message classified", attrs...)
+	s.log.Log(ctx, level, logMessage, attrs...)
 }

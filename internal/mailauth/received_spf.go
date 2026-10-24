@@ -19,10 +19,24 @@ func appendReceivedSPF(results []Result, headers []string, trusted map[string]bo
 		if len(match) != 2 {
 			continue
 		}
+		domain := receivedSPFEnvelopeDomain(header)
+		var scope SPFIdentity
+		if domain != "" {
+			scope = SPFIdentityMailFrom
+		}
+		// An explicit HELO result must not be attributed to the envelope sender.
+		identity, explicitIdentity := receivedSPFParameter(header, "identity")
+		envelope, hasEnvelope := receivedSPFParameter(header, "envelope-from")
+		nullEnvelope := hasEnvelope && (strings.TrimSpace(envelope) == "" || strings.TrimSpace(envelope) == "<>")
+		if strings.EqualFold(identity, "helo") || (!explicitIdentity && nullEnvelope) {
+			helo, _ := receivedSPFParameter(header, "helo")
+			domain, scope = DomainFromIdentity(helo), SPFIdentityHELO
+		}
 		results = appendUnique(results, Result{
-			Method:  MethodSPF,
-			Outcome: normalizeHeaderOutcome(MethodSPF, match[1]),
-			Domain:  receivedSPFEnvelopeDomain(header),
+			Method:      MethodSPF,
+			Outcome:     normalizeHeaderOutcome(MethodSPF, match[1]),
+			Domain:      domain,
+			SPFIdentity: scope,
 		})
 	}
 	return results

@@ -506,7 +506,7 @@ func TestPromptIncludesOnlyReceivedSPFFromTrustedReceiver(t *testing.T) {
 	m.AddHeader("Received-SPF", "pass receiver=mx.google.com; client-ip=192.0.2.2")
 	m.AddHeader("Received-SPF", "pass client-ip=192.0.2.3")
 	prompt := promptWithHeaderAuthentication(t, m, []string{"nl.invades.net"}, 100)
-	if !strings.Contains(prompt, "SPF: pass for envelope-sender domain unavailable") {
+	if !strings.Contains(prompt, "SPF: pass for domain (identity scope unavailable) unavailable") {
 		t.Fatalf("trusted Received-SPF result missing: %s", prompt)
 	}
 	if strings.Contains(prompt, "192.0.2.2") || strings.Contains(prompt, "192.0.2.3") {
@@ -534,7 +534,7 @@ func TestPromptAcceptsQuotedReceivedSPFReceiverParameter(t *testing.T) {
 	m := New(1000)
 	m.AddHeader("Received-SPF", `pass (local result) client-ip=192.0.2.1; receiver="nl.invades.net"`)
 	prompt := promptWithHeaderAuthentication(t, m, []string{"nl.invades.net"}, 100)
-	if !strings.Contains(prompt, "SPF: pass for envelope-sender domain unavailable") {
+	if !strings.Contains(prompt, "SPF: pass for domain (identity scope unavailable) unavailable") {
 		t.Fatalf("trusted quoted receiver missing:\n%s", prompt)
 	}
 }
@@ -595,7 +595,7 @@ func TestPromptOmitsAlignmentLanguageFromNonPassResults(t *testing.T) {
 	m.AddHeader("From", "sender@example.com")
 	context := AnalysisContext{Authentication: mailauth.NewEvidence([]mailauth.Result{
 		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomeFail, Domain: "example.com"},
-		{Method: mailauth.MethodSPF, Outcome: mailauth.OutcomeSoftfail, Domain: "example.com"},
+		{Method: mailauth.MethodSPF, SPFIdentity: mailauth.SPFIdentityMailFrom, Outcome: mailauth.OutcomeSoftfail, Domain: "example.com"},
 		{Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomeFail, Domain: "example.com"},
 	}, "example.com")}
 	prompt := promptWithContext(m, context, 100)
@@ -617,8 +617,8 @@ func TestPromptUsesFriendlyAuthenticationErrorDescriptions(t *testing.T) {
 	m := New(1000)
 	m.AddHeader("From", "sender@example.com")
 	context := AnalysisContext{Authentication: mailauth.NewEvidence([]mailauth.Result{
-		{Method: mailauth.MethodSPF, Outcome: mailauth.OutcomePermerror, Domain: "spf.example.com"},
-		{Method: mailauth.MethodSPF, Outcome: mailauth.OutcomeTemperror, Domain: "temp-spf.example.com"},
+		{Method: mailauth.MethodSPF, SPFIdentity: mailauth.SPFIdentityMailFrom, Outcome: mailauth.OutcomePermerror, Domain: "spf.example.com"},
+		{Method: mailauth.MethodSPF, SPFIdentity: mailauth.SPFIdentityMailFrom, Outcome: mailauth.OutcomeTemperror, Domain: "temp-spf.example.com"},
 		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePolicy, Domain: "policy.example.com"},
 		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomeNeutral, Domain: "neutral.example.com"},
 		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomePermerror, Domain: "permanent.example.com"},
@@ -655,7 +655,7 @@ func TestPromptUsesFriendlyDescriptionsForAbsentAuthentication(t *testing.T) {
 	m.AddHeader("From", "sender@example.com")
 	context := AnalysisContext{Authentication: mailauth.NewEvidence([]mailauth.Result{
 		{Method: mailauth.MethodDKIM, Outcome: mailauth.OutcomeNone},
-		{Method: mailauth.MethodSPF, Outcome: mailauth.OutcomeNone, Domain: "bounce.example.net"},
+		{Method: mailauth.MethodSPF, SPFIdentity: mailauth.SPFIdentityMailFrom, Outcome: mailauth.OutcomeNone, Domain: "bounce.example.net"},
 		{Method: mailauth.MethodDMARC, Outcome: mailauth.OutcomeNone, Domain: "example.com"},
 	}, "example.com")}
 	prompt := promptWithContext(m, context, 100)
@@ -883,5 +883,28 @@ func TestLinkInventoryDoesNotDuplicateLinkRetainedInBody(t *testing.T) {
 	}
 	if strings.Contains(prompt, "EXTRACTED LINKS") {
 		t.Fatalf("link retained in body was duplicated in extracted inventory: %s", prompt)
+	}
+}
+
+func TestPromptPreservesSPFIdentityScope(t *testing.T) {
+	for _, tc := range []struct{ name, header, value, want string }{
+		{"mailfrom", "Authentication-Results", "mx.example; spf=pass smtp.mailfrom=sender@example.com smtp.helo=relay.example.net", "SPF: pass for envelope-sender domain example.com"},
+		{"helo", "Authentication-Results", "mx.example; spf=pass smtp.mailfrom=<> smtp.helo=relay.example.net", "SPF: pass for HELO domain relay.example.net"},
+		{"helo no policy", "Authentication-Results", "mx.example; spf=none smtp.helo=relay.example.net", "SPF: no SPF policy for HELO domain relay.example.net"},
+		{"helo failure", "Authentication-Results", "mx.example; spf=fail smtp.helo=relay.example.net", "SPF: fail for HELO domain relay.example.net"},
+		{"unknown", "Authentication-Results", "mx.example; spf=pass", "SPF: pass for domain (identity scope unavailable) unavailable"},
+		{"received helo", "Received-SPF", "pass receiver=mx.example; identity=helo; helo=relay.example.net; envelope-from=sender@example.com", "SPF: pass for HELO domain relay.example.net"},
+		{"received bounce", "Received-SPF", "pass receiver=mx.example; envelope-from=<>; helo=relay.example.net", "SPF: pass for HELO domain relay.example.net"},
+		{"received mailfrom", "Received-SPF", "pass receiver=mx.example; identity=mailfrom; envelope-from=sender@example.com; helo=relay.example.net", "SPF: pass for envelope-sender domain example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(1000)
+			m.AddHeader("From", "sender@example.com")
+			m.AddHeader(tc.header, tc.value)
+			prompt := promptWithHeaderAuthentication(t, m, []string{"mx.example"}, 100)
+			if !strings.Contains(prompt, tc.want) {
+				t.Fatalf("missing %q in prompt: %s", tc.want, prompt)
+			}
+		})
 	}
 }

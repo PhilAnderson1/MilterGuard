@@ -46,11 +46,21 @@ const (
 	ErrorInternal ErrorCategory = "internal"
 )
 
+// SPFIdentity records which SMTP identity supplied the SPF policy.
+// The zero value means the identity scope was not supplied.
+type SPFIdentity string
+
+const (
+	SPFIdentityMailFrom SPFIdentity = "mailfrom"
+	SPFIdentityHELO     SPFIdentity = "helo"
+)
+
 // Result is one trusted authentication result and the domain it authenticates.
 type Result struct {
 	Method        Method
 	Outcome       Outcome
 	Domain        string
+	SPFIdentity   SPFIdentity
 	Aligned       bool
 	Reason        string
 	ErrorCategory ErrorCategory

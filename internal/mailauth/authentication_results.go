@@ -51,7 +51,7 @@ func Parse(input Input) []Result {
 			case MethodDKIM:
 				result.Domain = matchedDomain(dkimDomainPattern, clause)
 			case MethodSPF:
-				result.Domain = authenticationResultsSPFDomain(clause)
+				result.Domain, result.SPFIdentity = authenticationResultsSPFIdentity(clause)
 				hasAuthenticationResultsSPF = true
 			case MethodDMARC:
 				result.Domain = matchedDomain(dmarcDomainPattern, clause)
@@ -66,20 +66,20 @@ func Parse(input Input) []Result {
 	return appendReceivedSPF(results, input.ReceivedSPF, trusted)
 }
 
-// authenticationResultsSPFDomain returns the RFC 7208 identity recorded in a
+// authenticationResultsSPFIdentity returns the RFC 7208 identity recorded in a
 // trusted Authentication-Results SPF clause. MAIL FROM is preferred; HELO is
 // the applicable fallback for checks made against the HELO identity, including
 // messages with a null reverse path.
-func authenticationResultsSPFDomain(clause string) string {
+func authenticationResultsSPFIdentity(clause string) (string, SPFIdentity) {
 	if identity, ok := authenticationProperty(clause, "smtp", "mailfrom"); ok {
 		if domain := DomainFromIdentity(identity); domain != "" {
-			return domain
+			return domain, SPFIdentityMailFrom
 		}
 	}
 	if identity, ok := authenticationProperty(clause, "smtp", "helo"); ok {
-		return DomainFromIdentity(identity)
+		return DomainFromIdentity(identity), SPFIdentityHELO
 	}
-	return ""
+	return "", ""
 }
 
 // authenticationProperty extracts an exact ptype.property value while

@@ -240,7 +240,7 @@ func annotationWord(c byte) bool {
 // The old regexp used Unicode simple folding. Long s is the only non-ASCII
 // equivalent appearing in these fixed names; retain that spelling as well.
 func annotationNameEnd(value string, start int) int {
-	for _, name := range [...]string{"invisible", "visibility-varies-by-viewport-size", "visibility-uncertain", "hidden-content-stripped", "quoted-content"} {
+	for _, name := range [...]string{"invisible", "visibility-varies-by-viewport-size", "visibility-uncertain", "hidden-content-stripped", "quoted-content", "attached-email", "attached-file"} {
 		pos := start
 		matched := true
 		for i := 0; i < len(name); i++ {

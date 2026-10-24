@@ -4,7 +4,7 @@ import "testing"
 
 func TestSelectProcessedBodyBoundaries(t *testing.T) {
 	const truncatedMarker = "\n[processed email body truncated; the remainder was omitted]"
-	const incompleteMarker = "\n[HTML extraction incomplete; processing limits prevented extraction of the remainder]"
+	const incompleteMarker = "\n[Content extraction incomplete; some content may be missing]"
 	for _, test := range []struct {
 		name      string
 		content   extractedContent

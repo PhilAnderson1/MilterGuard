@@ -112,7 +112,6 @@ func TestMemoryExhaustionUsesResourceLimitAction(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 			service := processingTestService(action, analyzer)
 			service.ai.MaxHTMLParseMemoryBytes = 1
-			service.ai.HTMLResourceRejectMessage = "custom resource limit message"
 			msg := message.New(4096)
 			msg.AddHeader("Content-Type", "text/html")
 			msg.AddBody([]byte("<p>evidence</p>"))
@@ -124,7 +123,7 @@ func TestMemoryExhaustionUsesResourceLimitAction(t *testing.T) {
 				if result.selected != actionAccept || analyzer.calls.Load() != 1 {
 					t.Fatalf("result=%+v", result)
 				}
-			} else if result.selected != actionReject || result.rejectMessage != "custom resource limit message" || analyzer.calls.Load() != 0 || !strings.Contains(strings.Join(result.reasons, " "), "memory limit") {
+			} else if result.selected != actionReject || result.rejectMessage != resourceLimitRejectMessage || analyzer.calls.Load() != 0 || !strings.Contains(strings.Join(result.reasons, " "), "memory limit") {
 				t.Fatalf("result=%+v", result)
 			}
 		})

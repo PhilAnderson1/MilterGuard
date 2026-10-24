@@ -213,6 +213,7 @@ func (v *Verifier) verifySPF(ctx context.Context, transaction mailauth.Transacti
 	}
 
 	args := spf.Args{RemoteIP: remoteIP, HelloDomain: helo, LocalIP: localIP, LocalHostname: localHostname}
+	scope := mailauth.SPFIdentityHELO
 	sender := strings.TrimSpace(transaction.EnvelopeSender)
 	if sender != "" && sender != "<>" {
 		if strings.HasPrefix(sender, "<") && strings.HasSuffix(sender, ">") {
@@ -222,6 +223,7 @@ func (v *Verifier) verifySPF(ctx context.Context, transaction mailauth.Transacti
 		if err != nil {
 			return inputFailure(mailauth.OutcomePermerror, spf.StatusPermerror, mailauth.ErrorSyntax, "invalid envelope sender")
 		}
+		scope = mailauth.SPFIdentityMailFrom
 		args.MailFromLocalpart = address.Localpart
 		args.MailFromDomain = address.Domain
 	}
@@ -231,6 +233,7 @@ func (v *Verifier) verifySPF(ctx context.Context, transaction mailauth.Transacti
 		Method: mailauth.MethodSPF, Outcome: outcome(string(received.Result)),
 		Domain:       mailauth.NormalizeDomain(domain.ASCII),
 		SPFMechanism: bounded(received.Mechanism, 256),
+		SPFIdentity:  scope,
 	}
 	result.ErrorCategory, result.Reason = classifySPF(received.Result, verifyErr)
 	return result, received.Result, domain

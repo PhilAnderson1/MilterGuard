@@ -117,6 +117,7 @@ const (
 	ActivityEventSenderBlocklist                ActivityEventType = 7
 	ActivityEventHTMLDoS                        ActivityEventType = 8
 	ActivityEventHTMLLimit                      ActivityEventType = 9
+	ActivityEventIncompleteInspection           ActivityEventType = 10
 )
 
 type ActivityOutcome uint8
@@ -160,6 +161,8 @@ type ActivitySummary struct {
 	HTMLDoSAccepted                  int64
 	HTMLLimitRejections              int64
 	HTMLLimitAccepted                int64
+	IncompleteInspectionRejections   int64
+	IncompleteInspectionAccepted     int64
 	TokenCost                        float64
 }
 

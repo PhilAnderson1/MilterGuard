@@ -53,11 +53,11 @@ func TestHTMLCPUProtectionSkipsAIAndRespectsMode(t *testing.T) {
 		selected action
 	}{{"enforce", actionReject}, {"accept", actionAccept}} {
 		t.Run(tc.mode, func(t *testing.T) {
-			const rejectMessage = "HTML CPU limit exceeded"
+			const rejectMessage = resourceLimitRejectMessage
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1}}
 			service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
 				Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
-				MaxHTMLParseCPUMilliseconds: 1, HTMLResourceLimitAction: "dos-reject", HTMLResourceRejectMessage: rejectMessage, VisionMode: "off",
+				MaxHTMLParseCPUMilliseconds: 1, HTMLResourceLimitAction: "dos-reject", VisionMode: "off",
 			}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 			requireThreadCPU(t)
 			msg := message.New(4 << 20)
@@ -141,7 +141,7 @@ func TestHTMLCPULimitRejectUsesResourceMessageWithoutDoSClassification(t *testin
 	service := &analysisService{analyzer: analyzer, ai: config.AIConfig{
 		Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024,
 		MaxHTMLParseCPUMilliseconds: 1, HTMLResourceLimitAction: "reject",
-		HTMLResourceRejectMessage: "custom resource limit message", VisionMode: "off",
+		VisionMode: "off",
 	}, slots: make(chan struct{}, 1), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	requireThreadCPU(t)
 	msg := message.New(4 << 20)
@@ -149,7 +149,7 @@ func TestHTMLCPULimitRejectUsesResourceMessageWithoutDoSClassification(t *testin
 	msg.AddBody([]byte(cpuHeavyHTML()))
 	result := service.evaluate(context.Background(), msg, message.AnalysisContext{}, "enforce", .9, "accept", false)
 	if result.selected != actionReject || result.htmlCPUAction != "reject" || !result.htmlCPUExceeded ||
-		result.classification != "" || result.rejectMessage != "custom resource limit message" || analyzer.calls.Load() != 0 {
+		result.classification != "" || result.rejectMessage != resourceLimitRejectMessage || analyzer.calls.Load() != 0 {
 		t.Fatalf("result=%+v analyzer calls=%d", result, analyzer.calls.Load())
 	}
 }
@@ -385,7 +385,7 @@ func TestCompletedScanRecordsActivityAndTokenCost(t *testing.T) {
 		Activity:    config.ActivityConfig{Expiry: config.Duration(24 * time.Hour)},
 		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db")},
 		Filtering: config.FilteringConfig{
-			RejectScore: .9, LegitimateLowConfidenceScore: .8, AIErrorAction: "accept", RejectMessage: "blocked",
+			RejectScore: .9, LowConfidenceScore: .8, AIErrorAction: "accept", RejectMessage: "blocked",
 		},
 	}
 	server, conn, done := testServerWithConfig(t, cfg, fixedAnalyzer{
@@ -441,7 +441,7 @@ func TestFailedFailOpenScanRecordsAcceptedActivityAndKnownCost(t *testing.T) {
 		Activity:    config.ActivityConfig{Expiry: config.Duration(24 * time.Hour)},
 		Persistence: config.PersistenceConfig{DatabaseFile: filepath.Join(t.TempDir(), "milterguard.db")},
 		Filtering: config.FilteringConfig{
-			RejectScore: .9, LegitimateLowConfidenceScore: .8, AIErrorAction: "accept", RejectMessage: "blocked",
+			RejectScore: .9, LowConfidenceScore: .8, AIErrorAction: "accept", RejectMessage: "blocked",
 		},
 	}
 	server, conn, done := testServerWithConfig(t, cfg, usageFailingAnalyzer{

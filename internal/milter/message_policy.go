@@ -119,6 +119,13 @@ func postDecisionContext(ctx context.Context) (context.Context, context.CancelFu
 func (s *messagePolicyService) applyPostDecisionUpdates(ctx context.Context, current messageContext, result evaluationResult, inbound inboundEvidence, unwantedMinScore float64) {
 	ctx, cancel := postDecisionContext(ctx)
 	defer cancel()
+	if result.incompleteInspection {
+		if result.selected == actionReject {
+			s.recordRejection(ctx, current.message, current.visibleSender, current.envelopeSender, current.envelopeRecipients, result.reasons, incompleteInspectionPolicy)
+		}
+		// Missing evidence is not evidence against a sender or its sending IP.
+		return
+	}
 	if result.selected == actionReject {
 		s.recordRejection(ctx, current.message, current.visibleSender, current.envelopeSender, current.envelopeRecipients, result.reasons, "ai")
 		if !current.authenticated && !((result.htmlCPUExceeded || result.htmlMemoryExceeded) && result.htmlCPUAction == "reject") {

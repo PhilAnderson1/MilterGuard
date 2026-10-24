@@ -26,7 +26,9 @@ const (
 func DecideInboundLearning(policy InboundLearningPolicy, input InboundClassification) (InboundLearningAction, error) {
 	switch input.Verdict {
 	case InboundVerdictUnwanted:
-		if input.Score >= input.UnwantedMinScore {
+		// Unauthenticated mail must not damage the claimed sender's reputation,
+		// even when authentication is optional for positive learning.
+		if input.AuthenticationSatisfied && input.Score >= input.UnwantedMinScore {
 			return InboundLearningRemove, nil
 		}
 		return InboundLearningIgnore, nil

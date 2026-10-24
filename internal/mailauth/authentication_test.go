@@ -16,7 +16,7 @@ func TestParseAuthenticationResults(t *testing.T) {
 	}
 	want := []Result{
 		{Method: MethodDKIM, Outcome: "pass", Domain: "mail.example.com"},
-		{Method: MethodSPF, Outcome: "pass", Domain: "example.com"},
+		{Method: MethodSPF, SPFIdentity: SPFIdentityMailFrom, Outcome: "pass", Domain: "example.com"},
 		{Method: MethodDMARC, Outcome: "pass", Domain: "example.com"},
 	}
 	if got := Parse(input); !reflect.DeepEqual(got, want) {
@@ -49,7 +49,7 @@ func TestParseAuthenticationResultsIgnoresRFCComments(t *testing.T) {
 	}
 	want := []Result{
 		{Method: MethodDKIM, Outcome: OutcomePass, Domain: "example.com"},
-		{Method: MethodSPF, Outcome: OutcomePass, Domain: "example.com"},
+		{Method: MethodSPF, SPFIdentity: SPFIdentityMailFrom, Outcome: OutcomePass, Domain: "example.com"},
 		{Method: MethodDMARC, Outcome: OutcomePass, Domain: "example.com"},
 	}
 	if got := Parse(input); !reflect.DeepEqual(got, want) {
@@ -100,7 +100,7 @@ func TestParseAuthenticationResultsRejectsMalformedCommentsAndQuotes(t *testing.
 		ReceivedSPF:           []string{`pass receiver="mx.example"; envelope-from=sender@example.com`},
 		TrustedAuthservIDs:    []string{"mx.example"},
 	}
-	want := []Result{{Method: MethodSPF, Outcome: OutcomePass, Domain: "example.com"}}
+	want := []Result{{Method: MethodSPF, SPFIdentity: SPFIdentityMailFrom, Outcome: OutcomePass, Domain: "example.com"}}
 	if got := Parse(input); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Received-SPF fallback after malformed Authentication-Results = %#v, want %#v", got, want)
 	}
@@ -114,13 +114,13 @@ func TestParseReceivedSPFFallback(t *testing.T) {
 		},
 		TrustedAuthservIDs: []string{"mx.example"},
 	}
-	want := []Result{{Method: MethodSPF, Outcome: "pass", Domain: "example.com"}}
+	want := []Result{{Method: MethodSPF, SPFIdentity: SPFIdentityMailFrom, Outcome: "pass", Domain: "example.com"}}
 	if got := Parse(base); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Parse() = %#v, want %#v", got, want)
 	}
 
 	base.AuthenticationResults = []string{`mx.example; spf=neutral smtp.mailfrom=other.example`}
-	want = []Result{{Method: MethodSPF, Outcome: "neutral", Domain: "other.example"}}
+	want = []Result{{Method: MethodSPF, SPFIdentity: SPFIdentityMailFrom, Outcome: "neutral", Domain: "other.example"}}
 	if got := Parse(base); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Parse() with Authentication-Results SPF = %#v, want %#v", got, want)
 	}
@@ -156,7 +156,7 @@ func TestParseReceivedSPFUsesStructuredEnvelopeParameter(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			input := Input{ReceivedSPF: []string{test.header}, TrustedAuthservIDs: []string{"mx.example"}}
-			want := []Result{{Method: MethodSPF, Outcome: OutcomePass, Domain: test.want}}
+			want := []Result{{Method: MethodSPF, SPFIdentity: SPFIdentityMailFrom, Outcome: OutcomePass, Domain: test.want}}
 			if got := Parse(input); !reflect.DeepEqual(got, want) {
 				t.Fatalf("Parse() = %#v, want %#v", got, want)
 			}
@@ -183,7 +183,11 @@ func TestParseAuthenticationResultsSPFIdentityProperties(t *testing.T) {
 				AuthenticationResults: []string{"mx.example; " + test.clause},
 				TrustedAuthservIDs:    []string{"mx.example"},
 			}
-			want := []Result{{Method: MethodSPF, Outcome: OutcomePass, Domain: test.want}}
+			scope := SPFIdentityMailFrom
+			if test.want == "mail.example.com" {
+				scope = SPFIdentityHELO
+			}
+			want := []Result{{Method: MethodSPF, SPFIdentity: scope, Outcome: OutcomePass, Domain: test.want}}
 			if got := Parse(input); !reflect.DeepEqual(got, want) {
 				t.Fatalf("Parse() = %#v, want %#v", got, want)
 			}
@@ -204,7 +208,7 @@ func TestParseNormalizesOpenDMARCSPFTempfail(t *testing.T) {
 	}
 	for _, input := range tests {
 		got := Parse(input)
-		want := []Result{{Method: MethodSPF, Outcome: OutcomeTemperror, Domain: "example.com"}}
+		want := []Result{{Method: MethodSPF, SPFIdentity: SPFIdentityMailFrom, Outcome: OutcomeTemperror, Domain: "example.com"}}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("Parse() = %#v, want %#v", got, want)
 		}
@@ -301,7 +305,7 @@ func TestNewEvidenceUsesVerifiedDMARCAlignment(t *testing.T) {
 }
 
 func TestEvidenceWithUnavailableMethodsPreservesExistingResults(t *testing.T) {
-	existing := []Result{{Method: MethodSPF, Outcome: OutcomePass, Domain: "example.com"}}
+	existing := []Result{{Method: MethodSPF, SPFIdentity: SPFIdentityMailFrom, Outcome: OutcomePass, Domain: "example.com"}}
 	evidence := EvidenceWithUnavailableMethods(existing, "example.com", "authentication unavailable",
 		MethodSPF, MethodDKIM, MethodDMARC)
 

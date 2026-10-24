@@ -8,7 +8,7 @@ import (
 	"github.com/PhilAnderson1/MilterGuard/internal/termination"
 )
 
-func TestAttachedMessageParserRetainsOnlyStructuralHeaders(t *testing.T) {
+func TestAttachedMessageParserRetainsStructuralAndAttributionHeaders(t *testing.T) {
 	data := []byte("Subject: ignored\r\n" +
 		"cOnTeNt-TyPe: text/html;\r\n\tcharset=UTF-8\r\n" +
 		"Content-Transfer-Encoding: quoted-printable\r\n" +
@@ -24,8 +24,11 @@ func TestAttachedMessageParserRetainsOnlyStructuralHeaders(t *testing.T) {
 	if got.contentType != "text/html; charset=UTF-8" || got.transferEncoding != "quoted-printable" || got.contentID != "<first>" || string(got.body) != "<p>body</p>" {
 		t.Fatalf("parsed attached message = %+v", got)
 	}
-	if used := budget.primaryMemory.Used(); used == 0 || used >= int64(len(data)) {
-		t.Fatalf("retained-header charge = %d, want only selected values", used)
+	if got.headers != "Subject: ignored\n" {
+		t.Fatalf("attribution headers = %q", got.headers)
+	}
+	if used := budget.primaryMemory.Used(); used == 0 {
+		t.Fatal("retained headers were not charged")
 	}
 }
 

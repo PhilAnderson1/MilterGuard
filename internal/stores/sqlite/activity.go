@@ -69,7 +69,7 @@ func validActivityEvent(eventType stores.ActivityEventType, outcome stores.Activ
 		return outcome == stores.ActivityOutcomeAccepted || outcome == stores.ActivityOutcomeResponseFailed
 	case stores.ActivityEventSenderBlocklist:
 		return outcome == stores.ActivityOutcomeAccepted || outcome == stores.ActivityOutcomeRejected
-	case stores.ActivityEventHTMLDoS, stores.ActivityEventHTMLLimit:
+	case stores.ActivityEventHTMLDoS, stores.ActivityEventHTMLLimit, stores.ActivityEventIncompleteInspection:
 		return outcome == stores.ActivityOutcomeAccepted || outcome == stores.ActivityOutcomeRejected || outcome == stores.ActivityOutcomeResponseFailed
 	default:
 		return false
@@ -107,6 +107,8 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 		count(*) FILTER (WHERE event_type = :html_dos AND outcome = :accepted),
 		count(*) FILTER (WHERE event_type = :html_limit AND outcome = :rejected),
 		count(*) FILTER (WHERE event_type = :html_limit AND outcome = :accepted),
+		count(*) FILTER (WHERE event_type = :incomplete_inspection AND outcome = :rejected),
+		count(*) FILTER (WHERE event_type = :incomplete_inspection AND outcome = :accepted),
 		coalesce(sum(token_cost) FILTER (WHERE event_type = :scan), 0)
 		FROM activity WHERE occurred_at_ms >= :since AND occurred_at_ms < :before`,
 		sql.Named("scan", stores.ActivityEventScan),
@@ -120,6 +122,7 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 		sql.Named("sender_blocklist", stores.ActivityEventSenderBlocklist),
 		sql.Named("html_dos", stores.ActivityEventHTMLDoS),
 		sql.Named("html_limit", stores.ActivityEventHTMLLimit),
+		sql.Named("incomplete_inspection", stores.ActivityEventIncompleteInspection),
 		sql.Named("since", unixMillis(since)),
 		sql.Named("before", unixMillis(before))).Scan(
 		&summary.ScanTotal, &summary.ScanRejections, &summary.ScanAccepted,
@@ -128,7 +131,7 @@ func (r *activityRepository) ActivitySummary(ctx context.Context, query stores.A
 		&summary.ProtectedSenderDomainRejections, &summary.SenderBlocklistRejections,
 		&summary.SenderBlocklistRecipientRemovals, &summary.HTMLDoSRejections,
 		&summary.HTMLDoSAccepted, &summary.HTMLLimitRejections,
-		&summary.HTMLLimitAccepted, &summary.TokenCost)
+		&summary.HTMLLimitAccepted, &summary.IncompleteInspectionRejections, &summary.IncompleteInspectionAccepted, &summary.TokenCost)
 	if err != nil {
 		return stores.ActivitySummary{}, fmt.Errorf("aggregate activity: %w", err)
 	}

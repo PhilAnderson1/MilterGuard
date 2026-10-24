@@ -37,7 +37,9 @@ func (s *activityService) record(parent context.Context, event stores.ActivityEv
 
 func (s *activityService) recordScan(ctx context.Context, result evaluationResult, responseErr error) {
 	eventType := stores.ActivityEventScan
-	if (result.htmlCPUExceeded || result.htmlMemoryExceeded) && result.htmlCPUAction == "dos-reject" {
+	if result.incompleteInspection {
+		eventType = stores.ActivityEventIncompleteInspection
+	} else if (result.htmlCPUExceeded || result.htmlMemoryExceeded) && result.htmlCPUAction == "dos-reject" {
 		eventType = stores.ActivityEventHTMLDoS
 	} else if (result.htmlCPUExceeded || result.htmlMemoryExceeded) && result.htmlCPUAction == "reject" {
 		eventType = stores.ActivityEventHTMLLimit

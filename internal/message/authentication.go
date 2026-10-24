@@ -56,7 +56,7 @@ func writeAuthenticationResult(b *strings.Builder, result mailauth.Result, visib
 		case mailauth.MethodDKIM:
 			b.WriteString("DKIM: no signature present\n")
 		case mailauth.MethodSPF:
-			fmt.Fprintf(b, "SPF: no SPF policy for envelope-sender domain %s\n", availableValue(result.Domain))
+			fmt.Fprintf(b, "SPF: no SPF policy for %s %s\n", spfIdentityDescription(result), availableValue(result.Domain))
 		case mailauth.MethodDMARC:
 			fmt.Fprintf(b, "DMARC: no DMARC policy for visible From domain %s\n", availableValue(visibleDomain))
 		}
@@ -67,7 +67,7 @@ func writeAuthenticationResult(b *strings.Builder, result mailauth.Result, visib
 	case mailauth.MethodDKIM:
 		fmt.Fprintf(b, "%s: %s for signing domain %s%s\n", method, description, availableValue(result.Domain), passAlignmentText(result))
 	case mailauth.MethodSPF:
-		fmt.Fprintf(b, "%s: %s for envelope-sender domain %s%s\n", method, description, availableValue(result.Domain), passAlignmentText(result))
+		fmt.Fprintf(b, "%s: %s for %s %s%s\n", method, description, spfIdentityDescription(result), availableValue(result.Domain), passAlignmentText(result))
 	case mailauth.MethodDMARC:
 		fmt.Fprintf(b, "%s: %s for visible From domain %s\n", method, description, availableValue(result.Domain))
 	}
@@ -113,4 +113,15 @@ func availableValue(value string) string {
 		return "unavailable"
 	}
 	return value
+}
+
+func spfIdentityDescription(result mailauth.Result) string {
+	switch result.SPFIdentity {
+	case mailauth.SPFIdentityMailFrom:
+		return "envelope-sender domain"
+	case mailauth.SPFIdentityHELO:
+		return "HELO domain"
+	default:
+		return "domain (identity scope unavailable)"
+	}
 }

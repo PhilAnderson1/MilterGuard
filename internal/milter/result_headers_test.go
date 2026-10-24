@@ -91,7 +91,7 @@ func TestBelowThresholdUnwantedAddsTrustedResultHeaders(t *testing.T) {
 	expectFrame(t, conn, string(deleteHeaderResponse(classificationHeader)))
 	expectFrame(t, conn, string(addHeaderResponse(classificationHeader, "unwanted")))
 	expectFrame(t, conn, string(addHeaderResponse(scoreHeader, "0.85")))
-	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "low")))
+	expectFrame(t, conn, string(addHeaderResponse(confidenceHeader, "high")))
 	expectFrame(t, conn, string(addHeaderResponse(actionHeader, "accepted-below-threshold")))
 	expectFrame(t, conn, string([]byte{responseAccept}))
 }
@@ -255,12 +255,14 @@ func TestAcceptModeAddsConfiguredHeadersForEveryAIClassification(t *testing.T) {
 		wantAction     string
 	}{
 		{ai.Decision{Classification: "legitimate", Score: 0.8, Reasons: []string{"test"}}, "0.8", "high", "accepted"},
+		{ai.Decision{Classification: "unwanted", Score: 0.7, Reasons: []string{"test"}}, "0.7", "low", "accepted-accept-mode"},
+		{ai.Decision{Classification: "unwanted", Score: 0.8, Reasons: []string{"test"}}, "0.8", "high", "accepted-accept-mode"},
 		{ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}, "1", "high", "accepted-accept-mode"},
 	} {
 		t.Run(string(test.decision.Classification), func(t *testing.T) {
 			server, conn, done := testServer(t, fixedAnalyzer{decision: test.decision})
 			setTestMode(server, "accept")
-			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true })
+			setTestFiltering(server, func(cfg *config.FilteringConfig) { cfg.AddEmailHeaders = true; cfg.RejectScore = 0.5 })
 			defer func() { _ = conn.Close(); <-done }()
 
 			negotiateWithActions(t, conn, resultHeaderActions)
@@ -300,6 +302,7 @@ func TestAcceptedAIErrorAddsDiagnosticHeadersWithoutScore(t *testing.T) {
 		headerFrame(scoreHeader, "1"),
 		headerFrame(confidenceHeader, "high"),
 		headerFrame(actionHeader, "reject"),
+		headerFrame(policyHeader, "forged"),
 		headerFrame("From", "Sender <sender@example.com>"),
 		[]byte{commandEndHeaders},
 	)
@@ -335,4 +338,54 @@ func TestResultHeadersDoNotAffectDeliveryWithoutMTASupport(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectFrame(t, conn, string([]byte{responseAccept}))
+}
+
+// The policy header participates in removal on every accepted path, including
+// disabled generation and capability-limited MTAs. Count occurrences even when
+// oversized values exhausted retention before the second forged header.
+func TestPolicyHeaderReplacementLifecycle(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		actions uint32
+	}{
+		{"enabled", true, resultHeaderActions},
+		{"disabled", false, resultHeaderActions},
+		{"cannot remove", true, actionAddHeaders},
+		{"cannot add", true, actionChangeHeaders},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serverConn, clientConn := net.Pipe()
+			defer serverConn.Close()
+			defer clientConn.Close()
+			ss := newSession(&sessionDependencies{log: slog.New(slog.NewTextHandler(io.Discard, nil)), filtering: config.FilteringConfig{AddEmailHeaders: tc.enabled}}, serverConn)
+			ss.negotiatedActions = tc.actions
+			for i := 0; i < 4; i++ {
+				ss.message.AddHeader(policyHeader, strings.Repeat("x", 8192))
+			}
+			if ss.message.HeaderOccurrences(policyHeader) != 4 || len(ss.message.HeaderValues(policyHeader)) >= 4 {
+				t.Fatal("test did not exceed retention limit")
+			}
+			done := make(chan error, 1)
+			go func() { done <- ss.writeAcceptedBypassHeaders() }()
+			if tc.actions&actionChangeHeaders != 0 {
+				for i := 0; i < 4; i++ {
+					expectFrame(t, clientConn, string(deleteHeaderResponse(policyHeader)))
+				}
+				if tc.enabled && tc.actions&actionAddHeaders != 0 {
+					expectFrame(t, clientConn, string(addHeaderResponse(classificationHeader, "not-scanned")))
+					expectFrame(t, clientConn, string(addHeaderResponse(confidenceHeader, "unavailable")))
+					expectFrame(t, clientConn, string(addHeaderResponse(actionHeader, "accepted-bypass")))
+				}
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("unexpected extra result header")
+			}
+		})
+	}
 }

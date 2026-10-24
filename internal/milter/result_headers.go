@@ -11,10 +11,11 @@ const (
 	scoreHeader          = "X-MilterGuard-Score"
 	confidenceHeader     = "X-MilterGuard-Confidence"
 	actionHeader         = "X-MilterGuard-Action"
+	policyHeader         = "X-MilterGuard-Policy"
 	acceptModeAction     = "accepted-accept-mode"
 )
 
-var resultHeaderNames = []string{classificationHeader, scoreHeader, confidenceHeader, actionHeader}
+var resultHeaderNames = []string{classificationHeader, scoreHeader, confidenceHeader, actionHeader, policyHeader}
 
 // writeAcceptedResultHeaders removes sender-supplied result headers from every
 // accepted message. When configured to add headers, it replaces them with the
@@ -25,6 +26,14 @@ func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 	}
 	if result == nil {
 		return ss.writeClassificationHeaders("not-scanned", nil, "accepted-bypass")
+	}
+	if result.incompleteInspection {
+		return ss.replaceResultHeaders([][2]string{
+			{classificationHeader, "not-scanned"},
+			{confidenceHeader, "unavailable"},
+			{actionHeader, acceptModeAction},
+			{policyHeader, incompleteInspectionPolicy},
+		})
 	}
 	var headers [][2]string
 	if result.err != nil && result.selected == actionAccept {
@@ -48,7 +57,7 @@ func (ss *session) writeAcceptedResultHeaders(result *evaluationResult) error {
 		headers = [][2]string{
 			{classificationHeader, classification},
 			{scoreHeader, strconv.FormatFloat(result.score, 'f', -1, 64)},
-			{confidenceHeader, ss.confidenceLabel(classification, result.score)},
+			{confidenceHeader, ss.confidenceLabel(result.score)},
 			{actionHeader, action},
 		}
 	}
@@ -63,7 +72,7 @@ func (ss *session) writeClassificationHeaders(classification string, score *floa
 	headers := [][2]string{{classificationHeader, classification}}
 	if score != nil {
 		headers = append(headers, [2]string{scoreHeader, strconv.FormatFloat(*score, 'f', -1, 64)})
-		headers = append(headers, [2]string{confidenceHeader, ss.confidenceLabel(classification, *score)})
+		headers = append(headers, [2]string{confidenceHeader, ss.confidenceLabel(*score)})
 	} else {
 		headers = append(headers, [2]string{confidenceHeader, "unavailable"})
 	}
@@ -71,12 +80,8 @@ func (ss *session) writeClassificationHeaders(classification string, score *floa
 	return ss.replaceResultHeaders(headers)
 }
 
-func (ss *session) confidenceLabel(classification string, score float64) string {
-	threshold := ss.deps.filtering.RejectScore
-	if classification == "legitimate" {
-		threshold = ss.deps.filtering.LegitimateLowConfidenceScore
-	}
-	if score < threshold {
+func (ss *session) confidenceLabel(score float64) string {
+	if score < ss.deps.filtering.LowConfidenceScore {
 		return "low"
 	}
 	return "high"

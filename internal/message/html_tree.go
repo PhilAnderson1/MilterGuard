@@ -26,6 +26,8 @@ const (
 )
 
 type annotationUsage struct {
+	UsedAttachedEmailTag                  bool
+	UsedAttachedFileTag                   bool
 	UsedInvisibleTag                      bool
 	UsedVisibilityVariesByViewportSizeTag bool
 	UsedVisibilityUncertainTag            bool

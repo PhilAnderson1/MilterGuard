@@ -250,7 +250,7 @@ func TestConditionalOmissionReachesPromptAndStrippedBody(t *testing.T) {
 	m.AddHeader("Content-Type", "text/html")
 	m.AddBody([]byte(source))
 	analysis := m.BuildAnalysis(AnalysisContext{}, 1000, VisionOptions{Mode: "off"})
-	if !analysis.BodyExtractionIncomplete || !strings.Contains(analysis.Prompt, "Content processing limits prevented complete extraction") || !strings.Contains(analysis.Prompt, conditionalOmissionMarker) {
+	if !analysis.BodyExtractionIncomplete || !strings.Contains(analysis.Prompt, "Content extraction was incomplete; some email content may be missing.") || !strings.Contains(analysis.Prompt, conditionalOmissionMarker) {
 		t.Fatalf("prompt did not report omitted conditional content: %s", analysis.Prompt)
 	}
 }
@@ -386,7 +386,7 @@ func TestPromptStripsConcealedContentBeforePrefixTruncation(t *testing.T) {
 		!strings.Contains(analysis.Prompt, "keep") || !strings.Contains(analysis.Prompt, "end") {
 		t.Fatalf("stripped prompt lost visible content or retained concealed text: %s", analysis.Prompt)
 	}
-	if !strings.Contains(analysis.Prompt, "<hidden-content-stripped/>") || !strings.Contains(analysis.Prompt, "HTML-TO-TEXT EXTRACTOR ANNOTATIONS") {
+	if !strings.Contains(analysis.Prompt, "<hidden-content-stripped/>") || !strings.Contains(analysis.Prompt, "EMAIL CONTENT EXTRACTOR ANNOTATIONS") {
 		t.Fatalf("prompt = %s", analysis.Prompt)
 	}
 	if strings.Contains(analysis.Prompt, "ANALYSIS LIMITATIONS") || strings.Contains(analysis.Prompt, "Concealed content was removed") {

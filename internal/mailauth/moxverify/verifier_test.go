@@ -68,7 +68,7 @@ func TestVerifySPFDKIMNoneAndDMARCPass(t *testing.T) {
 		t.Fatal(err)
 	}
 	spfResult := resultFor(t, evidence, mailauth.MethodSPF, 0)
-	if spfResult.Outcome != mailauth.OutcomePass || spfResult.Domain != "example.test" {
+	if spfResult.Outcome != mailauth.OutcomePass || spfResult.Domain != "example.test" || spfResult.SPFIdentity != mailauth.SPFIdentityMailFrom {
 		t.Fatalf("SPF result = %#v", spfResult)
 	}
 	dkimResult := resultFor(t, evidence, mailauth.MethodDKIM, 0)
@@ -246,7 +246,7 @@ func TestVerifyNullReversePathUsesHELOIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := resultFor(t, evidence, mailauth.MethodSPF, 0)
-			if result.Outcome != test.outcome || result.Domain != test.domain {
+			if result.Outcome != test.outcome || result.Domain != test.domain || result.SPFIdentity != mailauth.SPFIdentityHELO {
 				t.Fatalf("SPF result = %#v", result)
 			}
 		})
