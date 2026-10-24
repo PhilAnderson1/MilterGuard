@@ -348,7 +348,7 @@
   "internal/fork/tdewolffparse/input.go::(*Input).Offset:1": "d104c94ef9784eebee95e7a3958008be8a6eeb267ec3ca38f1cc300099bd2475",
   "internal/fork/tdewolffparse/input.go::(*Input).Peek:1": "819299a4f2c1e9a3fe50788496af4b4e7997575c58c8d84b6ea485ca32e975df",
   "internal/fork/tdewolffparse/input.go::(*Input).PeekErr:1": "a9569110fc8ce12e85a241b4b8ea828816a2beaff3b007e8521d70d4b8f88050",
-  "internal/fork/tdewolffparse/input.go::(*Input).PeekRune:1": "f88c8ae00a80e92d7e06fcb27971fd117c0ceac6fbf48853879b0ff7fc6fc2ed",
+  "internal/fork/tdewolffparse/input.go::(*Input).PeekRune:1": "8aa2b6577596198255efc85d33a29f4feffd091fcdff66fe085e0ce2010d3fcc",
   "internal/fork/tdewolffparse/input.go::(*Input).Pos:1": "88a73c813763bfae657afec00cb5c10576d80fdb851c0de0e770d19e5b84d073",
   "internal/fork/tdewolffparse/input.go::(*Input).Reset:1": "f5c1f3f2a35bd43a88fd3cb4145a01ca732506059e152f4e26cd3aeaa989a6d9",
   "internal/fork/tdewolffparse/input.go::(*Input).Restore:1": "2e39f491d8bbd9b35ec8e568230e2b390ef0536a95902ed19b7e078623d6afbd",
