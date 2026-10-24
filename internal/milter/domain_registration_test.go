@@ -23,6 +23,59 @@ type fakeDomainRegistrationLookup struct {
 	calls      atomic.Int32
 }
 
+func TestRegistrableDomainUsesRegistryBoundary(t *testing.T) {
+	for _, tc := range []struct{ domain, want string }{
+		{"mail.example.com", "example.com"},
+		{"mail.example.co.uk", "example.co.uk"},
+		{"tenant.github.io", "github.io"},
+		{"github.io", "github.io"},
+		{"mail.tenant.blogspot.com", "blogspot.com"},
+		{"tenant.s3.amazonaws.com", "amazonaws.com"},
+		{"TENANT.GITHUB.IO.", "github.io"},
+		{"mail.example.test", "example.test"},
+		{"mail.example.foo.ck", "example.foo.ck"},
+		{"mail.www.ck", "www.ck"},
+		{"co.uk", ""},
+		{"com", ""},
+		{"", ""},
+		{"bad..example.com", ""},
+	} {
+		t.Run(tc.domain, func(t *testing.T) {
+			if got := registrableDomain(tc.domain); got != tc.want {
+				t.Fatalf("registrableDomain(%q) = %q, want %q", tc.domain, got, tc.want)
+			}
+		})
+	}
+}
+
+type domainRegistrationLookupFunc func(context.Context, string) (time.Time, time.Time, error)
+
+func (f domainRegistrationLookupFunc) Lookup(ctx context.Context, domain string) (time.Time, time.Time, error) {
+	return f(ctx, domain)
+}
+
+func TestDomainRegistrationPrivateTenantsShareRegistryLookup(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	calls := 0
+	lookup := domainRegistrationLookupFunc(func(_ context.Context, domain string) (time.Time, time.Time, error) {
+		calls++
+		if domain != "github.io" {
+			t.Errorf("RDAP domain = %q, want github.io", domain)
+		}
+		return now.Add(-365 * 24 * time.Hour), now.Add(365 * 24 * time.Hour), nil
+	})
+	store := newTestDomainRegistrationStore(t, now, lookup)
+	for _, domain := range []string{"alice.github.io", "bob.github.io", "github.io"} {
+		evidence, err := store.evidence(context.Background(), domain)
+		if err != nil || !evidence.Available || evidence.Domain != "github.io" {
+			t.Fatalf("evidence for %s = %+v, error = %v", domain, evidence, err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("RDAP calls = %d, want 1", calls)
+	}
+}
+
 type flakyDomainRegistrationRepository struct {
 	stores.DomainRegistrationRepository
 	writes int

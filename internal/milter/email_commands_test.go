@@ -681,6 +681,36 @@ func TestSenderOwnershipViaAliases(t *testing.T) {
 	}
 }
 
+func TestSenderOwnershipViaMultilineAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		aliases string
+		owned   bool
+	}{
+		{"single target", "sender:\n    pamail\n", true},
+		{"alias chain", "sender:\n\tphilip\nphilip: pamail\n", true},
+		{"trailing comma", "sender: pamail,\n    other\n", false},
+		{"leading comma", "sender: pamail\n    , other\n", false},
+		{"comments and blanks", "sender: pamail # first target\n# comment\n\n\t# another comment\n\t, other\n", false},
+		{"end of file", "sender: pamail\n\t, other", false},
+		{"following entry", "sender: pamail\n\t, other\nnext: pamail\n", false},
+		{"orphan continuation", "    sender: pamail\n", false},
+		{"redefined shared alias", "sender: pamail\nsender: pamail\n\t, other\n", false},
+		{"oversized entry", "sender: pamail\n" + strings.Repeat("    other\n", 14000), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "aliases")
+			if err := os.WriteFile(path, []byte(tc.aliases), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := senderOwnedViaAliases(path, "sender@invades.net", "pamail", "milterguard@invades.net")
+			if (err == nil) != tc.owned {
+				t.Fatalf("ownership error = %v, want owned=%t", err, tc.owned)
+			}
+		})
+	}
+}
+
 func TestCommandIncompleteMIMEExecutesNothing(t *testing.T) {
 	server, analyzer, conn, done := commandTestServer(t, true, nil)
 	defer func() { _ = conn.Close(); <-done }()

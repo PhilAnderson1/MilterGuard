@@ -77,23 +77,45 @@ func readSimpleAliases(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("aliases file is unavailable or too large")
 	}
 	aliases := make(map[string]string)
+	var entry strings.Builder
+	flush := func() {
+		key, value, found := strings.Cut(entry.String(), ":")
+		key, value = strings.ToLower(strings.TrimSpace(key)), strings.ToLower(strings.TrimSpace(value))
+		if found && validAliasName(key) {
+			delete(aliases, key)
+			if validAliasName(value) {
+				aliases[key] = value
+			}
+		}
+		entry.Reset()
+	}
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 4096), 64<<10)
 	for scanner.Scan() {
-		line := strings.TrimSpace(strings.SplitN(scanner.Text(), "#", 2)[0])
+		raw := scanner.Text()
+		line := strings.TrimSpace(strings.SplitN(raw, "#", 2)[0])
 		if line == "" {
 			continue
 		}
-		key, value, found := strings.Cut(line, ":")
-		key, value = strings.ToLower(strings.TrimSpace(key)), strings.ToLower(strings.TrimSpace(value))
-		if !found || !validAliasName(key) || !validAliasName(value) {
-			continue
+		// Indented physical lines belong to the preceding alias. Validate only
+		// the complete entry so a later recipient cannot be overlooked.
+		if raw[0] == ' ' || raw[0] == '\t' {
+			if entry.Len() == 0 {
+				continue
+			}
+			entry.WriteByte(' ')
+		} else {
+			flush()
 		}
-		aliases[key] = value
+		if entry.Len()+len(line) >= 64<<10 {
+			return nil, fmt.Errorf("alias entry is too large")
+		}
+		entry.WriteString(line)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
+	flush()
 	return aliases, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,11 +57,22 @@ func domainRegistrationEnabled(cfg config.DomainRegistrationConfig) bool {
 
 func registrableDomain(domain string) string {
 	domain = netsafety.DNSHostname(domain)
-	registrable, err := publicsuffix.EffectiveTLDPlusOne(domain)
-	if err != nil {
+	suffix, icann := publicsuffix.PublicSuffix(domain)
+	// Private suffixes describe tenant boundaries, not registry registrations.
+	// Walk past them while retaining ICANN wildcard and exception rules. An
+	// unknown TLD retains the public suffix library's single-label fallback.
+	for !icann {
+		_, parent, found := strings.Cut(suffix, ".")
+		if !found {
+			break
+		}
+		suffix, icann = publicsuffix.PublicSuffix(parent)
+	}
+	if len(domain) <= len(suffix) {
 		return ""
 	}
-	return netsafety.DNSHostname(registrable)
+	registrant := domain[:len(domain)-len(suffix)-1]
+	return domain[strings.LastIndexByte(registrant, '.')+1:]
 }
 
 // evidence returns current cached registration evidence or coalesces a bounded
