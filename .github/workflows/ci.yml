@@ -15,6 +15,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+          check-latest: true
           cache: true
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
@@ -40,6 +41,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+          check-latest: true
           cache: true
       - name: Race test
         run: go test -race ./internal/milter ./internal/admincmd ./internal/stores/...
