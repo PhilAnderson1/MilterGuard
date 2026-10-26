@@ -26,6 +26,10 @@ jobs:
         run: go test ./...
       - name: Vet
         run: go vet ./...
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Check for reachable vulnerabilities
+        run: govulncheck ./cmd/... ./internal/...
       - name: Build
         run: CGO_ENABLED=0 go build -trimpath ./cmd/milterguard
 
