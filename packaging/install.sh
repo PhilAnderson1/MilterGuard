@@ -30,7 +30,7 @@ license_source="$content_root/LICENSE"
 third_party_notices_source="$content_root/THIRD_PARTY_NOTICES.md"
 third_party_licenses_source="$content_root/THIRD_PARTY_LICENSES"
 
-for required_file in "$binary" "$config_source" "$prompt_source" "$trusted_domains_source" "$replay_tool_source" "$quickstart_source" "$operating_guide_source" "$readme_source" "$license_source" "$third_party_notices_source"; do
+for required_file in "$binary" "$config_source" "$prompt_source" "$trusted_domains_source" "$replay_tool_source" "$service_source" "$quickstart_source" "$operating_guide_source" "$readme_source" "$license_source" "$third_party_notices_source"; do
     if [ ! -f "$required_file" ]; then
         echo "Required installation file is missing: $required_file" >&2
         exit 1
@@ -39,6 +39,18 @@ done
 
 if [ ! -d "$third_party_licenses_source" ]; then
     echo "Required installation directory is missing: $third_party_licenses_source" >&2
+    exit 1
+fi
+
+third_party_licenses_found=false
+for third_party_license in "$third_party_licenses_source"/*; do
+    if [ -f "$third_party_license" ]; then
+        third_party_licenses_found=true
+        break
+    fi
+done
+if [ "$third_party_licenses_found" = false ]; then
+    echo "No third-party licence files found in: $third_party_licenses_source" >&2
     exit 1
 fi
 
@@ -69,18 +81,20 @@ install -d -o root -g milterguard -m 0750 /etc/milterguard
 install -d -o milterguard -g milterguard -m 0750 /var/lib/milterguard
 install -d -o milterguard -g milterguard -m 0750 /var/lib/milterguard/rejected-mail
 install -d -o root -g root -m 0755 /usr/local/share/milterguard/tools
+install -d -o root -g root -m 0755 /usr/local/share/milterguard/configs
 install -o root -g root -m 0755 "$replay_tool_source" /usr/local/share/milterguard/tools/replay_mailbox.py
+install -o root -g root -m 0644 "$config_source" /usr/local/share/milterguard/configs/milterguard.yaml
+install -o root -g root -m 0644 "$prompt_source" /usr/local/share/milterguard/configs/detection-prompt.txt
+install -o root -g root -m 0644 "$trusted_domains_source" /usr/local/share/milterguard/configs/trusted-sender-domains.txt
 install -o root -g root -m 0644 "$quickstart_source" /usr/local/share/milterguard/QUICKSTART.md
 install -o root -g root -m 0644 "$operating_guide_source" /usr/local/share/milterguard/OPERATING_GUIDE.md
 install -o root -g root -m 0644 "$readme_source" /usr/local/share/milterguard/README.md
 install -o root -g root -m 0644 "$license_source" /usr/local/share/milterguard/LICENSE
 install -o root -g root -m 0644 "$third_party_notices_source" /usr/local/share/milterguard/THIRD_PARTY_NOTICES.md
+rm -rf -- /usr/local/share/milterguard/THIRD_PARTY_LICENSES
 install -d -o root -g root -m 0755 /usr/local/share/milterguard/THIRD_PARTY_LICENSES
 for third_party_license in "$third_party_licenses_source"/*; do
-    if [ ! -f "$third_party_license" ]; then
-        echo "No third-party licence files found in: $third_party_licenses_source" >&2
-        exit 1
-    fi
+    [ -f "$third_party_license" ] || continue
     install -o root -g root -m 0644 "$third_party_license" /usr/local/share/milterguard/THIRD_PARTY_LICENSES/
 done
 
@@ -88,7 +102,7 @@ install_config_if_missing() {
     source_file=$1
     destination_file=$2
 
-    if [ -e "$destination_file" ]; then
+    if [ -e "$destination_file" ] || [ -L "$destination_file" ]; then
         echo "Preserving existing $destination_file"
     else
         install -o root -g milterguard -m 0640 "$source_file" "$destination_file"
@@ -96,24 +110,43 @@ install_config_if_missing() {
     fi
 }
 
+normalize_config_permissions() {
+    destination_file=$1
+
+    if [ -L "$destination_file" ]; then
+        echo "WARNING: Preserving configuration symlink without changing its target permissions: $destination_file" >&2
+    elif [ -f "$destination_file" ]; then
+        chown root:milterguard "$destination_file"
+        chmod 0640 "$destination_file"
+    else
+        echo "Configuration path is not a regular file: $destination_file" >&2
+        exit 1
+    fi
+}
+
 install_config_if_missing "$config_source" /etc/milterguard/milterguard.yaml
 install_config_if_missing "$prompt_source" /etc/milterguard/detection-prompt.txt
 install_config_if_missing "$trusted_domains_source" /etc/milterguard/trusted-sender-domains.txt
+normalize_config_permissions /etc/milterguard/milterguard.yaml
+normalize_config_permissions /etc/milterguard/detection-prompt.txt
+normalize_config_permissions /etc/milterguard/trusted-sender-domains.txt
 
 if [ -f "$service_source" ] && command -v systemctl >/dev/null 2>&1; then
     install -m 0644 "$service_source" /etc/systemd/system/milterguard.service
     systemctl daemon-reload
-    echo "Installed the systemd service (not enabled or started)."
+    systemctl enable milterguard.service
+    echo "Installed and enabled the systemd service (not started)."
 fi
 
 echo "Installed MilterGuard to /usr/local/sbin/milterguard"
+echo "Installed current reference configuration under /usr/local/share/milterguard/configs"
 echo ""
 echo "Edit /etc/milterguard/milterguard.yaml, then validate it with:"
 echo "  /usr/local/sbin/milterguard --config /etc/milterguard/milterguard.yaml --check-config"
 echo ""
 if [ -f "$service_source" ] && command -v systemctl >/dev/null 2>&1; then
-    echo "Enable and start MilterGuard with:"
-    echo "  systemctl enable --now milterguard"
+    echo "Start MilterGuard with:"
+    echo "  systemctl start milterguard"
     echo ""
     echo "For an upgrade where MilterGuard is already running, restart it with:"
     echo "  systemctl restart milterguard"

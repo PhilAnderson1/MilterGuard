@@ -27,6 +27,7 @@ path.
 | --- | --- |
 | `internal/admincmd` | Parses and executes administration commands independently of their email or terminal transport. |
 | `internal/ai` | Builds chat-completions requests, applies endpoint retries, and validates AI decisions. |
+| `internal/allocationaudit` | Verifies reviewed allocation-policy fingerprints for HTML extraction and the parser forks. |
 | `internal/attachment` | Detects prohibited executable attachments and inspects supported archives. |
 | `internal/config` | Loads defaults, strictly decodes YAML, and validates cross-setting requirements. |
 | `internal/htmlextract` | Applies shared allocation and CPU budgets inside the forked parsers, then derives presentation and visibility evidence from the parsed document. |
@@ -39,11 +40,13 @@ path.
 | `internal/netsafety` | Normalizes DNS hostnames and rejects unsafe or non-public network destinations. |
 | `internal/rdap` | Discovers and queries RDAP services with redirect, SSRF, and DNS-rebinding protection. |
 | `internal/rejectedmail` | Saves and cleans up rejected `.eml` files beneath the configured archive root. |
+| `internal/resourceguard` | Provides cumulative allocation admission, guarded storage helpers, cooperative CPU sampling, and per-thread CPU budgets for untrusted-content processing. |
 | `internal/smtpreply` | Builds MIME command replies and submits them to the configured SMTP service. |
 | `internal/sqlitedb` | Owns SQLite connection setup, schema creation and version validation, WAL handling, busy retries, transactions, and checkpoints. |
 | `internal/stores` | Defines SQL-independent repository interfaces, queries, and value types. |
 | `internal/stores/sqlite` | Implements the repository contracts with indexed SQLite operations. |
 | `internal/systemdns` | Constructs explicit resolvers for non-authentication DNS users, isolating them from dependency changes to the process-wide default resolver. |
+| `internal/termination` | Carries typed CPU, memory, and cancellation termination across guarded extraction code while preserving unrelated panics. |
 
 The dependency direction is intentional. Runtime protocol and policy logic
 depends on interfaces in `stores`; concrete SQL is confined to
@@ -257,8 +260,10 @@ the extractor does not simulate timelines.
 content exists, a second representation with that content removed. It also
 extracts links and image references. Only confidently visible text can suppress
 fallback vision analysis; an unresolved stylesheet removes that confidence.
-Analysis errors or cooperative stops switch extraction to a bounded lexical
+Eligible parser and structural failures switch extraction to a bounded lexical
 fallback, with fallback and completeness information carried into the prompt.
+CPU or memory exhaustion admits fallback only under the configured `fallback`
+resource policy; cancellation stops extraction without admitting fallback.
 Conditional Outlook comment fragments use the same directly bounded HTML
 parser and the remaining shared allocation budget, with scripting disabled and
 a smaller raw fragment-byte limit.
@@ -290,23 +295,28 @@ under every action so malformed or structurally limited HTML can still yield
 bounded classification evidence. Such a failure can make total extraction CPU
 approach twice the configured per-window limit.
 
-`max_html_parse_memory_bytes` supplies one cumulative accounting budget for all
-HTML parts in a message. Parser and CSS structures, extraction maps, guarded
-rendering buffers, and multipart output combination consume the same budget.
-Superseded charged backing arrays remain charged because Go may retain them
-until a later garbage collection. Multipart assembly reuses immutable strings
-when their representations are identical, and completes recovered output under
-the fallback allowance after primary processing stops. Opaque attachments retain
+`max_html_parse_memory_bytes` supplies the accounting allowance for each
+extraction stage. Primary extraction has one cumulative allowance shared across
+all of its MIME parts. If fallback is admitted, it receives a fresh allowance
+of the same size, shared across its restarted MIME processing. Parser and CSS
+structures, extraction maps, guarded rendering buffers, and multipart output
+combination consume the active stage's allowance. Superseded charged backing
+arrays remain charged because Go may retain them until a later garbage
+collection. Multipart assembly reuses immutable strings when their
+representations are identical, and completes recovered output under the
+fallback allowance after primary processing stops. Opaque attachments retain
 only their descriptive marker; transfer validation streams through a fixed
 scratch buffer rather than materializing an unused decoded body.
 
-This accounting budget is not a ceiling on the Go heap or process RSS. Raw and
-decoded input buffers, bounded temporary allocations, runtime bookkeeping, and
-garbage awaiting collection can exist outside it. Those allocations remain
+Neither accounting allowance is a ceiling on the Go heap or process RSS. Raw
+and decoded input buffers, bounded temporary allocations, runtime bookkeeping,
+and garbage awaiting collection can exist outside them. Those allocations remain
 bounded by message-size, decoded-input, MIME-depth, structural, and CPU limits.
 Capacity planning must also allow for normal application memory and up to
-`ai.max_concurrent` simultaneous analyses; a process or container memory limit
-is required when deployment needs a hard process-wide ceiling.
+`ai.max_concurrent` simultaneous live analyses. Email-command extraction has
+another semaphore of that size and can run alongside live analysis; its reply
+work is also capped at four workers. A process or container memory limit is
+required when deployment needs a hard process-wide ceiling.
 
 ## AI analysis
 
@@ -481,6 +491,13 @@ For changes that affect runtime wiring, run at least:
 go test ./cmd/... ./internal/...
 go test -race ./internal/milter ./internal/admincmd ./internal/stores/...
 go vet ./cmd/... ./internal/...
+```
+
+CI also installs the latest `govulncheck` and scans the shipped Go packages:
+
+```sh
+go install golang.org/x/vuln/cmd/govulncheck@latest
+govulncheck ./cmd/... ./internal/...
 ```
 
 The release build is compiled statically, and the distributed sample

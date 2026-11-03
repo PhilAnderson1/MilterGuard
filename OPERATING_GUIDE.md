@@ -36,6 +36,11 @@ For initial installation and activation, follow the
 ## Configure the AI service
 
 MilterGuard's configuration file is `/etc/milterguard/milterguard.yaml`.
+The portable tarball installer preserves files in `/etc/milterguard` during an
+upgrade and installs the current unmodified reference files under
+`/usr/local/share/milterguard/configs`. Compare those copies when reviewing new
+release options; do not replace an active configuration without carrying over
+site-specific values and secrets.
 Edit it before starting the service, preserving its YAML indentation and using
 spaces rather than tabs.
 
@@ -1205,4 +1210,7 @@ sudo ./uninstall.sh
 ```
 
 The portable uninstaller displays the files and data it will delete, requires
-explicit confirmation, and then asks whether to remove the service account.
+explicit confirmation, verifies that the service has stopped, and then asks
+whether to remove the service account. It refuses to operate when MilterGuard
+is registered as a Debian or RPM package; use the corresponding package-manager
+commands above in that case.

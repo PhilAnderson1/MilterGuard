@@ -58,10 +58,11 @@ configuration, security, testing, and maintenance information.
    file to use an unused loopback port instead. Use that same replacement port
    in the Postfix `smtpd_milters` setting in step 6.
 
-5. Enable and start MilterGuard:
+5. Start MilterGuard. Installation enables the service but deliberately leaves
+   it stopped until its configuration has been validated:
 
    ```sh
-   sudo systemctl enable --now milterguard
+   sudo systemctl start milterguard
    ```
 
 6. Add MilterGuard to the end of `smtpd_milters` in

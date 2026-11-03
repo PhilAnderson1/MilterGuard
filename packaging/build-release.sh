@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build the Linux x86-64 release archive and native Ubuntu/AlmaLinux packages.
 set -eu
+umask 022
 
 usage() {
     echo "Usage: $0 vMAJOR.MINOR.PATCH [--format all|tar|deb|rpm] [--output DIRECTORY] [--allow-dirty]" >&2
@@ -126,13 +127,13 @@ On Ubuntu, install the downloaded `.deb` with `sudo apt install ./milterguard_*.
 On AlmaLinux, install the `.rpm` with `sudo dnf install ./milterguard-*.rpm`.
 
 The package installs `/usr/sbin/milterguard`, creates the `milterguard` account,
-and installs a systemd unit. It does not enable or start the service. Edit
+and installs and enables a systemd unit. It does not start the service. Edit
 `/etc/milterguard/milterguard.yaml` and follow the Quick Start from its AI
 configuration step onward, substituting `/usr/sbin/milterguard` for the
 tarball's `/usr/local/sbin/milterguard`. Check the endpoint before starting:
 
     sudo /usr/sbin/milterguard --config /etc/milterguard/milterguard.yaml --check-config --check-port --check-endpoint
-    sudo systemctl enable --now milterguard
+    sudo systemctl start milterguard
 
 Configuration is preserved on upgrade. On Debian and Ubuntu, `apt remove`
 preserves configuration, the SQLite database, archived mail and the service
@@ -199,6 +200,9 @@ if [ "$1" = configure ]; then
             echo "WARNING: /etc/systemd/system/milterguard.service overrides the packaged unit; check for an earlier tarball installation." >&2
         fi
         systemctl daemon-reload || true
+        if [ -z "${2:-}" ]; then
+            systemctl enable milterguard.service
+        fi
         if [ -n "${2:-}" ] && systemctl is-active --quiet milterguard.service; then
             systemctl try-restart milterguard.service || true
         fi
@@ -279,6 +283,9 @@ if command -v systemctl >/dev/null 2>&1; then
         echo "WARNING: /etc/systemd/system/milterguard.service overrides the packaged unit; check for an earlier tarball installation." >&2
     fi
     systemctl daemon-reload || true
+    if [ "\$1" -eq 1 ]; then
+        systemctl enable milterguard.service
+    fi
 fi
 
 %posttrans

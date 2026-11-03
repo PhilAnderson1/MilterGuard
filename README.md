@@ -132,8 +132,9 @@ sudo ./packaging/install.sh
 ```
 
 The installer recognizes the source-tree layout, installs the compiled binary
-and supporting files, and preserves existing configuration files. Continue
-with the [Quick Start](QUICKSTART.md) to configure and activate MilterGuard.
+and supporting files, preserves existing configuration files, and enables the
+systemd service without starting it. Continue with the
+[Quick Start](QUICKSTART.md) to configure and activate MilterGuard.
 
 ## License
 
