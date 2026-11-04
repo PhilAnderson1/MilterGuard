@@ -146,12 +146,6 @@ modified configuration as `.rpmsave` files. To remove every trace after RPM
 removal, explicitly delete `/etc/milterguard` and `/var/lib/milterguard`, then
 remove the `milterguard` user and group.
 
-When upgrading a configuration that still contains `ai.disable_thinking`, use
-the current sample to migrate to `thinking_level`, `thinking_profile`,
-`endpoints_file`, and `profiles_file`, and change `ai.endpoint` to its base URL.
-An active older process is left running when the preserved configuration does
-not validate; restart it after completing the migration.
-
 Avoid installing a package over the tarball installation without first
 migrating the latter: its `/etc/systemd/system/milterguard.service` overrides
 the package's unit, and its `/usr/local/sbin/milterguard` remains separately

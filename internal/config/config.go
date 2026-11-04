@@ -324,9 +324,6 @@ func Load(path string) (Config, error) {
 	for _, exclusion := range plan.Exclusions() {
 		c.Warnings = append(c.Warnings, fmt.Sprintf("ai.thinking_profile option %q is unavailable for endpoint_type %q: %s", exclusion.OptionID, c.AI.EndpointType, exclusion.Reason))
 	}
-	if resolution.Clamped && resolution.MaxLevel != nil {
-		c.Warnings = append(c.Warnings, fmt.Sprintf("ai.thinking_level %d exceeds the highest usable level %d for endpoint_type %q and profile %q; using option %q", c.AI.ThinkingLevel, *resolution.MaxLevel, c.AI.EndpointType, c.AI.ThinkingProfile, resolution.OptionID))
-	}
 	c.AI.ThinkingPlan = plan
 	c.AI.ThinkingResolution = resolution
 	c.AI.ResolvedEndpoint = resolvedEndpoint

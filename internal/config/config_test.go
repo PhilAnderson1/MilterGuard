@@ -476,6 +476,14 @@ func TestAIModelMustBeExplicitlyConfigured(t *testing.T) {
 	}
 }
 
+func TestAIAPIKeyMayBeEmpty(t *testing.T) {
+	cfg := validConfig()
+	cfg.AI.APIKey = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("empty API key rejected: %v", err)
+	}
+}
+
 func TestValidateIncompleteBodyAction(t *testing.T) {
 	if defaults().AI.IncompleteBodyAction != "scan" {
 		t.Fatal("incomplete body handling must default to scan")
@@ -606,7 +614,7 @@ func TestValidateAIThinkingSettings(t *testing.T) {
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ai.endpoint_type") {
 		t.Fatalf("empty endpoint type error = %v", err)
 	}
-	for _, level := range []int{-1, 11} {
+	for _, level := range []int{-1, 5} {
 		cfg = validConfig()
 		cfg.AI.ThinkingLevel = level
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ai.thinking_level") {

@@ -150,17 +150,14 @@ func validateAI(c AIConfig) error {
 	if strings.TrimSpace(c.ThinkingProfile) == "" {
 		return fmt.Errorf("ai.thinking_profile is required")
 	}
-	if c.ThinkingLevel < 0 || c.ThinkingLevel > 10 {
-		return fmt.Errorf("ai.thinking_level must be between 0 and 10")
+	if int64(c.ThinkingLevel) < thinking.MinimumLevel || int64(c.ThinkingLevel) > thinking.MaximumLevel {
+		return fmt.Errorf("ai.thinking_level must be between %d and %d", thinking.MinimumLevel, thinking.MaximumLevel)
 	}
 	if c.EndpointsFile == "" || c.ProfilesFile == "" {
 		return fmt.Errorf("ai.endpoints_file and ai.profiles_file are required")
 	}
 	if _, err := thinking.ResolveEndpointURL(c.Endpoint, "/chat/completions"); err != nil {
 		return err
-	}
-	if c.APIKey == "" {
-		return fmt.Errorf("ai api_key is empty (and api_key_env is unset or empty)")
 	}
 	if c.Timeout.Value() <= 0 || c.MaxConcurrent < 1 || c.MaxBodyChars < 1 {
 		return fmt.Errorf("invalid ai timeout, max_concurrent, or max_body_chars")

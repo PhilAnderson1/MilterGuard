@@ -36,13 +36,13 @@ func TestCurrentCatalogueExamples(t *testing.T) {
 		want              string
 	}{
 		{"gufo", "qwen3_8", 0, `{"chat_template_kwargs":{"enable_thinking":false}}`},
-		{"gufo", "qwen3_8", 3, `{"chat_template_kwargs":{"enable_thinking":true},"reasoning_effort":"xhigh"}`},
-		{"gufo", "qwen3_8", 10, `{"chat_template_kwargs":{"enable_thinking":true},"reasoning_effort":"xhigh"}`},
+		{"gufo", "qwen3_8", 3, `{"chat_template_kwargs":{"enable_thinking":true},"reasoning_effort":"medium"}`},
+		{"gufo", "qwen3_8", 4, `{"chat_template_kwargs":{"enable_thinking":true},"reasoning_effort":"xhigh"}`},
 		{"vllm", "kimi_k2_6", 0, `{"chat_template_kwargs":{"thinking":false}}`},
 		{"vllm", "kimi_k2_6", 1, `{"chat_template_kwargs":{"thinking":true}}`},
 		{"vllm", "kimi_k3", 0, `{"reasoning_effort":"low"}`},
 		{"lm_studio", "qwen3_8", 0, `{"reasoning_effort":"none"}`},
-		{"openrouter", "qwen3_8", 3, `{"reasoning":{"effort":"xhigh"}}`},
+		{"openrouter", "qwen3_8", 4, `{"reasoning":{"effort":"xhigh"}}`},
 	}
 	for _, test := range tests {
 		name := test.endpoint + "/" + test.profile
@@ -62,18 +62,45 @@ func TestCurrentCatalogueExamples(t *testing.T) {
 	}
 }
 
-func TestNumericalSelectionAndEmptyProfile(t *testing.T) {
+func TestNormalizedSelectionAndEmptyProfile(t *testing.T) {
 	plan := currentPlan(t, "gufo", "qwen3_8")
-	for level, want := range []string{"off", "low", "medium", "high", "high"} {
+	for level, want := range []string{"off", "low", "medium", "medium", "high"} {
 		resolution, err := plan.ResolveLevel(int64(level))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if resolution.OptionID != want || resolution.Clamped != (level > 3) {
+		if resolution.OptionID != want || resolution.EffectiveLevel == nil || *resolution.EffectiveLevel != level || resolution.MaxLevel == nil || *resolution.MaxLevel != 4 {
 			t.Fatalf("level %d resolved to %+v, want %s", level, resolution, want)
 		}
 	}
-	empty, err := currentPlan(t, "openrouter", "none").ResolveLevel(10)
+	for level, want := range []string{"low", "medium", "medium", "high", "high"} {
+		resolution, err := currentPlan(t, "openrouter", "gpt_oss").ResolveLevel(int64(level))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolution.OptionID != want {
+			t.Fatalf("thinking-only level %d selected %q, want %q", level, resolution.OptionID, want)
+		}
+	}
+	for level, want := range []string{"low", "medium", "high", "xhigh", "max"} {
+		resolution, err := currentPlan(t, "openrouter", "minimax_m3_1_flash").ResolveLevel(int64(level))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolution.OptionID != want {
+			t.Fatalf("five-choice level %d selected %q, want %q", level, resolution.OptionID, want)
+		}
+	}
+	for level := int64(1); level <= MaximumLevel; level++ {
+		resolution, err := currentPlan(t, "openrouter", "qwen3_6").ResolveLevel(level)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolution.OptionID != "on" {
+			t.Fatalf("toggle level %d selected %q, want on", level, resolution.OptionID)
+		}
+	}
+	empty, err := currentPlan(t, "openrouter", "none").ResolveLevel(4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,15 +110,18 @@ func TestNumericalSelectionAndEmptyProfile(t *testing.T) {
 	if _, err := plan.ResolveLevel(-1); err == nil {
 		t.Fatal("negative thinking level accepted")
 	}
+	if _, err := plan.ResolveLevel(5); err == nil {
+		t.Fatal("thinking level above four accepted")
+	}
 }
 
 func TestEndpointLimitExcludesChoiceWithoutRenumberingGap(t *testing.T) {
 	plan := currentPlan(t, "lm_studio", "qwen3_6")
-	resolution, err := plan.ResolveLevel(10)
+	resolution, err := plan.ResolveLevel(4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolution.OptionID != "off" || !resolution.Clamped || len(plan.Exclusions()) != 1 || plan.Exclusions()[0].OptionID != "on" {
+	if resolution.OptionID != "off" || len(plan.Exclusions()) != 1 || plan.Exclusions()[0].OptionID != "on" {
 		t.Fatalf("limited plan resolution=%+v exclusions=%+v", resolution, plan.Exclusions())
 	}
 }
@@ -158,7 +188,7 @@ func TestEndpointURLPreservesBasePath(t *testing.T) {
 	}
 }
 
-func TestOffIsMovedFirstAndMaximumLevelClampsSafely(t *testing.T) {
+func TestOffIsMovedFirstAndMaximumNormalizedLevelSelectsHighest(t *testing.T) {
 	effort := "low"
 	profile := ProfileDefinition{Options: []OptionDefinition{
 		{ID: "low", Label: "Low", Mode: ModeEffort, Effort: &effort},
@@ -178,9 +208,12 @@ func TestOffIsMovedFirstAndMaximumLevelClampsSafely(t *testing.T) {
 	if err != nil || zero.OptionID != "off" {
 		t.Fatalf("level zero = %+v, %v", zero, err)
 	}
-	maximum, err := plan.ResolveLevel(int64(^uint64(0) >> 1))
-	if err != nil || maximum.OptionID != "low" || !maximum.Clamped {
+	maximum, err := plan.ResolveLevel(4)
+	if err != nil || maximum.OptionID != "low" {
 		t.Fatalf("maximum level = %+v, %v", maximum, err)
+	}
+	if _, err := plan.ResolveLevel(int64(^uint64(0) >> 1)); err == nil {
+		t.Fatal("out-of-range level accepted")
 	}
 	profile.Options = append(profile.Options, OptionDefinition{ID: "other-off", Label: "Other Off", Mode: ModeOff})
 	if _, err := CompilePlan(Catalogues{

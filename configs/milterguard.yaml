@@ -76,8 +76,8 @@ ai:
   # To use OpenRouter, create an account and API key at https://openrouter.ai/.
   endpoint: "https://openrouter.ai/api/v1"
 
-  # API credential. For a local endpoint that does not authenticate, a
-  # non-empty placeholder is still required and is sent as a Bearer token.
+  # API credential. Set this to "" or omit it for an unauthenticated local
+  # endpoint; MilterGuard then sends no Authorization header.
   api_key: "replace-with-your-endpoint-api-key"
 
   # Endpoint definition ID. Currently available: gufo, llama_cpp, vllm,
@@ -89,10 +89,11 @@ ai:
   # provider/model names; llama.cpp may use its configured model name or path.
   model: "qwen/qwen3.6-35b-a3b:exacto"
 
-  # Thinking level from 0 to 10. Level 0 selects Off when the configured
-  # endpoint/profile pair supports it, otherwise its lowest available level.
-  # Values beyond the profile's highest level select that highest level. Use 0
-  # to maximise processing throughput and minimise response latency.
+  # Relative thinking preference from 0 to 4. Level 0 selects Off where
+  # supported, otherwise the lowest available setting; level 4 selects the
+  # highest. Intermediate values are mapped across the model's available
+  # settings, so this is not a multiplier and several values may select the
+  # same setting. Use 0 to maximise throughput and minimise response latency.
   thinking_level: 0
 
   # Model thinking-profile ID. Currently available: none, qwen3_5, qwen3_6,
@@ -119,8 +120,8 @@ ai:
   endpoints_file: "/etc/milterguard/endpoints.yaml"
   profiles_file: "/etc/milterguard/thinking-profiles.yaml"
 
-  # Alternatively, set api_key: "" and name an environment variable here.
-  # The variable must be available to the MilterGuard service process.
+  # To read the key from an environment variable, leave api_key empty and name
+  # the variable here. It must be available to the MilterGuard service process.
   # api_key_env: "OPENROUTER_API_KEY"
 
   # Maximum duration of one AI request, using Go duration syntax. Must be > 0.

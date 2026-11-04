@@ -37,10 +37,11 @@ configuration, security, testing, and maintenance information.
    a compatible hosted service or a local AI server. The supplied configuration
    works with OpenRouter after adding an
    [OpenRouter API key](https://openrouter.ai) to `ai.api_key`. For another
-   service, configure the endpoint URL, endpoint type, model name, and API key.
-   If the local server does not require authentication, use a non-empty
-   placeholder key. See [Running AI locally](OPERATING_GUIDE.md#running-ai-locally)
-   for local setup guidance.
+   service, configure the endpoint URL, endpoint type, model name, and any API
+   key it requires. If a local server does not require authentication, omit
+   `ai.api_key` or set it to `""`; MilterGuard will send no Authorization
+   header. See [Running AI locally](OPERATING_GUIDE.md#running-ai-locally) for
+   local setup guidance.
 
 4. Validate the configuration:
 

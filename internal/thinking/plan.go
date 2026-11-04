@@ -47,10 +47,14 @@ type Resolution struct {
 	Effort         string
 	BudgetTokens   int64
 	OffAvailable   bool
-	Clamped        bool
 	Fingerprint    string
 	Fragment       map[string]any
 }
+
+const (
+	MinimumLevel int64 = 0
+	MaximumLevel int64 = 4
+)
 
 func CompilePlan(catalogues Catalogues, endpointID, profileID string, supportedProtocols map[string]bool) (*Plan, error) {
 	endpoint, ok := catalogues.Endpoints[endpointID]
@@ -139,7 +143,7 @@ func CompilePlan(catalogues Catalogues, endpointID, profileID string, supportedP
 		Endpoint   EndpointDefinition
 		Profile    ProfileDefinition
 		Algorithm  int
-	}{endpointID, profileID, endpoint, profile, 1}
+	}{endpointID, profileID, endpoint, profile, 2}
 	encoded, err := json.Marshal(fingerprintSource)
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint thinking plan: %w", err)
@@ -169,8 +173,8 @@ func (p *Plan) Exclusions() []Exclusion {
 }
 
 func (p *Plan) ResolveLevel(level int64) (Resolution, error) {
-	if level < 0 {
-		return Resolution{}, errors.New("thinking level must not be negative")
+	if level < MinimumLevel || level > MaximumLevel {
+		return Resolution{}, fmt.Errorf("thinking level must be between %d and %d", MinimumLevel, MaximumLevel)
 	}
 	result := Resolution{
 		RequestedLevel: level, Fingerprint: p.fingerprint,
@@ -181,23 +185,44 @@ func (p *Plan) ResolveLevel(level int64) (Resolution, error) {
 		result.Status = "uncontrolled"
 		return result, nil
 	}
-	last := len(p.ladder) - 1
-	index := last
-	if level <= int64(last) {
-		index = int(level)
-	}
+	index := p.normalizedChoiceIndex(level)
 	choice := p.ladder[index]
 	result.Status = "selected"
-	result.EffectiveLevel = intPointer(index)
-	result.MaxLevel = intPointer(last)
+	result.EffectiveLevel = intPointer(int(level))
+	result.MaxLevel = intPointer(int(MaximumLevel))
 	result.OptionID = choice.ID
 	result.Label = choice.Label
 	result.Mode = choice.Mode
 	result.Effort = choice.Effort
 	result.BudgetTokens = choice.BudgetTokens
-	result.Clamped = level > int64(last)
 	result.Fragment = cloneMap(choice.fragment)
 	return result, nil
+}
+
+// normalizedChoiceIndex maps the user-facing 0-4 preference onto the
+// effective choices without requiring callers to know how many choices a
+// model exposes. Where Off exists, zero selects it and levels 1-4 span only
+// the enabled choices. Otherwise the whole scale spans the available choices.
+func (p *Plan) normalizedChoiceIndex(level int64) int {
+	if len(p.ladder) == 1 {
+		return 0
+	}
+	if p.ladder[0].Mode == ModeOff {
+		if level == MinimumLevel {
+			return 0
+		}
+		return 1 + scaleLevel(level-1, MaximumLevel-1, len(p.ladder)-2)
+	}
+	return scaleLevel(level, MaximumLevel, len(p.ladder)-1)
+}
+
+// scaleLevel selects the nearest point on a zero-based target scale while
+// preserving both endpoints exactly.
+func scaleLevel(value, sourceMaximum int64, targetMaximum int) int {
+	if targetMaximum == 0 {
+		return 0
+	}
+	return int((value*int64(targetMaximum) + sourceMaximum/2) / sourceMaximum)
 }
 
 func (p *Plan) ValidateBaseRequest(base map[string]any) error {

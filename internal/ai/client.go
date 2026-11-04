@@ -194,7 +194,9 @@ func (c *Client) analyzeOnce(ctx context.Context, body []byte) (Analysis, bool, 
 	if err != nil {
 		return Analysis{}, false, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	if c.cfg.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.cfg.EndpointType == "openrouter" {
 		if c.cfg.SiteURL != "" {

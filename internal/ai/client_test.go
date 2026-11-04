@@ -113,7 +113,7 @@ func TestThinkingLevelUsesCatalogueRequestFragment(t *testing.T) {
 		{
 			endpointType: "gufo",
 			profile:      "qwen3_8",
-			level:        3,
+			level:        4,
 			assert: func(t *testing.T, body map[string]any) {
 				kwargs, ok := body["chat_template_kwargs"].(map[string]any)
 				if !ok || kwargs["enable_thinking"] != true || body["reasoning_effort"] != "xhigh" {
@@ -191,6 +191,41 @@ func TestOpenRouterAttributionHeadersAreEndpointSpecific(t *testing.T) {
 				Endpoint: "http://endpoint.invalid/v1/chat/completions", EndpointType: test.endpointType,
 				APIKey: "test-key", Model: "test-model", Timeout: config.Duration(time.Second),
 				SiteURL: "https://example.test/milterguard", AppName: "MilterGuard Test",
+			}, "classify")
+			client.http.Transport = transport
+			if _, err := client.Analyze(context.Background(), Input{Text: "test message"}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAuthorizationHeaderIsOptional(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		apiKey     string
+		wantHeader string
+	}{
+		{name: "authenticated", apiKey: "test-key", wantHeader: "Bearer test-key"},
+		{name: "unauthenticated"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				values := r.Header.Values("Authorization")
+				if test.wantHeader == "" {
+					if len(values) != 0 {
+						t.Fatalf("Authorization headers = %q, want none", values)
+					}
+				} else if len(values) != 1 || values[0] != test.wantHeader {
+					t.Fatalf("Authorization headers = %q, want %q", values, test.wantHeader)
+				}
+				return decisionResponse(`{"classification":"legitimate","score":0.5,"reasons":[]}`), nil
+			})
+			client := NewClient(config.AIConfig{
+				Endpoint: "http://endpoint.invalid/v1/chat/completions",
+				APIKey:   test.apiKey,
+				Model:    "test-model",
+				Timeout:  config.Duration(time.Second),
 			}, "classify")
 			client.http.Transport = transport
 			if _, err := client.Analyze(context.Background(), Input{Text: "test message"}); err != nil {

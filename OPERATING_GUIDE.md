@@ -44,13 +44,6 @@ site-specific values and secrets.
 Edit it before starting the service, preserving its YAML indentation and using
 spaces rather than tabs.
 
-When upgrading from a release that used `ai.disable_thinking`, remove that
-setting, change `ai.endpoint` from the complete Chat Completions URL to its base
-URL, and add `thinking_level`, `thinking_profile`, `endpoints_file`, and
-`profiles_file` as shown in the current reference configuration. Native package
-upgrades preserve the running process instead of restarting it when the saved
-configuration has not yet been migrated.
-
 MilterGuard supports hosted AI services and locally run models through a
 compatible API. Hosted services avoid the need to operate inference hardware;
 local models give you control over model versions and keep message analysis on
@@ -60,30 +53,40 @@ operational requirements. For local setup guidance, see
 
 ### Endpoint and model settings
 
-MilterGuard uses the OpenAI-compatible Chat Completions protocol with the
-endpoint definitions in `ai.endpoints_file`. Set `endpoint` to the service's
-base URL without `/chat/completions`; the route from the selected
-`endpoint_type` is appended at startup. The supplied endpoint IDs are `gufo`,
-`llama_cpp`, `vllm`, `lm_studio`, `ollama_openai`, and `openrouter`.
+Choose the service and model that will classify the mail, then set:
 
-Set `thinking_profile` to the exact model-capability profile selected from
-`ai.profiles_file`. MilterGuard does not infer a profile from the model name.
-`thinking_level` accepts 0 through 10. Level 0 selects Off when the selected
-endpoint/profile pair can express it, otherwise the lowest configured choice;
-higher values walk the profile's ordered choices and clamp at its highest
-usable choice. An empty profile sends no thinking override.
+- `endpoint` to the service's base URL. Do not include `/chat/completions`.
+- `endpoint_type` to the service or local server software being used. The
+  currently defined options are `gufo`, `llama_cpp`, `vllm`, `lm_studio`,
+  `ollama_openai`, and `openrouter`. Add support for other endpoint types to
+  `endpoints.yaml`.
+- `model` to the exact model name accepted by that service.
+- `thinking_profile` to the profile matching the model family. The currently
+  defined options are `none`, `qwen3_5`, `qwen3_6`, `qwen3_8`,
+  `qwen3_8_thinking_only`, `gpt_oss`, `gemma4`, `deepseek_v4`,
+  `deepseek_v4_1`, `glm5_3`, `kimi_k2_6`, `kimi_k2_7_code`, `kimi_k3`,
+  `minimax_m2_7`, `minimax_m3_1_flash`, `step3_7_flash`, and `step5_preview`.
+  Add support for other model families to `thinking-profiles.yaml`; use `none`
+  when the model has no controllable thinking mode.
+- `thinking_level` to `0` for normal use and maximum throughput. This disables
+  thinking where supported, or selects the model's lowest available setting.
+  Increase it toward `4` only if testing shows a worthwhile improvement;
+  MilterGuard maps the value onto the choices supported by the model.
+- `api_key` to the service credential, or use `api_key_env` to read it from an
+  environment variable. For an unauthenticated local server, omit `api_key` or
+  set it to `""`; MilterGuard then sends no Authorization header.
 
-Both catalogue files are strictly validated before the selected endpoint and
-profile IDs are accepted. Relative catalogue paths are resolved against the
-directory containing `milterguard.yaml`; catalogue edits take effect after a
-restart. The selected model must support image input if image analysis is
-enabled.
+The endpoint catalogue is `endpoints.yaml`, installed by default at
+`/etc/milterguard/endpoints.yaml`. The model thinking-profile catalogue is
+`thinking-profiles.yaml`, installed at
+`/etc/milterguard/thinking-profiles.yaml`. Additional endpoint and model
+thinking definitions can be added to these files.
 
-For example, to use OpenRouter, create an account and API key at
-https://openrouter.ai. The supplied configuration already contains the necessary
-OpenRouter settings; replace the placeholder `ai.api_key` with your key. If the
-configured model is no longer available, select a current compatible model and
-matching thinking profile, then test them before enabling rejection.
+The selected model must support image input if image analysis is enabled. Test
+the chosen endpoint and model against representative mail before enabling
+rejection. For OpenRouter, create an account and API key at
+https://openrouter.ai and replace the sample key in the reference
+configuration.
 
 Set `ai.input_cost_per_million_tokens` and
 `ai.output_cost_per_million_tokens` to the selected model's USD prices if you

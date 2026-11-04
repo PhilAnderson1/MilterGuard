@@ -106,8 +106,8 @@ cd milterguard-vVERSION-linux-amd64
 sudo ./install.sh
 ```
 
-Continue with the [Quick Start](QUICKSTART.md) to add an AI API key, connect
-MilterGuard to the MTA, verify its decisions in accept mode, and enable
+Continue with the [Quick Start](QUICKSTART.md) to configure an AI endpoint,
+connect MilterGuard to the MTA, verify its decisions in accept mode, and enable
 filtering.
 
 ## Documentation
