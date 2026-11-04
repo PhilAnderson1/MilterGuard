@@ -550,4 +550,5 @@ govulncheck ./cmd/... ./internal/...
 
 The release build is compiled statically, and the distributed sample
 configuration in `configs/milterguard.yaml` should pass `--check-config`
-before installation.
+before installation. Follow [RELEASING.md](RELEASING.md) for dependency and
+fork review, validation, packaging and publication checks before every release.
