@@ -329,14 +329,57 @@ selecting an alternative does not. Command execution consumes an explicit
 text/completeness result and refuses incomplete extraction of its configured raw
 prefix. The legacy text-only command helpers are not used to authorize execution.
 
+### Endpoint and thinking configuration
+
+During configuration loading, `internal/config` uses `internal/thinking` to
+read the operator-editable files named by `ai.endpoints_file` and
+`ai.profiles_file`. Both catalogues are read from disk and strictly validated
+before the selected `ai.endpoint_type` and `ai.thinking_profile` names are
+checked against them. Relative catalogue paths resolve against the directory
+containing the main configuration file. The catalogues are not embedded or
+reloaded per request; edits require a restart.
+
+Endpoint definitions describe the protocol, request route, thinking request
+templates, and supported effort or token-budget ranges. Thinking profiles
+describe a model family's ordered choices and template overrides. The profile
+is selected explicitly through `ai.thinking_profile`, not inferred from
+`ai.model`. `ai.endpoint` is an HTTP(S) base URL; the endpoint definition's
+route is appended to form the request URL. Catalogue entries can add endpoint
+types using the implemented `openai_chat` protocol adapter. Other protocols
+require application code even if the catalogue schema recognizes their names.
+
+`thinking.CompilePlan` compiles the selected endpoint/profile pair into an
+immutable plan. Options unsupported by the endpoint are excluded with
+configuration warnings. A nonempty profile with no usable options fails
+configuration loading. An empty profile, such as `none`, leaves thinking
+uncontrolled: it adds no thinking fields and does not explicitly turn thinking
+off. Off is placed first when available; other usable choices retain profile
+order.
+
+`ai.thinking_level` defaults to zero and uses a normalized 0–4 preference scale,
+not a direct index into the profile. Zero selects Off when available, otherwise
+the lowest usable choice. With Off available, levels 1–4 span the enabled
+choices; otherwise levels 0–4 span all usable choices. Intermediate levels map
+to the nearest choice, so several levels may select the same option. Level 4
+selects the highest usable choice. The resolved choice and request fragment
+are retained in the loaded configuration before the AI client is constructed.
+
+### Request construction and response handling
+
 The Milter analysis service builds an `ai.Input` from the already processed
-message and connection evidence. During configuration loading,
-`internal/thinking` reads both operator-editable catalogues, validates every
-definition, then compiles the selected endpoint/profile pair and numerical
-level before the AI client is constructed. `internal/ai` builds a fresh
-ordinary request, applies the plan's conflict-checked fragment, and owns HTTP
-communication with the resulting chat-completions route, bounded retries,
-response-size limits, and strict decision decoding.
+message and connection evidence. `internal/ai` builds a fresh ordinary request
+and applies the resolved thinking fragment. Template rendering preserves JSON
+value types, including booleans and integer token budgets. Fragment merging
+allows additional fields but rejects overwriting existing request values.
+For example, a thinking definition containing `model` cannot replace the model
+selected in the main configuration. All usable choices are checked for
+conflicts with ordinary request fields during configuration loading, and the
+merge checks again when constructing a request.
+
+`internal/ai` owns HTTP communication with the resolved chat-completions URL,
+bounded retries, response-size limits, and strict decision decoding. It sends
+a Bearer Authorization header only when an API key is configured, allowing
+unauthenticated local endpoints to use an empty key.
 
 The AI result is policy input rather than the final action. The Milter layer
 applies mode and confidence thresholds to choose the proposed and actual

@@ -1,12 +1,10 @@
 # MilterGuard Operating Guide
 
-Using the supplied default configuration, MilterGuard will initially analyse
-inbound email and report how it identifies unwanted spam, scams, threats
-concealed in images, and executable attachments without rejecting anything. It
-will not scan authenticated outbound email. After enforcement is enabled, it
-will provide basic virus protection by blocking executable attachments, learn
-and allowlist trusted email senders, and block problematic sending IP addresses
-to reduce false positives, false negatives, AI usage, and operating costs.
+With the supplied configuration, MilterGuard analyses inbound mail and logs its
+decisions without rejecting messages. Authenticated outbound mail is not scanned.
+After enforcement is enabled, it rejects unwanted mail and prohibited executable
+attachments, learns trusted correspondents, and blocks abusive sending IP
+addresses to improve filtering and reduce AI usage and operating costs.
 
 **Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
 the repository URL, https://github.com/PhilAnderson1/MilterGuard, and ask it to
@@ -19,28 +17,23 @@ For initial installation and activation, follow the
 ## Contents
 
 1. [Configure the AI service](#configure-the-ai-service)
-2. [Configure email authentication](#configure-email-authentication)
-3. [Connect Postfix to MilterGuard](#connect-postfix-to-milterguard)
-4. [Running MilterGuard in accept mode](#running-milterguard-in-accept-mode)
-5. [Enable enforcement](#enable-enforcement)
-6. [Use result headers](#use-result-headers)
-7. [Basic virus protection](#basic-virus-protection)
-8. [Rejection history and saved messages](#rejection-history-and-saved-messages)
-9. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
-10. [Running AI locally](#running-ai-locally)
-11. [Administration commands](#administration-commands)
-12. [Routine operation](#routine-operation)
+2. [Connect Postfix to MilterGuard](#connect-postfix-to-milterguard)
+3. [Running MilterGuard in accept mode](#running-milterguard-in-accept-mode)
+4. [Enable enforcement](#enable-enforcement)
+5. [Use result headers](#use-result-headers)
+6. [Basic virus protection](#basic-virus-protection)
+7. [Rejection history and saved messages](#rejection-history-and-saved-messages)
+8. [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
+9. [Running AI locally](#running-ai-locally)
+10. [Administration commands](#administration-commands)
+11. [Routine operation](#routine-operation)
+12. [Advanced configuration](#advanced-configuration)
 13. [Replay saved email](#replay-saved-email)
 14. [Remove MilterGuard](#remove-milterguard)
 
 ## Configure the AI service
 
 MilterGuard's configuration file is `/etc/milterguard/milterguard.yaml`.
-The portable tarball installer preserves files in `/etc/milterguard` during an
-upgrade and installs the current unmodified reference files under
-`/usr/local/share/milterguard/configs`. Compare those copies when reviewing new
-release options; do not replace an active configuration without carrying over
-site-specific values and secrets.
 Edit it before starting the service, preserving its YAML indentation and using
 spaces rather than tabs.
 
@@ -53,7 +46,8 @@ operational requirements. For local setup guidance, see
 
 ### Endpoint and model settings
 
-Choose the service and model that will classify the mail, then set:
+Choose the service and model that will classify the mail, then set these options
+in the `ai` section:
 
 - `endpoint` to the service's base URL. Do not include `/chat/completions`.
 - `endpoint_type` to the service or local server software being used. The
@@ -76,12 +70,6 @@ Choose the service and model that will classify the mail, then set:
   environment variable. For an unauthenticated local server, omit `api_key` or
   set it to `""`; MilterGuard then sends no Authorization header.
 
-The endpoint catalogue is `endpoints.yaml`, installed by default at
-`/etc/milterguard/endpoints.yaml`. The model thinking-profile catalogue is
-`thinking-profiles.yaml`, installed at
-`/etc/milterguard/thinking-profiles.yaml`. Additional endpoint and model
-thinking definitions can be added to these files.
-
 The selected model must support image input if image analysis is enabled. Test
 the chosen endpoint and model against representative mail before enabling
 rejection. For OpenRouter, create an account and API key at
@@ -99,94 +87,10 @@ MilterGuard sends the selected headers, extracted text, links, and qualifying
 inline images used for classification. OpenRouter can restrict requests to
 providers with a Zero Data Retention policy through its Privacy settings.
 
-### Classification settings
-
-`ai.max_body_chars` bounds the processed email body supplied to the model. If a
-tagged HTML body is too large, MilterGuard first removes content it has
-confidently identified as concealed and leaves location markers. If the result
-is still too large, it retains one continuous prefix and reports the omitted
-remainder. Independently extracted links remain available within their limits.
-
-`ai.compact_prompt_urls` defaults to `true`. It shortens unusually long URL
-components in the model-facing body while retaining domains and query parameter
-names. Set it to `false` to give the model complete URLs; this preserves more
-forensic evidence at the cost of additional input tokens and potentially
-earlier body truncation.
-
-`ai.max_html_parse_cpu_ms` limits the CPU time used to prepare message content
-for the analysis prompt, including MIME, plain-text, HTML and CSS processing.
-The option retains its historical HTML-specific name for configuration
-compatibility. The default is 250 milliseconds and the configured value must
-be positive. CPU time excludes time spent descheduled, so unrelated server load
-does not by itself consume the allowance. `ai.html_resource_limit_action`
-controls what happens at either the CPU or memory limit: `fallback` uses
-bounded or partial extraction and continues toward AI analysis, `reject`
-(the default) rejects without an IP-reputation penalty, and `dos-reject`
-treats the event as a suspected attack, rejects it, and applies the usual
-sending-IP reputation block and repeat-offender escalation. Authenticated
-submissions and configured IP or reverse-DNS exclusions remain protected from
-IP penalties. Both `reject` and `dos-reject` use the fixed SMTP 550 5.7.1
-message: "Message rejected because content processing exceeded server resource
-limits". The settings `ai.html_resource_reject_message` and
-`ai.html_dos_reject_message` are accepted for compatibility but ignored with a
-deprecation warning; remove them from existing configurations.
-`ai.html_parse_cpu_limit_action` remains a deprecated alias for
-`ai.html_resource_limit_action`; the new action setting takes precedence when
-both are supplied.
-MilterGuard refuses to start if its operating environment does not provide the
-per-thread CPU clock required to enforce this limit.
-
-Lexical HTML fallback has a separate allowance of the same duration. When the
-primary CPU or memory allowance is exhausted, only the `fallback` action
-permits a fallback attempt; `reject` and `dos-reject` stop extraction. An
-ordinary parser failure or structural limit, without CPU or memory exhaustion,
-may use fallback under any action so bounded message text remains available.
-A message that reaches fallback late can therefore consume nearly two
-configured CPU allowances.
-
-`ai.max_html_parse_memory_bytes` sets the allocation accounting allowance used
-by HTML/CSS parsing, guarded extraction buffers, and MIME processing. The
-default is 67108864 bytes (64 MiB), and the accepted range is 8-512 MiB.
-Primary extraction and fallback each receive a separate allowance of this
-size, shared across their respective MIME parts. Raising it increases the
-memory available to both legitimate and hostile mail. It is not a ceiling on
-the Go heap or process RSS: allocations outside the accounting, runtime
-overhead, and garbage awaiting collection also consume memory.
-
-When sizing a host, allow for primary and fallback allocations from up to
-`ai.max_concurrent` ordinary analyses. Email-command extraction has a separate
-set of slots, and archived-message rendering can also run in reply workers;
-the AI concurrency setting is not a process-wide extraction limit. Use an
-operating system or container memory limit when a hard process-wide ceiling
-is required.
-
-Memory exhaustion is handled first by `ai.html_resource_limit_action`, just
-like CPU exhaustion. `dos-reject` can apply IP-reputation penalties for either
-resource limit; `reject` does not. If the `fallback` policy allows processing
-to continue, `ai.incomplete_body_action` subsequently determines whether an
-incomplete retained body may be scanned or must be rejected.
-
-Set `ai.incomplete_body_action` to `scan` (the default) to classify the retained
-body with an explicit limitation notice. Set it to `reject` to record a
-rejection without asking the model when retained-body or final truncation,
-MIME/header limits, malformed MIME, incomplete transfer decoding, or extraction
-limits leave evidence incomplete. Failures encountered in an unselected MIME
-alternative also remain limitations; choosing between complete alternatives is
-not a failure. Visibility uncertainty alone does not trigger this policy. As
-with every rejection decision, accept mode records the decision but still
-accepts the message.
-
-Incomplete-inspection rejection is a policy decision, not an AI verdict. It
-adds no IP-reputation strikes and makes no correspondent-learning updates. The
-SMTP rejection explains that the content could not be fully inspected. In
-accept mode, generated result headers report `not-scanned`, confidence
-`unavailable`, action `accepted-accept-mode`, and policy
-`incomplete-inspection`, with no score. Logs and activity reports distinguish
-these decisions from AI classifications. Existing historical records are not
-reclassified.
+### Image analysis and the detection prompt
 
 Image analysis detects scams that conceal their message inside images. Set
-`vision_mode` to `off`, `fallback` to inspect images when insufficient text is
+`ai.vision_mode` to `off`, `fallback` to inspect images when insufficient text is
 available, or `always` to inspect them with every message. MilterGuard never
 downloads remote images.
 
@@ -196,30 +100,11 @@ has been tested with the configured model; test any prompt or model changes in
 accept mode against representative legitimate and unwanted email before
 enabling rejection.
 
-## Configure email authentication
-
-### Internal authentication (default)
-
-The supplied configuration uses `authentication.mode: internal`, which is
-recommended for new installations. MilterGuard calculates inbound SPF, DKIM,
-and DMARC directly from the SMTP transaction and the byte-exact message. These
-results are used only for MilterGuard's filtering, AI evidence, bypass, and
-learning decisions.
-
-### Reuse existing authentication filters
-
-If the server already has a complete, reliable local authentication stack, set
-`authentication.mode: trusted_headers` to reuse its SPF, DKIM, and DMARC results.
-This avoids repeating its DNS lookups and cryptographic verification.
-MilterGuard must run after those filters and must trust only their locally
-generated results. OpenDKIM alone normally supplies DKIM results, not the
-complete SPF, DKIM, and DMARC evidence MilterGuard can use.
-
-`correspondents.trusted_authserv_ids` must list the `authserv-id` values that
-your local filters put in `Authentication-Results`. The default,
-`$mta_hostname`, trusts results identified by the Postfix hostname.
-
 ## Connect Postfix to MilterGuard
+
+MilterGuard verifies SPF, DKIM and DMARC itself by default. To reuse results
+from existing authentication filters or adjust verification settings, see
+[SPF, DKIM and DMARC configuration](#spf-dkim-and-dmarc-configuration).
 
 Add MilterGuard to `smtpd_milters` in `/etc/postfix/main.cf`. With internal
 authentication and no other SMTP Milters:
@@ -239,19 +124,6 @@ outbound mail:
 smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8895
 ```
 
-In `trusted_headers` mode, the local authentication filters must precede
-MilterGuard. A typical complete chain is:
-
-```text
-OpenDKIM → OpenDMARC → MilterGuard
-```
-
-For example, with OpenDKIM on port 8891 and OpenDMARC on port 8892:
-
-```text
-smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
-```
-
 Use the actual sockets or ports configured on the server. If
 `non_smtpd_milters` is already configured, leave its existing filters in place
 but do not add MilterGuard. MilterGuard should process SMTP mail only; applying
@@ -262,35 +134,6 @@ Use `tempfail` instead if Postfix should defer delivery until every configured
 Milter is available. `milter_content_timeout = 600s` gives bounded attachment
 inspection and AI analysis time to complete. MilterGuard sends progress
 responses during long AI operations so Postfix continues waiting.
-
-### Protect authentication and result headers
-
-In `trusted_headers` mode, Postfix must remove externally supplied
-`Authentication-Results` and `Received-SPF` headers. A claimed authentication
-service or receiver identifier does not prove that a header was created locally,
-so otherwise a remote sender could forge evidence that MilterGuard trusts. Add
-these rules to `/etc/postfix/header_checks`:
-
-```text
-/^Authentication-Results:/ IGNORE
-/^Received-SPF:/ IGNORE
-/^X-MilterGuard-(Classification|Score|Confidence|Action|Policy):/ IGNORE
-```
-
-Enable the table in `/etc/postfix/main.cf`, merging it with any existing
-`header_checks` configuration:
-
-```text
-header_checks = regexp:/etc/postfix/header_checks
-```
-
-Postfix removes supplied authentication and MilterGuard result headers as it
-receives the message. The local authentication filters can then add fresh
-results before MilterGuard runs. Do not apply these rules through
-`milter_header_checks`, which operates on headers added by Milters.
-
-None of the header checks above are required with MilterGuard's default
-`authentication.mode: internal`.
 
 ### Required Postfix connection data
 
@@ -333,7 +176,7 @@ Internal mode requires valid `j` and `{daemon_addr}` connect macros;
 `smtpd_milters`. If `non_smtpd_milters` appears in the output, it must not
 contain MilterGuard.
 
-### Advanced authentication and listener settings
+### Listener access and capacity
 
 Loopback TCP listeners are usually simplest when several Milter services are in
 use. Unix sockets also work, but their directory ownership, permissions, and any
@@ -356,21 +199,6 @@ memory use. Memory-constrained systems may use a lower value, but should retain
 enough headroom above AI concurrency for normal mail bursts. Increasing AI
 concurrency helps only when the configured service can process the additional
 requests efficiently; locally hosted AI commonly needs a lower value.
-
-`authentication.message_storage` controls how the byte-exact message is kept
-until verification completes. The default `hybrid` mode keeps up to
-`authentication.memory_message_limit` simultaneous messages in memory and
-places additional messages in temporary files without waiting. Its theoretical
-additional heap bound is approximately `memory_message_limit ×
-milter.max_message_size`, although normal messages are smaller and each buffer
-is released immediately after authentication. Use `memory` to retain every
-message in memory or `file` to use temporary files for every message. File-backed
-stores use mode 0600, are unlinked immediately, and retain only an open file
-descriptor until verification completes.
-
-`authentication.timeout` bounds queueing plus SPF, DKIM, and DMARC work for one
-message. `authentication.max_concurrent` bounds simultaneous verification
-operations. Both values must be positive.
 
 Before starting MilterGuard for the first time, confirm that its configured
 listener is available:
@@ -398,7 +226,9 @@ and follow the current
 Do not query the public Spamhaus service through a public DNS resolver such as
 `1.1.1.1` or `8.8.8.8`; use a suitable local resolver or Spamhaus DQS.
 
-After changing `main.cf`, check and reload Postfix:
+### Apply the Postfix configuration
+
+After completing the Postfix setup, check and reload its configuration:
 
 ```sh
 sudo postfix check
@@ -419,9 +249,10 @@ Review the journal regularly:
 journalctl -u milterguard --since yesterday --no-pager -o cat
 ```
 
-MilterGuard's result is also recorded in the `X-MilterGuard-*` headers of each
-delivered email. View the message headers or source in your email client to see
-the classification, score, confidence, and action where applicable.
+With result headers enabled, accepted messages include `X-MilterGuard-*`
+headers where applicable. View the message headers or source in your email
+client to see the classification, score, confidence, and action. Messages that
+bypass analysis do not have an AI classification.
 
 Pay particular attention to legitimate messages classified as unwanted,
 unwanted messages classified as legitimate, endpoint failures, and unusually
@@ -430,9 +261,9 @@ the results consistently show that a change is needed.
 
 ## Enable enforcement
 
-When accept-mode results are satisfactory, change the mode to `enforce` and
-restart MilterGuard. It will then reject unwanted messages that meet the
-configured confidence threshold and block prohibited executable attachments.
+When accept-mode results are satisfactory, set `mode: enforce` and restart
+MilterGuard. It will then reject messages classified as unwanted with a score
+at or above `filtering.reject_score` and block prohibited executable attachments.
 
 The supplied configuration sets `filtering.ai_error_action: accept`. If AI
 analysis fails, MilterGuard therefore delivers the message without an AI
@@ -443,7 +274,7 @@ with `X-MilterGuard-Classification: unavailable` and
 `filtering.ai_error_action: tempfail` instead if the sending server should
 retain the message and retry after the AI service becomes available.
 
-### Deterministic acceptances without AI analysis
+### Acceptance without AI analysis
 
 MilterGuard accepts some trusted messages without sending them to the AI
 endpoint:
@@ -465,7 +296,7 @@ See [Trusted mail and adaptive filtering](#trusted-mail-and-adaptive-filtering)
 for how MilterGuard learns and verifies correspondents and configures trusted
 sender domains.
 
-### Deterministic rejections without AI analysis
+### Rejection without AI analysis
 
 In `enforce` mode, MilterGuard can also reject some messages without sending
 them to the AI endpoint:
@@ -548,14 +379,12 @@ if allof (
 }
 ```
 
-In `enforce` mode, unwanted messages at or above `reject_score` are rejected;
-the rule above handles accepted unwanted messages only when their score is also
+In `enforce` mode, unwanted messages at or above `filtering.reject_score` are
+rejected; the rule above handles accepted unwanted messages only when their score is also
 below `filtering.low_confidence_score`. That setting labels either classification
 as low confidence below its value and high confidence at or above it, independently
-of rejection policy. Its default is `0.8`. The former setting
-`legitimate_low_confidence_score` remains an alias; the new name takes precedence
-when both are supplied. To review low-confidence legitimate classifications as well,
-use a corresponding rule:
+of rejection policy. Its default is `0.8`. To review low-confidence legitimate
+classifications as well, use a corresponding rule:
 
 ```sieve
 if allof (
@@ -590,11 +419,9 @@ because MilterGuard cannot inspect their contents. Attachment size, archive
 depth, file-count, and total uncompressed-size limits protect the service from
 oversized files and archive bombs.
 
-ZIP entry counts include directories and are checked against the actual
-central-directory records before the ZIP reader allocates its file list.
-All ZIPs in a message, including nested ZIPs, also share a 1 MiB metadata limit
-for directory records, names, extra fields, and comments. Exceeding either
-limit is treated as incomplete inspection under `attachments.unscannable_action`.
+ZIP entry counts include directories. All ZIPs in a message, including nested
+ZIPs, also share a 1 MiB metadata limit. Exceeding either limit is handled by
+`attachments.unscannable_action`.
 
 The supplied blocklist also rejects uncommon Windows launchers and scripts,
 application installers, OneNote packages, and disk-image formats that are
@@ -608,8 +435,9 @@ The `attachments` configuration controls what happens when an archive is
 encrypted or content cannot be completely inspected. Each condition may be
 accepted, rejected, or temporarily deferred with `tempfail`. In the supplied
 configuration, encrypted archives and other unscannable content are rejected.
-Selecting `unscannable_action: accept` continues to AI analysis instead. The separate `invalid_mime_action`
-setting controls permanently invalid or ambiguous MIME structure; it defaults
+Selecting `attachments.unscannable_action: accept` continues to AI analysis
+instead. The separate `attachments.invalid_mime_action` setting controls
+permanently invalid or ambiguous MIME structure; it defaults
 to rejection because retrying cannot repair the message. Accept mode records
 the proposed attachment action but still accepts the message.
 
@@ -635,9 +463,9 @@ Cached IP rejections happen before the email is received and therefore cannot
 be recorded or saved.
 
 The archive may contain private correspondence and dangerous attachments, so
-restrict access to it. Retention cleanup runs at startup and every 24 hours;
-expired date directories are removed hierarchically. If the archive exceeds its
-`message_max_total_bytes` target size, daily cleanup removes the oldest retained
+restrict access to it. Retention cleanup runs at startup and every 24 hours.
+If the archive exceeds its `rejection_history.message_max_total_bytes` target
+size, daily cleanup removes the oldest retained
 messages until it is below the target. `rejection_history.expiry` controls both
 the database record and saved-message lifetime, keeping the two parts aligned.
 Archive errors are logged but never alter the SMTP filtering decision.
@@ -659,9 +487,7 @@ Authenticated submission client addresses are never blocked or otherwise
 modified by IP reputation, even when authenticated mail scanning is enabled.
 MilterGuard can also learn inbound senders that repeatedly receive a
 high-confidence legitimate classification and pass the configured authentication
-checks. The supplied configuration requires either SPF or DKIM to pass and align
-with the visible `From:` domain before an inbound result contributes toward
-automatic learning.
+checks. By default, the same aligned SPF or DKIM requirement applies to learning.
 
 This reduces cost and avoids repeatedly classifying routine mail. Entire email
 domains can also be allowlisted in the configured trusted-sender domains file.
@@ -684,9 +510,7 @@ evidence.
 An uncached lookup sends the sender's registrable domain name to an external
 RDAP service, but not the email address or message content. Set
 `domain_registration.enabled: false` to disable these lookups.
-Results are cached locally; expired entries are refreshed only if the domain is
-seen again, and entries more than two weeks past expiry are removed. Lookup
-failures never reject or defer mail.
+Lookup failures never reject or defer mail.
 
 When MilterGuard rejects unwanted mail, it records the sending IP address.
 Repeated attempts can then be rejected without another AI request, and persistent
@@ -697,7 +521,7 @@ until it expires. Configured shared mail providers are protected from automatic
 blocking.
 
 The `ip_reputation.ip_allowlist` prevents trusted IP addresses and networks from
-ever being blocked. The `domain_allowlist` provides the same protection for
+ever being blocked. The `ip_reputation.domain_allowlist` provides the same protection for
 sending hosts whose reverse-DNS hostname matches a listed domain or subdomain,
 but only after the hostname has been forward-resolved back to the connecting IP.
 This protects shared mail providers without allowing a forged PTR record to
@@ -754,8 +578,7 @@ sudo milterguard --config /path/to/milterguard.yaml --command-mode
 Command mode permits administrative operations on the live database, so the
 MilterGuard service does not need to be stopped.
 Use the Up and Down arrow keys to revisit commands from the current session;
-the ten most recent commands are restored from the SQLite database when the
-next interactive command-mode session starts.
+the ten most recent commands are remembered between interactive sessions.
 
 Available commands are:
 
@@ -778,21 +601,16 @@ EXIT
 ```
 
 - `ACTIVITY` reports filtering activity, failed AI evaluations, estimated AI
-  cost, and service uptime. Full sender-blocklist rejections are counted as
-  rejected messages; selective matches are counted as removed recipient
-  deliveries. CPU- or memory-limit decisions during content processing,
-  including MIME and plain text, have separate resource-limit (`reject`) and
-  DoS-protection (`dos-reject`) categories and are not counted as AI scans.
-  Processing under the `fallback` action remains in the scan category.
-  `ACTIVITY` is restricted to administrators.
+  cost, and service uptime. See [Activity report fields](#activity-report-fields)
+  for how outcomes are counted. This command is restricted to administrators.
 - `WHITELIST ADD`, `WHITELIST DELETE`, and `WHITELIST LIST` manage trusted
   correspondent addresses. Adding an address removes an exact-address block
   for the same recipient. It does not override a domain or server-wide block.
 - `BLOCKLIST ADD`, `BLOCKLIST DELETE`, and `BLOCKLIST LIST` manage manual
   visible-sender blocks. A sender pattern is either one exact mailbox or
   `*@example.com`; arbitrary wildcards are not supported. Command-line
-  additions and deletions require an explicit scope. For mutations, `*`
-  identifies the server-wide entry. Administrators can use `ALL` with
+  additions and deletions require an explicit recipient or scope. For these
+  commands, `*` identifies the server-wide entry. Administrators can use `ALL` with
   `BLOCKLIST DELETE` to remove the matching pattern from every recipient scope.
   Adding an exact-address block removes the corresponding trusted relationship
   for that recipient; a server-wide exact-address block removes it for every
@@ -806,7 +624,7 @@ EXIT
   also performs reverse-DNS lookups and includes each hostname or `(not found)`.
 - `IP ADD` creates a manual block using the configured repeat-offender duration,
   or the short duration when repeat-offender blocking is disabled. When
-  `repeat_refresh_on_attempt` is enabled, delivery attempts extend a manual
+  `ip_reputation.repeat_refresh_on_attempt` is enabled, delivery attempts extend a manual
   block that uses repeat-offender behaviour in the same way as an automatically
   created repeat-offender block. `IP DELETE` removes the IP reputation record.
 - `HELP` displays the command summary. `EXIT`, `QUIT`, or Ctrl-D closes the
@@ -857,7 +675,7 @@ not. Counts describe MilterGuard decisions, not confirmed delivery to a mailbox.
 | Output field | Meaning |
 | --- | --- |
 | Activity | Selected reporting period; defaults to the past week. `all` includes all retained activity. |
-| Service uptime | Time since the last recorded service start, rounded down to whole minutes. `0 minutes` means less than one minute; `unavailable` means usable start information was not available. |
+| Service uptime | Time since the last recorded service start, in whole minutes; `unavailable` if no usable start information exists. |
 | Retention | Configured `activity.expiry`, not the selected period or the age of the oldest event. |
 | Total rejected | Sum of the rejection categories listed below it. Temporary failures and failures to send the Milter response are excluded. |
 | Rejected — AI classification | Messages rejected through the AI evaluation path, normally because an unwanted classification met `filtering.reject_score`. |
@@ -865,32 +683,27 @@ not. Counts describe MilterGuard decisions, not confirmed delivery to a mailbox.
 | Rejected — Attachment policy | Messages rejected by attachment inspection, including prohibited attachments and inspection problems configured to cause rejection. |
 | Rejected — Protected sender-domain policy | Unauthenticated SMTP submissions claiming a visible From domain listed in `filtering.authenticated_only_sender_domains`. |
 | Rejected — Sender blocklist | Whole messages rejected because every recipient was covered by a matching sender-blocklist entry. |
-| Rejected — Content processing resource limit | CPU or memory limit decisions under `ai.html_resource_limit_action: reject`. These do not count as AI scans. |
-| Rejected — Content processing DoS protection | CPU or memory limit decisions under `ai.html_resource_limit_action: dos-reject`, which also applies the configured IP reputation response. These do not count as AI scans. |
-| Rejected — Incomplete inspection | Messages rejected under `ai.incomplete_body_action: reject` because content extraction was incomplete. No AI verdict or IP penalty is assigned; these do not count as AI scans. |
+| Rejected — Content processing resource limit | CPU or memory limit rejections under `ai.html_resource_limit_action: reject`. |
+| Rejected — Content processing DoS protection | CPU or memory limit rejections under `ai.html_resource_limit_action: dos-reject`. |
+| Rejected — Incomplete inspection | Incomplete content rejected under `ai.incomplete_body_action: reject`. |
 | Total accepted | Sum of the acceptance categories listed below it. This is not a count of every message passing through the server. |
 | Accepted — AI classification | Messages accepted through the AI evaluation path: legitimate results, unwanted results below the rejection threshold, or results accepted because the service is in accept mode. Also includes evaluation failures accepted under `filtering.ai_error_action: accept`. |
-| Accepted — Correspondent whitelist | Messages accepted by the correspondent bypass policy without an AI evaluation. Merely matching a correspondent does not increment this count when bypass is disabled and the message is scanned. |
-| Accepted — Trusted sender domain | Messages accepted by the trusted sender-domain bypass policy without an AI evaluation. This is separate from the IP reputation domain exemptions. |
-| Accepted — Content processing resource limit (accept mode) | Resource-limit decisions that would reject under the `reject` action but were accepted because the service was in accept mode. No AI scan is counted. |
-| Accepted — Content processing DoS protection (accept mode) | Resource-limit decisions that would reject under the `dos-reject` action but were accepted because the service was in accept mode. No AI scan is counted. |
-| Accepted — Incomplete inspection (accept mode) | Incomplete-inspection decisions that would reject under `incomplete_body_action: reject` but were accepted because the service was in accept mode. No AI scan is counted. |
+| Accepted — Correspondent whitelist | Messages that bypassed AI analysis through the correspondent allowlist. |
+| Accepted — Trusted sender domain | Messages that bypassed AI analysis through the trusted sender-domain allowlist. |
+| Accepted — Content processing resource limit (accept mode) | Resource-limit rejections overridden by accept mode. |
+| Accepted — Content processing DoS protection (accept mode) | DoS-protection rejections overridden by accept mode. |
+| Accepted — Incomplete inspection (accept mode) | Incomplete-inspection rejections overridden by accept mode. |
 | Recipient deliveries removed by sender blocklist | Number of individual recipients removed from transactions that could continue to other recipients. This is a recipient count, not a rejected-message count; the remaining message can also contribute to another outcome category. |
-| Total AI scans | Number of recorded AI evaluation events, including failed evaluations, temporary failures and response failures. Counts message evaluations, not individual API requests or retries. Excludes bypasses and the separate content-processing policy categories. Extraction that proceeds under `fallback` or incomplete-body `scan` remains in this category. |
-| AI evaluations failed | AI evaluation events with an analysis error, regardless of whether the configured response was acceptance or temporary failure. This is a subset of Total AI scans, not an additional message count. |
-| Total token cost | Sum of stored estimated token costs for scan events in the period, using endpoint-reported usage and the configured input/output prices at evaluation time. Missing usage can undercount costs; later price changes do not reprice stored events. |
+| Total AI scans | Message evaluations, including failed evaluations, temporary failures and response failures. Counts each evaluation once, regardless of API retries. Excludes bypasses and content-processing policy decisions; includes incomplete content sent for analysis. |
+| AI evaluations failed | Evaluations with an analysis error. This is a subset of Total AI scans. |
+| Total token cost | Estimated cost using endpoint-reported usage and the prices configured at evaluation time. Missing usage can undercount costs; later price changes do not alter earlier costs. |
 | Average cost per message scanned | Total token cost divided by Total AI scans, including failed evaluations in the denominator. Displays `N/A (no scans)` when that count is zero. |
-
-The token-cost notice identifies these figures as estimates rather than an
-endpoint invoice. Total cost is displayed to four decimal places and average
-cost to six; the average uses the stored total before display rounding.
 
 Accepted and rejected totals need not add up to Total AI scans: they include
 non-AI decisions, while scans also include temporary failures and response
 failures. Some paths, such as unscanned authenticated submissions, administrative
 commands, and attachment or protected-domain decisions overridden in accept
-mode, do not contribute to these totals. Historical events retain the categories
-recorded by the version running at the time; upgrades do not reclassify them.
+mode, do not contribute to these totals.
 
 The activity report's service uptime is elapsed time since the last recorded
 server start. An unclean shutdown can leave that status stale until the next
@@ -899,25 +712,9 @@ MilterGuard instance with a given database.
 
 ### Email commands
 
-The optional email command interface supports the same commands and sends the
-results back by email. HTML command bodies use the configured HTML CPU and
-memory limits; incomplete MIME, transfer decoding, or resource-limited
-extraction executes no commands and produces a command-failed reply. The command
-byte limit still selects a raw prefix, allowing oversized quoted replies; the
-selected prefix must itself parse and decode completely. `ACTIVITY` and IP
-commands are administrator-only. For ordinary authenticated users, the local recipient address is inferred from the
-authenticated envelope sender, so it is omitted
-from `WHITELIST`, `BLOCKLIST`, and `REJECTIONS` commands. Administrators may specify another
-recipient or use `*`.
-
-For example, an ordinary user can send `BLOCKLIST ADD fred@example.com` or
-`BLOCKLIST ADD *@example.com`; the entry applies only to that user's verified
-mailbox. A selective block on a multi-recipient message is silent to the remote
-sender: Postfix accepts the transaction for unaffected recipients after
-MilterGuard removes the blocked recipients. If the MTA did not negotiate the
-standard delete-recipient capability, MilterGuard keeps every recipient,
-continues normal filtering, and logs a warning for every unenforced match
-rather than rejecting unrelated recipients or creating an indefinite retry.
+The optional email command interface lets authenticated users manage their
+filtering settings and receive results by email. Administrators can also manage
+other users and run `ACTIVITY` and IP commands.
 
 Enable and configure `email_commands` in
 `/etc/milterguard/milterguard.yaml`. Set `recipient` to the local command
@@ -979,14 +776,28 @@ or a signature to follow. Listing results are newest-first. Listings that
 support a date period default to the previous week; `BLOCKLIST LIST` lists
 unexpired entries without a date filter.
 
+Ordinary users omit the recipient from `WHITELIST`, `BLOCKLIST`, and
+`REJECTIONS` commands; MilterGuard uses their verified sender address.
+For example, `BLOCKLIST ADD fred@example.com` or `BLOCKLIST ADD *@example.com`
+blocks that sender only for the requesting user. Administrators may specify
+another recipient or use `*` as described in the command reference.
+
+For messages addressed to several recipients, blocked deliveries are removed
+silently while other deliveries continue through normal filtering. If the MTA
+cannot remove individual recipients, MilterGuard leaves them in place and logs
+a warning about the unenforced blocks.
+
+Keep command emails short and avoid large quoted replies. If the command body
+cannot be fully read within the size and processing limits, no commands run
+and MilterGuard sends a command-failed reply.
+
 `REJECTION <id>` is restricted to messages addressed to the requesting user;
 administrators may retrieve any record. Its reply contains the rejection reason
 and processed body and, when available, attaches the original message as
 `rejection-<id>.eml`.
 
 Email command replies are limited to `milter.max_message_size`, including text,
-MIME headers, and base64 encoding. Saved messages share one attachment budget
-per reply, checked before their contents are loaded. Attachments that fit are
+MIME headers, and attachment encoding. Attachments that fit are
 included in request order; duplicate requests include the original only once.
 The reply lists rejection IDs omitted for size and suggests requesting them
 individually. If an individual message still cannot fit, retrieve it using
@@ -1026,7 +837,7 @@ new domains conservatively because matching, authenticated mail bypasses AI
 analysis. List one lowercase, exact domain per line; wildcards are not accepted.
 An entry such as `amazon.com` also matches its subdomains, but regional domains
 such as `amazon.co.uk` and `amazon.de` must be listed separately. With
-`sender_domain_allowlist_require_authentication` enabled, a matching domain
+`filtering.sender_domain_allowlist_require_authentication` enabled, a matching domain
 bypasses AI only when MilterGuard receives the aligned authentication selected
 by `authentication.trust_requirement`. Restart MilterGuard after changing the
 file.
@@ -1057,17 +868,20 @@ reputation, cached domain registration data, and activity history are stored in
 MilterGuard before copying this SQLite database so the backup is complete and
 consistent. Back it up when moving the learned state to another machine.
 
-Changes are committed immediately. `persistence.cleanup_interval` controls the
-periodic removal of expired and excess records and must be at least one minute;
-cleanup also runs at startup and checkpoints SQLite's write-ahead log. Expired
-domain-registration entries are ignored during lookups even before cleanup
-removes them.
+`persistence.cleanup_interval` controls periodic removal of expired and excess
+database records and must be at least one minute. Cleanup also runs at startup.
 
 Activity history is retained for `activity.expiry`, which defaults to one year.
-Its expiry shares the separate startup and 24-hour rejected-mail maintenance
-cycle, and still runs when saved-message archiving is disabled. Token costs are
-estimates based on reported usage and configured prices. Connection timeouts or
-missing token counts may cause costs to be under-counted.
+Expired activity is removed at startup and every 24 hours, even when
+saved-message archiving is disabled.
+
+### Configuration changes and upgrades
+
+The portable tarball installer preserves files in `/etc/milterguard` during an
+upgrade and installs current reference files under
+`/usr/local/share/milterguard/configs`. Compare those copies when reviewing new
+release options; preserve site-specific values and secrets when updating your
+configuration.
 
 Validate configuration changes and test the configured AI endpoint before
 applying them:
@@ -1080,6 +894,158 @@ milterguard --config /etc/milterguard/milterguard.yaml \
 The endpoint check sends one synthetic test email through the configured model
 and detection prompt. Success is reported as `configuration is valid` followed
 by `Endpoint OK`.
+
+## Advanced configuration
+
+### Content limits
+
+`ai.max_body_chars` bounds the processed email body supplied to the model. If a
+tagged HTML body is too large, MilterGuard first removes content it has
+confidently identified as concealed and leaves location markers. If the result
+is still too large, it retains one continuous prefix and reports the omitted
+remainder. Independently extracted links remain available within their limits.
+
+`ai.compact_prompt_urls` defaults to `true`. It shortens unusually long URL
+components in the model-facing body while retaining domains and query parameter
+names. Set it to `false` to give the model complete URLs; this preserves more
+forensic evidence at the cost of additional input tokens and potentially
+earlier body truncation.
+
+`ai.max_html_parse_cpu_ms` limits the CPU time used to prepare message content
+for the analysis prompt, including MIME, plain-text, HTML and CSS processing.
+The default is 250 milliseconds and the value must be positive. Time spent
+waiting for CPU does not consume the allowance.
+MilterGuard refuses to start if its operating environment does not provide the
+CPU clock required to enforce this limit.
+
+`ai.max_html_parse_memory_bytes` limits accounted memory allocations during
+message preparation. The default is 67108864 bytes (64 MiB), and the accepted
+range is 8-512 MiB.
+Raising it permits more memory use by both legitimate and hostile mail. It is
+not a ceiling on total process memory, which includes other allocations and
+memory awaiting release.
+
+Fallback uses a simpler extraction method with its own CPU and memory
+allowances of the same sizes. A message can therefore consume nearly twice
+the configured CPU allowance and allocate up to both memory allowances.
+Allow capacity for `ai.max_concurrent` analyses plus email commands and saved
+message viewing, which can run alongside them. Use an operating system or
+container memory limit if a hard process-wide ceiling is required.
+
+### Handling resource limits and incomplete messages
+
+Set `ai.html_resource_limit_action` to choose what happens when either the CPU
+or memory allowance is exhausted:
+
+- `reject` (the default) rejects without an IP-reputation penalty.
+- `dos-reject` rejects as a suspected attack and applies the configured sending-IP
+  reputation block and repeat-offender escalation. Authenticated submissions
+  and configured IP or reverse-DNS exclusions remain protected from penalties.
+- `fallback` attempts simpler extraction and continues toward AI analysis.
+
+Both rejection actions use SMTP 550 5.7.1 with the message: "Message rejected
+because content processing exceeded server resource limits". Parser failures
+and structural limits may use fallback under any action when neither resource
+allowance has been exhausted.
+
+If processing continues with incomplete content, `ai.incomplete_body_action`
+determines whether to scan it or reject it.
+
+Set `ai.incomplete_body_action` to `scan` (the default) to classify the retained
+body with an explicit limitation notice. Set it to `reject` to record a
+rejection without asking the model when truncation, malformed content, decoding
+failures or processing limits leave evidence incomplete. This includes failures
+in alternative message bodies, even if another body is readable. Uncertainty
+about whether HTML content is visible does not itself trigger this policy.
+In accept mode, both resource-limit and incomplete-inspection rejections are
+recorded but the message is still accepted.
+
+Incomplete-inspection rejection is a policy decision, not an AI verdict. It
+adds no IP-reputation strikes and makes no correspondent-learning updates. The
+SMTP rejection explains that the content could not be fully inspected. In
+accept mode, generated result headers report `not-scanned`, confidence
+`unavailable`, action `accepted-accept-mode`, and policy
+`incomplete-inspection`, with no score. Logs and activity reports distinguish
+these decisions from AI classifications.
+
+### SPF, DKIM and DMARC configuration
+
+#### Internal authentication (default)
+
+The supplied configuration uses `authentication.mode: internal`, which is
+recommended for new installations. MilterGuard calculates inbound SPF, DKIM,
+and DMARC directly from the SMTP transaction and the byte-exact message. These
+results are used only for MilterGuard's filtering, AI evidence, bypass, and
+learning decisions.
+
+#### Reuse existing authentication filters
+
+If the server already has a complete, reliable local authentication stack, set
+`authentication.mode: trusted_headers` to reuse its SPF, DKIM, and DMARC results.
+This avoids repeating its DNS lookups and cryptographic verification.
+MilterGuard must run after those filters and must trust only their locally
+generated results. OpenDKIM alone normally supplies DKIM results, not the
+complete SPF, DKIM, and DMARC evidence MilterGuard can use.
+
+`correspondents.trusted_authserv_ids` must list the `authserv-id` values that
+your local filters put in `Authentication-Results`. The default,
+`$mta_hostname`, trusts results identified by the Postfix hostname.
+
+In `trusted_headers` mode, the local authentication filters must precede
+MilterGuard. A typical complete chain is:
+
+```text
+OpenDKIM → OpenDMARC → MilterGuard
+```
+
+For example, with OpenDKIM on port 8891 and OpenDMARC on port 8892:
+
+```text
+smtpd_milters = inet:127.0.0.1:8891, inet:127.0.0.1:8892, inet:127.0.0.1:8895
+```
+
+#### Protect authentication and result headers
+
+In `trusted_headers` mode, Postfix must remove externally supplied
+`Authentication-Results` and `Received-SPF` headers. A claimed authentication
+service or receiver identifier does not prove that a header was created locally,
+so otherwise a remote sender could forge evidence that MilterGuard trusts. Add
+these rules to `/etc/postfix/header_checks`:
+
+```text
+/^Authentication-Results:/ IGNORE
+/^Received-SPF:/ IGNORE
+/^X-MilterGuard-(Classification|Score|Confidence|Action|Policy):/ IGNORE
+```
+
+Enable the table in `/etc/postfix/main.cf`, merging it with any existing
+`header_checks` configuration:
+
+```text
+header_checks = regexp:/etc/postfix/header_checks
+```
+
+Postfix removes supplied authentication and MilterGuard result headers as it
+receives the message. The local authentication filters can then add fresh
+results before MilterGuard runs. Do not apply these rules through
+`milter_header_checks`, which operates on headers added by Milters.
+
+None of the header checks above are required with MilterGuard's default
+`authentication.mode: internal`.
+
+#### Authentication resource limits
+
+`authentication.message_storage` controls how the byte-exact message is kept
+until verification completes. The default `hybrid` mode keeps up to
+`authentication.memory_message_limit` simultaneous messages in memory and
+places additional messages in temporary files without waiting. Its theoretical
+maximum memory requirement is approximately `authentication.memory_message_limit ×
+milter.max_message_size`, although normal messages are smaller. Use `memory` to retain every
+message in memory or `file` to use private temporary files for every message.
+
+`authentication.timeout` bounds queueing plus SPF, DKIM, and DMARC work for one
+message. `authentication.max_concurrent` bounds simultaneous verification
+operations. Both values must be positive.
 
 ## Replay saved email
 

@@ -2,7 +2,7 @@
 
 This guide takes you from downloading MilterGuard to a working Postfix
 integration in accept mode, which logs filtering decisions without rejecting
-mail. See the Operating Guide for detailed
+mail. See the [Operating Guide](OPERATING_GUIDE.md) for detailed
 configuration, security, testing, and maintenance information.
 
 1. Download the appropriate installation file from the latest MilterGuard
@@ -37,11 +37,12 @@ configuration, security, testing, and maintenance information.
    a compatible hosted service or a local AI server. The supplied configuration
    works with OpenRouter after adding an
    [OpenRouter API key](https://openrouter.ai) to `ai.api_key`. For another
-   service, configure the endpoint URL, endpoint type, model name, and any API
-   key it requires. If a local server does not require authentication, omit
-   `ai.api_key` or set it to `""`; MilterGuard will send no Authorization
-   header. See [Running AI locally](OPERATING_GUIDE.md#running-ai-locally) for
-   local setup guidance.
+   service, configure the endpoint URL, endpoint type, model name, thinking
+   profile, and any API key it requires; see
+   [Endpoint and model settings](OPERATING_GUIDE.md#endpoint-and-model-settings).
+   If a local server does not require authentication, omit `ai.api_key` or set
+   it to `""`. See [Running AI locally](OPERATING_GUIDE.md#running-ai-locally)
+   for local setup guidance.
 
 4. Validate the configuration:
 
@@ -70,6 +71,8 @@ configuration, security, testing, and maintenance information.
    `/etc/postfix/main.cf`:
 
    ```text
+   milter_default_action = accept
+   milter_protocol = 6
    milter_content_timeout = 600s
 
    # MilterGuard only
@@ -86,6 +89,10 @@ configuration, security, testing, and maintenance information.
    Do not add MilterGuard to `non_smtpd_milters`, because that setting also
    filters locally generated system mail.
 
+   Check the
+   [required Postfix connection data](OPERATING_GUIDE.md#required-postfix-connection-data)
+   so it can verify mail and recognize authenticated outbound submissions.
+
 7. Check and reload Postfix:
 
    ```sh
@@ -94,7 +101,7 @@ configuration, security, testing, and maintenance information.
    ```
 
    MilterGuard should now be processing mail through Postfix. It initially runs in
-   `accept` mode, so it analyses each message and logs its decision without
+   `accept` mode, so it analyses inbound mail and logs its decisions without
    rejecting anything. Review its decisions by looking at the MilterGuard-added
    headers in received emails or with:
 
@@ -105,15 +112,12 @@ configuration, security, testing, and maintenance information.
 8. Enable rejection:
 
    When its decisions have proved reliable, change `mode: accept` to
-   `mode: enforce` in `/etc/milterguard/milterguard.yaml`, then activate
-   filtering with:
+   `mode: enforce` in `/etc/milterguard/milterguard.yaml`, then restart
+   MilterGuard to enable rejection:
 
    ```sh
    sudo systemctl restart milterguard
    ```
-
-See the [Operating Guide](OPERATING_GUIDE.md) for detailed configuration,
-testing, security, and maintenance information.
 
 **Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
 the repository URL, https://github.com/PhilAnderson1/MilterGuard, and ask it to
