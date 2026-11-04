@@ -57,17 +57,20 @@ supports the Sendmail Milter protocol.
 - **Basic attachment protection:** block executable attachments, including those
   inside supported archives. This does not replace a full antivirus engine.
 
-## Early results
+## Performance (early results)
 
-From 30 September to 22 October 2026, MilterGuard accepted 236 legitimate
-inbound emails and recorded 475 spam or fraud rejections on one production mail
-server. One rejection was borderline: marketing outreach following a website
-signup. No other misclassifications were observed.
+From 30 September to 4 November 2026, one production mail server accepted 397
+inbound messages and recorded 792 MilterGuard rejections. There was one
+false-positive rejection, two spam messages were accepted, and one scam message
+was accepted.
 
-Testing used the Qwen3.6-35B-A3B model and an empty trusted-domain allowlist,
-with adaptive correspondent learning enabled. Repeated legitimate newsletters
-could therefore bypass subsequent AI scans. Rejection counts represent delivery
-attempts and may include retries.
+Testing used the Qwen3.6-35B-A3B model through OpenRouter, an empty
+trusted-domain allowlist, and adaptive correspondent learning. Repeated
+legitimate newsletters could therefore bypass subsequent AI scans.
+
+These observations represent an approximate overall filtering accuracy of
+99.7%. Estimated OpenRouter usage cost $1.85 over the five-week period, based
+on an average of $0.37 per week.
 
 These are early production observations, not a comparative benchmark.
 Evaluation is ongoing.
