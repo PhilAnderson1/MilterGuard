@@ -12,6 +12,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestMain(m *testing.M) {
+	endpoints, err := filepath.Abs(filepath.Join("..", "..", "configs", "endpoints.yaml"))
+	if err != nil {
+		panic(err)
+	}
+	profiles, err := filepath.Abs(filepath.Join("..", "..", "configs", "thinking-profiles.yaml"))
+	if err != nil {
+		panic(err)
+	}
+	defaultEndpointsFile = endpoints
+	defaultProfilesFile = profiles
+	os.Exit(m.Run())
+}
+
 func TestLoadAcceptsNewSectionsAndRejectsLegacySections(t *testing.T) {
 	writeConfig := func(t *testing.T, content string) string {
 		t.Helper()
@@ -586,18 +600,88 @@ func TestValidateOperationModes(t *testing.T) {
 	}
 }
 
-func TestValidateAIEndpointType(t *testing.T) {
-	for _, endpointType := range []string{"openrouter", "llamacpp", "openai"} {
-		cfg := validConfig()
-		cfg.AI.EndpointType = endpointType
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("endpoint type %q rejected: %v", endpointType, err)
+func TestValidateAIThinkingSettings(t *testing.T) {
+	cfg := validConfig()
+	cfg.AI.EndpointType = ""
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ai.endpoint_type") {
+		t.Fatalf("empty endpoint type error = %v", err)
+	}
+	for _, level := range []int{-1, 11} {
+		cfg = validConfig()
+		cfg.AI.ThinkingLevel = level
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ai.thinking_level") {
+			t.Fatalf("invalid thinking level %d error = %v", level, err)
 		}
 	}
-	cfg := validConfig()
-	cfg.AI.EndpointType = "unknown"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ai.endpoint_type") {
-		t.Fatalf("invalid endpoint type error = %v", err)
+}
+
+func TestLoadThinkingCataloguesBeforeSelectedIDs(t *testing.T) {
+	directory := t.TempDir()
+	for _, name := range []string{"endpoints.yaml", "thinking-profiles.yaml"} {
+		contents, err := os.ReadFile(filepath.Join("..", "..", "configs", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, name), contents, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(endpointType string) string {
+		t.Helper()
+		path := filepath.Join(directory, "milterguard.yaml")
+		contents := "ai:\n" +
+			"  endpoint: https://openrouter.ai/api/v1\n" +
+			"  endpoint_type: " + endpointType + "\n" +
+			"  thinking_profile: qwen3_6\n" +
+			"  thinking_level: 0\n" +
+			"  endpoints_file: endpoints.yaml\n" +
+			"  profiles_file: thinking-profiles.yaml\n" +
+			"  api_key: test-key\n" +
+			"  model: test-model\n" +
+			"filtering:\n  sender_domain_allowlist: ''\n"
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	cfg, err := Load(write("openrouter"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AI.EndpointsFile != filepath.Join(directory, "endpoints.yaml") ||
+		cfg.AI.ProfilesFile != filepath.Join(directory, "thinking-profiles.yaml") ||
+		cfg.AI.ResolvedEndpoint != "https://openrouter.ai/api/v1/chat/completions" ||
+		cfg.AI.ThinkingResolution.OptionID != "off" {
+		t.Fatalf("resolved AI configuration = %+v", cfg.AI)
+	}
+	if _, err := Load(write("missing")); err == nil || !strings.Contains(err.Error(), "unknown ai.endpoint_type") {
+		t.Fatalf("unknown endpoint error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "endpoints.yaml"), []byte("not: a catalogue\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(write("missing")); err == nil || strings.Contains(err.Error(), "unknown ai.endpoint_type") {
+		t.Fatalf("catalogue should be rejected before selected ID, error = %v", err)
+	}
+}
+
+func TestDisableThinkingSettingWasRemoved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "milterguard.yaml")
+	if err := os.WriteFile(path, []byte("ai:\n  disable_thinking: true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "disable_thinking") {
+		t.Fatalf("removed setting error = %v", err)
+	}
+}
+
+func TestThinkingLevelNullIsNotDefaultZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "milterguard.yaml")
+	if err := os.WriteFile(path, []byte("ai:\n  thinking_level: null\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "ai.thinking_level must not be null") {
+		t.Fatalf("null thinking level error = %v", err)
 	}
 }
 
@@ -928,6 +1012,11 @@ func TestDefaultsMatchDistributedConfiguration(t *testing.T) {
 	// credential placeholder and a recommended hosted model rather than defaults.
 	want.AI.APIKey = sample.AI.APIKey
 	want.AI.Model = sample.AI.Model
+	// The profile is selected explicitly for the sample model. The catalogue
+	// paths below are test-process overrides of the production defaults.
+	want.AI.ThinkingProfile = sample.AI.ThinkingProfile
+	sample.AI.EndpointsFile = want.AI.EndpointsFile
+	sample.AI.ProfilesFile = want.AI.ProfilesFile
 	// The complete sample names a particular hosted model and includes its
 	// current prices. Omitted prices must remain zero so a different or local
 	// model is never assigned an invented cost.

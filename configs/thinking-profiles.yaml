@@ -1,0 +1,215 @@
+schema_version: 2
+profiles:
+  none:
+    options: []
+  qwen3_5:
+    options:
+      - id: 'off'
+        label: 'Off'
+        mode: 'off'
+      - id: 'on'
+        label: 'On'
+        mode: 'on'
+    template_parameters:
+      thinking_toggle: enable_thinking
+  qwen3_6:
+    options:
+      - id: 'off'
+        label: 'Off'
+        mode: 'off'
+      - id: 'on'
+        label: 'On'
+        mode: 'on'
+    template_parameters:
+      thinking_toggle: enable_thinking
+  qwen3_8:
+    options:
+      - id: 'off'
+        label: 'Off'
+        mode: 'off'
+      - id: low
+        label: Low
+        mode: effort
+        effort: low
+      - id: medium
+        label: Medium
+        mode: effort
+        effort: medium
+      - id: high
+        label: High
+        mode: effort
+        effort: xhigh
+    template_parameters:
+      thinking_toggle: enable_thinking
+  qwen3_8_thinking_only:
+    options:
+      - id: low
+        label: Low
+        mode: effort
+        effort: low
+      - id: medium
+        label: Medium
+        mode: effort
+        effort: medium
+      - id: high
+        label: High
+        mode: effort
+        effort: xhigh
+    template_parameters:
+      thinking_toggle: enable_thinking
+  gpt_oss:
+    options:
+      - id: low
+        label: Low
+        mode: effort
+        effort: low
+      - id: medium
+        label: Medium
+        mode: effort
+        effort: medium
+      - id: high
+        label: High
+        mode: effort
+        effort: high
+  gemma4:
+    options:
+      - id: 'off'
+        label: 'Off'
+        mode: 'off'
+      - id: 'on'
+        label: 'On'
+        mode: 'on'
+  deepseek_v4:
+    options:
+      - id: 'off'
+        label: 'Off'
+        mode: 'off'
+      - id: high
+        label: High
+        mode: effort
+        effort: high
+      - id: max
+        label: Max
+        mode: effort
+        effort: max
+  deepseek_v4_1:
+    options:
+      - id: 'off'
+        label: 'Off'
+        mode: 'off'
+      - id: low
+        label: Low
+        mode: effort
+        effort: low
+      - id: high
+        label: High
+        mode: effort
+        effort: high
+      - id: max
+        label: Max
+        mode: effort
+        effort: max
+  glm5_3:
+    options:
+      - id: low
+        label: Low
+        mode: effort
+        effort: low
+      - id: high
+        label: High
+        mode: effort
+        effort: high
+      - id: max
+        label: Max
+        mode: effort
+        effort: max
+  kimi_k2_6:
+    template_parameters:
+      thinking_toggle: thinking
+    options:
+      - id: 'off'
+        label: 'Off'
+        mode: 'off'
+      - id: 'on'
+        label: 'On'
+        mode: 'on'
+  kimi_k2_7_code:
+    template_parameters:
+      thinking_toggle: null
+    options: []
+  kimi_k3:
+    template_parameters:
+      thinking_toggle: null
+    options:
+      - id: low
+        label: Low
+        mode: effort
+        effort: low
+      - id: high
+        label: High
+        mode: effort
+        effort: high
+      - id: max
+        label: Max
+        mode: effort
+        effort: max
+  minimax_m2_7:
+    template_parameters:
+      thinking_toggle: null
+    options: []
+  minimax_m3_1_flash:
+    template_parameters:
+      thinking_toggle: null
+    options:
+      - id: low
+        label: Low
+        mode: effort
+        effort: low
+      - id: medium
+        label: Medium
+        mode: effort
+        effort: medium
+      - id: high
+        label: High
+        mode: effort
+        effort: high
+      - id: xhigh
+        label: Extra high
+        mode: effort
+        effort: xhigh
+      - id: max
+        label: Max
+        mode: effort
+        effort: max
+  step3_7_flash:
+    template_parameters:
+      thinking_toggle: null
+    options:
+      - id: low
+        label: Low
+        mode: effort
+        effort: low
+      - id: medium
+        label: Medium
+        mode: effort
+        effort: medium
+      - id: high
+        label: High
+        mode: effort
+        effort: high
+  step5_preview:
+    template_parameters:
+      thinking_toggle: null
+    options:
+      - id: low
+        label: Low
+        mode: effort
+        effort: low
+      - id: medium
+        label: Medium
+        mode: effort
+        effort: medium
+      - id: high
+        label: High
+        mode: effort
+        effort: high

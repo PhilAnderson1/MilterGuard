@@ -21,6 +21,8 @@ fi
 config_source="$content_root/configs/milterguard.yaml"
 prompt_source="$content_root/configs/detection-prompt.txt"
 trusted_domains_source="$content_root/configs/trusted-sender-domains.txt"
+endpoints_source="$content_root/configs/endpoints.yaml"
+profiles_source="$content_root/configs/thinking-profiles.yaml"
 replay_tool_source="$content_root/tools/replay_mailbox.py"
 service_source="$content_root/packaging/systemd/milterguard.service"
 quickstart_source="$content_root/QUICKSTART.md"
@@ -30,7 +32,7 @@ license_source="$content_root/LICENSE"
 third_party_notices_source="$content_root/THIRD_PARTY_NOTICES.md"
 third_party_licenses_source="$content_root/THIRD_PARTY_LICENSES"
 
-for required_file in "$binary" "$config_source" "$prompt_source" "$trusted_domains_source" "$replay_tool_source" "$service_source" "$quickstart_source" "$operating_guide_source" "$readme_source" "$license_source" "$third_party_notices_source"; do
+for required_file in "$binary" "$config_source" "$prompt_source" "$trusted_domains_source" "$endpoints_source" "$profiles_source" "$replay_tool_source" "$service_source" "$quickstart_source" "$operating_guide_source" "$readme_source" "$license_source" "$third_party_notices_source"; do
     if [ ! -f "$required_file" ]; then
         echo "Required installation file is missing: $required_file" >&2
         exit 1
@@ -86,6 +88,8 @@ install -o root -g root -m 0755 "$replay_tool_source" /usr/local/share/miltergua
 install -o root -g root -m 0644 "$config_source" /usr/local/share/milterguard/configs/milterguard.yaml
 install -o root -g root -m 0644 "$prompt_source" /usr/local/share/milterguard/configs/detection-prompt.txt
 install -o root -g root -m 0644 "$trusted_domains_source" /usr/local/share/milterguard/configs/trusted-sender-domains.txt
+install -o root -g root -m 0644 "$endpoints_source" /usr/local/share/milterguard/configs/endpoints.yaml
+install -o root -g root -m 0644 "$profiles_source" /usr/local/share/milterguard/configs/thinking-profiles.yaml
 install -o root -g root -m 0644 "$quickstart_source" /usr/local/share/milterguard/QUICKSTART.md
 install -o root -g root -m 0644 "$operating_guide_source" /usr/local/share/milterguard/OPERATING_GUIDE.md
 install -o root -g root -m 0644 "$readme_source" /usr/local/share/milterguard/README.md
@@ -127,9 +131,13 @@ normalize_config_permissions() {
 install_config_if_missing "$config_source" /etc/milterguard/milterguard.yaml
 install_config_if_missing "$prompt_source" /etc/milterguard/detection-prompt.txt
 install_config_if_missing "$trusted_domains_source" /etc/milterguard/trusted-sender-domains.txt
+install_config_if_missing "$endpoints_source" /etc/milterguard/endpoints.yaml
+install_config_if_missing "$profiles_source" /etc/milterguard/thinking-profiles.yaml
 normalize_config_permissions /etc/milterguard/milterguard.yaml
 normalize_config_permissions /etc/milterguard/detection-prompt.txt
 normalize_config_permissions /etc/milterguard/trusted-sender-domains.txt
+normalize_config_permissions /etc/milterguard/endpoints.yaml
+normalize_config_permissions /etc/milterguard/thinking-profiles.yaml
 
 if [ -f "$service_source" ] && command -v systemctl >/dev/null 2>&1; then
     install -m 0644 "$service_source" /etc/systemd/system/milterguard.service

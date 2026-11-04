@@ -271,7 +271,9 @@ func (s *analysisService) logOutcome(ctx context.Context, msg *message.Message, 
 		logMessage = "message inspection policy decision"
 		attrs = append(attrs, "policy", incompleteInspectionPolicy)
 	} else {
-		attrs = append(attrs, "classification", result.classification, "score", result.score, "model", s.ai.Model)
+		attrs = append(attrs, "classification", result.classification, "score", result.score, "model", s.ai.Model,
+			"thinking_profile", s.ai.ThinkingProfile, "thinking_level", s.ai.ThinkingLevel,
+			"thinking_option", s.ai.ThinkingResolution.OptionID)
 	}
 	if includeSubject {
 		attrs = append(attrs, "subject", msg.DecodedHeader("Subject"))

@@ -164,7 +164,9 @@ func run() int {
 	}
 	defer cleanup()
 
-	logger.Info("MilterGuard started", "socket", cfg.Milter.Socket, "mode", cfg.Mode)
+	logger.Info("MilterGuard started", "socket", cfg.Milter.Socket, "mode", cfg.Mode,
+		"thinking_profile", cfg.AI.ThinkingProfile, "thinking_level", cfg.AI.ThinkingLevel,
+		"thinking_option", cfg.AI.ThinkingResolution.OptionID)
 	if err := server.Serve(ctx, ln); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("milter server stopped", "error", err)
 		return 1

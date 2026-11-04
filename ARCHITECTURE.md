@@ -46,6 +46,7 @@ path.
 | `internal/stores` | Defines SQL-independent repository interfaces, queries, and value types. |
 | `internal/stores/sqlite` | Implements the repository contracts with indexed SQLite operations. |
 | `internal/systemdns` | Constructs explicit resolvers for non-authentication DNS users, isolating them from dependency changes to the process-wide default resolver. |
+| `internal/thinking` | Strictly loads endpoint and thinking-profile catalogues, compiles an ordered immutable plan, renders typed request fragments, and merges them without overwriting ordinary request fields. |
 | `internal/termination` | Carries typed CPU, memory, and cancellation termination across guarded extraction code while preserving unrelated panics. |
 
 The dependency direction is intentional. Runtime protocol and policy logic
@@ -329,9 +330,13 @@ text/completeness result and refuses incomplete extraction of its configured raw
 prefix. The legacy text-only command helpers are not used to authorize execution.
 
 The Milter analysis service builds an `ai.Input` from the already processed
-message and connection evidence. `internal/ai` owns HTTP communication with the
-configured chat-completions endpoint, bounded retries, response-size limits,
-and strict decision decoding.
+message and connection evidence. During configuration loading,
+`internal/thinking` reads both operator-editable catalogues, validates every
+definition, then compiles the selected endpoint/profile pair and numerical
+level before the AI client is constructed. `internal/ai` builds a fresh
+ordinary request, applies the plan's conflict-checked fragment, and owns HTTP
+communication with the resulting chat-completions route, bounded retries,
+response-size limits, and strict decision decoding.
 
 The AI result is policy input rather than the final action. The Milter layer
 applies mode and confidence thresholds to choose the proposed and actual

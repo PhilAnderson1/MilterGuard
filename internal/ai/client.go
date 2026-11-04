@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/thinking"
 )
 
 type Classification string
@@ -116,6 +117,9 @@ func NewClient(cfg config.AIConfig, prompt string, logger ...*slog.Logger) *Clie
 	if len(logger) > 0 && logger[0] != nil {
 		log = logger[0]
 	}
+	if cfg.ResolvedEndpoint != "" {
+		cfg.Endpoint = cfg.ResolvedEndpoint
+	}
 	return &Client{
 		cfg: cfg, prompt: prompt, http: &http.Client{Timeout: cfg.Timeout.Value()}, log: log,
 		retryDelay: endpointRetryDelay,
@@ -150,12 +154,11 @@ func (c *Client) Analyze(ctx context.Context, input Input) (Analysis, error) {
 			{"role": "user", "content": userContent},
 		},
 	}
-	if c.cfg.DisableThinking {
-		switch c.cfg.EndpointType {
-		case "openrouter":
-			reqBody["reasoning"] = map[string]bool{"enabled": false}
-		case "llamacpp", "openai":
-			reqBody["reasoning_effort"] = "none"
+	if c.cfg.ThinkingPlan != nil {
+		var err error
+		reqBody, err = thinking.ApplyResolution(reqBody, c.cfg.ThinkingResolution)
+		if err != nil {
+			return Analysis{}, fmt.Errorf("apply thinking level: %w", err)
 		}
 	}
 	b, err := json.Marshal(reqBody)

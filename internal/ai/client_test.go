@@ -7,12 +7,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/thinking"
 )
 
 func TestValidate(t *testing.T) {
@@ -72,13 +74,16 @@ func TestDecisionRequiresScoreInPromptRange(t *testing.T) {
 	}
 }
 
-func TestDisableThinkingUsesEndpointSpecificRequestField(t *testing.T) {
+func TestThinkingLevelUsesCatalogueRequestFragment(t *testing.T) {
 	tests := []struct {
 		endpointType string
+		profile      string
+		level        int64
 		assert       func(*testing.T, map[string]any)
 	}{
 		{
 			endpointType: "openrouter",
+			profile:      "qwen3_6",
 			assert: func(t *testing.T, body map[string]any) {
 				reasoning, ok := body["reasoning"].(map[string]any)
 				if !ok || reasoning["enabled"] != false {
@@ -87,18 +92,32 @@ func TestDisableThinkingUsesEndpointSpecificRequestField(t *testing.T) {
 			},
 		},
 		{
-			endpointType: "llamacpp",
+			endpointType: "gufo",
+			profile:      "qwen3_6",
 			assert: func(t *testing.T, body map[string]any) {
-				if body["reasoning_effort"] != "none" {
-					t.Fatalf("llama.cpp reasoning control missing: %#v", body)
+				kwargs, ok := body["chat_template_kwargs"].(map[string]any)
+				if !ok || kwargs["enable_thinking"] != false {
+					t.Fatalf("Gufo thinking control missing: %#v", body)
 				}
 			},
 		},
 		{
-			endpointType: "openai",
+			endpointType: "lm_studio",
+			profile:      "qwen3_8",
 			assert: func(t *testing.T, body map[string]any) {
 				if body["reasoning_effort"] != "none" {
-					t.Fatalf("OpenAI reasoning control missing: %#v", body)
+					t.Fatalf("LM Studio reasoning control missing: %#v", body)
+				}
+			},
+		},
+		{
+			endpointType: "gufo",
+			profile:      "qwen3_8",
+			level:        3,
+			assert: func(t *testing.T, body map[string]any) {
+				kwargs, ok := body["chat_template_kwargs"].(map[string]any)
+				if !ok || kwargs["enable_thinking"] != true || body["reasoning_effort"] != "xhigh" {
+					t.Fatalf("Gufo effort control missing: %#v", body)
 				}
 			},
 		},
@@ -116,28 +135,35 @@ func TestDisableThinkingUsesEndpointSpecificRequestField(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"classification\":\"legitimate\",\"score\":0.5,\"reasons\":[]}"}}]}`)),
 				}, nil
 			})
+			catalogues, err := thinking.LoadCatalogues(
+				filepath.Join("..", "..", "configs", "endpoints.yaml"),
+				filepath.Join("..", "..", "configs", "thinking-profiles.yaml"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := thinking.CompilePlan(catalogues, test.endpointType, test.profile, map[string]bool{"openai_chat": true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resolution, err := plan.ResolveLevel(test.level)
+			if err != nil {
+				t.Fatal(err)
+			}
 			client := NewClient(config.AIConfig{
-				Endpoint:        "http://endpoint.invalid/v1/chat/completions",
-				EndpointType:    test.endpointType,
-				APIKey:          "test-key",
-				Model:           "test-model",
-				DisableThinking: true,
-				Timeout:         config.Duration(time.Second),
+				Endpoint:           "http://endpoint.invalid/v1/chat/completions",
+				EndpointType:       test.endpointType,
+				APIKey:             "test-key",
+				Model:              "test-model",
+				Timeout:            config.Duration(time.Second),
+				ThinkingPlan:       plan,
+				ThinkingResolution: resolution,
 			}, "classify")
 			client.http.Transport = transport
 			if _, err := client.Analyze(context.Background(), Input{Text: "test message"}); err != nil {
 				t.Fatal(err)
 			}
 			test.assert(t, body)
-			controls := 0
-			for _, key := range []string{"reasoning", "reasoning_effort"} {
-				if _, ok := body[key]; ok {
-					controls++
-				}
-			}
-			if controls != 1 {
-				t.Fatalf("expected exactly one reasoning control, got %d: %#v", controls, body)
-			}
 		})
 	}
 }
@@ -148,8 +174,8 @@ func TestOpenRouterAttributionHeadersAreEndpointSpecific(t *testing.T) {
 		wantHeaders  bool
 	}{
 		{endpointType: "openrouter", wantHeaders: true},
-		{endpointType: "openai"},
-		{endpointType: "llamacpp"},
+		{endpointType: "gufo"},
+		{endpointType: "llama_cpp"},
 	} {
 		t.Run(test.endpointType, func(t *testing.T) {
 			transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {

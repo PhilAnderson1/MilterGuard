@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
+	"github.com/PhilAnderson1/MilterGuard/internal/thinking"
 )
 
 // Validate rejects unsafe, contradictory, or incomplete settings that cannot
@@ -143,8 +144,20 @@ func validateAI(c AIConfig) error {
 	if c.Endpoint == "" || c.Model == "" || c.PromptFile == "" {
 		return fmt.Errorf("ai endpoint, model, and prompt_file are required")
 	}
-	if c.EndpointType != "openrouter" && c.EndpointType != "llamacpp" && c.EndpointType != "openai" {
-		return fmt.Errorf("ai.endpoint_type must be openrouter, llamacpp, or openai")
+	if strings.TrimSpace(c.EndpointType) == "" {
+		return fmt.Errorf("ai.endpoint_type is required")
+	}
+	if strings.TrimSpace(c.ThinkingProfile) == "" {
+		return fmt.Errorf("ai.thinking_profile is required")
+	}
+	if c.ThinkingLevel < 0 || c.ThinkingLevel > 10 {
+		return fmt.Errorf("ai.thinking_level must be between 0 and 10")
+	}
+	if c.EndpointsFile == "" || c.ProfilesFile == "" {
+		return fmt.Errorf("ai.endpoints_file and ai.profiles_file are required")
+	}
+	if _, err := thinking.ResolveEndpointURL(c.Endpoint, "/chat/completions"); err != nil {
+		return err
 	}
 	if c.APIKey == "" {
 		return fmt.Errorf("ai api_key is empty (and api_key_env is unset or empty)")

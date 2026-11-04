@@ -8,12 +8,14 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/PhilAnderson1/MilterGuard/internal/mailaddr"
 	"github.com/PhilAnderson1/MilterGuard/internal/netsafety"
+	"github.com/PhilAnderson1/MilterGuard/internal/thinking"
 	"gopkg.in/yaml.v3"
 )
 
@@ -136,10 +138,13 @@ type AuthenticationConfig struct {
 type AIConfig struct {
 	Endpoint                    string   `yaml:"endpoint"`
 	EndpointType                string   `yaml:"endpoint_type"`
+	ThinkingLevel               int      `yaml:"thinking_level"`
+	ThinkingProfile             string   `yaml:"thinking_profile"`
+	EndpointsFile               string   `yaml:"endpoints_file"`
+	ProfilesFile                string   `yaml:"profiles_file"`
 	APIKey                      string   `yaml:"api_key"`
 	APIKeyEnv                   string   `yaml:"api_key_env"`
 	Model                       string   `yaml:"model"`
-	DisableThinking             bool     `yaml:"disable_thinking"`
 	PromptFile                  string   `yaml:"prompt_file"`
 	Timeout                     Duration `yaml:"timeout"`
 	Retries                     int      `yaml:"retries"`
@@ -150,19 +155,22 @@ type AIConfig struct {
 	MaxHTMLParseMemoryBytes     int64    `yaml:"max_html_parse_memory_bytes"`
 	HTMLResourceLimitAction     string   `yaml:"html_resource_limit_action"`
 	// Deprecated YAML settings, resolved or ignored and cleared by Load.
-	LegacyHTMLResourceRejectMessage *string `yaml:"html_resource_reject_message,omitempty"`
-	LegacyHTMLParseCPULimitAction   *string `yaml:"html_parse_cpu_limit_action,omitempty"`
-	LegacyHTMLDoSRejectMessage      *string `yaml:"html_dos_reject_message,omitempty"`
-	IncompleteBodyAction            string  `yaml:"incomplete_body_action"`
-	VisionMode                      string  `yaml:"vision_mode"`
-	VisionMinTextChars              int     `yaml:"vision_min_text_chars"`
-	MaxImages                       int     `yaml:"max_images"`
-	MaxImageBytes                   int64   `yaml:"max_image_bytes"`
-	MaxImagePixels                  int64   `yaml:"max_image_pixels"`
-	SiteURL                         string  `yaml:"site_url"`
-	AppName                         string  `yaml:"app_name"`
-	InputCostPerMillionTokens       float64 `yaml:"input_cost_per_million_tokens"`
-	OutputCostPerMillionTokens      float64 `yaml:"output_cost_per_million_tokens"`
+	LegacyHTMLResourceRejectMessage *string             `yaml:"html_resource_reject_message,omitempty"`
+	LegacyHTMLParseCPULimitAction   *string             `yaml:"html_parse_cpu_limit_action,omitempty"`
+	LegacyHTMLDoSRejectMessage      *string             `yaml:"html_dos_reject_message,omitempty"`
+	IncompleteBodyAction            string              `yaml:"incomplete_body_action"`
+	VisionMode                      string              `yaml:"vision_mode"`
+	VisionMinTextChars              int                 `yaml:"vision_min_text_chars"`
+	MaxImages                       int                 `yaml:"max_images"`
+	MaxImageBytes                   int64               `yaml:"max_image_bytes"`
+	MaxImagePixels                  int64               `yaml:"max_image_pixels"`
+	SiteURL                         string              `yaml:"site_url"`
+	AppName                         string              `yaml:"app_name"`
+	InputCostPerMillionTokens       float64             `yaml:"input_cost_per_million_tokens"`
+	OutputCostPerMillionTokens      float64             `yaml:"output_cost_per_million_tokens"`
+	ThinkingPlan                    *thinking.Plan      `yaml:"-"`
+	ThinkingResolution              thinking.Resolution `yaml:"-"`
+	ResolvedEndpoint                string              `yaml:"-"`
 }
 type FilteringConfig struct {
 	LegacyLegitimateLowConfidenceScore         *float64 `yaml:"legitimate_low_confidence_score,omitempty"`
@@ -234,6 +242,9 @@ func Load(path string) (Config, error) {
 	} else if !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("invalid trailing YAML content: %w", err)
 	}
+	if err := rejectNullAISettings(b, "endpoint", "endpoint_type", "thinking_level", "thinking_profile", "endpoints_file", "profiles_file"); err != nil {
+		return Config{}, err
+	}
 	if c.Filtering.LegacyLegitimateLowConfidenceScore != nil {
 		var supplied struct {
 			Filtering struct {
@@ -280,6 +291,45 @@ func Load(path string) (Config, error) {
 	if c.AI.APIKey == "" && c.AI.APIKeyEnv != "" {
 		c.AI.APIKey = os.Getenv(c.AI.APIKeyEnv)
 	}
+	configPath, err := filepath.Abs(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolve configuration path: %w", err)
+	}
+	c.AI.EndpointsFile = resolveConfigRelativePath(filepath.Dir(configPath), c.AI.EndpointsFile)
+	c.AI.ProfilesFile = resolveConfigRelativePath(filepath.Dir(configPath), c.AI.ProfilesFile)
+	catalogues, err := thinking.LoadCatalogues(c.AI.EndpointsFile, c.AI.ProfilesFile)
+	if err != nil {
+		return Config{}, err
+	}
+	plan, err := thinking.CompilePlan(catalogues, c.AI.EndpointType, c.AI.ThinkingProfile, map[string]bool{"openai_chat": true})
+	if err != nil {
+		return Config{}, err
+	}
+	resolvedEndpoint, err := thinking.ResolveEndpointURL(c.AI.Endpoint, plan.Route())
+	if err != nil {
+		return Config{}, err
+	}
+	baseRequest := map[string]any{
+		"model": "", "temperature": 0,
+		"response_format": map[string]any{"type": "json_object"},
+		"messages":        []any{},
+	}
+	if err := plan.ValidateBaseRequest(baseRequest); err != nil {
+		return Config{}, err
+	}
+	resolution, err := plan.ResolveLevel(int64(c.AI.ThinkingLevel))
+	if err != nil {
+		return Config{}, err
+	}
+	for _, exclusion := range plan.Exclusions() {
+		c.Warnings = append(c.Warnings, fmt.Sprintf("ai.thinking_profile option %q is unavailable for endpoint_type %q: %s", exclusion.OptionID, c.AI.EndpointType, exclusion.Reason))
+	}
+	if resolution.Clamped && resolution.MaxLevel != nil {
+		c.Warnings = append(c.Warnings, fmt.Sprintf("ai.thinking_level %d exceeds the highest usable level %d for endpoint_type %q and profile %q; using option %q", c.AI.ThinkingLevel, *resolution.MaxLevel, c.AI.EndpointType, c.AI.ThinkingProfile, resolution.OptionID))
+	}
+	c.AI.ThinkingPlan = plan
+	c.AI.ThinkingResolution = resolution
+	c.AI.ResolvedEndpoint = resolvedEndpoint
 	if c.Filtering.SenderDomainAllowlistFile != "" {
 		domains, err := loadSenderDomainAllowlist(c.Filtering.SenderDomainAllowlistFile)
 		if err != nil {
@@ -314,9 +364,10 @@ func defaults() Config {
 			TrustRequirement: AuthenticationTrustEither, MessageStorage: "hybrid", MemoryMessageLimit: 8,
 		},
 		AI: AIConfig{
-			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter",
-			DisableThinking: true,
-			PromptFile:      "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
+			Endpoint: "https://openrouter.ai/api/v1", EndpointType: "openrouter",
+			ThinkingLevel: 0, ThinkingProfile: "none",
+			EndpointsFile: defaultEndpointsFile, ProfilesFile: defaultProfilesFile,
+			PromptFile: "/etc/milterguard/detection-prompt.txt", Timeout: Duration(45 * time.Second),
 			Retries: 2, MaxConcurrent: 8, MaxBodyChars: 50000, CompactPromptURLs: true,
 			MaxHTMLParseCPUMilliseconds: 250, MaxHTMLParseMemoryBytes: 64 << 20,
 			HTMLResourceLimitAction: "reject",
@@ -390,6 +441,9 @@ func defaults() Config {
 }
 
 const maxSenderDomainAllowlistBytes = 1 << 20
+
+var defaultEndpointsFile = "/etc/milterguard/endpoints.yaml"
+var defaultProfilesFile = "/etc/milterguard/thinking-profiles.yaml"
 
 var errSenderDomainAllowlistEmpty = errors.New("filtering.sender_domain_allowlist contains no domains")
 
@@ -480,4 +534,39 @@ func (c Config) LogLevel() slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+func resolveConfigRelativePath(directory, path string) string {
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(directory, path)
+}
+
+func rejectNullAISettings(source []byte, names ...string) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(source, &document); err != nil {
+		return err
+	}
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		wanted[name] = true
+	}
+	if len(document.Content) == 0 || document.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	root := document.Content[0]
+	for index := 0; index < len(root.Content); index += 2 {
+		if root.Content[index].Value != "ai" || root.Content[index+1].Kind != yaml.MappingNode {
+			continue
+		}
+		ai := root.Content[index+1]
+		for fieldIndex := 0; fieldIndex < len(ai.Content); fieldIndex += 2 {
+			name, value := ai.Content[fieldIndex].Value, ai.Content[fieldIndex+1]
+			if wanted[name] && value.Tag == "!!null" {
+				return fmt.Errorf("ai.%s must not be null", name)
+			}
+		}
+	}
+	return nil
 }

@@ -116,6 +116,8 @@ stage_native_payload() {
     install -m 0640 configs/milterguard.yaml "$payload/etc/milterguard/milterguard.yaml"
     install -m 0640 configs/detection-prompt.txt "$payload/etc/milterguard/detection-prompt.txt"
     install -m 0640 configs/trusted-sender-domains.txt "$payload/etc/milterguard/trusted-sender-domains.txt"
+    install -m 0640 configs/endpoints.yaml "$payload/etc/milterguard/endpoints.yaml"
+    install -m 0640 configs/thinking-profiles.yaml "$payload/etc/milterguard/thinking-profiles.yaml"
     install -m 0755 tools/replay_mailbox.py "$payload/usr/share/milterguard/tools/replay_mailbox.py"
     install -m 0644 README.md QUICKSTART.md OPERATING_GUIDE.md LICENSE THIRD_PARTY_NOTICES.md \
         "$payload/usr/share/doc/milterguard/"
@@ -144,6 +146,12 @@ modified configuration as `.rpmsave` files. To remove every trace after RPM
 removal, explicitly delete `/etc/milterguard` and `/var/lib/milterguard`, then
 remove the `milterguard` user and group.
 
+When upgrading a configuration that still contains `ai.disable_thinking`, use
+the current sample to migrate to `thinking_level`, `thinking_profile`,
+`endpoints_file`, and `profiles_file`, and change `ai.endpoint` to its base URL.
+An active older process is left running when the preserved configuration does
+not validate; restart it after completing the migration.
+
 Avoid installing a package over the tarball installation without first
 migrating the latter: its `/etc/systemd/system/milterguard.service` overrides
 the package's unit, and its `/usr/local/sbin/milterguard` remains separately
@@ -170,6 +178,8 @@ EOF
 /etc/milterguard/milterguard.yaml
 /etc/milterguard/detection-prompt.txt
 /etc/milterguard/trusted-sender-domains.txt
+/etc/milterguard/endpoints.yaml
+/etc/milterguard/thinking-profiles.yaml
 EOF
     cat > "$deb_root/DEBIAN/preinst" <<'EOF'
 #!/bin/sh
@@ -187,7 +197,7 @@ EOF
 set -e
 if [ "$1" = configure ]; then
     install -d -o root -g milterguard -m 0750 /etc/milterguard
-    for name in milterguard.yaml detection-prompt.txt trusted-sender-domains.txt; do
+    for name in milterguard.yaml detection-prompt.txt trusted-sender-domains.txt endpoints.yaml thinking-profiles.yaml; do
         path="/etc/milterguard/$name"
         if [ -f "$path" ] && [ ! -L "$path" ]; then
             chown root:milterguard "$path"
@@ -204,7 +214,11 @@ if [ "$1" = configure ]; then
             systemctl enable milterguard.service
         fi
         if [ -n "${2:-}" ] && systemctl is-active --quiet milterguard.service; then
-            systemctl try-restart milterguard.service || true
+            if /usr/sbin/milterguard --config /etc/milterguard/milterguard.yaml --check-config; then
+                systemctl try-restart milterguard.service || true
+            else
+                echo "WARNING: MilterGuard remains on the running version because the preserved configuration is not valid for the new version; update it and restart the service." >&2
+            fi
         fi
     fi
 fi
@@ -290,7 +304,11 @@ fi
 
 %posttrans
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet milterguard.service; then
-    systemctl try-restart milterguard.service || true
+    if /usr/sbin/milterguard --config /etc/milterguard/milterguard.yaml --check-config; then
+        systemctl try-restart milterguard.service || true
+    else
+        echo "WARNING: MilterGuard remains on the running version because the preserved configuration is not valid for the new version; update it and restart the service." >&2
+    fi
 fi
 
 %preun
@@ -309,6 +327,8 @@ fi
 %config(noreplace) %attr(0640,root,milterguard) /etc/milterguard/milterguard.yaml
 %config(noreplace) %attr(0640,root,milterguard) /etc/milterguard/detection-prompt.txt
 %config(noreplace) %attr(0640,root,milterguard) /etc/milterguard/trusted-sender-domains.txt
+%config(noreplace) %attr(0640,root,milterguard) /etc/milterguard/endpoints.yaml
+%config(noreplace) %attr(0640,root,milterguard) /etc/milterguard/thinking-profiles.yaml
 /usr/sbin/milterguard
 /usr/lib/systemd/system/milterguard.service
 /usr/share/milterguard/tools/replay_mailbox.py
