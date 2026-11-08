@@ -118,7 +118,7 @@ Evaluation is ongoing.
 
 ## Build and install from source
 
-Building requires Go 1.27 or later:
+Building requires Go 1.27.3 or later:
 
 ```sh
 git clone https://github.com/PhilAnderson1/MilterGuard.git

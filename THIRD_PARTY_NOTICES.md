@@ -10,7 +10,7 @@ licence texts are reproduced verbatim in `THIRD_PARTY_LICENSES`.
 | github.com/beorn7/perks | v1.0.1 | `github.com-beorn7-perks.txt` |
 | github.com/cespare/xxhash/v2 | v2.3.0 | `github.com-cespare-xxhash-v2.txt` |
 | github.com/clipperhouse/uax29/v2 | v2.7.0 | `github.com-clipperhouse-uax29-v2.txt` |
-| Go standard library | Go 1.27 or later | `go-standard-library.txt` |
+| Go standard library | Go 1.27.3 or later | `go-standard-library.txt` |
 | github.com/dustin/go-humanize | v1.1.0 | `github.com-dustin-go-humanize.txt` |
 | github.com/google/uuid | v1.6.0 | `github.com-google-uuid.txt` |
 | github.com/mattn/go-isatty | v0.0.24 | `github.com-mattn-go-isatty.txt` |

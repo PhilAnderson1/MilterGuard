@@ -2,6 +2,8 @@ module github.com/PhilAnderson1/MilterGuard
 
 go 1.27.0
 
+toolchain go1.27.3
+
 require (
 	github.com/mattn/go-isatty v0.0.24
 	github.com/mjl-/adns v0.0.0-20260809141028-22f885debe71
