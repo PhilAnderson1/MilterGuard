@@ -8,8 +8,210 @@
 
 # Operation mode: accept or enforce.
 # accept analyses and tags mail but does not reject it.
-# enforce can reject unwanted decisions according to policy below.
+# enforce rejects messages according to the configured filtering policies.
 mode: "accept"
+
+ai:
+  # Base URL for your AI service, including its API prefix:
+  # OpenRouter: https://openrouter.ai/api/v1
+  # Other supplied endpoint types normally use: http://hostname:port/v1
+  # Use your server's configured base URL; do not include /chat/completions.
+  # To use OpenRouter, create an account and API key at https://openrouter.ai/.
+  endpoint: "https://openrouter.ai/api/v1"
+
+  # Choose your service or server software. Currently available: gufo, llama_cpp, vllm,
+  # lm_studio, ollama_openai, and openrouter. These options are defined in
+  # endpoints_file.
+  endpoint_type: "openrouter"
+
+  # API key for your service. Set to "" or omit if authentication is not required.
+  api_key: "replace-with-your-endpoint-api-key"
+
+  # To read the key from an environment variable, leave api_key empty and name
+  # the variable here. It must be available to the MilterGuard service process.
+  # api_key_env: "OPENROUTER_API_KEY"
+
+  # Model identifier accepted by the endpoint. OpenRouter commonly uses
+  # provider/model names; llama.cpp may use its configured model name or path.
+  model: "qwen/qwen3.6-35b-a3b:exacto"
+
+  # Choose the thinking profile matching your model, or none if it has no
+  # controllable thinking mode. Current options include qwen3_5, qwen3_6,
+  # qwen3_8, gemma4, deepseek_v4, deepseek_v4_1, and kimi_k2_6,
+  # all of which support turning thinking off.
+  # These options are defined in profiles_file.
+  thinking_profile: "qwen3_6"
+
+  # Keep at 0 for maximum throughput: thinking is off or at its lowest level.
+  # Increase towards 4 (maximum thinking) only if it improves classification.
+  # See the Operating Guide for how levels map to your model's settings.
+  thinking_level: 0
+
+  # Estimated USD prices per million input and output tokens. The example prices
+  # below are for the sample model on OpenRouter; update them for your selected
+  # model and provider. Omitting these settings assumes zero cost, which is
+  # suitable for locally hosted or free AI services.
+  input_cost_per_million_tokens: 0.1262
+  output_cost_per_million_tokens: 0.9827
+
+  # Image analysis detects scams concealed in images to evade text-based filtering.
+  # Modes: off, fallback, or always. fallback analyses inline images only when
+  # insufficient body text is available. Requires a vision-capable AI model.
+  vision_mode: "fallback"
+
+  # In fallback mode, analyse images when body text has fewer than this many characters.
+  vision_min_text_chars: 500
+
+  # Maximum duration of one AI request, using Go duration syntax. Must be > 0.
+  timeout: "45s"
+
+  # Retry transient endpoint failures or malformed AI responses this many times.
+  retries: 2
+
+  # Maximum number of simultaneous AI analyses; positive integer.
+  max_concurrent: 8
+
+  # Maximum number of message-text characters supplied to the AI; positive
+  # integer. This is separate from milter.max_message_size, which is in bytes.
+  max_body_chars: 50000
+
+  # Reduce prompt size by shortening long URL components, preserving domains
+  # and parameter names.
+  compact_prompt_urls: true
+
+  # Maximum embedded images sent for analysis. Remote images are never downloaded.
+  max_images: 2
+
+  # Maximum size of each image, in bytes.
+  max_image_bytes: 2097152
+
+  # Maximum total pixels (width x height) in each image.
+  max_image_pixels: 12000000
+
+  # Limit CPU spent extracting message content. Full extraction and fallback
+  # each get this allowance in milliseconds. If a limit is reached,
+  # html_resource_limit_action determines whether to reject or use fallback.
+  max_html_parse_cpu_ms: 250
+
+  # Limit memory allocations tracked during message extraction, in bytes
+  # (8-512 MiB). Full extraction and fallback each get this allowance, shared
+  # across their MIME parts. This is not a total process memory limit.
+  # If exhausted, html_resource_limit_action determines how to proceed.
+  max_html_parse_memory_bytes: 67108864
+
+  # When extraction exceeds a CPU or memory limit:
+  # fallback: continue analysis with bounded or partial extraction.
+  # reject: reject without an IP-reputation penalty (default).
+  # dos-reject: reject and apply DoS IP-reputation penalties.
+  html_resource_limit_action: "reject"
+
+  # When truncation, malformed content or processing limits prevent full inspection:
+  # scan: analyse available content and tell the AI that inspection was incomplete.
+  # reject: reject in enforce mode, without an AI scan or IP-reputation penalty.
+  incomplete_body_action: "scan"
+
+  # Absolute path to the system prompt used for every classification.
+  prompt_file: "/etc/milterguard/detection-prompt.txt"
+
+  # Files defining supported endpoints and model thinking settings. Edit these
+  # to add or customise support for a service or model family.
+  # Relative paths are resolved from this configuration file's directory;
+  # restart MilterGuard after editing either catalogue.
+  endpoints_file: "/etc/milterguard/endpoints.yaml"
+  profiles_file: "/etc/milterguard/thinking-profiles.yaml"
+
+  # Optional website and application name shown for OpenRouter attribution.
+  # Empty strings disable them.
+  site_url: "https://github.com/PhilAnderson1/MilterGuard"
+  app_name: "MilterGuard"
+
+filtering:
+  # Visible From domains that may be used only by authenticated SMTP users. Use
+  # this when your server is the only legitimate source of mail for your domains.
+  # Entries are matched case-insensitively and also protect their subdomains.
+  # Do not list domains used by legitimate third-party sending services unless
+  # those messages are submitted through this server with SMTP authentication.
+  # An empty list disables this policy. To enable it, replace [] with:
+  # authenticated_only_sender_domains:
+  #   - "mydomain1.com"
+  #   - "mydomain2.com"
+  authenticated_only_sender_domains: []
+
+  # The supplied detection prompt already has a conservative bias towards
+  # legitimate classifications. The minimum of 0.5 rejects every `unwanted`
+  # classification; increasing it makes rejection still more conservative.
+  reject_score: 0.5
+
+  # Mark either classification below this score as low confidence (0.5-1).
+  # This affects result headers only, not rejection decisions.
+  low_confidence_score: 0.8
+
+  # Add classification, confidence, score, and action headers to accepted email.
+  add_email_headers: true
+
+  # Scan email sent by authenticated users. Set to true to enable attachment
+  # and AI scanning of outbound mail.
+  scan_authenticated: false
+
+  # File containing trusted visible From domains that bypass AI scanning.
+  # List one exact domain per line; entries also match their subdomains.
+  sender_domain_allowlist: "/etc/milterguard/trusted-sender-domains.txt"
+
+  # Apply authentication.trust_requirement before allowing a domain bypass.
+  sender_domain_allowlist_require_authentication: true
+
+  # Action when AI analysis fails: accept or tempfail. tempfail asks the sending
+  # mail server to retry later. Accept mode always accepts.
+  ai_error_action: "accept"
+
+  # Text returned with SMTP status 550 5.7.1 when a message is rejected.
+  # Keep this on one line.
+  reject_message: "Message rejected as suspected spam or fraud"
+
+email_commands:
+  # Manage MilterGuard by email. To enable, set enabled to true and replace
+  # example.com with your mail domain. Add this entry to /etc/aliases and run newaliases:
+  # milterguard: /dev/null
+  enabled: false
+  recipient: "milterguard@example.com"
+
+  # Authenticated mail login names (SASL identities) allowed to manage any
+  # local mailbox. Names are matched case-insensitively. [] means no
+  # administrators. To add administrators, replace it with the following:
+  # administrators:
+  #   - "admin_login"
+  #   - "another_admin"
+  administrators: []
+
+  # Permit normal authenticated users to manage entries for their own verified
+  # envelope-sender address.
+  allow_authenticated_users: false
+
+  # Use local aliases to verify that the sender address belongs exclusively
+  # to the authenticated user.
+  verify_sender_via_aliases: true
+  aliases_file: "/etc/aliases"
+
+  # If alias verification is disabled, Postfix must enforce sender ownership
+  # with smtpd_sender_login_maps. Without either check, an authenticated user
+  # could modify another local user's allowlist.
+
+  # Reply by email with command results.
+  send_replies: true
+
+  # SMTP server used to send command results. Include the port. IPv6 literals
+  # must be bracketed, for example [::1]:25.
+  smtp_host: "127.0.0.1:25"
+
+  # SMTP transport encryption: off, opportunistic, or required. Opportunistic
+  # uses STARTTLS when a non-loopback server advertises it; required refuses to
+  # send unless STARTTLS with a valid server certificate can be established.
+  smtp_tls: "opportunistic"
+
+  # Maximum raw body prefix inspected for up to 100 commands. Content beyond
+  # this limit, such as quoted reply history, is ignored. Plain-text and HTML
+  # commands are accepted; attachments are not.
+  max_message_bytes: 65536
 
 milter:
   # Listener address. IPv4 and IPv6 addresses and Unix sockets are accepted.
@@ -41,191 +243,6 @@ milter:
   # Maximum email size retained for analysis, in bytes; 1 to 104857600.
   # Larger messages are truncated and the decision log records truncated=true.
   max_message_size: 10485760
-
-authentication:
-  # Authentication source: internal or trusted_headers. internal makes
-  # MilterGuard calculate SPF, DKIM, and DMARC directly and is recommended for
-  # new installations. trusted_headers reuses results from existing filters.
-  mode: "internal"
-
-  # Authentication required by trust-based policies when their corresponding
-  # require_authentication option is enabled: dkim, spf, either, or both.
-  # The default "either" accepts aligned SPF or DKIM. Select "dkim" for a
-  # stricter policy that cannot be satisfied by an excessively permissive SPF
-  # record. "both" is strictest but forwarding often breaks SPF even when DKIM
-  # remains valid.
-  trust_requirement: "either"
-
-  # Whole-operation timeout for internal SPF/DKIM/DMARC verification.
-  timeout: "10s"
-
-  # Maximum number of simultaneous internal verification operations.
-  max_concurrent: 8
-
-  # Exact RFC message storage used for DKIM verification: memory, file, or
-  # hybrid. Hybrid keeps a limited number in memory and sends overflow to disk.
-  message_storage: "hybrid"
-
-  # Maximum simultaneous in-memory exact messages in hybrid mode. Additional
-  # messages use temporary files without waiting for a memory slot.
-  memory_message_limit: 8
-
-ai:
-  # Base URL for the selected endpoint. The route from endpoints_file is
-  # appended to this URL; do not include /chat/completions here.
-  # To use OpenRouter, create an account and API key at https://openrouter.ai/.
-  endpoint: "https://openrouter.ai/api/v1"
-
-  # API credential. Set this to "" or omit it for an unauthenticated local
-  # endpoint; MilterGuard then sends no Authorization header.
-  api_key: "replace-with-your-endpoint-api-key"
-
-  # Endpoint definition ID. Currently available: gufo, llama_cpp, vllm,
-  # lm_studio, ollama_openai, and openrouter. These options are defined in
-  # endpoints_file.
-  endpoint_type: "openrouter"
-
-  # Model identifier accepted by the endpoint. OpenRouter commonly uses
-  # provider/model names; llama.cpp may use its configured model name or path.
-  model: "qwen/qwen3.6-35b-a3b:exacto"
-
-  # Relative thinking preference from 0 to 4. Level 0 selects Off where
-  # supported, otherwise the lowest available setting; level 4 selects the
-  # highest. Intermediate values are mapped across the model's available
-  # settings, so this is not a multiplier and several values may select the
-  # same setting. Use 0 to maximise throughput and minimise response latency.
-  thinking_level: 0
-
-  # Model thinking-profile ID. Currently available: none, qwen3_5, qwen3_6,
-  # qwen3_8, qwen3_8_thinking_only, gpt_oss, gemma4, deepseek_v4,
-  # deepseek_v4_1, glm5_3, kimi_k2_6, kimi_k2_7_code, kimi_k3,
-  # minimax_m2_7, minimax_m3_1_flash, step3_7_flash, and step5_preview.
-  # These options are defined in profiles_file.
-  thinking_profile: "qwen3_6"
-
-  # Estimated USD prices per million input and output tokens. The example prices
-  # below are for the sample model on OpenRouter; update them for your selected
-  # model and provider. Omitting these settings assumes zero cost, which is
-  # suitable for locally hosted or free AI services.
-  input_cost_per_million_tokens: 0.1262
-  output_cost_per_million_tokens: 0.9827
-
-  # Absolute path to the system prompt used for every classification.
-  prompt_file: "/etc/milterguard/detection-prompt.txt"
-
-  # Define the available endpoint request formats and model-specific thinking
-  # levels. Both catalogues are read and strictly validated at startup.
-  # Relative paths are resolved from this configuration file's directory;
-  # restart MilterGuard after editing either catalogue.
-  endpoints_file: "/etc/milterguard/endpoints.yaml"
-  profiles_file: "/etc/milterguard/thinking-profiles.yaml"
-
-  # To read the key from an environment variable, leave api_key empty and name
-  # the variable here. It must be available to the MilterGuard service process.
-  # api_key_env: "OPENROUTER_API_KEY"
-
-  # Maximum duration of one AI request, using Go duration syntax. Must be > 0.
-  timeout: "45s"
-
-  # Retry transient endpoint failures or malformed AI responses this many times.
-  retries: 2
-
-  # Maximum number of simultaneous AI analyses; positive integer.
-  max_concurrent: 8
-
-  # Maximum number of message-text characters supplied to the AI; positive
-  # integer. This is separate from milter.max_message_size, which is in bytes.
-  max_body_chars: 50000
-
-  # Shorten unusually long URL components in the AI prompt while preserving
-  # domains, parameter names, and the complete URL internally.
-  compact_prompt_urls: true
-
-  # Limit CPU spent extracting message content. Full extraction and fallback
-  # each get this allowance in milliseconds. If a limit is reached,
-  # html_resource_limit_action determines whether to reject or use fallback.
-  max_html_parse_cpu_ms: 250
-
-  # Limit memory allocations tracked during message extraction, in bytes
-  # (8-512 MiB). Full extraction and fallback each get this allowance, shared
-  # across their MIME parts. This is not a total process memory limit.
-  # If exhausted, html_resource_limit_action determines how to proceed.
-  max_html_parse_memory_bytes: 67108864
-
-  # When extraction exceeds a CPU or memory limit:
-  # fallback: continue analysis with bounded or partial extraction.
-  # reject: reject without an IP-reputation penalty (default).
-  # dos-reject: reject and apply DoS IP-reputation penalties.
-  html_resource_limit_action: "reject"
-
-  # Handling when retained-body/final truncation, MIME/header limits, malformed
-  # MIME, transfer decoding, or extraction limits leave evidence incomplete.
-  # Failures in unselected MIME alternatives remain limitations. Choosing
-  # complete alternatives or visibility uncertainty alone is not a failure.
-  # scan submits the retained prefix with a limitation notice; reject records a
-  # inspection-policy rejection (enforced only while mode is enforce), without
-  # an AI verdict, IP-reputation strike, or correspondent-learning update.
-  incomplete_body_action: "scan"
-
-  # Image analysis detects scams concealed in images to evade text-based filtering.
-  # Modes: off, fallback, or always. fallback analyses inline images only when
-  # insufficient body text is available. Requires a vision-capable AI model.
-  vision_mode: "fallback"
-  vision_min_text_chars: 500
-
-  # Limits the number, file size, and dimensions of embedded images sent for
-  # analysis. Remote images are never downloaded.
-  max_images: 2
-  max_image_bytes: 2097152
-  max_image_pixels: 12000000
-
-  # Optional OpenRouter attribution headers. Empty strings disable them.
-  # site_url is sent as HTTP-Referer; app_name is sent as X-Title.
-  site_url: "https://github.com/PhilAnderson1/MilterGuard"
-  app_name: "MilterGuard"
-
-filtering:
-  # The supplied detection prompt already has a conservative bias towards
-  # legitimate classifications. The minimum of 0.5 rejects every `unwanted`
-  # classification; increasing it makes rejection still more conservative.
-  reject_score: 0.5
-
-  # Mark either classification below this score as low confidence (0.5-1).
-  # This affects result headers only, not rejection decisions.
-  low_confidence_score: 0.8
-
-  # Add classification, confidence, score, and action headers to accepted email.
-  add_email_headers: true
-
-  # Scan email sent by authenticated users. Set to true to enable attachment
-  # and AI scanning of outbound mail.
-  scan_authenticated: false
-
-  # Visible From domains that may be used only by authenticated SMTP users. Use
-  # this when your server is the only legitimate source of mail for your domains.
-  # Entries are matched case-insensitively and also protect their subdomains.
-  # Do not list domains used by legitimate third-party sending services unless
-  # those messages are submitted through this server with SMTP authentication.
-  # An empty list disables this policy. To enable it, replace [] with:
-  # authenticated_only_sender_domains:
-  #   - "mydomain1.com"
-  #   - "mydomain2.com"
-  authenticated_only_sender_domains: []
-
-  # File containing trusted visible From domains that bypass AI scanning.
-  # List one exact domain per line; entries also match their subdomains.
-  sender_domain_allowlist: "/etc/milterguard/trusted-sender-domains.txt"
-
-  # Apply authentication.trust_requirement before allowing a domain bypass.
-  sender_domain_allowlist_require_authentication: true
-
-  # Action when AI analysis fails: accept or tempfail. tempfail asks the sending
-  # mail server to retry later. Accept mode always accepts.
-  ai_error_action: "accept"
-
-  # Text returned with SMTP status 550 5.7.1 when a message is rejected.
-  # Keep this on one line; NUL and newline characters are removed.
-  reject_message: "Message rejected as suspected spam or fraud"
 
 attachments:
   # Block executable attachments before AI analysis.
@@ -303,12 +320,16 @@ attachments:
   # Inspect the contents of ZIP, TAR, GZIP, and BZIP2 attachments.
   inspect_archives: true
 
-  # Safety limits for attachments and decompressed archive contents.
+  # Maximum size of each decoded attachment or extracted file, in bytes.
   max_attachment_bytes: 10485760
+
+  # Maximum archive nesting depth to inspect.
   archive_max_depth: 2
-  # ZIP directory entries count too; ZIP metadata is additionally capped at
-  # 1 MiB across all ZIP archives in one message before file-list allocation.
+
+  # Maximum archive entries across a message; ZIP directories count too.
   archive_max_files: 100
+
+  # Maximum total decompressed archive content per message, in bytes.
   archive_max_uncompressed_bytes: 52428800
 
   # Action for encrypted archives and content that cannot be fully inspected:
@@ -325,89 +346,58 @@ attachments:
   # encrypted or unscannable content when its configured action is reject.
   reject_message: "Message rejected because an attachment is prohibited or could not be safely inspected"
 
-email_commands:
-  # Process email commands, disabled by default. Replace
-  # example.com with your mail domain, then add this fallback to /etc/aliases:
-  # milterguard: /dev/null
-  enabled: false
-  recipient: "milterguard@example.com"
+correspondents:
+  # Automatically allowlist external addresses that authenticated local users
+  # send email to.
+  learn_authenticated_recipients: true
 
-  # SASL login identities of administrators with permission to manage any
-  # local mailbox. Values are matched case-insensitively. [] means no
-  # administrators. To add administrators, replace it with the following:
-  # administrators:
-  #   - "admin_login"
-  #   - "another_admin"
-  administrators: []
+  # Automatically add consistently legitimate inbound senders to the allowlist.
+  learn_legitimate_senders: true
 
-  # Permit normal authenticated users to manage entries for their own verified
-  # envelope-sender address.
-  allow_authenticated_users: false
+  # Number of legitimate emails required to allowlist an inbound sender, and the
+  # minimum confidence score each email must meet.
+  legitimate_sender_min_messages: 3
+  legitimate_sender_min_score: 0.80
 
-  # Verify that an authenticated user's envelope sender resolves exclusively to
-  # their SASL identity through simple local aliases.
-  verify_sender_via_aliases: true
-  aliases_file: "/etc/aliases"
+  # Require authentication.trust_requirement before learning legitimate inbound
+  # senders. Removing learned senders after unwanted mail always requires authentication.
+  legitimate_sender_require_authentication: true
 
-  # If alias verification is disabled, Postfix must enforce sender ownership
-  # with smtpd_sender_login_maps. Without either check, an authenticated user
-  # could modify another local user's allowlist.
+  # Use known correspondents when assessing inbound mail. If false, learning
+  # can continue, but saved relationships do not affect filtering.
+  use_allowlist: true
 
-  # Send a reply confirmation email when a command email is received.
-  send_replies: true
-  # SMTP server used to send command results. Include the port. IPv6 literals
-  # must be bracketed, for example [::1]:25.
-  smtp_host: "127.0.0.1:25"
+  # per_sender keeps each local user's correspondents separate. global uses
+  # known correspondents from all local users.
+  scope: "per_sender"
 
-  # SMTP transport encryption: off, opportunistic, or required. Opportunistic
-  # uses STARTTLS when a non-loopback server advertises it; required refuses to
-  # send unless STARTTLS with a valid server certificate can be established.
-  smtp_tls: "opportunistic"
+  # For per_sender scope, require all envelope recipients to recognise the
+  # correspondent, or any to require only one. all is safer for shared servers.
+  recipient_match: "all"
 
-  # Maximum raw body prefix inspected for up to 100 commands. Content beyond
-  # this limit, such as quoted reply history, is ignored. Plain-text and HTML
-  # commands are accepted; attachments are not.
-  max_message_bytes: 65536
+  # Bypass AI email scanning when recipient_match and any configured
+  # authentication requirements are satisfied. When false, the relationship
+  # is supplied to the AI as supporting evidence.
+  bypass_ai: true
 
-rejection_history:
-  # Retain rejection records and their saved messages for this duration.
-  # Uses Go duration syntax; 0s disables rejection history and requires
-  # save_messages to be false.
-  expiry: "720h"
+  # Apply authentication.trust_requirement before a known correspondent can
+  # bypass AI. Disable to permit bypass without authentication.
+  require_authentication_for_bypass: true
 
-  # Safety ceiling for rejection records. Periodic cleanup removes expired
-  # records first, then the oldest records above this number. On a busy server,
-  # this limit may therefore shorten the configured retention period.
-  max_entries: 100000
-
-  # Save copies of messages rejected after complete-message inspection.
-  # IP reputation rejections occur before the message is received and cannot
-  # be saved. Stored email may contain private data and malicious attachments.
-  save_messages: true
-
-  # Messages are stored as YYYY/MM/DD/*.eml beneath this directory.
-  message_directory: "/var/lib/milterguard/rejected-mail"
-
-  # Target maximum archive size. If it is exceeded, daily cleanup deletes the
-  # oldest messages; the archive can therefore exceed this temporarily.
-  message_max_total_bytes: 1073741824
-
-sender_blocklist:
-  # Manually added exact-address and *@domain entries expire after this period.
-  # Adding an existing entry again refreshes its expiry. Minimum: 24h.
-  expiry: "8760h"
-
-  # Maximum stored entries. Periodic SQLite maintenance removes expired rows
-  # first, then entries with the earliest expiry when this limit is exceeded.
+  # Target maximum correspondent records. Cleanup may remove older records
+  # before stale_after expires to keep within this target.
   max_entries: 10000
 
-  # Make *@example.com match both example.com and its subdomains. Changing this
-  # setting immediately changes how every existing domain entry is interpreted.
-  include_subdomains: true
+  # Remove relationships with no qualifying inbound or outbound activity for
+  # this duration. 0s disables age-based expiry.
+  stale_after: "8760h"
 
-  # Returned only when every recipient in the SMTP transaction has blocked the
-  # visible sender. Partial recipient removal is intentionally silent.
-  reject_message: "Message rejected by recipient sender blocklist"
+  # Used only when authentication.mode is trusted_headers. Identifies
+  # Authentication-Results and Received-SPF headers added by your own mail
+  # server. $mta_hostname automatically uses your MTA hostname. Postfix must
+  # remove forged inbound copies before trusted local filters add replacements.
+  trusted_authserv_ids:
+    - "$mta_hostname"
 
 ip_reputation:
   # Text returned when mail is rejected because the sending IP is blocked.
@@ -431,14 +421,12 @@ ip_reputation:
   # Use ip_allowlist or domain_allowlist below for hosts that must never be blocked.
   legitimate_messages_per_strike: 1
 
-  # Retention target for sending IP records; positive integer. Periodic cleanup
-  # removes the least useful records above this number.
+  # Target maximum sending IP records; positive integer. Older or less useful
+  # records may be removed during cleanup to keep within this target.
   max_entries: 10000
 
-  # Strikes and active blocks persist in persistence.database_file.
-
-  # Exact IP addresses or CIDR ranges that must never be added to the rejection
-  # cache. Add trusted relays and shared forwarding services here as needed.
+  # IP addresses or CIDR ranges that must never be blocked by IP reputation.
+  # Add trusted relays and shared forwarding services here as needed.
   ip_allowlist:
     - "127.0.0.0/8"
     - "::1/128"
@@ -461,86 +449,6 @@ ip_reputation:
     - "mail.com"
     - "yandex.net"
 
-domain_registration:
-  # Supply the AI with the age of authenticated sender domains. Registration
-  # lookups are cached and failures never reject or defer email.
-  enabled: true
-
-  # Maximum duration of an RDAP lookup.
-  timeout: "3s"
-
-  # Retention target for cached domains. Periodic cleanup removes the records
-  # with the earliest expiry dates above this number.
-  max_entries: 10000
-
-  # Registration data persists in persistence.database_file.
-
-correspondents:
-  # Automatically allowlist external addresses that authenticated local users
-  # send email to.
-  learn_authenticated_recipients: true
-
-  # Automatically add consistently legitimate inbound senders to the allowlist.
-  learn_legitimate_senders: true
-
-  # Number of legitimate emails required to allowlist an inbound sender, and the
-  # minimum confidence score each email must meet.
-  legitimate_sender_min_messages: 3
-  legitimate_sender_min_score: 0.80
-
-  # Apply authentication.trust_requirement before an inbound legitimate result
-  # contributes toward automatic allowlisting. Unwanted results must always
-  # satisfy authentication.trust_requirement before removing inbound-learned entries.
-  legitimate_sender_require_authentication: true
-
-  # Boolean: use saved relationships when assessing inbound mail. When false,
-  # the database may still be populated for inspection without affecting mail.
-  use_allowlist: true
-
-  # per_sender keeps each local user's correspondents separate. global uses
-  # known correspondents from all local users.
-  scope: "per_sender"
-
-  # For per_sender scope, require all envelope recipients to recognise the
-  # correspondent, or any to require only one. all is safer for shared servers.
-  recipient_match: "all"
-
-  # Boolean: bypass AI email scanning when recipient_match and any configured
-  # authentication requirements are satisfied. When false, the relationship
-  # is supplied to the AI as supporting evidence.
-  bypass_ai: true
-
-  # Apply authentication.trust_requirement before a known correspondent can
-  # bypass AI. Disable to permit bypass without authentication.
-  require_authentication_for_bypass: true
-
-  # Retention target for relationships. Periodic cleanup removes unpromoted and
-  # then oldest records above this number.
-  max_entries: 10000
-
-  # Remove relationships with no qualifying inbound or outbound activity for
-  # this duration. 0s disables age-based expiry.
-  stale_after: "8760h"
-
-  # Used only when authentication.mode is trusted_headers. Identifies
-  # Authentication-Results and Received-SPF headers added by your own mail
-  # server. $mta_hostname automatically uses your MTA hostname. Postfix must
-  # remove forged inbound copies before trusted local filters add replacements.
-  trusted_authserv_ids:
-    - "$mta_hostname"
-
-activity:
-  # Retain activity-reporting events for this positive Go duration.
-  expiry: "8760h"
-
-persistence:
-  # SQLite database containing all persistent MilterGuard state.
-  database_file: "/var/lib/milterguard/milterguard.db"
-
-  # How often expired and excess records are removed and SQLite's write-ahead
-  # log is checkpointed. Must be at least 1m; maintenance also runs at startup.
-  cleanup_interval: "10m"
-
 logging:
   # Minimum log level: debug, info, warn, or error.
   level: "info"
@@ -554,3 +462,94 @@ logging:
   # Log complete AI input for troubleshooting. This may expose sensitive email
   # content, so enable it only temporarily. Image data is never logged.
   include_ai_input: false
+
+rejection_history:
+  # Retain rejection records and their saved messages for this duration.
+  # Uses Go duration syntax; 0s disables rejection history and requires
+  # save_messages to be false.
+  expiry: "720h"
+
+  # Target maximum rejection records. Cleanup removes older records above
+  # this number, which may shorten the configured retention period.
+  max_entries: 100000
+
+  # Save copies of messages rejected after complete-message inspection.
+  # IP reputation rejections occur before the message is received and cannot
+  # be saved. Stored email may contain private data and malicious attachments.
+  save_messages: true
+
+  # Directory for saved rejected messages.
+  message_directory: "/var/lib/milterguard/rejected-mail"
+
+  # Target maximum archive size. If it is exceeded, daily cleanup deletes the
+  # oldest messages; the archive can therefore exceed this temporarily.
+  message_max_total_bytes: 1073741824
+
+authentication:
+  # Authentication source: internal or trusted_headers. internal makes
+  # MilterGuard calculate SPF, DKIM, and DMARC directly and is recommended for
+  # new installations. trusted_headers reuses results from existing filters.
+  mode: "internal"
+
+  # Authentication required by trust-based policies when their corresponding
+  # require_authentication option is enabled: dkim, spf, either, or both.
+  # The default "either" accepts aligned SPF or DKIM. Select "dkim" for a
+  # stricter policy that cannot be satisfied by an excessively permissive SPF
+  # record. "both" is strictest but forwarding often breaks SPF even when DKIM
+  # remains valid.
+  trust_requirement: "either"
+
+  # Maximum time allowed to verify SPF, DKIM and DMARC for one message.
+  timeout: "10s"
+
+  # Maximum number of simultaneous internal verification operations.
+  max_concurrent: 8
+
+  # Where to hold messages during DKIM verification: memory, file, or hybrid.
+  # hybrid limits memory use by storing additional messages on disk.
+  message_storage: "hybrid"
+
+  # Maximum messages held in memory at once in hybrid mode; additional messages
+  # are stored on disk.
+  memory_message_limit: 8
+
+sender_blocklist:
+  # Manually added exact-address and *@domain entries expire after this period.
+  # Adding an existing entry again refreshes its expiry. Minimum: 24h.
+  expiry: "8760h"
+
+  # Target maximum blocklist entries. Cleanup may remove entries closest to
+  # expiry early to keep within this target.
+  max_entries: 10000
+
+  # Make *@example.com match both example.com and its subdomains. Changing this
+  # setting immediately changes how every existing domain entry is interpreted.
+  include_subdomains: true
+
+  # Returned only when every recipient in the SMTP transaction has blocked the
+  # visible sender. Partial recipient removal is intentionally silent.
+  reject_message: "Message rejected by recipient sender blocklist"
+
+activity:
+  # How long to retain activity reports; must be greater than 0s.
+  expiry: "8760h"
+
+domain_registration:
+  # Supply the AI with the age of authenticated sender domains. Registration
+  # lookups are cached and failures never reject or defer email.
+  enabled: true
+
+  # Maximum time to look up a domain's registration details.
+  timeout: "3s"
+
+  # Target maximum saved domain lookups. Older results may be removed during
+  # cleanup and looked up again when needed.
+  max_entries: 10000
+
+persistence:
+  # SQLite database containing all persistent MilterGuard state.
+  database_file: "/var/lib/milterguard/milterguard.db"
+
+  # How often to clean up expired and excess records. Must be at least 1m;
+  # cleanup also runs at startup.
+  cleanup_interval: "10m"

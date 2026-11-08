@@ -77,10 +77,6 @@ enabling spam and scam rejection.
    Do not add MilterGuard to `non_smtpd_milters`, because that setting also
    filters locally generated system mail.
 
-   Check the
-   [required Postfix connection data](OPERATING_GUIDE.md#required-postfix-connection-data)
-   so it can verify mail and recognize authenticated outbound submissions.
-
 7. Check and reload Postfix:
 
    ```sh
@@ -106,6 +102,16 @@ enabling spam and scam rejection.
    ```sh
    sudo systemctl restart milterguard
    ```
+
+### Recommended next steps
+
+- **Protect your own domains from impersonation.** If this server is their only
+  legitimate mail source, configure `authenticated_only_sender_domains` to
+  reject outsiders claiming to send from them, without AI scanning. See
+  [Rejection without AI analysis](OPERATING_GUIDE.md#rejection-without-ai-analysis).
+- **Manage MilterGuard by email.** Enable email commands to review filtering
+  activity, retrieve rejected messages, and manage allowlists and blocklists
+  from your inbox. See [Email commands](OPERATING_GUIDE.md#email-commands).
 
 For further configuration and troubleshooting, see the
 [Operating Guide](OPERATING_GUIDE.md).

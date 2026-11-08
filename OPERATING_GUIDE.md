@@ -56,7 +56,10 @@ ai:
   thinking_profile: "qwen3_6"
 ```
 
-- `endpoint` to the service's base URL. Do not include `/chat/completions`.
+- `endpoint` to the service's base URL, including its API prefix. OpenRouter
+  uses `https://openrouter.ai/api/v1`; other supplied endpoint types normally
+  use `http://hostname:port/v1`. Use your server's configured base URL and do
+  not include `/chat/completions`.
 - `endpoint_type` to the service or local server software being used. The
   currently defined options are `gufo`, `llama_cpp`, `vllm`, `lm_studio`,
   `ollama_openai`, and `openrouter`. Add support for other endpoint types to
@@ -139,6 +142,9 @@ inspection and AI analysis time to complete. MilterGuard sends progress
 responses during long AI operations so Postfix continues waiting.
 
 ### Required Postfix connection data
+
+Postfix 3.2 and later supply the required connection data by default. Check
+these settings only if you have customised Postfix's Milter macro lists.
 
 Internal SPF verification requires Postfix to supply its `{daemon_addr}`
 connect macro. Postfix 3.2 and later include it in the default
