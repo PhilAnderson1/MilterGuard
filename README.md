@@ -21,16 +21,10 @@ capabilities of modern AI to identify spam and scams through the meaning, intent
 and context of each email. Unwanted mail can be rejected during SMTP delivery,
 before it reaches the recipient’s inbox.
 
-It gathers connection details, checks sender authentication through SPF, DKIM
-and DMARC, and looks up domain age to give the AI context beyond the message
-itself. It exposes hidden or obscured content to the AI alongside visible text,
-so the AI can assess both what the recipient sees and what may have been
-concealed to evade spam filters. With a vision-capable model, it can also
-examine messages embedded in images.
-
-MilterGuard automatically builds an IP blocklist for repeat offenders and learns
-trusted senders from legitimate correspondence. This reduces unnecessary AI
-scans and helps refine filtering decisions over time.
+MilterGuard checks sender authentication and gives the AI both visible and
+concealed message content, helping it identify deceptive emails and attempts
+to evade filtering. With a vision-capable model, it can also read text embedded
+in images.
 
 ## Who is MilterGuard for?
 
@@ -57,24 +51,6 @@ supports the Sendmail Milter protocol.
 - **Basic attachment protection:** block executable attachments, including those
   inside supported archives. This does not replace a full antivirus engine.
 
-## Performance (early results)
-
-From 30 September to 4 November 2026, one production mail server accepted 397
-inbound messages and recorded 792 MilterGuard rejections. There was one
-false-positive rejection, two spam messages were accepted, and one scam message
-was accepted.
-
-Testing used the Qwen3.6-35B-A3B model through OpenRouter, an empty
-trusted-domain allowlist, and adaptive correspondent learning. Repeated
-legitimate newsletters could therefore bypass subsequent AI scans.
-
-These observations represent an approximate overall filtering accuracy of
-99.7%. Estimated OpenRouter usage cost $1.85 over the five-week period, based
-on an average of $0.37 per week.
-
-These are early production observations, not a comparative benchmark.
-Evaluation is ongoing.
-
 ## Requirements
 
 MilterGuard requires:
@@ -82,6 +58,9 @@ MilterGuard requires:
 - A Linux mail server whose MTA supports the Sendmail Milter protocol. Postfix
   is tested and documented.
 - Access to a compatible AI service or local model server.
+
+The supplied packages and archive are for x86-64 Linux. The documented
+installation uses systemd.
 
 ## Install
 
@@ -109,9 +88,26 @@ cd milterguard-vVERSION-linux-amd64
 sudo ./install.sh
 ```
 
-Continue with the [Quick Start](QUICKSTART.md) to configure an AI endpoint,
-connect MilterGuard to the MTA, verify its decisions in accept mode, and enable
-rejection.
+The supplied configuration uses OpenRouter; add your API key to get started.
+Follow the [Quick Start](QUICKSTART.md) to connect MilterGuard to Postfix,
+check its decisions in accept mode, and enable rejection.
+
+## Performance (early results)
+
+From 30 September to 4 November 2026, one production mail server accepted 397
+inbound messages and recorded 792 MilterGuard rejections. There was one
+false-positive rejection, two spam messages were accepted, and one scam message
+was accepted.
+
+Testing used Qwen3.6-35B-A3B through OpenRouter, with automatic learning of
+trusted senders enabled.
+
+These observations represent an approximate overall filtering accuracy of
+99.7%. Estimated OpenRouter usage cost $1.85 over the five-week period, based
+on an average of $0.37 per week.
+
+These are early production observations, not a comparative benchmark.
+Evaluation is ongoing.
 
 ## Documentation
 
@@ -131,9 +127,8 @@ make
 sudo ./packaging/install.sh
 ```
 
-The installer recognizes the source-tree layout, installs the compiled binary
-and supporting files, preserves existing configuration files, and enables the
-systemd service without starting it. Continue with the
+The installer preserves existing configuration files and enables the systemd
+service without starting it. Continue with the
 [Quick Start](QUICKSTART.md) to configure and activate MilterGuard.
 
 ## License

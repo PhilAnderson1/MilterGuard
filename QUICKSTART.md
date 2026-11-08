@@ -1,14 +1,10 @@
 # MilterGuard Quick Start
 
-This guide takes you from downloading MilterGuard to a working Postfix
-integration in accept mode, which logs filtering decisions without rejecting
-mail. See the [Operating Guide](OPERATING_GUIDE.md) for detailed
-configuration, security, testing, and maintenance information.
+Install MilterGuard, connect it to Postfix, and check its decisions before
+enabling spam and scam rejection.
 
-1. Download the appropriate installation file from the latest MilterGuard
-   release:
-
-   https://github.com/PhilAnderson1/MilterGuard/releases/latest
+1. Download the appropriate installation file from the
+   [latest release](https://github.com/PhilAnderson1/MilterGuard/releases/latest).
 
 2. Install MilterGuard using the appropriate method below. Replace `VERSION`
    with the release number without its leading `v`.
@@ -33,16 +29,10 @@ configuration, security, testing, and maintenance information.
    sudo ./install.sh
    ```
 
-3. Configure the AI service in `/etc/milterguard/milterguard.yaml`. You can use
-   a compatible hosted service or a local AI server. The supplied configuration
-   works with OpenRouter after adding an
-   [OpenRouter API key](https://openrouter.ai) to `ai.api_key`. For another
-   service, configure the endpoint URL, endpoint type, model name, thinking
-   profile, and any API key it requires; see
+3. Configure the AI service in `/etc/milterguard/milterguard.yaml` by adding
+   your [OpenRouter API key](https://openrouter.ai) to `ai.api_key`. To use a
+   local LLM or another provider, see
    [Endpoint and model settings](OPERATING_GUIDE.md#endpoint-and-model-settings).
-   If a local server does not require authentication, omit `ai.api_key` or set
-   it to `""`. See [Running AI locally](OPERATING_GUIDE.md#running-ai-locally)
-   for local setup guidance.
 
 4. Validate the configuration:
 
@@ -52,16 +42,14 @@ configuration, security, testing, and maintenance information.
      --check-config --check-port --check-endpoint
    ```
 
-   This checks that the configuration file is valid and the configured Milter
-   port is available, then sends a synthetic test email to the configured AI
-   service and checks its response.
+   This checks the configuration, confirms the listening port is available,
+   and tests the AI service.
 
    If port `8895` is already in use, edit `milter.socket` in the configuration
    file to use an unused loopback port instead. Use that same replacement port
    in the Postfix `smtpd_milters` setting in step 6.
 
-5. Start MilterGuard. Installation enables the service but deliberately leaves
-   it stopped until its configuration has been validated:
+5. Installation enables the service without starting it. Start it now:
 
    ```sh
    sudo systemctl start milterguard
@@ -119,7 +107,5 @@ configuration, security, testing, and maintenance information.
    sudo systemctl restart milterguard
    ```
 
-**Need help?** For technical questions about MilterGuard, give ChatGPT or Claude
-the repository URL, https://github.com/PhilAnderson1/MilterGuard, and ask it to
-consult the current source code and documentation. Check any suggested
-configuration changes before applying them to a live mail server.
+For further configuration and troubleshooting, see the
+[Operating Guide](OPERATING_GUIDE.md).
