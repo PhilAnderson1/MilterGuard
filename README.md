@@ -3,7 +3,7 @@
 <p align="center">
   <img src="assets/milterguard-logo.png"
        alt="MilterGuard — A shrewd eye for unwanted email"
-       width="500">
+       width="80%">
 </p>
 
 [![CI](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml)
