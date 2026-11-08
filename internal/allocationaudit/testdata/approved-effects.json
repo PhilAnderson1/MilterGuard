@@ -544,7 +544,7 @@
   "internal/fork/xnethtml/render.go::\u003cinit\u003e:4": "1066f399c329eccc2c6c14fceb56840bb12ddb62a4ab4528247c999e89828662",
   "internal/fork/xnethtml/render.go::\u003cinit\u003e:5": "88456756c1e35f0485a45efdd4a7a890cb2e1ea39a92441c706e2d231e00e0ac",
   "internal/fork/xnethtml/render.go::Render:1": "a5169be350a7a27bf54a2b116d93c48d10551a489fa5ed6b98efe930ffda843c",
-  "internal/fork/xnethtml/render.go::childTextNodesAreLiteral:1": "00a2633e90c901e1840ebb42a7baada5b722c2e9bef05afe7af74ee12a55f269",
+  "internal/fork/xnethtml/render.go::childTextNodesAreLiteral:1": "70929f9a50807561baac13f3d8d369629356c50038123404d08f0b89b252a50e",
   "internal/fork/xnethtml/render.go::render1:1": "15bdbaaa5b6db2be198a9e662c1c8d54417a5c555406d785c89c8cb21675c4de",
   "internal/fork/xnethtml/render.go::render:1": "7f2946ffce751c2346c95e5d536b78c1f2acd158d71feef58c69a9a9f6f00f9a",
   "internal/fork/xnethtml/render.go::writeDoctypeQuoted:1": "f90916650a139a520685f58f11be2c188a70095ef22901f5887b290c954d79d1",

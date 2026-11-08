@@ -1,7 +1,7 @@
 # Upstream provenance
 
 This directory is a source fork of `github.com/tdewolff/parse/v2` from tag
-`v2.8.18`, commit `74435e5c57a215fd698e07400f3f4f335ec944de`.
+`v2.8.20`, commit `0013eb97556f32f355b0a9845250cc195661b0a2`.
 
 It originally copied the complete root package, buffer package, and CSS
 lexer/parser package with their upstream tests. Unused diagnostic helpers,
@@ -10,9 +10,9 @@ unreferenced buffer package were subsequently removed. Imports were rewritten
 to the MilterGuard-local package paths. The unrelated HTML, JavaScript, JSON,
 XML, and numeric-conversion subpackages were not copied.
 
-The only upstream source change from v2.8.17 to v2.8.18 was in the uncopied
-JavaScript AST package. The upstream root, buffer, and CSS packages were
-unchanged between those tags.
+The upstream changes from v2.8.18 through v2.8.20 were confined to the uncopied
+HTML lexer and JavaScript AST/parser packages. The upstream root, buffer, and
+CSS packages were unchanged between those tags.
 
 Local compatibility changes:
 

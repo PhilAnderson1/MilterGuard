@@ -1,12 +1,18 @@
 # Upstream provenance
 
 This directory is a source fork of `golang.org/x/net/html` from tag
-`v0.61.0`, commit `c1d31df183e51b1075a2fd670d6f6f4efb871773`.
+`v0.62.0`, commit `3de643db506517b3e652a13cc0b56034cea6b8e6`.
 
 The root `html` package and its `atom` and `charset` subpackages were copied.
 Imports were rewritten to the MilterGuard-local package paths.
 
 Local changes:
+
+- Upstream v0.62.0's linear text-node coalescing is represented by the fork's
+  existing guarded `strings.Builder` implementation, which publishes immutable
+  prefixes during parsing and accounts for each allocation. The v0.62.0
+  foreign-content rendering correction and its expanded regression cases are
+  integrated directly.
 
 - `ParseWithOptions`, `ParseFragmentWithOptions`, and
   `ParseOptionResourceLimits` apply a shared monotonic memory budget and

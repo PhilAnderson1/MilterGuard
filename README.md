@@ -36,7 +36,8 @@ supports the Sendmail Milter protocol.
 
 ## Features
 
-- **Simple installation:** a single executable with no separate database service.
+- **Simple installation:** a single self-contained executable, with no additional
+  libraries or separate database service to install.
 - **AI model choice:** use a hosted AI service, or keep message analysis on your
   own hardware with a local model.
 - **No spam/ham training required:** start filtering without assembling a
@@ -117,7 +118,7 @@ Evaluation is ongoing.
 
 ## Build and install from source
 
-Building requires Go 1.26 or later:
+Building requires Go 1.27 or later:
 
 ```sh
 git clone https://github.com/PhilAnderson1/MilterGuard.git
