@@ -105,9 +105,10 @@ enabling spam and scam rejection.
 
 ### Recommended next steps
 
-- **Protect your own domains from impersonation.** If this server is their only
-  legitimate mail source, configure `authenticated_only_sender_domains` to
-  reject outsiders claiming to send from them, without AI scanning. See
+- **Reduce unnecessary AI scans.** Scam and malware emails often claim to come
+  from the recipient's own domain. If this server is the only legitimate mail
+  source for your domains, list them in `authenticated_only_sender_domains` to
+  reject these impersonation attempts before AI scanning. See
   [Rejection without AI analysis](OPERATING_GUIDE.md#rejection-without-ai-analysis).
 - **Manage MilterGuard by email.** Enable email commands to review filtering
   activity, retrieve rejected messages, and manage allowlists and blocklists

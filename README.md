@@ -123,7 +123,6 @@ Building requires Go 1.27.3 or later:
 ```sh
 git clone https://github.com/PhilAnderson1/MilterGuard.git
 cd MilterGuard
-go test ./...
 make
 sudo ./packaging/install.sh
 ```
